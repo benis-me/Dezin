@@ -1,55 +1,41 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowRight, Check, RotateCw } from "lucide-react";
 import { Button, Spinner } from "../components/ui/index.ts";
 import { AgentLogo, agentLabel } from "../components/agent-logos.tsx";
 import { useApi } from "../lib/api-context.tsx";
+import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
-import type { AgentInfo } from "../lib/api.ts";
 
 /**
- * First-run welcome. Scans for installed coding-agent CLIs, lets the user pick the agent +
- * model Dezin should drive, and persists the choice. Shown until the user gets started.
+ * First-run welcome. Runs the same deep scan as a manual Rescan (so CodeBuddy's live model
+ * list etc. is accurate, not the fast-path seed), lets the user pick the agent + model Dezin
+ * should drive, and persists it. Uses the shared agents context so the result is appwide.
  */
 export function OnboardingScreen({ onDone }: { onDone: () => void }) {
   const api = useApi();
   const { toast } = useToast();
-  const [agents, setAgents] = useState<AgentInfo[] | null>(null); // null = scanning
+  const { agents, loading, scanning, rescan } = useAgents();
   const [agent, setAgent] = useState("");
   const [model, setModel] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const scan = useCallback(
-    async (fresh = false) => {
-      setAgents(null);
-      try {
-        const [list, settings] = await Promise.all([
-          fresh ? api.rescanAgents() : api.listAgents(),
-          api.getSettings().catch(() => null),
-        ]);
-        setAgents(list);
-        const avail = list.filter((a) => a.available);
-        const preferred =
-          settings?.agentCommand && avail.some((a) => a.command === settings.agentCommand)
-            ? settings.agentCommand
-            : (avail[0]?.command ?? "");
-        setAgent(preferred);
-        setModel("");
-      } catch {
-        setAgents([]);
-      }
-    },
-    [api],
-  );
-
+  // A thorough scan on first run, matching the Settings Rescan (the boot scan is the fast path).
   useEffect(() => {
-    void scan();
-  }, [scan]);
+    void rescan();
+  }, [rescan]);
 
-  const available = (agents ?? []).filter((a) => a.available);
+  const available = agents.filter((a) => a.available);
+
+  // Default to the first available agent once the scan resolves.
+  useEffect(() => {
+    if (available.length && !available.some((a) => a.command === agent)) setAgent(available[0]!.command);
+  }, [available, agent]);
+
   const current = available.find((a) => a.command === agent);
   const models = current?.models ?? [];
+  const busy = loading || scanning;
 
   const finish = async () => {
     setSaving(true);
@@ -78,22 +64,17 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
         <div className="rounded-2xl border border-border bg-card p-4">
           <div className="mb-3 flex items-center justify-between">
             <span className="label-mono">Agent</span>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 gap-1.5 text-xs text-muted-foreground"
-              disabled={agents === null}
-              onClick={() => void scan(true)}
-            >
+            <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground" disabled={busy} onClick={() => void rescan()}>
               <RotateCw size={13} strokeWidth={1.75} />
               Rescan
             </Button>
           </div>
 
-          {agents === null ? (
-            <div className="flex flex-col items-center gap-3 py-10 text-sm text-muted-foreground">
+          {busy ? (
+            <div className="flex flex-col items-center gap-3 py-10 text-center text-sm text-muted-foreground">
               <Spinner size={20} />
-              Scanning for installed agents…
+              Scanning for installed agents and models…
+              <span className="text-xs text-muted-foreground/70">This can take a moment the first time.</span>
             </div>
           ) : available.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
@@ -137,7 +118,7 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
               {models.length > 0 ? (
                 <>
                   <p className="label-mono mb-2 mt-4">Model</p>
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto pr-0.5">
                     {["", ...models].map((m) => (
                       <button
                         key={m || "default"}
@@ -160,7 +141,7 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
           )}
         </div>
 
-        <Button size="lg" className="mt-6 w-full gap-2" disabled={saving || agents === null} onClick={() => void finish()}>
+        <Button size="lg" className="mt-6 w-full gap-2" disabled={saving || busy} onClick={() => void finish()}>
           {saving ? <Spinner size={15} /> : null}
           {available.length === 0 ? "Continue anyway" : "Get started"}
           {!saving ? <ArrowRight size={16} strokeWidth={2} /> : null}
