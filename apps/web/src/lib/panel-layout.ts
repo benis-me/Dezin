@@ -33,4 +33,4 @@ export function savePanelFraction(key: string, layout: Layout, panelId: string):
 }
 
 export const RESIZE_SEPARATOR_CLASS =
-  "app-no-drag w-1 cursor-col-resize bg-transparent outline-none transition-colors hover:bg-primary/40 focus-visible:bg-primary/60 data-[separator=active]:bg-primary/70";
+  "app-no-drag w-px cursor-col-resize bg-border outline-none transition-colors hover:bg-primary focus-visible:bg-primary data-[separator=active]:bg-primary";

@@ -418,7 +418,9 @@ test("the Files tab lists project files and previews the selected file's source"
   expect(screen.queryByRole("tab", { name: "Code" })).toBeNull();
   expect(screen.getByRole("tablist", { name: "Artifact views" }).className).toContain("[&_[role=tab]]:px-2.5");
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
-  expect(await screen.findByRole("separator", { name: "Resize file browser" })).toHaveAttribute("data-separator");
+  const fileResize = await screen.findByRole("separator", { name: "Resize file browser" });
+  expect(fileResize).toHaveAttribute("data-separator");
+  expect(fileResize).toHaveClass("w-px", "bg-border");
   expect((await screen.findAllByText("index.html")).length).toBeGreaterThan(0);
   // assets is a folder at root; double-click into it, then open the file
   expect(screen.getByText("assets")).toBeInTheDocument();
