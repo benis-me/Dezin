@@ -26,13 +26,13 @@ export const CLEAN_ARTIFACT = `<!doctype html>
 </style>
 </head>
 <body>
-  <section data-od-id="hero">
+  <section data-dezin-id="hero">
     <p class="eyebrow">Changelog</p>
     <h1>Ship design, not slop</h1>
     <p>Real copy describing the product in plain language.</p>
     <a class="cta" href="#start">Start building</a>
   </section>
-  <section data-od-id="features">
+  <section data-dezin-id="features">
     <div class="card"><h3>Token-aware</h3><p>It honours your design system.</p></div>
   </section>
 </body>

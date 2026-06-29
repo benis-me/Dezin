@@ -267,6 +267,83 @@ test("user message shows attached images as thumbnails, not the .refs path text"
   expect(img.getAttribute("src")).toBe("/api/projects/p1/refs/shot.png");
 });
 
+test("user message shows markup targets as cards above the text bubble", async () => {
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [
+      {
+        id: "m1",
+        conversationId: "c1",
+        role: "user" as const,
+        content:
+          "Make the headline shorter.\n\n" +
+          "Scoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n" +
+          '- selector: `section.hero > h1`\n  tag: h1\n  rect: x=24 y=40 w=320 h=48\n  text: "Enterprise pricing made simple"\n  note: Use fewer words',
+        createdAt: 1,
+      },
+    ],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const bubble = await screen.findByText("Make the headline shorter.");
+  const target = screen.getByLabelText("Marked target section.hero > h1");
+  expect(target).toBeInTheDocument();
+  expect(target).toHaveTextContent("h1");
+  expect(target).toHaveTextContent("320x48");
+  expect(target).toHaveTextContent("Enterprise pricing made simple");
+  expect(target).toHaveTextContent("Use fewer words");
+  expect(screen.queryByText(/Scoped edit/)).toBeNull();
+  expect(target.compareDocumentPosition(bubble) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test("markup prompts include selector, tag, geometry, text, and note for precise scoped edits", async () => {
+  const streamRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {
+    yield { type: "run-start", runId: "r-markup", conversationId: "c1" };
+    yield { type: "run-done", runId: "r-markup", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+  });
+  const fake = makeFakeApi({
+    listFiles: async () => [{ path: "index.html", size: 120 }],
+    streamRun: streamRun as never,
+  });
+  const user = userEvent.setup();
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Artifact preview");
+  fireEvent.click(screen.getByLabelText("Select an element"));
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        source: "dezin",
+        type: "selected",
+        selector: "section.hero > h1",
+        tag: "h1",
+        text: "Enterprise pricing made simple",
+        rect: { x: 24, y: 40, w: 320, h: 48 },
+      },
+    }),
+  );
+  await user.type(await screen.findByPlaceholderText("Describe the change to this element…"), "Use fewer words");
+  await user.click(screen.getByRole("button", { name: "Add" }));
+  await user.click(screen.getByLabelText("Send"));
+
+  await waitFor(() => expect(streamRun).toHaveBeenCalled());
+  const calls = streamRun.mock.calls as unknown as Array<[{ brief?: string }]>;
+  const brief = calls[0]?.[0]?.brief ?? "";
+  expect(brief).toContain("selector: `section.hero > h1`");
+  expect(brief).toContain("tag: h1");
+  expect(brief).toContain("rect: x=24 y=40 w=320 h=48");
+  expect(brief).toContain('text: "Enterprise pricing made simple"');
+  expect(brief).toContain("note: Use fewer words");
+});
+
 test("conversation switcher lists conversations and switches between them", async () => {
   const fake = makeFakeApi({
     listConversations: async () => [

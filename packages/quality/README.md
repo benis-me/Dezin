@@ -36,7 +36,7 @@ const result = await lintAndRepair(html, async (lintBlock) => {
 - **P1:** ALL-CAPS without ≥0.06em tracking (token-aware, resolved across
   themes), external image CDNs, >12 raw hex outside `:root`, accent overuse
   (cap **3**, a deliberately strict default).
-- **P2:** `<section>` missing `data-od-id`.
+- **P2:** `<section>` missing `data-dezin-id`.
 - **Dezin extensions:** shadow-only cards (prefer borders), gradient-clipped
   text, oversized non-pill border-radius. Toggle with `disableDezinRules`.
 

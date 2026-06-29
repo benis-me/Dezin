@@ -12,7 +12,7 @@ import { createApp } from "../src/index.ts";
 
 const CLEAN =
   `<style>:root{--accent:#2563eb}</style>\n` +
-  `<section data-od-id="x"><h1>Hi there</h1><p>Real copy describing the thing.</p></section>`;
+  `<section data-dezin-id="x"><h1>Hi there</h1><p>Real copy describing the thing.</p></section>`;
 const SLOPPY = `<style>.hero{background:#6366f1}</style><h1>🚀 Launch</h1><p>10x faster.</p>`;
 
 interface RunCtx {
