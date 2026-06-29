@@ -8,7 +8,8 @@ import { GenericCliRunner, GENERIC_AGENTS, type ProcessSpawner, type SpawnInput 
 test("each known agent builds a sane invocation with model + prompt", () => {
   for (const [cmd, config] of Object.entries(GENERIC_AGENTS)) {
     const args = config.buildArgs("some-model", "PROMPT");
-    assert.ok(args.includes("PROMPT"), `${cmd} should pass the prompt`);
+    // viaStdin agents (e.g. copilot) deliver the prompt on stdin, not in argv.
+    if (!config.viaStdin) assert.ok(args.includes("PROMPT"), `${cmd} should pass the prompt`);
     assert.ok(args.includes("some-model"), `${cmd} should pass the model`);
   }
 });

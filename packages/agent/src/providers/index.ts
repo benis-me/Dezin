@@ -11,6 +11,8 @@ import { codexProvider } from "./codex.ts";
 import { geminiProvider } from "./gemini.ts";
 import { codebuddyProvider } from "./codebuddy.ts";
 import { cursorAgentProvider } from "./cursor-agent.ts";
+import { copilotProvider } from "./copilot.ts";
+import { qwenProvider } from "./qwen.ts";
 import { opencodeProvider } from "./opencode.ts";
 import { aiderProvider } from "./aider.ts";
 
@@ -21,6 +23,8 @@ export const AGENT_PROVIDERS: ReadonlyArray<AgentProvider> = [
   geminiProvider,
   codebuddyProvider,
   cursorAgentProvider,
+  copilotProvider,
+  qwenProvider,
   opencodeProvider,
   aiderProvider,
 ];

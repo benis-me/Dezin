@@ -147,7 +147,8 @@ test("HomeScreen renames a project via the dialog", async () => {
 
 const AGENTS = [
   { id: "claude", command: "claude", available: true, version: "claude 1.2.3", models: ["claude-opus-4-8", "claude-sonnet-4-6"] },
-  { id: "codex", command: "codex", available: false, models: [] },
+  { id: "codex", command: "codex", available: true, version: "codex 1.0.0", models: ["gpt-5"] },
+  { id: "gemini", command: "gemini", available: false, models: [] },
 ];
 const DSYS = [
   { id: "modern-minimal", name: "Modern Minimal", category: "", summary: "" },
@@ -185,6 +186,8 @@ test("SettingsScreen sidebar lists sections; Provider + Defaults show daemon dat
   fireEvent.click(screen.getByRole("button", { name: "Provider" }));
   // the detected daemon agent shows as a card with its version
   expect(await screen.findByText(/claude 1\.2\.3/)).toBeInTheDocument();
+  // an uninstalled agent is shown but disabled (not selectable)
+  expect(screen.getByRole("button", { name: /Gemini/ })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Defaults" }));
   expect(await screen.findByRole("combobox", { name: "Default design system" })).toHaveTextContent("Modern Minimal");
 });

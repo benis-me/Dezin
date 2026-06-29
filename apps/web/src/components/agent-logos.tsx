@@ -1,4 +1,5 @@
 import { Bot, MessageSquareCode, SquareTerminal, Terminal } from "lucide-react";
+import { siGithubcopilot, siQwen } from "simple-icons";
 
 // Brand marks (simple-icons paths, 24×24). Agents without a public mark fall back to a
 // neutral terminal glyph. Logos keep their brand colour — they're identity, not UI accent.
@@ -14,6 +15,8 @@ const CURSOR =
 const LABELS: Record<string, string> = {
   claude: "Claude Code",
   codebuddy: "CodeBuddy",
+  copilot: "GitHub Copilot",
+  qwen: "Qwen Code",
   codex: "Codex",
   gemini: "Gemini CLI",
   "cursor-agent": "Cursor Agent",
@@ -57,6 +60,18 @@ export function AgentLogo({ id, className = "size-5" }: { id: string; className?
       </svg>
     );
   if (id === "codebuddy") return <MessageSquareCode className={className} strokeWidth={1.75} aria-hidden />;
+  if (id === "copilot")
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+        <path d={siGithubcopilot.path} />
+      </svg>
+    );
+  if (id === "qwen")
+    return (
+      <svg viewBox="0 0 24 24" className={className} fill="#6950EF" aria-hidden>
+        <path d={siQwen.path} />
+      </svg>
+    );
   if (id === "opencode") return <SquareTerminal className={className} strokeWidth={1.75} aria-hidden />;
   if (id === "aider") return <Bot className={className} strokeWidth={1.75} aria-hidden />;
   return <Terminal className={className} strokeWidth={1.75} aria-hidden />;

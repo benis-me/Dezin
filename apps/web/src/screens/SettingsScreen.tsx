@@ -164,13 +164,17 @@ export function SettingsScreen({
                                 key={a.id}
                                 type="button"
                                 aria-pressed={selected}
+                                disabled={!a.available}
+                                title={a.available ? undefined : `${agentLabel(a.id)} isn't installed`}
                                 onClick={() => save("agentCommand", a.command)}
                                 className={cn(
-                                  "relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-all active:scale-[0.99]",
+                                  "relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-all",
+                                  a.available && "active:scale-[0.99]",
                                   selected
                                     ? "border-ring bg-surface ring-2 ring-ring/25"
-                                    : "border-border hover:border-border-strong hover:bg-surface-2/50",
-                                  !a.available && "opacity-65",
+                                    : a.available
+                                      ? "border-border hover:border-border-strong hover:bg-surface-2/50"
+                                      : "cursor-not-allowed border-border opacity-50",
                                 )}
                               >
                                 {selected ? <Check size={14} strokeWidth={2.5} className="absolute right-2.5 top-2.5 text-foreground" /> : null}
