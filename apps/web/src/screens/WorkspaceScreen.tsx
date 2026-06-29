@@ -50,6 +50,10 @@ interface Msg {
   at?: number;
 }
 
+/** A live, ordered chunk of the agent's turn — assistant prose or a tool step — so the two
+ *  render interleaved (chronologically) during generation, not split into separate blocks. */
+type LiveItem = { type: "text"; text: string } | { type: "tool"; summary: string };
+
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
   return t.length === 0 ? "Untitled" : t.length > 48 ? `${t.slice(0, 48)}…` : t;
@@ -390,8 +394,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [setupPhase, setSetupPhase] = useState<SetupPhase | null>(null);
   const [running, setRunning] = useState(false);
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
-  const [liveSteps, setLiveSteps] = useState<string[]>([]);
-  const [liveText, setLiveText] = useState("");
+  const [liveItems, setLiveItems] = useState<LiveItem[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -417,7 +420,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const msgId = useRef(0);
   const activeConv = useRef<string | null>(null);
   const modeRef = useRef<ProjectMode>("prototype");
-  const liveStepsRef = useRef<string[]>([]);
+  const liveItemsRef = useRef<LiveItem[]>([]);
+  const gotTurnText = useRef(false);
+  const stickBottom = useRef(true);
   const splitRef = useRef<HTMLDivElement>(null);
 
   const setActive = (id: string | null) => {
@@ -534,12 +539,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         }
         setLintFindings([]);
         setScore(null);
-        setLiveText("");
-        setLiveSteps([]);
-        liveStepsRef.current = [];
+        setLiveItems([]);
+        liveItemsRef.current = [];
+        gotTurnText.current = false;
+        stickBottom.current = true;
         setLiveStatus("Starting…");
         break;
       case "turn-start":
+        gotTurnText.current = false;
         setLiveStatus(ev.isRepair ? "Repairing the artifact…" : "Generating…");
         break;
       case "preview-update":
@@ -548,20 +555,30 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         setTab("Preview");
         break;
       case "activity": {
+        // liveItemsRef is the synchronous source of truth (run-done reads it in the same tick);
+        // setLiveItems just mirrors it for rendering.
         const a = ev.activity as { kind: string; text?: string; summary?: string } | undefined;
+        const arr = liveItemsRef.current;
+        const last = arr[arr.length - 1];
         if (a?.kind === "tool" && a.summary) {
-          setLiveSteps((s) => {
-            if (s[s.length - 1] === a.summary) return s;
-            const next = [...s, a.summary!];
-            liveStepsRef.current = next;
-            return next;
-          });
-        } else if (a?.kind === "text" && a.text) setLiveText((t) => t + a.text);
+          if (last?.type === "tool" && last.summary === a.summary) break;
+          liveItemsRef.current = [...arr, { type: "tool", summary: a.summary }];
+          setLiveItems(liveItemsRef.current);
+        } else if (a?.kind === "text" && a.text) {
+          gotTurnText.current = true;
+          liveItemsRef.current =
+            last?.type === "text" ? [...arr.slice(0, -1), { type: "text", text: last.text + a.text }] : [...arr, { type: "text", text: a.text }];
+          setLiveItems(liveItemsRef.current);
+        }
         break;
       }
       case "turn-end":
-        if (typeof ev.text === "string" && ev.text) push("assistant", ev.text);
-        setLiveText("");
+        // Runners that don't stream text chunks still hand the full turn text here.
+        if (typeof ev.text === "string" && ev.text && !gotTurnText.current) {
+          liveItemsRef.current = [...liveItemsRef.current, { type: "text", text: ev.text }];
+          setLiveItems(liveItemsRef.current);
+        }
+        gotTurnText.current = false;
         break;
       case "lint": {
         const findings = Array.isArray(ev.findings) ? (ev.findings as QualityFinding[]) : [];
@@ -574,13 +591,21 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         const s = typeof ev.score === "number" ? ev.score : null;
         setScore(s);
         setLiveStatus(null);
-        // Preserve the build process as a collapsible record before clearing it.
-        if (liveStepsRef.current.length) {
-          const steps = liveStepsRef.current;
-          setMessages((m) => [...m, { id: msgId.current++, kind: "process", text: "", steps }]);
+        // Materialize the live turn into the transcript: the prose as an assistant message,
+        // the tool calls as a collapsible process record.
+        {
+          const items = liveItemsRef.current;
+          const text = items
+            .filter((i): i is { type: "text"; text: string } => i.type === "text")
+            .map((i) => i.text)
+            .join("\n\n")
+            .trim();
+          const steps = items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool").map((i) => i.summary);
+          if (text) setMessages((m) => [...m, { id: msgId.current++, kind: "assistant", text }]);
+          if (steps.length) setMessages((m) => [...m, { id: msgId.current++, kind: "process", text: "", steps }]);
         }
-        liveStepsRef.current = [];
-        setLiveSteps([]);
+        liveItemsRef.current = [];
+        setLiveItems([]);
         const fixes = rounds ? ` after ${rounds} fix${rounds > 1 ? "es" : ""}` : "";
         const quality = s !== null ? `, quality ${s}/100` : "";
         pushResult(
@@ -601,7 +626,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       }
       case "run-error":
         setLiveStatus(null);
-        setLiveSteps([]);
+        setLiveItems([]);
+        liveItemsRef.current = [];
         pushResult(`The run failed: ${typeof ev.message === "string" ? ev.message : "generation failed"}`, { error: true });
         break;
       default:
@@ -637,13 +663,21 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       for await (const ev of stream) handleEvent(ev, projectId);
     } catch (err) {
       setLiveStatus(null);
-      setLiveSteps([]);
+      setLiveItems([]);
+      liveItemsRef.current = [];
       pushResult(`The run failed: ${err instanceof Error ? err.message : "run failed"}`, { error: true });
       toast("The run failed.", { variant: "error" });
     } finally {
       setRunning(false);
     }
   };
+
+  // Keep the transcript pinned to the newest content as it streams — unless the user scrolled
+  // up to read (stickBottom is cleared by the container's onScroll below).
+  useEffect(() => {
+    const el = chatScrollRef.current;
+    if (el && stickBottom.current) el.scrollTop = el.scrollHeight;
+  }, [liveItems, messages, liveStatus, running]);
 
   useEffect(() => {
     let alive = true;
@@ -1127,6 +1161,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
         <div
           ref={chatScrollRef}
+          onScroll={() => {
+            const el = chatScrollRef.current;
+            if (el) stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          }}
           className="flex-1 space-y-4 overflow-auto px-4 pt-5"
           style={{ paddingBottom: composerH + 36 }}
         >
@@ -1171,47 +1209,23 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   </div>
                 </FadeIn>
               ))}
-              {running && liveText ? <Markdown>{liveText}</Markdown> : null}
               {running ? (
-                <FadeIn className="rounded-xl border border-border bg-card p-3">
-                  <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+                <div className="space-y-3">
+                  {liveItems.map((it, i) =>
+                    it.type === "text" ? (
+                      it.text.trim() ? <Markdown key={i}>{it.text}</Markdown> : null
+                    ) : (
+                      <div key={i} className="flex items-center gap-2 py-0.5 font-mono text-[11px] text-muted-foreground">
+                        <span aria-hidden className="size-1 shrink-0 rounded-full bg-muted-foreground/60" />
+                        <span className="truncate">{it.summary}</span>
+                      </div>
+                    ),
+                  )}
+                  <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                     <Spinner size={13} />
                     {liveStatus ?? "Working"}
                   </div>
-                  {liveSteps.length ? (
-                    <ul className="mt-2.5 space-y-1.5 border-t border-border pt-2.5">
-                      <AnimatePresence initial={false}>
-                        {liveSteps.map((step, i) => {
-                          const last = i === liveSteps.length - 1;
-                          return (
-                            <motion.li
-                              key={`${i}:${step}`}
-                              layout
-                              initial={{ opacity: 0, x: -6 }}
-                              animate={{ opacity: 1, x: 0 }}
-                              transition={{ duration: 0.25, ease: [0.25, 1, 0.5, 1] }}
-                              className="flex items-center gap-2 font-mono text-[11px] text-foreground-2"
-                            >
-                              {last ? (
-                                <motion.span
-                                  aria-hidden
-                                  className="grid size-3.5 shrink-0 place-items-center"
-                                  animate={{ opacity: [0.4, 1, 0.4] }}
-                                  transition={{ duration: 1.1, repeat: Infinity, ease: "easeInOut" }}
-                                >
-                                  <span className="size-1.5 rounded-full bg-foreground-2" />
-                                </motion.span>
-                              ) : (
-                                <Check size={13} strokeWidth={2.5} className="shrink-0 text-success" />
-                              )}
-                              <span className="truncate">{step}</span>
-                            </motion.li>
-                          );
-                        })}
-                      </AnimatePresence>
-                    </ul>
-                  ) : null}
-                </FadeIn>
+                </div>
               ) : null}
             </>
           )}
