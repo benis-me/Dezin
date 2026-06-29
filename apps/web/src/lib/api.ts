@@ -257,7 +257,7 @@ export interface ApiClient {
   previewUrl(id: string): string;
   variantPreviewUrl(id: string, vid: string): string;
   exportUrl(id: string): string;
-  streamRun(input: RunInput): AsyncGenerator<RunEvent>;
+  streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent>;
 }
 
 export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
@@ -271,8 +271,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     return (await res.json()) as T;
   }
 
-  async function* streamRun(input: RunInput): AsyncGenerator<RunEvent> {
-    const res = await f(baseUrl + "/api/runs", jsonInit("POST", input));
+  async function* streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent> {
+    const res = await f(baseUrl + "/api/runs", { ...jsonInit("POST", input), signal });
     if (!res.ok) throw new ApiError(res.status, await safeText(res));
 
     if (!res.body) {

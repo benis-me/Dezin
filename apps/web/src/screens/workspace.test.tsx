@@ -80,7 +80,7 @@ test("rehydrates the prior transcript and reuses the conversation on the next ru
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "tweak it" } });
   fireEvent.click(screen.getByLabelText("Send"));
   expect(await screen.findByText("Continued.")).toBeInTheDocument();
-  expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "c1", brief: "tweak it" }));
+  expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "c1", brief: "tweak it" }), expect.anything());
 });
 
 test("conversation switcher lists conversations and switches between them", async () => {

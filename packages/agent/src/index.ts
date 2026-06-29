@@ -9,6 +9,7 @@ export type {
   AgentTurnResult,
   TurnRole,
 } from "./types.ts";
+export { AbortError, abortError, isAbortError } from "./types.ts";
 export { FakeRunner, type FakeRunnerOptions } from "./fake-runner.ts";
 export {
   generateArtifact,

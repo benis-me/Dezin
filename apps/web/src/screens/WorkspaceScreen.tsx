@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Code, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, Plus, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Tablet, X } from "lucide-react";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Code, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, Plus, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, type TabItem } from "../components/ui/index.ts";
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
@@ -393,6 +393,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const previewIframeRef = useRef<HTMLIFrameElement>(null);
   const [setupPhase, setSetupPhase] = useState<SetupPhase | null>(null);
   const [running, setRunning] = useState(false);
+  const [queue, setQueue] = useState<string[]>([]);
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
   const [liveItems, setLiveItems] = useState<LiveItem[]>([]);
   const [input, setInput] = useState("");
@@ -423,6 +424,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const liveItemsRef = useRef<LiveItem[]>([]);
   const gotTurnText = useRef(false);
   const stickBottom = useRef(true);
+  const abortRef = useRef<AbortController | null>(null);
+  const runningRef = useRef(false);
   const splitRef = useRef<HTMLDivElement>(null);
 
   const setActive = (id: string | null) => {
@@ -527,6 +530,22 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const pushResult = (text: string, meta: ResultMeta): void =>
     setMessages((m) => [...m, { id: msgId.current++, kind: "result", text, meta }]);
 
+  // Turn the live (interleaved) stream into the transcript: prose → an assistant message,
+  // tool calls → a collapsible process record. Used on completion and on a Stop.
+  const materializeLive = (): void => {
+    const items = liveItemsRef.current;
+    const text = items
+      .filter((i): i is { type: "text"; text: string } => i.type === "text")
+      .map((i) => i.text)
+      .join("\n\n")
+      .trim();
+    const steps = items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool").map((i) => i.summary);
+    if (text) setMessages((m) => [...m, { id: msgId.current++, kind: "assistant", text }]);
+    if (steps.length) setMessages((m) => [...m, { id: msgId.current++, kind: "process", text: "", steps }]);
+    liveItemsRef.current = [];
+    setLiveItems([]);
+  };
+
   const handleEvent = (ev: RunEvent, id: string): void => {
     switch (ev.type) {
       case "run-start":
@@ -591,21 +610,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         const s = typeof ev.score === "number" ? ev.score : null;
         setScore(s);
         setLiveStatus(null);
-        // Materialize the live turn into the transcript: the prose as an assistant message,
-        // the tool calls as a collapsible process record.
-        {
-          const items = liveItemsRef.current;
-          const text = items
-            .filter((i): i is { type: "text"; text: string } => i.type === "text")
-            .map((i) => i.text)
-            .join("\n\n")
-            .trim();
-          const steps = items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool").map((i) => i.summary);
-          if (text) setMessages((m) => [...m, { id: msgId.current++, kind: "assistant", text }]);
-          if (steps.length) setMessages((m) => [...m, { id: msgId.current++, kind: "process", text: "", steps }]);
-        }
-        liveItemsRef.current = [];
-        setLiveItems([]);
+        materializeLive();
         const fixes = rounds ? ` after ${rounds} fix${rounds > 1 ? "es" : ""}` : "";
         const quality = s !== null ? `, quality ${s}/100` : "";
         pushResult(
@@ -637,7 +642,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const runBrief = async (brief: string, agentOverride?: string, modelOverride?: string): Promise<void> => {
     const text = brief.trim();
-    if (!text || running) return;
+    if (!text || runningRef.current) return;
 
     if (projectId === "new") {
       try {
@@ -651,26 +656,42 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
 
     push("user", text);
+    runningRef.current = true;
     setRunning(true);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
     try {
-      const stream = api.streamRun({
-        projectId,
-        brief: text,
-        conversationId: activeConv.current ?? undefined,
-        agentCommand: agentOverride || runAgent || undefined,
-        model: modelOverride || runModel || undefined,
-      });
+      const stream = api.streamRun(
+        {
+          projectId,
+          brief: text,
+          conversationId: activeConv.current ?? undefined,
+          agentCommand: agentOverride || runAgent || undefined,
+          model: modelOverride || runModel || undefined,
+        },
+        ctrl.signal,
+      );
       for await (const ev of stream) handleEvent(ev, projectId);
     } catch (err) {
       setLiveStatus(null);
-      setLiveItems([]);
-      liveItemsRef.current = [];
-      pushResult(`The run failed: ${err instanceof Error ? err.message : "run failed"}`, { error: true });
-      toast("The run failed.", { variant: "error" });
+      if (ctrl.signal.aborted) {
+        // User pressed Stop — keep what was generated so far, note the stop, no error.
+        materializeLive();
+        pushResult("Stopped.", {});
+      } else {
+        setLiveItems([]);
+        liveItemsRef.current = [];
+        pushResult(`The run failed: ${err instanceof Error ? err.message : "run failed"}`, { error: true });
+        toast("The run failed.", { variant: "error" });
+      }
     } finally {
+      runningRef.current = false;
+      abortRef.current = null;
       setRunning(false);
     }
   };
+
+  const stop = (): void => abortRef.current?.abort();
 
   // Keep the transcript pinned to the newest content as it streams — unless the user scrolled
   // up to read (stickBottom is cleared by the container's onScroll below).
@@ -678,6 +699,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const el = chatScrollRef.current;
     if (el && stickBottom.current) el.scrollTop = el.scrollHeight;
   }, [liveItems, messages, liveStatus, running]);
+
+  // Drain queued prompts one at a time once the current run finishes.
+  useEffect(() => {
+    if (runningRef.current || queue.length === 0) return;
+    const [next, ...rest] = queue;
+    setQueue(rest);
+    void runBrief(next!);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, queue]);
 
   useEffect(() => {
     let alive = true;
@@ -980,7 +1010,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   };
 
   const send = () => {
-    if (running) return;
     const scoped = selectedTargets.length > 0;
     const refs = attachments.length
       ? `\n\nReference files (read them from disk): ${attachments.map((a) => a.path).join(", ")}`
@@ -996,7 +1025,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setInput("");
     setAttachments([]);
     setSelectedTargets([]);
-    void runBrief(text);
+    // While a run is in flight, queue the prompt to run when it finishes.
+    if (runningRef.current) setQueue((q) => [...q, text]);
+    else void runBrief(text);
   };
 
   const referenceProject = async (project: Project): Promise<void> => {
@@ -1323,6 +1354,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 ))}
               </div>
             ) : null}
+            {queue.length ? (
+              <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+                <History size={12} strokeWidth={1.75} />
+                {queue.length} prompt{queue.length === 1 ? "" : "s"} queued — running after the current one
+              </div>
+            ) : null}
             {isExisting ? (
               <input
                 ref={fileInputRef}
@@ -1379,15 +1416,22 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   onModelChange={setRunModel}
                   onRescan={rescanAgents}
                 />
-                <Button
-                  aria-label="Send"
-                  size="icon-sm"
-                  onClick={send}
-                  disabled={running || (input.trim().length === 0 && selectedTargets.length === 0)}
-                  className="ml-0.5 rounded-lg"
-                >
-                  <ArrowUp size={15} strokeWidth={2} />
-                </Button>
+                {running && input.trim().length === 0 && selectedTargets.length === 0 ? (
+                  <Button aria-label="Stop" size="icon-sm" variant="outline" onClick={stop} className="ml-0.5 rounded-lg" title="Stop generating">
+                    <Square size={12} strokeWidth={2} className="fill-current" />
+                  </Button>
+                ) : (
+                  <Button
+                    aria-label={running ? "Queue" : "Send"}
+                    size="icon-sm"
+                    onClick={send}
+                    disabled={!running && input.trim().length === 0 && selectedTargets.length === 0}
+                    title={running ? "Queue this prompt to run next" : undefined}
+                    className="ml-0.5 rounded-lg"
+                  >
+                    <ArrowUp size={15} strokeWidth={2} />
+                  </Button>
+                )}
               </div>
             </div>
           </div>

@@ -11,6 +11,17 @@ export type TurnRole = "user" | "assistant";
 /** A live step in the agent's process, surfaced to the UI as it streams. */
 export type AgentActivity = { kind: "text"; text: string } | { kind: "tool"; name: string; summary: string };
 
+/** Raised when a run is cancelled (user Stop / client disconnect) so callers can treat it as
+ *  a clean stop rather than a failure, and retries don't kick in. */
+export class AbortError extends Error {
+  constructor() {
+    super("aborted");
+    this.name = "AbortError";
+  }
+}
+export const abortError = (): AbortError => new AbortError();
+export const isAbortError = (e: unknown): boolean => e instanceof Error && e.name === "AbortError";
+
 export interface AgentTurnInput {
   /** The composed system prompt (from @dezin/prompt). */
   systemPrompt: string;
@@ -24,6 +35,8 @@ export interface AgentTurnInput {
   isRepair?: boolean;
   /** Called with each live activity (text chunk / tool step) as the agent works. */
   onActivity?: (ev: AgentActivity) => void;
+  /** Abort to cancel this turn (terminates the spawned CLI). */
+  signal?: AbortSignal;
 }
 
 export interface AgentTurnResult {

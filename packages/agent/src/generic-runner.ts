@@ -68,6 +68,7 @@ export class GenericCliRunner implements AgentRunner {
       args: this.buildArgs(prompt),
       cwd: input.projectDir,
       stdin: this.opts.config.viaStdin ? prompt : "",
+      signal: input.signal,
     });
 
     let artifactHtml = "";

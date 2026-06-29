@@ -7,6 +7,7 @@
 
 import { lintAndRepair, type ClosedLoopOptions, type Finding } from "../../quality/src/index.ts";
 import type { AgentActivity, AgentRunner, AgentTurnInput, AgentTurnResult, TurnRole } from "./types.ts";
+import { isAbortError } from "./types.ts";
 
 /**
  * Run one agent turn with bounded retry + exponential backoff. Coding-agent CLIs
@@ -26,6 +27,8 @@ export async function runTurnWithRetry(
       return await runner.runTurn(turnInput);
     } catch (err) {
       lastErr = err;
+      // A cancel is final — don't retry into a killed/aborted run.
+      if (isAbortError(err) || turnInput.signal?.aborted) throw err;
       if (attempt < maxAttempts) {
         opts.onRetry?.(attempt, err);
         await sleep(400 * 2 ** (attempt - 1));
@@ -47,6 +50,8 @@ export interface GenerateInput {
   lint?: ClosedLoopOptions;
   /** Optional progress callback (emit run events for SSE). */
   onEvent?: (event: GenerateEvent) => void;
+  /** Abort to cancel the run (terminates the active turn + stops the loop). */
+  signal?: AbortSignal;
 }
 
 export type GenerateEvent =
@@ -71,7 +76,7 @@ export interface GenerateResult {
 }
 
 export async function generateArtifact(input: GenerateInput): Promise<GenerateResult> {
-  const { runner, systemPrompt, brief, projectDir, lint, onEvent } = input;
+  const { runner, systemPrompt, brief, projectDir, lint, onEvent, signal } = input;
   const history: { role: TurnRole; content: string }[] = [];
   const turns: AgentTurnResult[] = [];
 
@@ -84,6 +89,7 @@ export async function generateArtifact(input: GenerateInput): Promise<GenerateRe
       history: [...history],
       isRepair,
       onActivity: (activity) => onEvent?.({ type: "activity", round, activity }),
+      signal,
     };
     const result = await runTurnWithRetry(runner, turnInput, {
       onRetry: (attempt) =>

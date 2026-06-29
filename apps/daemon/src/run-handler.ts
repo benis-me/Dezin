@@ -14,6 +14,7 @@ import {
   runTurnWithRetry,
   GenericCliRunner,
   getProvider,
+  isAbortError,
   type GenerateEvent,
   type AgentRunner,
 } from "../../../packages/agent/src/index.ts";
@@ -143,6 +144,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   };
   sse({ type: "run-start", runId: run.id, conversationId: conversation.id });
 
+  // Cancel the run if the client disconnects (the composer "Stop" aborts the fetch). The
+  // signal terminates the active agent CLI and stops the lint loop.
+  const ctrl = new AbortController();
+  req.on("close", () => ctrl.abort());
+
   const dir = projectDir(deps.dataDir, project.id);
   await mkdir(dir, { recursive: true });
 
@@ -171,6 +177,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             recordStep(activity);
             sse({ type: "activity", round: 0, activity });
           },
+          signal: ctrl.signal,
         },
         {
           onRetry: (attempt) =>
@@ -184,8 +191,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       store.updateRun(run.id, { status: "succeeded", repairRounds: 0, lintPassed: true, score: null, finishedAt: Date.now() });
       sse({ type: "run-done", runId: run.id, passed: true, rounds: 0, score: null, mode: "standard", findings: [] });
     } catch (err) {
-      store.updateRun(run.id, { status: "failed", finishedAt: Date.now() });
-      sse({ type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
+      const cancelled = ctrl.signal.aborted || isAbortError(err);
+      store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
+      persistProcess();
+      if (!cancelled) sse({ type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
     } finally {
       res.end();
     }
@@ -203,6 +212,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       brief,
       projectDir: dir,
       lint: { maxRounds: body.maxRounds ?? 2 },
+      signal: ctrl.signal,
       onEvent: (e: GenerateEvent) => {
         if (e.type === "activity") recordStep(e.activity);
         sse(e);
@@ -246,8 +256,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     // Headless-screenshot the finished artifact as the gallery cover (best-effort, async).
     void captureCover(join(dir, result.artifactPath), join(dir, ".cover.png"));
   } catch (err) {
-    store.updateRun(run.id, { status: "failed", finishedAt: Date.now() });
-    sse({ type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
+    const cancelled = ctrl.signal.aborted || isAbortError(err);
+    store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
+    persistProcess(); // keep the partial process record + whatever the agent wrote to disk
+    if (!cancelled) sse({ type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
   } finally {
     stopPoll();
     res.end();

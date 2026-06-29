@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentRunner, AgentTurnInput, AgentTurnResult } from "./types.ts";
+import { abortError } from "./types.ts";
 import { parseClaudeStream, parseClaudeLine } from "./claude-stream.ts";
 
 export interface SpawnInput {
@@ -19,6 +20,8 @@ export interface SpawnInput {
   stdin: string;
   /** Called with each stdout chunk as it arrives (for live streaming). */
   onStdout?: (chunk: string) => void;
+  /** Abort to terminate the child (a user "Stop"). */
+  signal?: AbortSignal;
 }
 
 export interface SpawnOutput {
@@ -45,9 +48,15 @@ export class NodeSpawner implements ProcessSpawner {
         IMPECCABLE_HOOK_QUIET: "1",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       };
+      if (input.signal?.aborted) return reject(abortError());
       const child = spawn(input.command, input.args, { cwd: input.cwd, stdio: ["pipe", "pipe", "pipe"], env });
       let stdout = "";
       let stderr = "";
+      const onAbort = (): void => {
+        child.kill("SIGTERM");
+      };
+      input.signal?.addEventListener("abort", onAbort, { once: true });
+      const cleanup = (): void => input.signal?.removeEventListener("abort", onAbort);
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
       child.stdout.on("data", (d: string) => {
@@ -55,8 +64,15 @@ export class NodeSpawner implements ProcessSpawner {
         input.onStdout?.(d);
       });
       child.stderr.on("data", (d: string) => (stderr += d));
-      child.on("error", reject);
-      child.on("close", (code) => resolve({ stdout, stderr, exitCode: code ?? 0 }));
+      child.on("error", (e) => {
+        cleanup();
+        reject(e);
+      });
+      child.on("close", (code) => {
+        cleanup();
+        if (input.signal?.aborted) return reject(abortError());
+        resolve({ stdout, stderr, exitCode: code ?? 0 });
+      });
       child.stdin.on("error", () => {}); // ignore EPIPE if the child exits early
       child.stdin.write(input.stdin);
       child.stdin.end();
@@ -134,6 +150,7 @@ export class ClaudeCodeRunner implements AgentRunner {
       cwd: input.projectDir,
       stdin,
       onStdout,
+      signal: input.signal,
     });
 
     const parsed = parseClaudeStream(stdout);

@@ -5,7 +5,7 @@
 
 export type MessageRole = "user" | "assistant" | "system";
 
-export type RunStatus = "pending" | "running" | "succeeded" | "failed";
+export type RunStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
 
 /**
  * Build mode. "prototype" = a single self-contained index.html (fast). "standard"
