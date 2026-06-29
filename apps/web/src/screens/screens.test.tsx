@@ -5,11 +5,15 @@ import { HomeScreen } from "./HomeScreen.tsx";
 import { DesignSystemsScreen } from "./DesignSystemsScreen.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { SettingsScreen } from "./SettingsScreen.tsx";
+import { Shell } from "../components/Shell.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 
-afterEach(cleanup);
+afterEach(() => {
+  localStorage.removeItem("dezin.shell.sidebar.width");
+  cleanup();
+});
 
 const SKILLS = [
   { id: "frontend-design", name: "Frontend design", description: "d", mode: "prototype", triggers: [], designSystem: true },
@@ -23,6 +27,16 @@ function renderWithApi(ui: React.ReactElement, over = {}) {
 test("HomeScreen shows an empty state with no projects", () => {
   renderWithApi(<HomeScreen projects={[]} />, { listSkills: async () => SKILLS });
   expect(screen.getByText(/No projects yet/i)).toBeInTheDocument();
+});
+
+test("Shell sidebar can be resized outside project pages", () => {
+  window.history.pushState({}, "", "/");
+  render(
+    <Shell dark={false} onToggleDark={() => {}} onOpenSettings={() => {}}>
+      <div>Content</div>
+    </Shell>,
+  );
+  expect(screen.getByRole("separator", { name: "Resize app sidebar" })).toBeInTheDocument();
 });
 
 test("HomeScreen lists projects and opens them", () => {

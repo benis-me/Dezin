@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, ChevronDown, MessageSquare, Pencil, Trash2 } from "lucide-react";
+import { Check, ChevronDown, MessageSquare, Pencil, Plus, Trash2 } from "lucide-react";
 import type { Conversation } from "../lib/api.ts";
 import { Input, Popover, PopoverContent, PopoverTrigger, ScrollArea } from "./ui/index.ts";
 
@@ -18,6 +18,7 @@ export function ConversationSelect({
   onSwitch,
   onRename,
   onDelete,
+  onCreate,
   label,
 }: {
   conversations: Conversation[];
@@ -25,14 +26,12 @@ export function ConversationSelect({
   onSwitch: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
+  onCreate?: () => void;
   label: (c: Conversation, i: number) => string;
 }) {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-
-  const active = conversations.find((c) => c.id === activeId);
-  const activeLabel = active ? label(active, conversations.indexOf(active)) : "Conversation";
 
   const commitRename = (c: Conversation, i: number): void => {
     onRename(c.id, draft.trim() || label(c, i));
@@ -42,14 +41,28 @@ export function ConversationSelect({
   return (
     <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger
-        aria-label="Conversation switcher"
+        aria-label="Conversations"
         className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
       >
         <MessageSquare size={13} strokeWidth={1.75} />
-        <span className="max-w-[12rem] truncate font-medium text-foreground">{activeLabel}</span>
+        <span className="font-medium text-foreground">Conversations</span>
         <ChevronDown size={13} strokeWidth={2} />
       </PopoverTrigger>
       <PopoverContent align="start" className="w-72 p-1">
+        {onCreate ? (
+          <button
+            type="button"
+            aria-label="New conversation"
+            onClick={() => {
+              onCreate();
+              setOpen(false);
+            }}
+            className="mb-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium text-foreground transition-colors hover:bg-accent"
+          >
+            <Plus size={13} strokeWidth={2} className="text-muted-foreground" />
+            New conversation
+          </button>
+        ) : null}
         <ScrollArea viewportClassName="max-h-72">
           <ul>
             {conversations.map((c, i) => {

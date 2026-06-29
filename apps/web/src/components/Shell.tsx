@@ -1,9 +1,9 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { LayoutGrid, Moon, Puzzle, Shapes, Settings, Sun, type LucideIcon } from "lucide-react";
 import { useRoute, navigate, type Route } from "../router.tsx";
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
-import { IconButton } from "./ui/index.ts";
+import { IconButton, ResizeHandle } from "./ui/index.ts";
 
 interface NavLink {
   label: string;
@@ -16,6 +16,18 @@ const NAV: NavLink[] = [
   { label: "Home", path: "/", icon: LayoutGrid, match: (r) => r.name === "home" },
   { label: "Design systems", path: "/design-systems", icon: Shapes, match: (r) => r.name === "design-systems" },
 ];
+
+const SHELL_SIDEBAR_WIDTH_KEY = "dezin.shell.sidebar.width";
+
+function readShellSidebarSplit(): number {
+  try {
+    const n = Number(localStorage.getItem(SHELL_SIDEBAR_WIDTH_KEY));
+    if (Number.isFinite(n)) return Math.min(0.28, Math.max(0.12, n));
+  } catch {
+    /* localStorage may be unavailable */
+  }
+  return 0.18;
+}
 
 /**
  * App shell — a tool layout: a slim left sidebar (nav + controls) beside the main
@@ -34,74 +46,97 @@ export function Shell({
 }) {
   const route = useRoute();
   const inProject = route.name === "project";
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const [sidebarSplit, setSidebarSplit] = useState(readShellSidebarSplit);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SHELL_SIDEBAR_WIDTH_KEY, String(sidebarSplit));
+    } catch {
+      /* localStorage may be unavailable */
+    }
+  }, [sidebarSplit]);
 
   return (
-    <div className="flex h-screen bg-background text-foreground">
+    <div ref={shellRef} className="flex h-screen bg-background text-foreground">
       {!inProject ? (
-        <aside className="app-drag titlebar-pad-top flex w-52 shrink-0 flex-col border-r border-border bg-sidebar">
-          <div className="flex items-center justify-between gap-2 px-3.5 py-3.5">
-            <button
-              type="button"
-              onClick={() => navigate("/")}
-              className="app-no-drag rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-            >
-              <span className="font-brand text-[19px] text-foreground transition-opacity hover:opacity-70">Dezin</span>
-            </button>
-            <IconButton
-              aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
-              title={dark ? "Light mode" : "Dark mode"}
-              onClick={onToggleDark}
-              className="app-no-drag"
-            >
-              {dark ? <Sun size={16} strokeWidth={1.75} /> : <Moon size={16} strokeWidth={1.75} />}
-            </IconButton>
-          </div>
+        <>
+          <aside
+            style={{ width: `${sidebarSplit * 100}%` }}
+            className="app-drag titlebar-pad-top flex min-w-[176px] max-w-[320px] shrink-0 flex-col bg-sidebar"
+          >
+            <div className="flex items-center justify-between gap-2 px-3.5 py-3.5">
+              <button
+                type="button"
+                onClick={() => navigate("/")}
+                className="app-no-drag rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
+                <span className="font-brand text-[19px] text-foreground transition-opacity hover:opacity-70">Dezin</span>
+              </button>
+              <IconButton
+                aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
+                title={dark ? "Light mode" : "Dark mode"}
+                onClick={onToggleDark}
+                className="app-no-drag"
+              >
+                {dark ? <Sun size={16} strokeWidth={1.75} /> : <Moon size={16} strokeWidth={1.75} />}
+              </IconButton>
+            </div>
 
-          <nav aria-label="Primary" className="flex flex-1 flex-col gap-0.5 px-2.5">
-            {NAV.map((link) => {
-              const active = link.match(route);
-              const Icon = link.icon;
-              return (
-                <button
-                  key={link.path}
-                  type="button"
-                  aria-current={active ? "page" : undefined}
-                  onClick={() => navigate(link.path)}
-                  className={cn(
-                    "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors",
-                    active
-                      ? "bg-background text-foreground ring-1 ring-border"
-                      : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-                  )}
-                >
-                  <Icon size={16} strokeWidth={1.75} className={active ? "text-primary" : ""} />
-                  {link.label}
-                </button>
-              );
-            })}
-          </nav>
+            <nav aria-label="Primary" className="flex flex-1 flex-col gap-0.5 px-2.5">
+              {NAV.map((link) => {
+                const active = link.match(route);
+                const Icon = link.icon;
+                return (
+                  <button
+                    key={link.path}
+                    type="button"
+                    aria-current={active ? "page" : undefined}
+                    onClick={() => navigate(link.path)}
+                    className={cn(
+                      "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors",
+                      active
+                        ? "bg-background text-foreground ring-1 ring-border"
+                        : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
+                    )}
+                  >
+                    <Icon size={16} strokeWidth={1.75} className={active ? "text-primary" : ""} />
+                    {link.label}
+                  </button>
+                );
+              })}
+            </nav>
 
-          <div className="flex flex-col gap-0.5 border-t border-border px-2.5 py-2.5">
-            <button
-              type="button"
-              onClick={() => onOpenSettings("extension")}
-              aria-label="Browser extension"
-              className="app-no-drag flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-background/60 hover:text-foreground"
-            >
-              <Puzzle size={16} strokeWidth={1.75} />
-              Browser extension
-            </button>
-            <button
-              type="button"
-              onClick={() => onOpenSettings()}
-              aria-label="Settings"
-              className="app-no-drag flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-background/60 hover:text-foreground"
-            >
-              <Settings size={16} strokeWidth={1.75} />
-              Settings
-            </button>
-          </div>
-        </aside>
+            <div className="flex flex-col gap-0.5 border-t border-border px-2.5 py-2.5">
+              <button
+                type="button"
+                onClick={() => onOpenSettings("extension")}
+                aria-label="Browser extension"
+                className="app-no-drag flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-background/60 hover:text-foreground"
+              >
+                <Puzzle size={16} strokeWidth={1.75} />
+                Browser extension
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenSettings()}
+                aria-label="Settings"
+                className="app-no-drag flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm text-muted-foreground transition-colors hover:bg-background/60 hover:text-foreground"
+              >
+                <Settings size={16} strokeWidth={1.75} />
+                Settings
+              </button>
+            </div>
+          </aside>
+          <ResizeHandle
+            containerRef={shellRef}
+            value={sidebarSplit}
+            onResize={setSidebarSplit}
+            min={0.12}
+            max={0.28}
+            label="Resize app sidebar"
+          />
+        </>
       ) : null}
 
       <main className="relative flex flex-1 overflow-hidden">

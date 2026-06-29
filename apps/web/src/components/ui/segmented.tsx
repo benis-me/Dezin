@@ -17,21 +17,26 @@ export function Tabs({
   value,
   onChange,
   className = "",
+  variant = "default",
   "aria-label": ariaLabel,
 }: {
   items: TabItem[];
   value: string;
   onChange: (value: string) => void;
   className?: string;
+  variant?: "default" | "plain";
   "aria-label"?: string;
 }) {
   const layoutId = useId();
+  const plain = variant === "plain";
   return (
     <div
       role="tablist"
       aria-label={ariaLabel}
       className={cn(
-        "inline-flex h-8 w-fit items-center justify-center gap-0.5 rounded-lg border border-border bg-surface-2/60 p-0.5 text-muted-foreground",
+        plain
+          ? "inline-flex h-8 w-fit items-center justify-center gap-0.5 rounded-lg p-0 text-muted-foreground"
+          : "inline-flex h-8 w-fit items-center justify-center gap-0.5 rounded-lg border border-border bg-surface-2/60 p-0.5 text-muted-foreground",
         className,
       )}
     >
@@ -45,7 +50,8 @@ export function Tabs({
             aria-selected={active}
             onClick={() => onChange(item.value)}
             className={cn(
-              "relative inline-flex h-full flex-1 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 [&_svg]:size-3.5",
+              "relative inline-flex h-full flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 [&_svg]:size-3.5",
+              plain ? "px-2" : "px-2.5",
               active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
             )}
           >
@@ -53,7 +59,7 @@ export function Tabs({
               <motion.span
                 layoutId={layoutId}
                 aria-hidden
-                className="absolute inset-0 rounded-md bg-card ring-1 ring-border"
+                className={cn("absolute inset-0 rounded-md", plain ? "bg-surface-2" : "bg-card ring-1 ring-border")}
                 transition={{ type: "spring", stiffness: 520, damping: 42 }}
               />
             ) : null}

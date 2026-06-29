@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, Plus, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
+import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, ResizeHandle, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
 import { PreviewModal } from "../components/PreviewModal.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
@@ -33,6 +33,7 @@ const SEVERITY_STYLE: Record<string, string> = {
 };
 
 const SPLIT_KEY = "dezin.workspace.split";
+const FILES_SPLIT_KEY = "dezin.workspace.files.split";
 const REPLAYABLE_RUN_STATUSES = new Set(["running", "pending", "cancelled", "failed"]);
 
 function queueKey(projectId: string): string {
@@ -484,12 +485,34 @@ function FilesPanel({
   running: boolean;
   onOpen: (path: string) => void;
 }) {
+  const filesSplitRef = useRef<HTMLDivElement | null>(null);
+  const [filesSplit, setFilesSplit] = useState(readFilesSplit);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(FILES_SPLIT_KEY, String(filesSplit));
+    } catch {
+      /* ignore */
+    }
+  }, [filesSplit]);
+
   if (files.length === 0) return emptyPane(running ? "Generating…" : "No files yet. Run to generate.");
   return (
-    <div className="flex h-full bg-surface">
-      <div className="w-[38%] min-w-[220px] max-w-[360px] shrink-0 border-r border-border">
+    <div ref={filesSplitRef} className="flex h-full bg-surface">
+      <div
+        style={{ width: `${filesSplit * 100}%` }}
+        className="min-w-[200px] max-w-[480px] shrink-0"
+      >
         <FilesBrowser files={files} activeFile={activeFile} onOpen={onOpen} />
       </div>
+      <ResizeHandle
+        containerRef={filesSplitRef}
+        value={filesSplit}
+        onResize={setFilesSplit}
+        min={0.22}
+        max={0.58}
+        label="Resize file browser"
+      />
       <div className="min-w-0 flex-1">
         {activeFile ? <CodeView name={activeFile} text={fileText} /> : emptyPane("Select a file to preview")}
       </div>
@@ -693,6 +716,15 @@ function emptyPane(label: string) {
   );
 }
 
+function ToolbarTooltip({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent sideOffset={2}>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 function readSplit(): number {
   try {
     const v = Number(localStorage.getItem(SPLIT_KEY));
@@ -701,6 +733,16 @@ function readSplit(): number {
     /* ignore */
   }
   return 0.33;
+}
+
+function readFilesSplit(): number {
+  try {
+    const v = Number(localStorage.getItem(FILES_SPLIT_KEY));
+    if (v >= 0.22 && v <= 0.58) return v;
+  } catch {
+    /* ignore */
+  }
+  return 0.38;
 }
 
 export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: string; onOpenSettings?: (section?: string) => void }) {
@@ -770,6 +812,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     activeConv.current = id;
     setActiveConvId(id);
   };
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SPLIT_KEY, String(split));
+    } catch {
+      /* ignore */
+    }
+  }, [split]);
 
   const push = (kind: Msg["kind"], text: string) =>
     setMessages((m) => [...m, { id: msgId.current++, kind, text, at: Date.now() }]);
@@ -1515,32 +1565,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (previewSrc) setPreviewSrc(previewSrc.startsWith("http") ? `${previewSrc.split("?")[0]}?t=${Date.now()}` : `${api.previewUrl(projectId)}?t=${Date.now()}`);
   };
 
-  const startDrag = (e: ReactMouseEvent) => {
-    e.preventDefault();
-    const onMove = (ev: MouseEvent) => {
-      const el = splitRef.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0) return;
-      const frac = (ev.clientX - rect.left) / rect.width;
-      setSplit(Math.min(0.55, Math.max(0.24, frac)));
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      setSplit((s) => {
-        try {
-          localStorage.setItem(SPLIT_KEY, String(s));
-        } catch {
-          /* ignore */
-        }
-        return s;
-      });
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
   const visualFindings = lintFindings.filter(isVisualFinding);
@@ -1619,19 +1643,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           </div>
           {isExisting ? (
             <div className="flex shrink-0 items-center gap-0.5">
-              {conversations.length > 0 ? (
-                <ConversationSelect
-                  conversations={conversations}
-                  activeId={activeConvId}
-                  onSwitch={(id) => void switchTo(id)}
-                  onRename={renameConv}
-                  onDelete={(id) => void deleteConv(id)}
-                  label={convLabel}
-                />
-              ) : null}
-              <IconButton aria-label="New conversation" title="New conversation" onClick={() => void newConversation()}>
-                <Plus size={15} strokeWidth={2} />
-              </IconButton>
+              <ConversationSelect
+                conversations={conversations}
+                activeId={activeConvId}
+                onSwitch={(id) => void switchTo(id)}
+                onRename={renameConv}
+                onDelete={(id) => void deleteConv(id)}
+                onCreate={() => void newConversation()}
+                label={convLabel}
+              />
             </div>
           ) : null}
         </div>
@@ -1881,74 +1901,87 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         </div>
       </section>
 
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize panels"
-        onMouseDown={startDrag}
-        className="w-px shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary"
+      <ResizeHandle
+        containerRef={splitRef}
+        value={split}
+        onResize={setSplit}
+        min={0.24}
+        max={0.55}
+        label="Resize panels"
       />
 
       <section aria-label="Artifact" className="flex flex-1 flex-col">
-        <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2">
-          <Tabs aria-label="Artifact views" items={tabItems} value={tab} onChange={(v) => setTab(v as Tab)} />
-          <div className="flex items-center gap-1">
-            {tab === "Preview" && previewSrc ? (
-              <>
-                <Segmented
-                  ariaLabel="Device"
-                  size="sm"
-                  value={device}
-                  onChange={setDevice}
-                  className="mr-1"
-                  options={[
-                    { value: "desktop", title: "Desktop", icon: <Monitor size={14} strokeWidth={1.75} /> },
-                    { value: "tablet", title: "Tablet", icon: <Tablet size={14} strokeWidth={1.75} /> },
-                    { value: "mobile", title: "Mobile", icon: <Smartphone size={14} strokeWidth={1.75} /> },
-                  ]}
-                />
-                <IconButton
-                  aria-label="Select an element"
-                  title={selectMode ? "Click an element in the preview" : "Select an element to refine"}
-                  onClick={() => setSelectMode((v) => !v)}
-                  className={selectMode ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}
-                >
-                  <MousePointerClick size={15} strokeWidth={1.75} />
-                </IconButton>
-                <IconButton aria-label="Refresh preview" title="Refresh preview" onClick={refreshPreview}>
-                  <motion.span animate={{ rotate: refreshSpin * 360 }} transition={{ duration: 0.5, ease: [0.25, 1, 0.5, 1] }}>
-                    <RotateCw size={15} strokeWidth={1.75} />
-                  </motion.span>
-                </IconButton>
-              </>
-            ) : null}
-            {canExport ? (
-              <a
-                href={api.exportUrl(projectId)}
-                download
-                className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
-              >
-                <Download size={14} strokeWidth={1.75} />
-                Export
-              </a>
-            ) : null}
-            <IconButton
-              aria-label="Full screen preview"
-              title="Full screen"
-              disabled={!previewSrc}
-              onClick={() => setFullscreen(true)}
-            >
-              <Maximize2 size={15} strokeWidth={1.75} />
-            </IconButton>
-            {onOpenSettings ? (
-              <>
-                <span className="mx-0.5 h-5 w-px bg-border" aria-hidden />
-                <IconButton aria-label="Settings" title="Settings" onClick={() => onOpenSettings()}>
-                  <Settings size={15} strokeWidth={1.75} />
-                </IconButton>
-              </>
-            ) : null}
-          </div>
+        <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
+          <Tabs aria-label="Artifact views" items={tabItems} value={tab} onChange={(v) => setTab(v as Tab)} variant="plain" />
+          <TooltipProvider delayDuration={120}>
+            <div className="flex items-center gap-1">
+              {tab === "Preview" && previewSrc ? (
+                <>
+                  <Segmented
+                    ariaLabel="Device"
+                    size="xs"
+                    value={device}
+                    onChange={setDevice}
+                    className="app-no-drag mr-1"
+                    options={[
+                      { value: "desktop", title: "Desktop", icon: <Monitor size={13} strokeWidth={1.75} /> },
+                      { value: "tablet", title: "Tablet", icon: <Tablet size={13} strokeWidth={1.75} /> },
+                      { value: "mobile", title: "Mobile", icon: <Smartphone size={13} strokeWidth={1.75} /> },
+                    ]}
+                  />
+                  <ToolbarTooltip label={selectMode ? "Click an element in the preview" : "Select an element to refine"}>
+                    <IconButton
+                      aria-label="Select an element"
+                      onClick={() => setSelectMode((v) => !v)}
+                      className={`app-no-drag ${selectMode ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}`}
+                    >
+                      <MousePointerClick size={15} strokeWidth={1.75} />
+                    </IconButton>
+                  </ToolbarTooltip>
+                  <ToolbarTooltip label="Refresh preview">
+                    <IconButton aria-label="Refresh preview" onClick={refreshPreview} className="app-no-drag">
+                      <motion.span animate={{ rotate: refreshSpin * 360 }} transition={{ duration: 0.5, ease: [0.25, 1, 0.5, 1] }}>
+                        <RotateCw size={15} strokeWidth={1.75} />
+                      </motion.span>
+                    </IconButton>
+                  </ToolbarTooltip>
+                </>
+              ) : null}
+              {canExport ? (
+                <ToolbarTooltip label="Export">
+                  <a
+                    href={api.exportUrl(projectId)}
+                    download
+                    aria-label="Export project"
+                    className="app-no-drag grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                  >
+                    <Download size={15} strokeWidth={1.75} />
+                  </a>
+                </ToolbarTooltip>
+              ) : null}
+              <ToolbarTooltip label="Full screen preview">
+                <span className="app-no-drag inline-flex">
+                  <IconButton
+                    aria-label="Full screen preview"
+                    disabled={!previewSrc}
+                    onClick={() => setFullscreen(true)}
+                  >
+                    <Maximize2 size={15} strokeWidth={1.75} />
+                  </IconButton>
+                </span>
+              </ToolbarTooltip>
+              {onOpenSettings ? (
+                <>
+                  <span className="mx-0.5 h-5 w-px bg-border" aria-hidden />
+                  <ToolbarTooltip label="Settings">
+                    <IconButton aria-label="Settings" onClick={() => onOpenSettings()} className="app-no-drag">
+                      <Settings size={15} strokeWidth={1.75} />
+                    </IconButton>
+                  </ToolbarTooltip>
+                </>
+              ) : null}
+            </div>
+          </TooltipProvider>
         </div>
 
         <div className="dz-canvas relative flex-1 overflow-hidden">

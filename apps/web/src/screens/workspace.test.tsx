@@ -14,6 +14,7 @@ beforeEach(() => {
   takePendingAgent();
   takePendingModel();
   localStorage.removeItem("dezin.workspace.queue.p1");
+  localStorage.removeItem("dezin.workspace.files.split");
 });
 afterEach(cleanup);
 
@@ -58,8 +59,9 @@ test("sending a brief streams events into the chat and shows the preview + expor
   expect(iframe.getAttribute("sandbox")).toBe("allow-scripts allow-same-origin allow-downloads");
 
   // export link points at the export endpoint
-  const exportLink = screen.getByRole("link", { name: /export/i });
+  const exportLink = screen.getByRole("link", { name: "Export project" });
   expect(exportLink).toHaveAttribute("href", "/api/projects/p1/export");
+  expect(screen.queryByText("Export")).toBeNull();
 });
 
 test("mount reattaches the latest running run and replays its stream", async () => {
@@ -364,7 +366,8 @@ test("conversation switcher lists conversations and switches between them", asyn
   // defaults to the latest conversation (c2)
   expect(await screen.findByText("second message")).toBeInTheDocument();
   const user = userEvent.setup();
-  await user.click(screen.getByRole("button", { name: "Conversation switcher" }));
+  expect(screen.queryByRole("button", { name: /Second/ })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Conversations" }));
   await user.click(await screen.findByText("First"));
   expect(await screen.findByText("first message")).toBeInTheDocument();
 });
@@ -382,7 +385,8 @@ test("New conversation creates one and clears the transcript", async () => {
     </ApiProvider>,
   );
   expect(await screen.findByText("old message")).toBeInTheDocument();
-  fireEvent.click(screen.getByLabelText("New conversation"));
+  fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+  fireEvent.click(await screen.findByRole("button", { name: "New conversation" }));
   await waitFor(() => expect(screen.queryByText("old message")).toBeNull());
   expect(createConversation).toHaveBeenCalledWith("p1");
 });
@@ -405,6 +409,7 @@ test("the Files tab lists project files and previews the selected file's source"
   );
   expect(screen.queryByRole("tab", { name: "Code" })).toBeNull();
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
+  expect(await screen.findByRole("separator", { name: "Resize file browser" })).toBeInTheDocument();
   expect((await screen.findAllByText("index.html")).length).toBeGreaterThan(0);
   // assets is a folder at root; double-click into it, then open the file
   expect(screen.getByText("assets")).toBeInTheDocument();
