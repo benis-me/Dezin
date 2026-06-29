@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, matchPath, safeJoin } from "../src/index.ts";
+import { injectSelectBridge } from "../src/serve-static.ts";
 
 interface Ctx {
   base: string;
@@ -156,4 +157,10 @@ test("safeJoin blocks path traversal", () => {
   assert.equal(safeJoin(root, "index.html"), "/data/projects/p/index.html");
   assert.equal(safeJoin(root, "../../etc/passwd"), null);
   assert.equal(safeJoin(root, "a/../b.css"), "/data/projects/p/b.css");
+});
+
+test("picker bridge reports stable precise selectors", () => {
+  const html = injectSelectBridge("<body><section data-dezin-id=\"hero\"><h1>Title</h1></section></body>");
+  assert.match(html, /data-dezin-id/);
+  assert.match(html, /nth-of-type/);
 });

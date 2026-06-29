@@ -22,6 +22,15 @@ test("anti-slop layer is generated from the linter's own rule lists (single sour
   }
 });
 
+test("generated artifacts use Dezin target anchors", () => {
+  const prototypePrompt = composeSystemPrompt({ mode: "prototype" });
+  assert.match(prototypePrompt, /data-dezin-id/);
+  assert.match(prototypePrompt, /markup tools can target/);
+
+  const standardPrompt = composeSystemPrompt({ mode: "standard" });
+  assert.match(standardPrompt, /data-dezin-id/);
+});
+
 test("design system is injected as authoritative tokens, verbatim", () => {
   const p = composeSystemPrompt({ designSystem: modernMinimal });
   assert.ok(p.includes("AUTHORITATIVE"), "marks the brand authoritative");

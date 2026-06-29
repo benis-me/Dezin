@@ -47,13 +47,13 @@ h1 { font-family: var(--font-display); font-size: 32px; font-weight: 590; letter
 </style>
 </head>
 <body>
-  <section data-od-id="hero">
+  <section data-dezin-id="hero">
     <p class="eyebrow">Changelog</p>
     <h1>Ship design, not slop</h1>
     <p>Real copy in plain language describing what the product does.</p>
     <a class="btn-primary" href="#start">Start building</a>
   </section>
-  <section data-od-id="features">
+  <section data-dezin-id="features">
     <div class="card"><h2>Token-aware</h2><p>It honours the active design system.</p></div>
   </section>
 </body>

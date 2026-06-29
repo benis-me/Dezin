@@ -52,7 +52,10 @@ the closest free Fontsource family rather than falling back to a bare system sta
 const PROTOTYPE_BUILD = `## Output — one self-contained file
 
 Build a single \`index.html\` with inline <style> and <script>. No build step. This is
-a fast, shareable prototype.`;
+a fast, shareable prototype.
+
+Add \`data-dezin-id\` to every top-level section or screen region so critique and
+markup tools can target the artifact precisely.`;
 
 const STANDARD_BUILD = `## Output — a real Vite + React project
 
@@ -67,7 +70,9 @@ file). Build it the way a production frontend is built:
   \`three\` when they genuinely earn their place). Keep the dependency set lean.
 - Do NOT create an \`index.html\` artifact in the root for the design — the project's
   index.html + main.jsx already bootstrap React. Don't eject from the toolchain.
-- The dev server (\`npm run dev\`) renders your work live; write code that runs.`;
+- The dev server (\`npm run dev\`) renders your work live; write code that runs.
+- Add \`data-dezin-id\` to every top-level section or screen region so critique and
+  markup tools can target the artifact precisely.`;
 
 const IMAGE_GEN = `## Generated imagery
 

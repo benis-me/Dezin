@@ -281,13 +281,13 @@ function checkAccentOveruse(html: string, cap: number): Finding[] {
 
 function checkMissingAnchors(html: string): Finding[] {
   const sections = html.match(/<section\b[^>]*>/gi) ?? [];
-  const missing = sections.filter((s) => !/data-od-id|data-screen-label/.test(s));
+  const missing = sections.filter((s) => !/data-dezin-id|data-screen-label/.test(s));
   if (missing.length > 0) {
     return [{
       severity: "P2",
       id: "missing-section-anchor",
-      message: `${missing.length} <section> without data-od-id — comment/critique tools can't target it.`,
-      fix: "Add a data-od-id to each top-level section.",
+      message: `${missing.length} <section> without data-dezin-id — comment/critique tools can't target it.`,
+      fix: "Add a data-dezin-id to each top-level section.",
       snippet: missing[0],
     }];
   }

@@ -37,7 +37,7 @@ const STREAM = [
 
 test("ClaudeCodeRunner assembles args/stdin, runs, and reads back the artifact", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-claude-"));
-  const html = `<section data-od-id="x"><h1>Hero</h1></section>`;
+  const html = `<section data-dezin-id="x"><h1>Hero</h1></section>`;
   const spawner = new FakeSpawner(STREAM, html);
   const runner = new ClaudeCodeRunner({ spawner, command: "claude" });
 

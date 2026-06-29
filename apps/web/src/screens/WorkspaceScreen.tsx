@@ -78,6 +78,21 @@ interface Msg {
  *  render interleaved (chronologically) during generation, not split into separate blocks. */
 type LiveItem = { type: "text"; text: string } | { type: "tool"; summary: string };
 
+interface MarkupRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+interface MarkupTarget {
+  selector: string;
+  tag: string;
+  text: string;
+  rect?: MarkupRect;
+  note?: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object";
 }
@@ -127,25 +142,117 @@ function toMsg(m: Message, id: number): Msg {
 }
 
 const IMG_REF_RE = /\.refs\/[^\s,"'`)]+\.(?:png|jpe?g|gif|webp|svg|avif)/gi;
+const RECT_RE = /x=(-?\d+)\s+y=(-?\d+)\s+w=(\d+)\s+h=(\d+)/;
+
+function unquote(value: string): string {
+  return value.trim().replace(/^["“`]+|["”`]+$/g, "");
+}
+
+function parseMarkupTargets(block: string): MarkupTarget[] {
+  const targets: MarkupTarget[] = [];
+  let currentIndex = -1;
+  const start = (selector: string): MarkupTarget => {
+    const target = { selector, tag: "", text: "" };
+    targets.push(target);
+    currentIndex = targets.length - 1;
+    return target;
+  };
+  for (const line of block.split("\n")) {
+    const modern = line.match(/^\s*-\s*selector:\s*`([^`]+)`/);
+    if (modern) {
+      start(modern[1]!.trim());
+      continue;
+    }
+    const legacy = line.match(/^\s*-\s*`([^`]+)`(?:\s+\(“([^”]*)”\))?(?::\s*(.*))?/);
+    if (legacy) {
+      const target = start(legacy[1]!.trim());
+      target.text = legacy[2]?.trim() ?? "";
+      target.note = legacy[3]?.trim() || undefined;
+      continue;
+    }
+    const target = targets[currentIndex];
+    if (!target) continue;
+    const attr = line.match(/^\s*(tag|rect|text|note):\s*(.*)$/);
+    if (!attr) continue;
+    const [, key, raw = ""] = attr;
+    if (key === "tag") target.tag = unquote(raw);
+    else if (key === "text") target.text = unquote(raw);
+    else if (key === "note") target.note = unquote(raw) || undefined;
+    else if (key === "rect") {
+      const m = raw.match(RECT_RE);
+      if (m) target.rect = { x: Number(m[1]), y: Number(m[2]), w: Number(m[3]), h: Number(m[4]) };
+    }
+  }
+  return targets;
+}
 
 /** Split a user message into its prose and any attached image refs, dropping the
  *  auto-generated "(read them from disk): …" reference lines from the visible text. */
-function parseUserMessage(text: string): { body: string; images: string[] } {
+function parseUserMessage(text: string): { body: string; images: string[]; targets: MarkupTarget[] } {
   const images = [...new Set(text.match(IMG_REF_RE) ?? [])];
-  const body = text
-    .split(/\n{2,}/)
-    .filter((p) => !/read them from disk/i.test(p))
-    .join("\n\n")
-    .trim();
-  return { body, images };
+  const targets: MarkupTarget[] = [];
+  const bodyParts: string[] = [];
+  for (const part of text.split(/\n{2,}/)) {
+    if (/read them from disk/i.test(part)) continue;
+    if (/^Scoped edit\s+—/i.test(part.trim())) {
+      targets.push(...parseMarkupTargets(part));
+      continue;
+    }
+    bodyParts.push(part);
+  }
+  return { body: bodyParts.join("\n\n").trim(), images, targets };
+}
+
+function MarkupTargetCards({ targets }: { targets: MarkupTarget[] }) {
+  if (!targets.length) return null;
+  return (
+    <div className="flex w-full flex-col items-end gap-1.5">
+      {targets.map((target, idx) => (
+        <div
+          key={`${target.selector}-${idx}`}
+          role="group"
+          aria-label={`Marked target ${target.selector}`}
+          className="max-w-[88%] rounded-xl border border-border bg-card px-3 py-2 text-left shadow-sm"
+        >
+          <div className="mb-1.5 flex items-center gap-1.5">
+            <MousePointerClick size={12} strokeWidth={2} className="shrink-0 text-brand" />
+            <span className="label-mono text-brand">Marked target</span>
+            {target.tag ? <span className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[10px] text-muted-foreground">{target.tag}</span> : null}
+            {target.rect ? (
+              <span className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[10px] text-muted-foreground">
+                {target.rect.w}x{target.rect.h}
+              </span>
+            ) : null}
+          </div>
+          <code className="block truncate font-mono text-[11px] text-foreground-2">{target.selector}</code>
+          {target.text ? <p className="mt-1 truncate text-xs text-muted-foreground">"{target.text}"</p> : null}
+          {target.note ? <p className="mt-1 text-xs leading-snug text-foreground">{target.note}</p> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function quoteMarkupValue(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function formatMarkupTarget(target: MarkupTarget): string {
+  const lines = [`- selector: \`${target.selector}\``];
+  if (target.tag) lines.push(`  tag: ${target.tag}`);
+  if (target.rect) lines.push(`  rect: x=${target.rect.x} y=${target.rect.y} w=${target.rect.w} h=${target.rect.h}`);
+  if (target.text) lines.push(`  text: ${quoteMarkupValue(target.text)}`);
+  if (target.note) lines.push(`  note: ${target.note}`);
+  return lines.join("\n");
 }
 
 /** A user turn: attached images render as 1:1 thumbnails (hover to preview), right-aligned
  *  above the message bubble — instead of the raw ".refs/…" paths the agent reads from disk. */
 function UserMessage({ text, srcFor }: { text: string; srcFor: (refPath: string) => string }) {
-  const { body, images } = parseUserMessage(text);
+  const { body, images, targets } = parseUserMessage(text);
   return (
     <div className="flex flex-col items-end gap-1.5">
+      <MarkupTargetCards targets={targets} />
       {images.length ? (
         <TooltipProvider delayDuration={120}>
           <div className="flex flex-wrap justify-end gap-1.5">
@@ -348,7 +455,7 @@ function MarkUpPopover({
   onAdd,
   onCancel,
 }: {
-  mark: { selector: string; tag: string; text: string; x: number; y: number };
+  mark: MarkupTarget & { x: number; y: number };
   onAdd: (note: string) => void;
   onCancel: () => void;
 }) {
@@ -511,8 +618,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerH, setComposerH] = useState(92);
   const [selectMode, setSelectMode] = useState(false);
-  const [selectedTargets, setSelectedTargets] = useState<{ selector: string; tag: string; text: string; note?: string }[]>([]);
-  const [pendingMark, setPendingMark] = useState<{ selector: string; tag: string; text: string; x: number; y: number } | null>(null);
+  const [selectedTargets, setSelectedTargets] = useState<MarkupTarget[]>([]);
+  const [pendingMark, setPendingMark] = useState<(MarkupTarget & { x: number; y: number }) | null>(null);
   const previewIframeRef = useRef<HTMLIFrameElement>(null);
   const [setupPhase, setSetupPhase] = useState<SetupPhase | null>(null);
   const [running, setRunning] = useState(false);
@@ -1080,7 +1187,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         const ir = previewIframeRef.current?.getBoundingClientRect();
         const r = d.rect;
         const pos = computeMarkupPosition(ir, r, { width: window.innerWidth, height: window.innerHeight });
-        setPendingMark({ selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", x: pos.x, y: pos.y });
+        setPendingMark({ selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: r, x: pos.x, y: pos.y });
         setSelectMode(false);
       } else if (d.type === "cancel") {
         setSelectMode(false);
@@ -1116,7 +1223,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (!pendingMark) return;
     setSelectedTargets((cur) => [
       ...cur,
-      { selector: pendingMark.selector, tag: pendingMark.tag, text: pendingMark.text, note: note.trim() || undefined },
+      {
+        selector: pendingMark.selector,
+        tag: pendingMark.tag,
+        text: pendingMark.text,
+        rect: pendingMark.rect,
+        note: note.trim() || undefined,
+      },
     ]);
     dismissMark();
   };
@@ -1213,7 +1326,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       : "";
     const targets = scoped
       ? `\n\nScoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n${selectedTargets
-          .map((t) => `- \`${t.selector}\`${t.text ? ` (“${t.text}”)` : ""}${t.note ? `: ${t.note}` : ""}`)
+          .map(formatMarkupTarget)
           .join("\n")}`
       : "";
     const base = input.trim() || (scoped ? "Refine the marked element(s) per the notes." : "");
