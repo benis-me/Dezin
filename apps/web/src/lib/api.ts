@@ -61,6 +61,7 @@ export interface RunInput {
   projectId: string;
   brief: string;
   conversationId?: string;
+  variantId?: string;
   maxRounds?: number;
   /** Per-run overrides (fall back to Settings). */
   agentCommand?: string;

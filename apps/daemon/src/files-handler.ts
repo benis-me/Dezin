@@ -6,9 +6,9 @@
 import { stat } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { sendJson, sendError } from "./http-util.ts";
-import { projectDir } from "./serve-static.ts";
 import { walkFiles } from "./export-handler.ts";
 import type { AppDeps } from "./app.ts";
+import { activeArtifactDir } from "./variant-workspaces.ts";
 
 export async function handleListFiles(
   res: ServerResponse,
@@ -16,9 +16,10 @@ export async function handleListFiles(
   deps: AppDeps,
 ): Promise<void> {
   const id = params.id!;
-  if (!deps.store.getProject(id)) return sendError(res, 404, "project not found");
+  const project = deps.store.getProject(id);
+  if (!project) return sendError(res, 404, "project not found");
 
-  const files = await walkFiles(projectDir(deps.dataDir, id));
+  const files = await walkFiles(await activeArtifactDir(deps, project));
   const out = await Promise.all(files.map(async (f) => ({ path: f.rel, size: (await stat(f.abs)).size })));
   out.sort((a, b) => a.path.localeCompare(b.path));
   sendJson(res, 200, out);

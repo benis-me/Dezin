@@ -14,7 +14,7 @@ import type { CreateProjectInput, Settings } from "../../../packages/core/src/in
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import type { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
-import { serveProjectFile, serveVariantFile, projectDir } from "./serve-static.ts";
+import { serveProjectFile, serveFileFromBase, projectDir } from "./serve-static.ts";
 import { figToJson, summarizeFig } from "./parse-fig.ts";
 import { serveWeb, defaultWebDir } from "./serve-web.ts";
 import { handleRun, handleRunStream, handleCancelRun } from "./run-handler.ts";
@@ -30,6 +30,7 @@ import {
 import { handleGetVersion, handleRestoreVersion } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer } from "./project-runtime.ts";
+import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
@@ -255,10 +256,12 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/devserver",
-    handler: async (_req, res, { id }, { store, dataDir }) => {
-      if (!store.getProject(id!)) return sendError(res, 404, "project not found");
+    handler: async (_req, res, { id }, deps) => {
+      const project = deps.store.getProject(id!);
+      if (!project) return sendError(res, 404, "project not found");
       try {
-        const { url } = await ensureDevServer(id!, projectDir(dataDir, id!));
+        const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
+        const { url } = await ensureDevServer(id!, await activeArtifactDir(deps, project), variantRuntimeKey(id!, active));
         sendJson(res, 200, { url });
       } catch (err) {
         sendError(res, 409, err instanceof Error ? err.message : "dev server unavailable");
@@ -411,8 +414,13 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/variants/:vid/preview/*rest",
-    handler: (_req, res, { id, vid, rest }, { dataDir, store }) =>
-      serveVariantFile(res, dataDir, id!, vid!, store.getActiveVariantId(id!), rest ?? ""),
+    handler: async (_req, res, { id, vid, rest }, deps) => {
+      const project = deps.store.getProject(id!);
+      if (!project) return sendError(res, 404, "project not found");
+      const base = await variantArtifactDir(deps, project, vid!);
+      if (!base) return sendError(res, 404, "variant not found");
+      return serveFileFromBase(res, base, rest ?? "");
+    },
   },
   {
     method: "GET",
@@ -443,7 +451,11 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/projects/:id/preview/*rest",
-    handler: (_req, res, { id, rest }, { dataDir }) => serveProjectFile(res, dataDir, id!, rest ?? ""),
+    handler: async (_req, res, { id, rest }, deps) => {
+      const project = deps.store.getProject(id!);
+      if (!project) return serveProjectFile(res, deps.dataDir, id!, rest ?? "");
+      return serveFileFromBase(res, await activeArtifactDir(deps, project), rest ?? "");
+    },
   },
   {
     method: "POST",
