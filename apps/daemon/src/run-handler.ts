@@ -178,7 +178,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
 
   const systemPrompt = composeSystemPrompt({
     designSystem,
-    skill: skill ? { name: skill.name, body: skill.body, mode: skill.mode } : undefined,
+    skill: skill ? { name: skill.name, body: skill.body, mode: skill.mode, libraries: skill.libraries } : undefined,
     userInstructions: settings.customInstructions || undefined,
     craft: craft || undefined,
     imageGen: Boolean(settings.imageApiKey && settings.imageApiBaseUrl),

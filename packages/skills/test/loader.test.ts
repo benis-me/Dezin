@@ -28,6 +28,7 @@ test("modes and designSystem flags are parsed per skill", () => {
   // design-md PRODUCES a design system, so it does not consume one
   assert.equal(findSkill(skills, "design-md")?.designSystem, false);
   assert.equal(findSkill(skills, "dashboard")?.designSystem, true);
+  assert.deepEqual(findSkill(skills, "motion-landing")?.libraries.slice(0, 5), ["css", "waapi", "motion", "gsap", "remotion"]);
   // anti-ai-slop is in the craft of the page-building skills
   assert.ok(findSkill(skills, "landing")?.craft.includes("anti-ai-slop"));
 });

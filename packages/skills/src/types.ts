@@ -11,6 +11,8 @@ export interface SkillInfo {
   craft: string[];
   /** Keyword phrases that hint when this skill applies. */
   triggers: string[];
+  /** Optional implementation libraries this skill may choose from. */
+  libraries: string[];
   /** Whether this skill consumes an active design system (false = it produces one). */
   designSystem: boolean;
   /** The markdown workflow body after the frontmatter fence. */

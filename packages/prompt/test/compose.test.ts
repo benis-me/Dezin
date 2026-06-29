@@ -53,6 +53,21 @@ test("skill body and user instructions are included when provided", () => {
   assert.ok(p.indexOf("Active skill") < p.indexOf("Never fabricate"));
 });
 
+test("skill libraries inject implementation routing only when declared", () => {
+  const p = composeSystemPrompt({
+    mode: "standard",
+    skill: { name: "Motion landing", body: "build motion", libraries: ["motion", "gsap", "remotion"] },
+  });
+  assert.match(p, /Implementation library routing/);
+  assert.match(p, /motion\/react/);
+  assert.match(p, /ScrollTrigger/);
+  assert.match(p, /only for a video\/timeline deliverable/);
+  assert.ok(p.indexOf("Implementation library routing") < p.indexOf("Active skill"));
+
+  const plain = composeSystemPrompt({ skill: { name: "Landing", body: "build it" } });
+  assert.ok(!plain.includes("Implementation library routing"));
+});
+
 test("empty skill/instructions are omitted (no empty sections)", () => {
   const p = composeSystemPrompt({ skill: { name: "x", body: "   " }, userInstructions: "  " });
   assert.ok(!p.includes("Active skill"));

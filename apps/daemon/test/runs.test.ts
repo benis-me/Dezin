@@ -525,6 +525,28 @@ test("the composed prompt includes the active skill body and design-system token
   });
 });
 
+test("motion skills add animation library routing to the composed prompt", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({
+      name: "Animation",
+      skillId: "motion-landing",
+    });
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make an animated launch page" }),
+    });
+    await res.text();
+
+    const prompt = runner.calls[0]?.systemPrompt ?? "";
+    assert.match(prompt, /Implementation library routing/);
+    assert.match(prompt, /Motion for React/);
+    assert.match(prompt, /GSAP/);
+    assert.match(prompt, /Remotion/);
+  });
+});
+
 test("an unknown skillId is tolerated — skill omitted, run still succeeds", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN] });
   await withRunServer(runner, async ({ base, store }) => {

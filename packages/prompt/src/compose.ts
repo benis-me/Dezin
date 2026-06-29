@@ -22,7 +22,7 @@ export interface ComposeInput {
   /** The active brand. Injected as authoritative tokens. */
   designSystem?: DesignSystem;
   /** The active skill (artifact shape): its SKILL.md body is the workflow. */
-  skill?: { name: string; body: string; mode?: string };
+  skill?: { name: string; body: string; mode?: string; libraries?: string[] };
   /** Free-form project/user instructions. */
   userInstructions?: string;
   /** Pre-rendered craft references (from @dezin/craft loadCraftSections). */
@@ -82,6 +82,33 @@ emit \`<img src="" data-gen-prompt="a precise description of the image" alt="...
 after you finish. Use sparingly and purposefully — never decorative filler, never
 more than the layout needs. For icons/logos prefer inline SVG, not generated images.`;
 
+function renderLibraryRouting(libraries: string[], mode: ComposeInput["mode"]): string | null {
+  const available = Array.from(new Set(libraries.map((l) => l.trim()).filter(Boolean)));
+  if (available.length === 0) return null;
+  const standard = mode === "standard";
+  return `## Implementation library routing
+
+This skill may use these libraries when the brief genuinely needs them: ${available.join(", ")}.
+Choose the smallest tool that fits the job; do not stack libraries for the same motion.
+
+- CSS transitions / Web Animations API: simple hover states, opacity/transform reveals,
+  one-off loops, and low-risk prototype motion.
+- Motion for React (\`motion\`, import from \`motion/react\`): React component transitions,
+  layout animations, presence/exit states, gestures, and viewport entry motion.${
+    standard ? " Install it only when those React-specific primitives are useful." : " In single-file prototype mode, prefer CSS/WAAPI unless the skill explicitly provides a CDN-safe path."
+  }
+- GSAP: sequenced timelines, ScrollTrigger, pinned/scrubbed scroll sections, SVG/path
+  choreography, magnetic interactions, and complex orchestration. In Standard mode GSAP
+  is already available in the scaffold.
+- Remotion: only for a video/timeline deliverable that should render frames or MP4s from
+  React compositions. Do not use Remotion for an ordinary interactive landing page.
+- WebGL / Three / OGL: only when a shader or real 3D scene is the centerpiece, not as
+  background decoration.
+
+Always respect \`prefers-reduced-motion\`, keep the no-motion state fully readable, and
+make load/reveal animations fail-safe so content cannot remain hidden if JS or a library fails.`;
+}
+
 const SEP = "\n\n---\n\n";
 
 export function renderDesignSystemBlock(ds: DesignSystem): string {
@@ -125,6 +152,9 @@ export function composeSystemPrompt(input: ComposeInput = {}): string {
   if (input.userInstructions && input.userInstructions.trim()) {
     parts.push(`## Custom instructions\n\n${input.userInstructions.trim()}`);
   }
+
+  const libraryRouting = renderLibraryRouting(input.skill?.libraries ?? [], input.mode);
+  if (libraryRouting) parts.push(libraryRouting);
 
   if (input.skill && input.skill.body.trim()) {
     parts.push(
