@@ -52,6 +52,7 @@ test("HomeScreen surfaces an error toast when archive fails", async () => {
 
 test("⌘K opens the command palette", () => {
   window.history.pushState({}, "", "/");
+  localStorage.setItem("dezin.onboarded", "1"); // past first-run onboarding
   render(
     <ApiProvider client={makeFakeApi({})}>
       <ToastProvider>

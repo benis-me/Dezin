@@ -4,7 +4,10 @@ import App from "./App.tsx";
 import { ApiProvider } from "./lib/api-context.tsx";
 import { makeFakeApi } from "./test/fake-api.ts";
 
-beforeEach(() => window.history.pushState({}, "", "/"));
+beforeEach(() => {
+  window.history.pushState({}, "", "/");
+  localStorage.setItem("dezin.onboarded", "1"); // skip first-run onboarding in app tests
+});
 afterEach(cleanup);
 
 const api = makeFakeApi({

@@ -91,7 +91,7 @@ export function AgentModelSelect({
         {models.length > 0 ? (
           <>
             <p className="label-mono px-0.5 pb-1.5 pt-3">Model</p>
-            <div className="flex flex-wrap gap-1">
+            <div className="flex max-h-44 flex-wrap gap-1 overflow-y-auto pr-0.5">
               {["", ...models].map((m) => (
                 <button
                   key={m || "default"}

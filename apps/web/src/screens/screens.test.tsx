@@ -6,6 +6,7 @@ import { DesignSystemsScreen } from "./DesignSystemsScreen.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { SettingsScreen } from "./SettingsScreen.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
+import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 
 afterEach(cleanup);
@@ -172,7 +173,9 @@ function renderSettings(over = {}) {
   const api = makeFakeApi({ listAgents: async () => AGENTS, listDesignSystems: async () => DSYS, updateSettings, ...over });
   render(
     <ApiProvider client={api}>
-      <SettingsScreen dark={false} onToggleDark={onToggleDark} />
+      <AgentsProvider>
+        <SettingsScreen dark={false} onToggleDark={onToggleDark} />
+      </AgentsProvider>
     </ApiProvider>,
   );
   return { onToggleDark, updateSettings };

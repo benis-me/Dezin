@@ -37,12 +37,13 @@ import { AttachMenu } from "../components/AttachMenu.tsx";
 import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
 import { FieldSelect } from "../components/FieldSelect.tsx";
 import { useApi } from "../lib/api-context.tsx";
+import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { takePendingComposer } from "../lib/pending-composer.ts";
 import { setPendingImages, setPendingAgent, setPendingRefs } from "../lib/pending-brief.ts";
 import { fetchProjectArtifact, toBase64 } from "../lib/project-ref.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
-import type { AgentInfo, DesignSystemCard, Project, ProjectMode, SkillCard } from "../lib/api.ts";
+import type { DesignSystemCard, Project, ProjectMode, SkillCard } from "../lib/api.ts";
 
 const DEFAULT_SKILL = "frontend-design";
 const DEFAULT_DS = "modern-minimal";
@@ -114,7 +115,8 @@ export function HomeScreen({
   const [skills, setSkills] = useState<SkillCard[]>([]);
   const [skillId, setSkillId] = useState(DEFAULT_SKILL);
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const { agents, rescan: rescanAgents } = useAgents();
+  const [settingsAgent, setSettingsAgent] = useState("");
   const [homeAgent, setHomeAgent] = useState("");
   const [homeModel, setHomeModel] = useState("");
   const [designSystemId, setDesignSystemId] = useState(DEFAULT_DS);
@@ -204,17 +206,20 @@ export function HomeScreen({
         if (d.length && !d.some((x) => x.id === DEFAULT_DS)) setDesignSystemId(d[0]!.id);
       })
       .catch(() => {});
-    void Promise.all([api.listAgents().catch(() => []), api.getSettings().catch(() => null)]).then(([a, s]) => {
-      if (!alive) return;
-      setAgents(a);
-      const avail = a.filter((x) => x.available);
-      const preferred = s?.agentCommand && avail.some((x) => x.command === s.agentCommand) ? s.agentCommand : avail[0]?.command ?? "";
-      setHomeAgent((cur) => cur || preferred);
-    });
+    void api.getSettings().then((s) => alive && setSettingsAgent(s?.agentCommand ?? "")).catch(() => {});
     return () => {
       alive = false;
     };
   }, [api]);
+
+  // Default the home agent once the shared scan resolves: the saved agent if installed, else
+  // the first available one.
+  useEffect(() => {
+    const avail = agents.filter((a) => a.available);
+    if (!avail.length) return;
+    const preferred = settingsAgent && avail.some((a) => a.command === settingsAgent) ? settingsAgent : avail[0]!.command;
+    setHomeAgent((cur) => cur || preferred);
+  }, [agents, settingsAgent]);
 
   const addImages = async (files: FileList | null): Promise<void> => {
     if (!files) return;
@@ -230,14 +235,6 @@ export function HomeScreen({
       } catch {
         toast("Couldn't read that image.", { variant: "error" });
       }
-    }
-  };
-
-  const rescanAgents = async (): Promise<void> => {
-    try {
-      setAgents(await api.rescanAgents());
-    } catch {
-      toast("Couldn't rescan agents.", { variant: "error" });
     }
   };
 

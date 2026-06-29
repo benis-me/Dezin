@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { MotionConfig } from "motion/react";
 import App from "./App.tsx";
 import { ApiProvider } from "./lib/api-context.tsx";
+import { AgentsProvider } from "./lib/agents-context.tsx";
 import { ToastProvider } from "./components/Toast.tsx";
 import { native } from "./lib/native.ts";
 import "@fontsource/space-grotesk/500.css";
@@ -25,9 +26,11 @@ createRoot(root).render(
   <StrictMode>
     <MotionConfig reducedMotion="user">
       <ApiProvider>
-        <ToastProvider>
-          <App />
-        </ToastProvider>
+        <AgentsProvider>
+          <ToastProvider>
+            <App />
+          </ToastProvider>
+        </AgentsProvider>
       </ApiProvider>
     </MotionConfig>
   </StrictMode>,

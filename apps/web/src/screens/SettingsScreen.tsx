@@ -4,8 +4,9 @@ import { Button, Field, Input, Picker, Textarea, Loading, Spinner, Badge, Scroll
 import { cn } from "../lib/utils.ts";
 import { AgentLogo, agentLabel } from "../components/agent-logos.tsx";
 import { useApi } from "../lib/api-context.tsx";
+import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
-import type { AgentInfo, DesignSystemCard, Settings } from "../lib/api.ts";
+import type { DesignSystemCard, Settings } from "../lib/api.ts";
 
 type SectionId = "appearance" | "provider" | "connection" | "defaults" | "instructions" | "extension" | "about";
 
@@ -34,19 +35,14 @@ export function SettingsScreen({
     SECTIONS.some((s) => s.id === initialSection) ? (initialSection as SectionId) : "appearance",
   );
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [agentsLoading, setAgentsLoading] = useState(true);
+  const { agents, loading: agentsInitial, scanning, rescan } = useAgents();
+  const agentsLoading = agentsInitial || scanning;
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
   const [version, setVersion] = useState<string>("");
 
   useEffect(() => {
     let alive = true;
     void api.getSettings().then((s) => alive && setSettings(s)).catch(() => {});
-    void api
-      .listAgents()
-      .then((a) => alive && setAgents(a))
-      .catch(() => {})
-      .finally(() => alive && setAgentsLoading(false));
     void api.listDesignSystems().then((d) => alive && setSystems(d)).catch(() => {});
     void api.getHealth().then((h) => alive && setVersion(h.version)).catch(() => {});
     return () => {
@@ -135,14 +131,7 @@ export function SettingsScreen({
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => {
-                            setAgentsLoading(true);
-                            void api
-                              .rescanAgents()
-                              .then((a) => setAgents(a))
-                              .catch(() => toast("Couldn't rescan agents.", { variant: "error" }))
-                              .finally(() => setAgentsLoading(false));
-                          }}
+                          onClick={() => void rescan().catch(() => toast("Couldn't rescan agents.", { variant: "error" }))}
                         >
                           <RotateCw size={13} strokeWidth={1.75} />
                           Rescan

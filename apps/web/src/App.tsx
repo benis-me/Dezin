@@ -12,6 +12,7 @@ import { DesignSystemsScreen } from "./screens/DesignSystemsScreen.tsx";
 import { DesignSystemDetailScreen } from "./screens/DesignSystemDetailScreen.tsx";
 import { DesignSystemNewScreen } from "./screens/DesignSystemNewScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
+import { OnboardingScreen } from "./screens/OnboardingScreen.tsx";
 
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
@@ -51,6 +52,13 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
 
 export default function App() {
   const route = useRoute();
+  const [onboarded, setOnboarded] = useState(() => {
+    try {
+      return localStorage.getItem("dezin.onboarded") === "1";
+    } catch {
+      return true;
+    }
+  });
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -85,6 +93,21 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  if (!onboarded) {
+    return (
+      <OnboardingScreen
+        onDone={() => {
+          try {
+            localStorage.setItem("dezin.onboarded", "1");
+          } catch {
+            /* ignore */
+          }
+          setOnboarded(true);
+        }}
+      />
+    );
+  }
 
   return (
     <Shell dark={dark} onToggleDark={onToggleDark} onOpenSettings={openSettings}>

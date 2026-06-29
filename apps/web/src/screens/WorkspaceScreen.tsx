@@ -13,10 +13,11 @@ import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { useApi } from "../lib/api-context.tsx";
+import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
 import { setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
-import type { AgentInfo, Conversation, Variant, DesignSystemCard, Message, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
+import type { Conversation, Variant, DesignSystemCard, Message, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 
 const TABS = ["Preview", "Code", "Files", "Quality", "History"] as const;
@@ -406,7 +407,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [variants, setVariants] = useState<Variant[]>([]);
   const [compare, setCompare] = useState<{ a: { url: string; label: string }; b: { url: string; label: string } } | null>(null);
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const { agents, rescan: rescanAgents } = useAgents();
+  const [settingsAgent, setSettingsAgent] = useState("");
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [diff, setDiff] = useState<{ label: string; lines: DiffLine[] } | null>(null);
@@ -644,18 +646,19 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   useEffect(() => {
     let alive = true;
-    void Promise.all([api.listAgents().catch(() => []), api.getSettings().catch(() => null)]).then(([a, s]) => {
-      if (!alive) return;
-      setAgents(a);
-      // Default the composer to the configured agent (or the first available one).
-      const avail = a.filter((x) => x.available);
-      const preferred = s?.agentCommand && avail.some((x) => x.command === s.agentCommand) ? s.agentCommand : avail[0]?.command ?? "";
-      setRunAgent((cur) => cur || preferred);
-    });
+    void api.getSettings().then((s) => alive && setSettingsAgent(s?.agentCommand ?? "")).catch(() => {});
     return () => {
       alive = false;
     };
   }, [api]);
+
+  // Default the composer to the configured agent (or first available) once the scan resolves.
+  useEffect(() => {
+    const avail = agents.filter((a) => a.available);
+    if (!avail.length) return;
+    const preferred = settingsAgent && avail.some((a) => a.command === settingsAgent) ? settingsAgent : avail[0]!.command;
+    setRunAgent((cur) => cur || preferred);
+  }, [agents, settingsAgent]);
 
   // Rehydrate the project's conversations + latest transcript, then run any pending brief.
   useEffect(() => {
@@ -908,14 +911,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const changeDs = (id: string): void => {
     setDsId(id);
     void api.patchProject(projectId, { designSystemId: id || null }).catch(() => toast("Couldn't change the design system.", { variant: "error" }));
-  };
-
-  const rescanAgents = async (): Promise<void> => {
-    try {
-      setAgents(await api.rescanAgents());
-    } catch {
-      toast("Couldn't rescan agents.", { variant: "error" });
-    }
   };
 
   const renameConv = (cid: string, title: string): void => {
