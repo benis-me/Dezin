@@ -18,7 +18,7 @@ test("detectAgents probes each known agent + carries known models", async () => 
   const claude = agents.find((a) => a.id === "claude")!;
   assert.equal(claude.available, true);
   assert.equal(claude.version, "claude 1.2.3");
-  assert.ok(claude.models.includes("claude-opus-4-8"), "claude carries known models");
+  assert.ok(claude.models.includes("opus"), "claude carries its model aliases");
   assert.equal(agents.find((a) => a.id === "codex")!.available, false);
 });
 
