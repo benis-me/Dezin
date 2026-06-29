@@ -154,21 +154,35 @@ export function HomeScreen({
     if (p.designSystemId) setDesignSystemId(p.designSystemId);
   }, []);
 
-  // Consume a one-shot capture handed off by the browser extension.
+  // Consume a one-shot capture handed off by the browser extension. Polled on mount and
+  // whenever the window regains focus, so an already-open Dezin picks up an Import even
+  // while it was in the background.
   useEffect(() => {
     if (projectsOverride) return;
-    let alive = true;
-    void api
-      .getCapture()
-      .then((cap) => {
-        if (!alive || !cap.images.length) return;
-        setImages(cap.images.map((i) => ({ name: i.name, base64: i.base64, preview: `data:image/png;base64,${i.base64}` })));
-        if (cap.note) setBrief((b) => (b.trim() ? b : cap.note));
-        toast(`Imported ${cap.images.length} reference${cap.images.length === 1 ? "" : "s"} from ${cap.source}.`);
-      })
-      .catch(() => {});
+    // The GET is one-shot (the daemon clears it on read, serializing concurrent reads), so
+    // we do NOT gate the consume on an `alive` flag — under StrictMode's double-invoke the
+    // first read would clear the capture and the second would find nothing. Whichever read
+    // wins applies the state; a stray read-after-unmount is a harmless no-op.
+    const pull = () => {
+      void api
+        .getCapture()
+        .then((cap) => {
+          if (!cap.images.length) return;
+          setImages((cur) => [...cur, ...cap.images.map((i) => ({ name: i.name, base64: i.base64, preview: `data:image/png;base64,${i.base64}` }))]);
+          if (cap.note) setBrief((b) => (b.trim() ? b : cap.note));
+          toast(`Imported ${cap.images.length} reference${cap.images.length === 1 ? "" : "s"} from ${cap.source}.`);
+        })
+        .catch(() => {});
+    };
+    const onVisible = () => {
+      if (!document.hidden) pull();
+    };
+    pull();
+    window.addEventListener("focus", pull);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
-      alive = false;
+      window.removeEventListener("focus", pull);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [api, projectsOverride, toast]);
 

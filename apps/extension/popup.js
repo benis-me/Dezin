@@ -2,7 +2,7 @@ const input = document.getElementById("url");
 const status = document.getElementById("status");
 
 chrome.storage.sync.get("dezinUrl", ({ dezinUrl }) => {
-  input.value = dezinUrl || "http://localhost:5173";
+  input.value = dezinUrl || "http://127.0.0.1:7457";
 });
 
 document.getElementById("save").addEventListener("click", () => {

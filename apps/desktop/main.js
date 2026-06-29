@@ -26,7 +26,9 @@ function startDaemon() {
   }
   daemon = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
     cwd: join(ROOT, "apps", "daemon"),
-    env: { ...process.env, DEZIN_PORT: "0", DEZIN_PORTFILE: PORTFILE, DEZIN_DATA_DIR: DATA_DIR, DEZIN_ELECTRON: "1" },
+    // Fixed default port so the browser extension can reach the daemon at a known address
+    // (127.0.0.1:7457); still overridable via env. The portfile records whatever it binds.
+    env: { ...process.env, DEZIN_PORT: process.env.DEZIN_PORT || "7457", DEZIN_PORTFILE: PORTFILE, DEZIN_DATA_DIR: DATA_DIR, DEZIN_ELECTRON: "1" },
     // IPC channel lets the daemon ask us to capture covers via our own Chromium.
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });

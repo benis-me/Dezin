@@ -1,35 +1,39 @@
 # Dezin Capture (Chrome extension)
 
 Capture cover art and design shots from **Pinterest, Behance, and Dribbble** straight
-into Dezin's home composer as a reference, then build a faithful recreation.
+into the Dezin app's composer as a reference plus a recreation brief, then build a
+faithful recreation.
 
 ## How it works
 
 1. Hover any large image (or video) on a supported site → a **✦ Capture** button appears.
-2. Click it → a panel previews the capture.
-   - **Images** are grabbed at full resolution (the background worker fetches them, so
-     cross-origin CDNs don't taint a canvas).
-   - **Videos** are sampled into a few frames (best-effort; falls back to the poster if
-     the video is cross-origin protected). Toggle which frames to keep.
-3. Add an optional note, then **Import to Dezin →**. The references are POSTed to the
-   Dezin daemon (`/api/capture`) and Dezin opens with them already in the composer —
-   hit Build to recreate.
+2. Click it → a panel opens with a preview and an **✦ Analyze** button.
+3. Hit **Analyze** (shows a loading state):
+   - **Images** become a single design reference.
+   - **Videos** are sampled into frames at a fixed cadence (best-effort; falls back to the
+     poster if the video is cross-origin protected).
+4. The panel shows the captured reference(s) — toggle which to keep — and a generated,
+   editable **recreation brief**.
+5. Hit **Import to Dezin →**. The references (fetched to base64 by the background worker, so
+   cross-origin CDNs don't taint a canvas) and the brief are POSTed to the Dezin daemon's
+   `/api/capture`. **No browser tab is opened** — switch to the running Dezin app and the
+   reference + brief are waiting in the home composer. Hit Build to recreate.
 
 ## Install (unpacked)
 
-1. Run Dezin (`npm run dev`, or the desktop app).
+1. Run Dezin — the desktop app, or `pnpm dev` for the web dev server.
 2. Chrome → `chrome://extensions` → enable **Developer mode** → **Load unpacked** →
    select this `apps/extension` folder.
-3. Click the extension icon and set **Dezin URL**:
+3. Click the extension icon and confirm the **Dezin daemon URL**:
+   - Desktop app: `http://127.0.0.1:7457` (default — the desktop pins this port)
    - Dev server: `http://localhost:5173`
-   - Installed app / desktop: `http://127.0.0.1:7457`
 
-The handoff uses a one-shot endpoint on the daemon: the extension `POST`s the images to
-`/api/capture`; Dezin's home reads and clears them on load. Vite proxies `/api`, so the
-same URL works for both the dev server and the bundled daemon.
+The handoff uses a one-shot endpoint: the extension `POST`s to `/api/capture`; the Dezin
+home reads and clears it on load **and whenever the window regains focus**, so an
+already-open app picks up an Import without a reload.
 
 ## Not included
 
 - No packaging/signing (load unpacked only).
-- The deep "recreation plan" is produced by Dezin's agent after import — the panel just
-  prepares and previews the references.
+- "Analyze" prepares the reference frames and a recreation brief; the actual design
+  recreation is produced by Dezin's agent after you Build.
