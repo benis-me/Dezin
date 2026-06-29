@@ -10,7 +10,7 @@ const { join, dirname } = require("node:path");
 const ROOT = join(__dirname, "..", "..");
 const DATA_DIR = process.env.DEZIN_DATA_DIR || join(ROOT, ".dezin", "data");
 const PORTFILE = join(ROOT, ".dezin", "desktop-daemon.json");
-// Set DEZIN_DEV_URL=http://localhost:7456 to load the Vite dev server (assumes
+// Set DEZIN_DEV_URL=http://localhost:6273 to load the Vite dev server (assumes
 // `npm run dev` is running) instead of spawning the bundled daemon.
 const DEV_URL = process.env.DEZIN_DEV_URL || "";
 

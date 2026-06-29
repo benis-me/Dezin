@@ -25,7 +25,7 @@ function daemonTarget(): string {
 
 const target = daemonTarget();
 // Dev server port. Override with DEZIN_WEB_PORT; defaults off the common 5173.
-const webPort = Number(process.env.DEZIN_WEB_PORT ?? 7456);
+const webPort = Number(process.env.DEZIN_WEB_PORT ?? 6273);
 // Re-read the discovery file per request so a daemon restart (e.g. `node --watch`
 // rebinding a new ephemeral port) is picked up without restarting Vite.
 const router = () => daemonTarget();
