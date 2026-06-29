@@ -118,7 +118,29 @@
     throw new Error("Couldn't read this video (cross-origin protected). Try a still image instead.");
   }
 
-  const briefFor = (isVideo, frameCount) =>
+  // Ask the background worker to fetch a (possibly cross-origin) URL to base64.
+  const fetchViaBackground = (url) =>
+    new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: "dezin-fetch", url }, (resp) => {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        if (resp && resp.ok) resolve(resp.base64);
+        else reject(new Error((resp && resp.error) || "fetch failed"));
+      });
+    });
+
+  // Send the captured image to Dezin's daemon, which runs the configured agent's fast model
+  // on it and returns a generated recreation brief.
+  const analyzeViaBackground = (base64) =>
+    new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: "dezin-analyze", image: base64, source: SITE }, (resp) => {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        if (resp && resp.ok && resp.brief) resolve(resp);
+        else reject(new Error((resp && resp.error) || "analysis failed"));
+      });
+    });
+
+  // Used only if the model analysis is unavailable (no agent / daemon offline).
+  const fallbackBrief = (isVideo, frameCount) =>
     isVideo
       ? `Recreate this ${SITE} UI from the ${frameCount} sampled frame${frameCount === 1 ? "" : "s"} as a responsive web page — match its layout, typography, colour, spacing, components, and the motion/interaction the frames imply.`
       : `Recreate this ${SITE} design faithfully as a responsive web page — match its layout, typography, colour, spacing, and components.`;
@@ -191,9 +213,9 @@
         body.querySelector(".btn").addEventListener("click", () => api.analyze({ isVideo, previewSrc, media }));
       },
 
-      // Stage 2 — analyzing (loading)
+      // Stage 2 — analyzing (capture the bytes, then a fast agent model reads the design)
       async analyze({ isVideo, previewSrc, media }) {
-        body.innerHTML = `<div class="center"><span class="spin big"></span><p class="muted">${isVideo ? "Sampling frames…" : "Reading the design…"}</p></div>`;
+        body.innerHTML = `<div class="center"><span class="spin big"></span><p class="muted">Capturing…</p></div>`;
         const progress = body.querySelector(".muted");
         try {
           if (isVideo) {
@@ -202,10 +224,29 @@
           } else {
             const src = previewSrc || bestSrc(media);
             if (!src) throw new Error("Nothing to capture here.");
-            refs = [{ url: src, name: nameFromUrl(src), preview: src, on: true }];
+            progress.textContent = "Fetching image…";
+            const b64 = await fetchViaBackground(src);
+            refs = [{ base64: b64, name: nameFromUrl(src), preview: `data:image/png;base64,${b64}`, on: true }];
           }
           if (!refs.length) throw new Error("Nothing to analyze here.");
-          brief = briefFor(isVideo, refs.length);
+          // Ensure a representative frame has base64 (a poster fallback may only be a URL).
+          const mid = refs[Math.floor(refs.length / 2)];
+          if (!mid.base64 && mid.url) {
+            mid.base64 = await fetchViaBackground(mid.url);
+            mid.preview = `data:image/png;base64,${mid.base64}`;
+          }
+          // A fast agent model reads the design and writes the recreation brief.
+          progress.textContent = "Analyzing the design…";
+          try {
+            const resp = await analyzeViaBackground(mid.base64);
+            brief = resp.brief;
+            if (resp.agent) {
+              const tag = body.parentElement && body.parentElement.querySelector(".src");
+              if (tag) tag.textContent = `${SITE} · ${resp.agent}`;
+            }
+          } catch {
+            brief = fallbackBrief(isVideo, refs.length); // model unavailable — keep moving
+          }
           api.result();
         } catch (err) {
           api.error(String(err && err.message ? err.message : err), () => api.ready({ isVideo, previewSrc, media }));

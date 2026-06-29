@@ -13,6 +13,7 @@
   },
   "scripts": {
     "dev": "bash scripts/dev.sh",
+    "ext": "bash scripts/extension-path.sh",
     "desktop": "pnpm --filter ./apps/web build && pnpm --filter ./apps/desktop start",
     "desktop:dev": "DEZIN_DEV_URL=http://localhost:5173 pnpm --filter ./apps/desktop start",
     "test": "bash scripts/test-all.sh",

@@ -32,6 +32,7 @@ import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer } from "./project-runtime.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleListAgents, handleRescanAgents, warmAgents, type AgentProber } from "./agents-handler.ts";
+import { analyzeImage } from "./analyze-image.ts";
 
 export interface AppDeps {
   store: Store;
@@ -125,6 +126,25 @@ const routes: Route[] = [
       const cap = pendingCapture;
       pendingCapture = null;
       sendJson(res, 200, cap ?? { images: [], note: "", source: "" });
+    },
+  },
+  {
+    // Browser extension "Analyze": run the configured agent's fast model on a captured
+    // screenshot and return a one-paragraph recreation brief.
+    method: "POST",
+    pattern: "/api/analyze-image",
+    handler: async (req, res, _p, { store }) => {
+      const body = (await readJsonBody(req)) as { image?: string; agentCommand?: string; model?: string } | null;
+      const image = typeof body?.image === "string" ? body.image : "";
+      if (!image) return sendError(res, 400, "no image");
+      const command = (typeof body?.agentCommand === "string" && body.agentCommand) || store.getSettings().agentCommand || "claude";
+      const model = typeof body?.model === "string" ? body.model : undefined;
+      try {
+        const brief = await analyzeImage(command, image, model);
+        sendJson(res, 200, { brief, agent: command });
+      } catch (e) {
+        sendError(res, 502, e instanceof Error ? e.message : "analysis failed");
+      }
     },
   },
   {

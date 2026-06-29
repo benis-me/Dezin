@@ -27,6 +27,38 @@ async function urlToBase64(url) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Fetch cross-origin media to base64 so the content script can decode it into a
+  // same-origin (data:) image and read its pixels without tainting a canvas.
+  if (msg?.type === "dezin-fetch") {
+    (async () => {
+      try {
+        sendResponse({ ok: true, base64: await urlToBase64(msg.url) });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
+      }
+    })();
+    return true;
+  }
+  // Run the configured agent's fast model on a captured image to generate a brief.
+  if (msg?.type === "dezin-analyze") {
+    (async () => {
+      try {
+        const base = await dezinUrl();
+        const r = await fetch(`${base}/api/analyze-image`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ image: msg.image, source: msg.source || "extension" }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.brief) throw new Error(data.error || `analyze ${r.status}`);
+        sendResponse({ ok: true, brief: data.brief, agent: data.agent });
+      } catch (e) {
+        const m = String(e && e.message ? e.message : e);
+        sendResponse({ ok: false, error: /Failed to fetch/i.test(m) ? "Couldn't reach Dezin to analyze." : m });
+      }
+    })();
+    return true;
+  }
   if (msg?.type !== "dezin-import") return;
   (async () => {
     try {
