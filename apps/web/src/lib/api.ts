@@ -260,6 +260,10 @@ export interface ApiClient {
   variantPreviewUrl(id: string, vid: string): string;
   exportUrl(id: string): string;
   streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent>;
+  /** Reattach to an in-flight (or finished) run: replays its events, then streams live. */
+  reattachRun(runId: string, signal?: AbortSignal): AsyncGenerator<RunEvent>;
+  /** Explicitly stop a run (the composer "Stop"); works across pages. */
+  cancelRun(runId: string): Promise<{ cancelled: boolean }>;
 }
 
 export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
@@ -273,20 +277,16 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     return (await res.json()) as T;
   }
 
-  async function* streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent> {
-    const res = await f(baseUrl + "/api/runs", { ...jsonInit("POST", input), signal });
+  async function* consumeSse(res: Response): AsyncGenerator<RunEvent> {
     if (!res.ok) throw new ApiError(res.status, await safeText(res));
-
     if (!res.body) {
       // Environments without a streaming body: parse the whole text.
-      const text = await res.text();
-      for (const block of text.split("\n\n")) {
+      for (const block of (await res.text()).split("\n\n")) {
         const ev = parseSseBlock(block);
         if (ev) yield ev;
       }
       return;
     }
-
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -308,6 +308,14 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       const ev = parseSseBlock(tail);
       if (ev) yield ev;
     }
+  }
+
+  async function* streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent> {
+    yield* consumeSse(await f(baseUrl + "/api/runs", { ...jsonInit("POST", input), signal }));
+  }
+
+  async function* reattachRun(runId: string, signal?: AbortSignal): AsyncGenerator<RunEvent> {
+    yield* consumeSse(await f(`${baseUrl}/api/runs/${enc(runId)}/stream`, { signal }));
   }
 
   async function* scanAgentsStream(): AsyncGenerator<ScanEvent> {
@@ -422,5 +430,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     variantPreviewUrl: (id, vid) => `${baseUrl}/api/projects/${enc(id)}/variants/${enc(vid)}/preview/`,
     exportUrl: (id) => `${baseUrl}/api/projects/${enc(id)}/export`,
     streamRun,
+    reattachRun,
+    cancelRun: (runId) => json<{ cancelled: boolean }>(`/api/runs/${enc(runId)}/cancel`, { method: "POST" }),
   };
 }

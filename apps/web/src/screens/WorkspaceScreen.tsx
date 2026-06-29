@@ -16,7 +16,7 @@ import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
-import { setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
+import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
 import type { Conversation, Variant, DesignSystemCard, Message, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 
@@ -33,6 +33,30 @@ const SEVERITY_STYLE: Record<string, string> = {
 };
 
 const SPLIT_KEY = "dezin.workspace.split";
+const REPLAYABLE_RUN_STATUSES = new Set(["running", "pending", "cancelled", "failed"]);
+
+function queueKey(projectId: string): string {
+  return `dezin.workspace.queue.${projectId}`;
+}
+
+function readQueue(projectId: string): string[] {
+  if (projectId === "new") return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(queueKey(projectId)) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string" && x.trim().length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeQueue(projectId: string, queue: string[]): void {
+  if (projectId === "new") return;
+  try {
+    localStorage.setItem(queueKey(projectId), JSON.stringify(queue));
+  } catch {
+    /* localStorage may be unavailable */
+  }
+}
 
 interface ResultMeta {
   passed?: boolean;
@@ -441,7 +465,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const previewIframeRef = useRef<HTMLIFrameElement>(null);
   const [setupPhase, setSetupPhase] = useState<SetupPhase | null>(null);
   const [running, setRunning] = useState(false);
-  const [queue, setQueue] = useState<string[]>([]);
+  const [queue, setQueue] = useState<string[]>(() => readQueue(projectId));
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
   const [liveItems, setLiveItems] = useState<LiveItem[]>([]);
   const [input, setInput] = useState("");
@@ -474,6 +498,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const stickBottom = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
   const runningRef = useRef(false);
+  const activeRunIdRef = useRef<string | null>(null);
+  const terminalEventRef = useRef(false);
+  const reattachedRunsRef = useRef<Set<string>>(new Set());
   const splitRef = useRef<HTMLDivElement>(null);
 
   const setActive = (id: string | null) => {
@@ -519,6 +546,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       if (latest && typeof latest.score === "number") {
         setScore((cur) => cur ?? latest.score);
         setRanOnce(true);
+      }
+      if (latest && REPLAYABLE_RUN_STATUSES.has(latest.status) && !reattachedRunsRef.current.has(latest.id)) {
+        void reattachRun(latest.id, latest.status);
       }
     } catch {
       // no runs yet
@@ -597,6 +627,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const handleEvent = (ev: RunEvent, id: string): void => {
     switch (ev.type) {
       case "run-start":
+        terminalEventRef.current = false;
+        if (typeof ev.runId === "string") activeRunIdRef.current = ev.runId;
         if (typeof ev.conversationId === "string") {
           const cid = ev.conversationId;
           setActive(cid);
@@ -654,6 +686,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         break;
       }
       case "run-done": {
+        terminalEventRef.current = true;
+        activeRunIdRef.current = null;
         const rounds = typeof ev.rounds === "number" ? ev.rounds : 0;
         const s = typeof ev.score === "number" ? ev.score : null;
         setScore(s);
@@ -678,13 +712,56 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         break;
       }
       case "run-error":
+        terminalEventRef.current = true;
+        activeRunIdRef.current = null;
         setLiveStatus(null);
         setLiveItems([]);
         liveItemsRef.current = [];
         pushResult(`The run failed: ${typeof ev.message === "string" ? ev.message : "generation failed"}`, { error: true });
         break;
+      case "run-cancelled":
+        terminalEventRef.current = true;
+        activeRunIdRef.current = null;
+        setLiveStatus(null);
+        materializeLive();
+        pushResult("Stopped.", {});
+        break;
       default:
         break;
+    }
+  };
+
+  const reattachRun = async (runId: string, status: string): Promise<void> => {
+    if (runningRef.current) return;
+    reattachedRunsRef.current.add(runId);
+    runningRef.current = true;
+    setRunning(true);
+    setLiveStatus(status === "running" || status === "pending" ? "Reconnecting…" : "Replaying interrupted run…");
+    activeRunIdRef.current = runId;
+    terminalEventRef.current = false;
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    try {
+      for await (const ev of api.reattachRun(runId, ctrl.signal)) handleEvent(ev, projectId);
+      if (!terminalEventRef.current) {
+        setLiveStatus(null);
+        materializeLive();
+        pushResult(status === "cancelled" ? "Interrupted." : status === "failed" ? "The run failed before it could report an error." : "Disconnected.", {
+          error: status === "failed",
+        });
+      }
+    } catch (err) {
+      setLiveStatus(null);
+      if (!ctrl.signal.aborted) {
+        setLiveItems([]);
+        liveItemsRef.current = [];
+        pushResult(`Couldn't reconnect: ${err instanceof Error ? err.message : "stream unavailable"}`, { error: true });
+      }
+    } finally {
+      if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
+      runningRef.current = false;
+      if (abortRef.current === ctrl) abortRef.current = null;
+      setRunning(false);
     }
   };
 
@@ -696,6 +773,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       try {
         const project = await api.createProject({ name: briefToName(text) });
         setPendingBrief(text);
+        const agent = agentOverride || runAgent;
+        const model = modelOverride || runModel;
+        if (agent) setPendingAgent(agent, model || undefined);
         navigate(`/projects/${project.id}`);
       } catch {
         toast("Couldn't create the project.", { variant: "error" });
@@ -705,6 +785,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
     push("user", text);
     runningRef.current = true;
+    terminalEventRef.current = false;
+    activeRunIdRef.current = null;
     setRunning(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -724,8 +806,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       setLiveStatus(null);
       if (ctrl.signal.aborted) {
         // User pressed Stop — keep what was generated so far, note the stop, no error.
-        materializeLive();
-        pushResult("Stopped.", {});
+        if (!terminalEventRef.current) {
+          materializeLive();
+          pushResult("Stopped.", {});
+        }
       } else {
         setLiveItems([]);
         liveItemsRef.current = [];
@@ -734,12 +818,17 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       }
     } finally {
       runningRef.current = false;
+      activeRunIdRef.current = null;
       abortRef.current = null;
       setRunning(false);
     }
   };
 
-  const stop = (): void => abortRef.current?.abort();
+  const stop = (): void => {
+    const runId = activeRunIdRef.current;
+    if (runId) void api.cancelRun(runId).catch(() => {});
+    abortRef.current?.abort();
+  };
 
   // Keep the transcript pinned to the newest content as it streams — unless the user scrolled
   // up to read (stickBottom is cleared by the container's onScroll below).
@@ -750,12 +839,20 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   // Drain queued prompts one at a time once the current run finishes.
   useEffect(() => {
-    if (runningRef.current || queue.length === 0) return;
+    if (loading || runningRef.current || queue.length === 0) return;
     const [next, ...rest] = queue;
     setQueue(rest);
     void runBrief(next!);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, queue]);
+  }, [loading, running, queue]);
+
+  useEffect(() => {
+    setQueue(readQueue(projectId));
+  }, [projectId]);
+
+  useEffect(() => {
+    writeQueue(projectId, queue);
+  }, [projectId, queue]);
 
   useEffect(() => {
     let alive = true;

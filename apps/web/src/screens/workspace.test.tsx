@@ -5,9 +5,22 @@ import { WorkspaceScreen } from "./WorkspaceScreen.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type { RunEvent } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
+import { AgentsProvider } from "../lib/agents-context.tsx";
+import { takePendingAgent, takePendingBrief, takePendingModel } from "../lib/pending-brief.ts";
 
-beforeEach(() => window.history.pushState({}, "", "/projects/p1"));
+beforeEach(() => {
+  window.history.pushState({}, "", "/projects/p1");
+  takePendingBrief();
+  takePendingAgent();
+  takePendingModel();
+  localStorage.removeItem("dezin.workspace.queue.p1");
+});
 afterEach(cleanup);
+
+const AGENTS = [
+  { id: "claude", command: "claude", available: true, version: "claude 1.2.3", models: ["opus", "sonnet"] },
+  { id: "codex", command: "codex", available: true, version: "codex 1.0.0", models: ["gpt-5"] },
+];
 
 test("sending a brief streams events into the chat and shows the preview + export", async () => {
   const fake = makeFakeApi({
@@ -47,6 +60,150 @@ test("sending a brief streams events into the chat and shows the preview + expor
   // export link points at the export endpoint
   const exportLink = screen.getByRole("link", { name: /export/i });
   expect(exportLink).toHaveAttribute("href", "/api/projects/p1/export");
+});
+
+test("mount reattaches the latest running run and replays its stream", async () => {
+  const reattachRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {
+    yield { type: "run-start", runId: "r-live", conversationId: "c1" };
+    yield { type: "turn-start", round: 0, isRepair: false };
+    yield { type: "turn-end", round: 0, text: "Recovered streamed text." };
+    yield { type: "run-done", runId: "r-live", passed: true, rounds: 0, score: 100, previewUrl: "/projects/p1/preview/", findings: [] };
+  });
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [],
+    listRuns: async () => [
+      { id: "r-live", conversationId: "c1", status: "running", score: null, repairRounds: 0, lintPassed: false, createdAt: 2, finishedAt: null },
+    ],
+    reattachRun,
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText("Recovered streamed text.")).toBeInTheDocument();
+  expect(reattachRun).toHaveBeenCalledWith("r-live", expect.anything());
+  expect(await screen.findByText(/Done, quality 100\/100/)).toBeInTheDocument();
+});
+
+test("mount replays an interrupted run log after daemon restart", async () => {
+  const reattachRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {
+    yield { type: "run-start", runId: "r-interrupted", conversationId: "c1" };
+    yield { type: "turn-end", round: 0, text: "Partial text before quit." };
+  });
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [],
+    listRuns: async () => [
+      { id: "r-interrupted", conversationId: "c1", status: "cancelled", score: null, repairRounds: 0, lintPassed: false, createdAt: 2, finishedAt: 3 },
+    ],
+    reattachRun,
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText("Partial text before quit.")).toBeInTheDocument();
+  expect(await screen.findByText("Interrupted.")).toBeInTheDocument();
+  expect(reattachRun).toHaveBeenCalledWith("r-interrupted", expect.anything());
+});
+
+test("Stop explicitly cancels the active daemon run", async () => {
+  const cancelRun = vi.fn(async () => ({ cancelled: true }));
+  const fake = makeFakeApi({
+    streamRun: async function* (_input, signal): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-stop", conversationId: "c1" };
+      await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+    },
+    cancelRun,
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "keep going" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  fireEvent.click(await screen.findByLabelText("Stop"));
+
+  await waitFor(() => expect(cancelRun).toHaveBeenCalledWith("r-stop"));
+});
+
+test("queued prompts survive remount and drain on the next workspace entry", async () => {
+  localStorage.setItem("dezin.workspace.queue.p1", JSON.stringify(["queued follow-up"]));
+  const streamRun = vi.fn(() =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-queued", conversationId: "c1" };
+      yield { type: "turn-end", round: 0, text: "Queued result." };
+      yield { type: "run-done", runId: "r-queued", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+    })(),
+  );
+  const fake = makeFakeApi({ streamRun: streamRun as never });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByText("Queued result.")).toBeInTheDocument();
+  expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ brief: "queued follow-up" }), expect.anything());
+  expect(localStorage.getItem("dezin.workspace.queue.p1")).toBe("[]");
+});
+
+test("/projects/new preserves the selected agent and model for the first run", async () => {
+  const createProject = vi.fn(async () => ({
+    id: "p-new",
+    name: "New",
+    skillId: null,
+    designSystemId: "modern-minimal",
+    mode: "prototype" as const,
+    createdAt: 1,
+    updatedAt: 1,
+  }));
+  const fake = makeFakeApi({
+    createProject,
+    listAgents: async () => AGENTS,
+    rescanAgents: async () => AGENTS,
+    getSettings: async () => ({
+      agentCommand: "claude",
+      model: "",
+      apiBaseUrl: "",
+      apiKey: "",
+      defaultDesignSystemId: "modern-minimal",
+      customInstructions: "",
+      imageApiBaseUrl: "",
+      imageApiKey: "",
+      imageModel: "",
+    }),
+  });
+  const user = userEvent.setup();
+
+  render(
+    <ApiProvider client={fake}>
+      <AgentsProvider>
+        <WorkspaceScreen projectId="new" />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  await user.click(await screen.findByRole("button", { name: "Agent and model" }));
+  await user.click(await screen.findByText("Codex"));
+  await user.click(await screen.findByText("gpt-5"));
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make a hero" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  await waitFor(() => expect(createProject).toHaveBeenCalled());
+  expect(takePendingAgent()).toBe("codex");
+  expect(takePendingModel()).toBe("gpt-5");
 });
 
 test("rehydrates the prior transcript and reuses the conversation on the next run", async () => {

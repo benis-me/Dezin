@@ -62,6 +62,9 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     exportUrl: (id: string) => `/api/projects/${id}/export`,
     // eslint-disable-next-line require-yield
     streamRun: async function* () {},
+    // eslint-disable-next-line require-yield
+    reattachRun: async function* () {},
+    cancelRun: async () => ({ cancelled: true }),
     ...over,
   };
 }

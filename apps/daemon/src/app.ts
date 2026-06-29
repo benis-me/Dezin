@@ -17,7 +17,7 @@ import { sendJson, sendError, send, readJsonBody, readRawBody, matchPath } from 
 import { serveProjectFile, serveVariantFile, projectDir } from "./serve-static.ts";
 import { figToJson, summarizeFig } from "./parse-fig.ts";
 import { serveWeb, defaultWebDir } from "./serve-web.ts";
-import { handleRun } from "./run-handler.ts";
+import { handleRun, handleRunStream, handleCancelRun } from "./run-handler.ts";
 import { handleExport } from "./export-handler.ts";
 import { handleListFiles } from "./files-handler.ts";
 import {
@@ -342,6 +342,16 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/runs",
     handler: (req, res, _p, deps) => handleRun(req, res, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/runs/:id/stream",
+    handler: (req, res, params, deps) => handleRunStream(req, res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/runs/:id/cancel",
+    handler: (_req, res, params) => handleCancelRun(res, params),
   },
   {
     method: "GET",

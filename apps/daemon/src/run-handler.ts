@@ -26,8 +26,9 @@ import { generateImages } from "./image-gen.ts";
 import { captureCover } from "./capture-cover.ts";
 import { gitCommit } from "./project-runtime.ts";
 import type { Settings } from "../../../packages/core/src/index.ts";
-import { readJsonBody, sendError } from "./http-util.ts";
+import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
+import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
 import type { AppDeps } from "./app.ts";
 
 // Skills are scanned once and cached for the daemon process.
@@ -139,21 +140,32 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const run = store.createRun(project.id, conversation.id);
   store.updateRun(run.id, { status: "running" });
 
-  // Open the SSE stream.
+  // Open the SSE stream + register the run with the broker. Events are buffered + persisted to
+  // a per-run log so another client can reattach (after navigating away, or an app restart) and
+  // replay what the run reached. The run continues regardless of THIS client's connection — it
+  // ends only on completion, an explicit cancel, or the daemon exiting.
   res.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache",
     connection: "keep-alive",
   });
-  const sse = (event: unknown): void => {
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
-  };
+  const ctrl = createRun({ runId: run.id, conversationId: conversation.id, dataDir: deps.dataDir });
+  const unsubscribe = subscribe(
+    run.id,
+    deps.dataDir,
+    (ev) => {
+      try {
+        res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      } catch {
+        /* socket closed */
+      }
+    },
+    () => {},
+  );
+  // On disconnect just stop writing — do NOT cancel; the run keeps going for reattach.
+  req.on("close", unsubscribe);
+  const sse = (event: unknown): void => pushEvent(run.id, event);
   sse({ type: "run-start", runId: run.id, conversationId: conversation.id });
-
-  // Cancel the run if the client disconnects (the composer "Stop" aborts the fetch). The
-  // signal terminates the active agent CLI and stops the lint loop.
-  const ctrl = new AbortController();
-  req.on("close", () => ctrl.abort());
 
   const dir = projectDir(deps.dataDir, project.id);
   await mkdir(dir, { recursive: true });
@@ -201,8 +213,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const cancelled = ctrl.signal.aborted || isAbortError(err);
       store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
       persistProcess();
-      if (!cancelled) sse({ type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
+      sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
     } finally {
+      finishRun(run.id);
+      unsubscribe();
       res.end();
     }
     return;
@@ -267,9 +281,41 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const cancelled = ctrl.signal.aborted || isAbortError(err);
     store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
     persistProcess(); // keep the partial process record + whatever the agent wrote to disk
-    if (!cancelled) sse({ type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
+    sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
   } finally {
     stopPoll();
+    finishRun(run.id);
+    unsubscribe();
     res.end();
   }
+}
+
+/** GET /api/runs/:id/stream — reattach to a run: replays buffered/persisted events, then live. */
+export function handleRunStream(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps): void {
+  const runId = params.id!;
+  res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" });
+  const unsub = subscribe(
+    runId,
+    deps.dataDir,
+    (ev) => {
+      try {
+        res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      } catch {
+        /* socket closed */
+      }
+    },
+    () => {
+      try {
+        res.end();
+      } catch {
+        /* already closed */
+      }
+    },
+  );
+  req.on("close", unsub);
+}
+
+/** POST /api/runs/:id/cancel — explicit Stop; aborts the agent + ends the run. */
+export function handleCancelRun(res: ServerResponse, params: Record<string, string>): void {
+  sendJson(res, 200, { cancelled: cancelRun(params.id!) });
 }

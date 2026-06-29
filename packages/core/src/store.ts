@@ -402,6 +402,15 @@ export class Store {
     return this.getRun(id)!;
   }
 
+  /** Mark runs left "running"/"pending" (a previous process died mid-run) as cancelled. Run
+   *  at daemon startup so interrupted runs don't look perpetually in-progress. */
+  markInterruptedRuns(): number {
+    const res = this.db
+      .prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending')`)
+      .run(this.clock.now());
+    return Number(res.changes ?? 0);
+  }
+
   /** A project's runs, newest-first (createdAt desc, rowid desc tiebreak). */
   listRuns(projectId: string, variantId?: string): Run[] {
     const rows = variantId

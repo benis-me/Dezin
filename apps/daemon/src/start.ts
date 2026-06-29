@@ -11,7 +11,6 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
-import { ClaudeCodeRunner } from "../../../packages/agent/src/index.ts";
 import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDir } from "../../../packages/design/src/index.ts";
 import { stopAllDevServers } from "./project-runtime.ts";
 import { createApp } from "./app.ts";
@@ -33,10 +32,11 @@ const VERSION = (() => {
 function main(): void {
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
   const store = new Store(join(DATA_DIR, "app.sqlite"));
-  const runner = new ClaudeCodeRunner({ command: process.env.DEZIN_AGENT_CMD ?? "claude" });
+  store.markInterruptedRuns(); // a prior process died mid-run → don't show those as running
+  if (process.env.DEZIN_AGENT_CMD) store.updateSettings({ agentCommand: process.env.DEZIN_AGENT_CMD });
   // One shared registry: bundled systems + any the user has imported (persisted to disk).
   const designRegistry = new DesignRegistry([...BUNDLED_DESIGN_SYSTEMS, ...loadDesignSystems(userDesignDir(DATA_DIR))]);
-  const server = createApp({ store, dataDir: DATA_DIR, version: VERSION, runner, designRegistry });
+  const server = createApp({ store, dataDir: DATA_DIR, version: VERSION, designRegistry });
 
   server.listen(PORT, HOST, () => {
     const { port } = server.address() as AddressInfo;

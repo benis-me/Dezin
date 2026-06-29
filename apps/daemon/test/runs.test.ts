@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
+import { spawn } from "node:child_process";
 import { Store } from "../../../packages/core/src/index.ts";
 import { FakeRunner } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
@@ -286,4 +287,79 @@ test("an unknown skillId is tolerated — skill omitted, run still succeeds", as
     assert.ok(events.some((e) => e.type === "run-done"), "run completed");
     assert.doesNotMatch(runner.calls[0]?.systemPrompt ?? "", /Active skill/, "no skill section");
   });
+});
+
+test("daemon start honors per-run agentCommand/model instead of a fixed startup runner", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-start-agent-"));
+  const binDir = join(root, "bin");
+  const dataDir = join(root, "data");
+  const portFile = join(root, "daemon.json");
+  const callsFile = join(root, "calls.jsonl");
+  const clean = CLEAN.replace(/`/g, "\\`");
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(
+    join(binDir, "codex"),
+    `#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify({cmd:"codex", args:process.argv.slice(2)}) + "\\n");
+fs.writeFileSync(path.join(process.cwd(), "index.html"), \`${clean}\`);
+console.log("codex done");
+`,
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    join(binDir, "fake-claude"),
+    `#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify({cmd:"fake-claude", args:process.argv.slice(2)}) + "\\n");
+fs.writeFileSync(path.join(process.cwd(), "index.html"), \`${clean}\`);
+console.log(JSON.stringify({type:"assistant", message:{content:[{type:"text", text:"claude done"}]}}));
+`,
+    { mode: 0o755 },
+  );
+
+  const child = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      DEZIN_DATA_DIR: dataDir,
+      DEZIN_PORTFILE: portFile,
+      DEZIN_AGENT_CMD: "fake-claude",
+    },
+    stdio: "ignore",
+  });
+  try {
+    let base = "";
+    for (let i = 0; i < 80; i++) {
+      if (existsSync(portFile)) {
+        base = (JSON.parse(readFileSync(portFile, "utf8")) as { url: string }).url;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(base, "daemon wrote its port file");
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "go", agentCommand: "codex", model: "gpt-5" }),
+    });
+    assert.equal(res.status, 200);
+    const events = parseSse(await res.text());
+    assert.ok(events.some((e) => e.type === "run-done"), "run completed");
+
+    const calls = readFileSync(callsFile, "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { cmd: string; args: string[] });
+    const runCall = calls.find((c) => c.cmd === "codex" && c.args.includes("exec"));
+    assert.ok(runCall, `expected the run to use codex, got ${JSON.stringify(calls)}`);
+    assert.ok(runCall.args.includes("gpt-5"), "selected model reaches the chosen runner");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((r) => child.once("exit", r));
+  }
 });
