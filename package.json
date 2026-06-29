@@ -15,7 +15,7 @@
     "dev": "bash scripts/dev.sh",
     "ext": "bash scripts/extension-path.sh",
     "desktop": "pnpm --filter ./apps/web build && pnpm --filter ./apps/desktop start",
-    "desktop:dev": "DEZIN_DEV_URL=http://localhost:${DEZIN_WEB_PORT:-6273} pnpm --filter ./apps/desktop start",
+    "desktop:dev": "DEZIN_DEV=1 pnpm --filter ./apps/desktop start",
     "test": "bash scripts/test-all.sh",
     "test:quality": "pnpm --filter @dezin/quality test",
     "typecheck": "bash scripts/typecheck.sh",

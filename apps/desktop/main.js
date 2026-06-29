@@ -10,9 +10,13 @@ const { join, dirname } = require("node:path");
 const ROOT = join(__dirname, "..", "..");
 const DATA_DIR = process.env.DEZIN_DATA_DIR || join(ROOT, ".dezin", "data");
 const PORTFILE = join(ROOT, ".dezin", "desktop-daemon.json");
-// Set DEZIN_DEV_URL=http://localhost:6273 to load the Vite dev server (assumes
-// `npm run dev` is running) instead of spawning the bundled daemon.
+const WEB_PORTFILE = join(ROOT, ".dezin", "web.json");
+// Dev mode loads the Vite dev server instead of spawning the bundled daemon.
+// DEZIN_DEV_URL pins an explicit URL; DEZIN_DEV=1 discovers Vite's actual port
+// from .dezin/web.json (Vite auto-falls-back if its preferred port is taken).
+// Either way assumes `pnpm dev` is running.
 const DEV_URL = process.env.DEZIN_DEV_URL || "";
+const DEV = process.env.DEZIN_DEV === "1";
 
 let daemon = null;
 let win = null;
@@ -96,6 +100,23 @@ async function waitForDaemon(timeoutMs = 20000) {
   return null;
 }
 
+// Dev: poll for the Vite portfile (.dezin/web.json), written by webPortfilePlugin
+// with whatever port Vite actually bound — so a port-conflict fallback stays in sync.
+async function waitForWebUrl(timeoutMs = 20000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (existsSync(WEB_PORTFILE)) {
+      try {
+        return JSON.parse(readFileSync(WEB_PORTFILE, "utf8")).url;
+      } catch {
+        /* not written fully yet */
+      }
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return null;
+}
+
 async function createWindow() {
   win = new BrowserWindow({
     width: 1440,
@@ -113,6 +134,14 @@ async function createWindow() {
   });
 
   let url = DEV_URL;
+  if (!url && DEV) {
+    url = await waitForWebUrl();
+    if (!url) {
+      dialog.showErrorBox("Dezin", "Couldn't find the Vite dev server — run `pnpm dev` first.");
+      app.quit();
+      return;
+    }
+  }
   if (!url) {
     startDaemon();
     url = await waitForDaemon();
