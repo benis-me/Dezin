@@ -102,7 +102,7 @@ export function DesignSystemNewScreen() {
           if (names.length) setAssets((a) => [...a, ...names]);
         }}
       />
-      <div className="app-drag titlebar-pad-left flex h-12 shrink-0 items-center gap-2.5 border-b border-border px-4">
+      <div className="app-drag flex h-12 shrink-0 items-center gap-2.5 border-b border-border px-4">
         <button
           type="button"
           aria-label="Back to design systems"

@@ -118,12 +118,12 @@ export function DesignSystemDetailScreen({ id, embedded = false }: { id: string;
   });
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-w-0 flex-1 flex-col">
       <style dangerouslySetInnerHTML={{ __html: scopedTokens(detail.tokensCss, scope) }} />
       {/* Top bar */}
       <div
         className={`flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border px-4 ${
-          embedded ? "pr-12" : "app-drag titlebar-pad-left"
+          embedded ? "pr-12" : "app-drag"
         }`}
       >
         <div className="flex min-w-0 items-center gap-2.5">
@@ -183,7 +183,7 @@ export function DesignSystemDetailScreen({ id, embedded = false }: { id: string;
 
         {/* Right content */}
         <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
-          <div className="max-w-5xl space-y-12 px-8 py-8">
+          <div className="max-w-7xl space-y-12 px-8 py-8">
             <Section id="overview" label="Overview" icon={BookOpen}>
               <p className="max-w-prose text-[15px] leading-relaxed text-foreground-2">{detail.summary}</p>
               {/* Brand lockup on light + dark */}
