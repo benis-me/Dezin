@@ -10,31 +10,19 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GENERIC_AGENTS } from "../../../packages/agent/src/index.ts";
+import { getProvider } from "../../../packages/agent/src/index.ts";
 
 const ANALYZE_PROMPT =
   "Look at the design screenshot saved as reference.png in this folder. Write ONE concise paragraph (2 to 4 sentences, plain text, no preamble, no markdown, no lists, no code) describing it as a recreation brief for rebuilding it as a responsive web page: its overall layout, type treatment, colour system, key components, and mood. Do not create, edit, or write any files — only print the paragraph.";
 
-/** A fast, non-thinking model per agent for a quick pass (omitted when unknown). */
-const FAST_MODEL: Record<string, string> = { claude: "claude-haiku-4-5", codebuddy: "claude-haiku-4.5" };
-
-function argvFor(command: string, model: string | undefined): string[] {
-  // Claude and CodeBuddy (a Claude-Code fork) share the same headless invocation.
-  if (command === "claude" || command === "codebuddy") {
-    const args = ["-p", ANALYZE_PROMPT, "--permission-mode", "bypassPermissions"];
-    if (model) args.push("--model", model);
-    return args;
-  }
-  const cfg = GENERIC_AGENTS[command];
-  if (cfg) return cfg.buildArgs(model, ANALYZE_PROMPT);
-  return ["-p", ANALYZE_PROMPT];
-}
-
 export async function analyzeImage(command: string, base64: string, model?: string, timeoutMs = 90_000): Promise<string> {
+  const provider = getProvider(command);
+  const m = model ?? provider?.fastModel;
+  const args = provider ? provider.oneShotArgs(m, ANALYZE_PROMPT) : ["-p", ANALYZE_PROMPT];
   const dir = await mkdtemp(join(tmpdir(), "dezin-analyze-"));
   try {
     await writeFile(join(dir, "reference.png"), Buffer.from(base64, "base64"));
-    const out = await spawnText(command, argvFor(command, model ?? FAST_MODEL[command]), dir, timeoutMs);
+    const out = await spawnText(command, args, dir, timeoutMs);
     const brief = cleanBrief(out);
     if (!brief) throw new Error("the agent returned no brief");
     return brief;

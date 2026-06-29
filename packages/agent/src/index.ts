@@ -34,7 +34,17 @@ export {
 } from "./claude-runner.ts";
 export {
   GenericCliRunner,
-  GENERIC_AGENTS,
   type GenericAgentConfig,
   type GenericCliRunnerOptions,
 } from "./generic-runner.ts";
+export {
+  AGENT_PROVIDERS,
+  GENERIC_AGENTS,
+  getProvider,
+  probeVersion,
+  runCapture,
+  augmentedPath,
+  dedupModels,
+  type AgentProvider,
+  type VersionProbe,
+} from "./providers/index.ts";

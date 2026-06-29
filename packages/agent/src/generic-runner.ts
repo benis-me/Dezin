@@ -27,32 +27,8 @@ export interface GenericAgentConfig {
   viaStdin?: boolean;
 }
 
-/**
- * Per-CLI invocation, keyed by command. Each runs non-interactively, auto-approves
- * edits, applies changes in cwd, and accepts an optional model override.
- */
-export const GENERIC_AGENTS: Record<string, GenericAgentConfig> = {
-  // OpenAI Codex CLI — `codex exec` runs headless and applies edits directly.
-  codex: {
-    buildArgs: (m, p) => ["exec", "--skip-git-repo-check", "--sandbox", "danger-full-access", ...(m ? ["-m", m] : []), p],
-  },
-  // Gemini CLI — `-p` non-interactive, `--yolo` auto-approves tool calls.
-  gemini: {
-    buildArgs: (m, p) => ["--yolo", ...(m ? ["-m", m] : []), "-p", p],
-  },
-  // Cursor agent CLI — `-p`/--print headless mode.
-  "cursor-agent": {
-    buildArgs: (m, p) => [...(m ? ["--model", m] : []), "-p", p],
-  },
-  // Aider — one-shot `--message`, auto-confirm, leave git to Dezin.
-  aider: {
-    buildArgs: (m, p) => ["--yes-always", "--no-auto-commits", ...(m ? ["--model", m] : []), "--message", p],
-  },
-  // opencode — `run <prompt>` headless.
-  opencode: {
-    buildArgs: (m, p) => ["run", ...(m ? ["--model", m] : []), p],
-  },
-};
+// Per-CLI invocations now live with their providers (src/providers/*.ts); the back-compat
+// GENERIC_AGENTS map is derived there from the registry.
 
 export interface GenericCliRunnerOptions {
   id?: string;

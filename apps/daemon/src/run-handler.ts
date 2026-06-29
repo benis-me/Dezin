@@ -12,9 +12,8 @@ import { composeSystemPrompt } from "../../../packages/prompt/src/index.ts";
 import {
   generateArtifact,
   runTurnWithRetry,
-  ClaudeCodeRunner,
   GenericCliRunner,
-  GENERIC_AGENTS,
+  getProvider,
   type GenerateEvent,
   type AgentRunner,
 } from "../../../packages/agent/src/index.ts";
@@ -41,18 +40,14 @@ function skills(): SkillInfo[] {
 export function buildRunner(settings: Settings, override: { agentCommand?: string; model?: string } = {}): AgentRunner {
   const command = override.agentCommand || settings.agentCommand || "claude";
   const model = override.model || settings.model || undefined;
+
+  // Each agent's runner (stream-json for Claude/CodeBuddy, generic CLI for the rest) is
+  // defined by its provider; an unknown CLI falls back to a best-effort positional prompt.
+  const provider = getProvider(command);
+  if (provider) return provider.createRunner({ command, model });
+
   const base = command.split("/").pop() ?? command;
-
-  // Claude (and CodeBuddy, a Claude-Code fork that speaks the same stream-json protocol)
-  // get the rich stream-json runner (live tool activity); other agents use the generic CLI
-  // runner with their documented headless invocation.
-  if (base === "claude" || base === "codebuddy") return new ClaudeCodeRunner({ command, model });
-
-  const config = GENERIC_AGENTS[base] ?? {
-    // Unknown CLI: best-effort positional prompt.
-    buildArgs: (m: string | undefined, p: string) => [...(m ? ["--model", m] : []), p],
-  };
-  return new GenericCliRunner({ id: base, command, model, config });
+  return new GenericCliRunner({ id: base, command, model, config: { buildArgs: (m, p) => [...(m ? ["--model", m] : []), p] } });
 }
 
 /**
