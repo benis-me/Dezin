@@ -33,6 +33,14 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
   // First run does the full (deep) scan and waits for it — a slower first cold start is fine,
   // and the results then match a manual Rescan instead of the fast-path seed.
   const busy = loading || scanning;
+  const cbScanning = scanning && agents.some((a) => a.id === "codebuddy" && a.available);
+  const status = loading
+    ? "Detecting installed agents…"
+    : cbScanning
+      ? "Reading CodeBuddy's model list…"
+      : scanning
+        ? "Reading installed model lists…"
+        : "";
 
   const finish = async () => {
     setSaving(true);
@@ -70,8 +78,10 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
           {busy ? (
             <div className="flex flex-col items-center gap-3 py-10 text-center text-sm text-muted-foreground">
               <Spinner size={20} />
-              Scanning for installed agents and models…
-              <span className="text-xs text-muted-foreground/70">This can take a moment the first time.</span>
+              {status}
+              <span className="text-xs text-muted-foreground/70">
+                {cbScanning ? "CodeBuddy's list comes from its interactive UI — about 30 seconds." : "This can take a moment the first time."}
+              </span>
             </div>
           ) : available.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
