@@ -103,6 +103,7 @@ async function runVisualQa(
   brief: string,
   conversationHistory: VisualQaInput["conversationHistory"],
 ): Promise<QualityFinding[]> {
+  if (!settings.visualQaEnabled) return [];
   try {
     const runner = deps.visualQa ?? auditVisualArtifact;
     return await runner({ htmlPath, settings, agentCommand, model, brief, conversationHistory });

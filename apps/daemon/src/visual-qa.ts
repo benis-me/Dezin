@@ -342,6 +342,7 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
 }
 
 export async function auditVisualArtifact(input: VisualQaInput): Promise<QualityFinding[]> {
+  if (!input.settings.visualQaEnabled) return [];
   if (!existsSync(input.htmlPath)) return [];
   const screenshotPath = input.screenshotPath ?? join(dirname(input.htmlPath), ".visual-qa", "screenshot.png");
   const geometry = await collectGeometry(input.htmlPath, screenshotPath);

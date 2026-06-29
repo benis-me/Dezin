@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent } from "../src/visual-qa.ts";
+import { auditVisualArtifact, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent } from "../src/visual-qa.ts";
 
 test("findingsFromGeometry reports horizontal overflow, offscreen fixed controls, and clipped text", () => {
   const findings = findingsFromGeometry(
@@ -65,6 +65,25 @@ test("parseVisualReview normalizes model-returned findings", () => {
   assert.equal(findings[0]?.id, "visual-ai-review-1");
   assert.equal(findings[0]?.severity, "P1");
   assert.match(findings[0]?.message ?? "", /CTA overlaps/);
+});
+
+test("auditVisualArtifact is disabled by settings", async () => {
+  const findings = await auditVisualArtifact({
+    htmlPath: "/does/not/exist/index.html",
+    settings: {
+      agentCommand: "claude",
+      model: "",
+      apiBaseUrl: "",
+      apiKey: "",
+      defaultDesignSystemId: "modern-minimal",
+      customInstructions: "",
+      imageApiBaseUrl: "",
+      imageApiKey: "",
+      imageModel: "",
+      visualQaEnabled: false,
+    },
+  });
+  assert.deepEqual(findings, []);
 });
 
 test("reviewScreenshotWithAgent runs in the project directory with artifact and screenshot context", async () => {

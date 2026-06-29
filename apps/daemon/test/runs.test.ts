@@ -98,6 +98,7 @@ test("prototype run folds visual QA findings into score, result, and persisted r
   await withRunServer(
     new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }),
     async ({ base, store }) => {
+      store.updateSettings({ visualQaEnabled: true });
       const project = await createProject(base);
       const conversation = store.createConversation(project.id);
       store.addMessage(conversation.id, "user", "previous user request");
