@@ -156,6 +156,38 @@ const DSYS = [
   { id: "editorial", name: "Editorial", category: "", summary: "" },
 ];
 
+test("HomeScreen composer honors the saved agent + model, not the first available", async () => {
+  const settings = {
+    agentCommand: "codex", // NOT claude (the first available) — e.g. the agent chosen during onboarding
+    model: "gpt-5",
+    apiBaseUrl: "",
+    apiKey: "",
+    defaultDesignSystemId: "modern-minimal",
+    customInstructions: "",
+    imageApiBaseUrl: "",
+    imageApiKey: "",
+    imageModel: "",
+  };
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        listAgents: async () => AGENTS,
+        rescanAgents: async () => AGENTS,
+        getSettings: async () => settings,
+        listSkills: async () => SKILLS,
+        listDesignSystems: async () => DSYS,
+      })}
+    >
+      <AgentsProvider>
+        <HomeScreen projects={[]} />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+  const trigger = await screen.findByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(trigger).toHaveTextContent("Codex"));
+  expect(trigger).toHaveTextContent("gpt-5");
+});
+
 function renderSettings(over = {}) {
   const onToggleDark = vi.fn();
   const updateSettings = vi.fn(async (p: object) => ({

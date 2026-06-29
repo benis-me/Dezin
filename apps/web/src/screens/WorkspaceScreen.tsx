@@ -408,7 +408,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [variants, setVariants] = useState<Variant[]>([]);
   const [compare, setCompare] = useState<{ a: { url: string; label: string }; b: { url: string; label: string } } | null>(null);
   const { agents, rescan: rescanAgents } = useAgents();
-  const [settingsAgent, setSettingsAgent] = useState("");
+  const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
+  const [settingsModel, setSettingsModel] = useState("");
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [diff, setDiff] = useState<{ label: string; lines: DiffLine[] } | null>(null);
@@ -646,19 +647,30 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   useEffect(() => {
     let alive = true;
-    void api.getSettings().then((s) => alive && setSettingsAgent(s?.agentCommand ?? "")).catch(() => {});
+    void api
+      .getSettings()
+      .then((s) => {
+        if (!alive) return;
+        setSettingsAgent(s?.agentCommand ?? "");
+        setSettingsModel(s?.model ?? "");
+      })
+      .catch(() => alive && setSettingsAgent(""));
     return () => {
       alive = false;
     };
   }, [api]);
 
-  // Default the composer to the configured agent (or first available) once the scan resolves.
+  // Default the composer to the saved agent + model — only once settings have loaded, so the
+  // scan resolving first doesn't lock it onto the first available agent. A pending hand-off
+  // from Home or a manual pick (runAgent already set) is preserved.
   useEffect(() => {
+    if (settingsAgent === null) return;
     const avail = agents.filter((a) => a.available);
     if (!avail.length) return;
-    const preferred = settingsAgent && avail.some((a) => a.command === settingsAgent) ? settingsAgent : avail[0]!.command;
-    setRunAgent((cur) => cur || preferred);
-  }, [agents, settingsAgent]);
+    const useSaved = settingsAgent !== "" && avail.some((a) => a.command === settingsAgent);
+    setRunAgent((cur) => cur || (useSaved ? settingsAgent : avail[0]!.command));
+    if (useSaved && settingsModel) setRunModel((cur) => cur || settingsModel);
+  }, [agents, settingsAgent, settingsModel]);
 
   // Rehydrate the project's conversations + latest transcript, then run any pending brief.
   useEffect(() => {

@@ -116,7 +116,8 @@ export function HomeScreen({
   const [skillId, setSkillId] = useState(DEFAULT_SKILL);
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
   const { agents, rescan: rescanAgents } = useAgents();
-  const [settingsAgent, setSettingsAgent] = useState("");
+  const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
+  const [settingsModel, setSettingsModel] = useState("");
   const [homeAgent, setHomeAgent] = useState("");
   const [homeModel, setHomeModel] = useState("");
   const [designSystemId, setDesignSystemId] = useState(DEFAULT_DS);
@@ -206,20 +207,30 @@ export function HomeScreen({
         if (d.length && !d.some((x) => x.id === DEFAULT_DS)) setDesignSystemId(d[0]!.id);
       })
       .catch(() => {});
-    void api.getSettings().then((s) => alive && setSettingsAgent(s?.agentCommand ?? "")).catch(() => {});
+    void api
+      .getSettings()
+      .then((s) => {
+        if (!alive) return;
+        setSettingsAgent(s?.agentCommand ?? "");
+        setSettingsModel(s?.model ?? "");
+      })
+      .catch(() => alive && setSettingsAgent(""));
     return () => {
       alive = false;
     };
   }, [api]);
 
-  // Default the home agent once the shared scan resolves: the saved agent if installed, else
-  // the first available one.
+  // Default the composer to the saved agent + model — but only once settings have loaded, so
+  // the scan resolving first doesn't lock it onto the first available agent. A manual pick
+  // (homeAgent already set) is preserved.
   useEffect(() => {
+    if (settingsAgent === null) return;
     const avail = agents.filter((a) => a.available);
     if (!avail.length) return;
-    const preferred = settingsAgent && avail.some((a) => a.command === settingsAgent) ? settingsAgent : avail[0]!.command;
-    setHomeAgent((cur) => cur || preferred);
-  }, [agents, settingsAgent]);
+    const useSaved = settingsAgent !== "" && avail.some((a) => a.command === settingsAgent);
+    setHomeAgent((cur) => cur || (useSaved ? settingsAgent : avail[0]!.command));
+    if (useSaved && settingsModel) setHomeModel((cur) => cur || settingsModel);
+  }, [agents, settingsAgent, settingsModel]);
 
   const addImages = async (files: FileList | null): Promise<void> => {
     if (!files) return;
