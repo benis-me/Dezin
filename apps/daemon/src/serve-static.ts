@@ -1,6 +1,7 @@
 /**
- * Serve a generated artifact file from a project's on-disk directory, with
- * path-traversal protection. Artifacts live at <dataDir>/projects/<id>/...
+ * Serve a generated artifact file from an on-disk artifact directory, with
+ * path-traversal protection. Prototype artifacts live at <dataDir>/projects/<id>/...
+ * while Standard variants may live in git worktrees.
  */
 
 import { readFile, stat } from "node:fs/promises";
@@ -49,36 +50,11 @@ export function safeJoin(root: string, rel: string): string | null {
   return target;
 }
 
-export async function serveProjectFile(
-  res: ServerResponse,
-  dataDir: string,
-  projectId: string,
-  relPath: string,
-): Promise<void> {
-  return serveFromBase(res, projectDir(dataDir, projectId), relPath);
+export async function serveProjectFile(res: ServerResponse, dataDir: string, projectId: string, relPath: string): Promise<void> {
+  return serveFileFromBase(res, projectDir(dataDir, projectId), relPath);
 }
 
-/** Serve a branch's artifact: the active branch lives at the root, others under .variants/<id>/. */
-export async function serveVariantFile(
-  res: ServerResponse,
-  dataDir: string,
-  projectId: string,
-  variantId: string,
-  activeVariantId: string | null,
-  relPath: string,
-): Promise<void> {
-  const base =
-    variantId === activeVariantId
-      ? projectDir(dataDir, projectId)
-      : safeJoin(projectDir(dataDir, projectId), join(".variants", variantId));
-  if (!base) {
-    sendError(res, 400, "invalid path");
-    return;
-  }
-  return serveFromBase(res, base, relPath);
-}
-
-async function serveFromBase(res: ServerResponse, root: string, relPath: string): Promise<void> {
+export async function serveFileFromBase(res: ServerResponse, root: string, relPath: string): Promise<void> {
   const rel = relPath === "" ? "index.html" : relPath;
   const target = safeJoin(root, rel);
   if (!target) {

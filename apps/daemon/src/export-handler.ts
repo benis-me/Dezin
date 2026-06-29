@@ -7,9 +7,9 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import type { ServerResponse } from "node:http";
 import { sendError } from "./http-util.ts";
-import { projectDir } from "./serve-static.ts";
 import { createZip, type ZipEntry } from "./zip.ts";
 import type { AppDeps } from "./app.ts";
+import { activeArtifactDir } from "./variant-workspaces.ts";
 
 export interface FileRef {
   rel: string;
@@ -42,9 +42,10 @@ export async function handleExport(
   deps: AppDeps,
 ): Promise<void> {
   const id = params.id!;
-  if (!deps.store.getProject(id)) return sendError(res, 404, "project not found");
+  const project = deps.store.getProject(id);
+  if (!project) return sendError(res, 404, "project not found");
 
-  const dir = projectDir(deps.dataDir, id);
+  const dir = await activeArtifactDir(deps, project);
   const files = await walkFiles(dir);
   if (files.length === 0) return sendError(res, 404, "no artifacts to export");
 

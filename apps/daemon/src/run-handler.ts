@@ -29,6 +29,7 @@ import { ensureDevServer, gitCommit, workingTreeFingerprint } from "./project-ru
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
+import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
 import type { AppDeps } from "./app.ts";
 
@@ -88,6 +89,7 @@ interface RunBody {
   maxRounds?: number;
   agentCommand?: string;
   model?: string;
+  variantId?: string;
 }
 
 function resultMessage(text: string, meta: Record<string, unknown>): string {
@@ -147,6 +149,21 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   if (!conversation) return sendError(res, 404, "conversation not found");
   if (conversation.projectId !== project.id) return sendError(res, 400, "conversation does not belong to project");
 
+  const mainVariant = store.ensureMainVariant(project.id);
+  const targetVariantId = body.variantId ?? store.getActiveVariantId(project.id) ?? mainVariant.id;
+  const targetVariant = store.getVariant(targetVariantId);
+  if (!targetVariant || targetVariant.projectId !== project.id) return sendError(res, 404, "variant not found");
+  if (project.mode !== "standard" && body.variantId && body.variantId !== store.getActiveVariantId(project.id)) {
+    return sendError(res, 409, "targeted variant runs are only supported in standard mode");
+  }
+  let dir: string;
+  try {
+    dir = project.mode === "standard" ? await standardVariantArtifactDir(deps, project.id, targetVariantId) : projectDir(deps.dataDir, project.id);
+    await mkdir(dir, { recursive: true });
+  } catch (err) {
+    return sendError(res, 409, err instanceof Error ? err.message : "variant workspace unavailable");
+  }
+
   // Resolve the active design system (the project's, else the settings default).
   const registry = deps.designRegistry ?? defaultRegistry();
   const designSystemId = project.designSystemId ?? settings.defaultDesignSystemId;
@@ -176,7 +193,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
   store.addMessage(conversation.id, "user", brief);
-  const run = store.createRun(project.id, conversation.id);
+  const run = store.createRun(project.id, conversation.id, targetVariantId);
   store.updateRun(run.id, { status: "running" });
 
   // Open the SSE stream + register the run with the broker. Events are buffered + persisted to
@@ -204,10 +221,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // On disconnect just stop writing — do NOT cancel; the run keeps going for reattach.
   req.on("close", unsubscribe);
   const sse = (event: unknown): void => pushEvent(run.id, event);
-  sse({ type: "run-start", runId: run.id, conversationId: conversation.id });
+  sse({ type: "run-start", runId: run.id, conversationId: conversation.id, variantId: targetVariantId });
 
-  const dir = projectDir(deps.dataDir, project.id);
-  await mkdir(dir, { recursive: true });
   const origin = requestOrigin(req);
 
   // Record the agent's tool steps so the conversation keeps a permanent process record.
@@ -260,7 +275,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         let renderUrl: string | undefined;
         if (!deps.visualQa) {
           try {
-            renderUrl = (await ensureDevServer(project.id, dir)).url;
+            renderUrl = (await ensureDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId))).url;
           } catch (err) {
             visualFindings = [
               {

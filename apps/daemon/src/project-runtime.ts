@@ -105,11 +105,11 @@ function freePort(): Promise<number> {
  * loads this URL directly (cross-origin) with allow-same-origin, so JSX is
  * transpiled and there is no CORS — no daemon proxy in the path.
  */
-export async function ensureDevServer(projectId: string, projectDir: string): Promise<{ url: string }> {
-  let rt = runtimes.get(projectId);
+export async function ensureDevServer(projectId: string, projectDir: string, runtimeKey = projectId): Promise<{ url: string }> {
+  let rt = runtimes.get(runtimeKey);
   if (!rt) {
     rt = { phase: existsSync(join(projectDir, "node_modules")) ? "ready" : "installing" };
-    runtimes.set(projectId, rt);
+    runtimes.set(runtimeKey, rt);
   }
   if (!existsSync(join(projectDir, "node_modules"))) throw new Error("dependencies not installed yet");
   if (rt.dev && !rt.dev.proc.killed) return { url: rt.dev.url };

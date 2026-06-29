@@ -1380,7 +1380,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
-  // Switching/forking a branch swaps the artifact at the project root — reload everything.
+  // Switching/forking a branch changes the active artifact source — reload everything.
   const reloadArtifact = (scopeVariants: Variant[] = variants): void => {
     void loadFiles();
     void loadRuns(scopeVariants);
