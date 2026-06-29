@@ -5,11 +5,15 @@ import { HomeScreen } from "./HomeScreen.tsx";
 import { DesignSystemsScreen } from "./DesignSystemsScreen.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { SettingsScreen } from "./SettingsScreen.tsx";
+import { Shell } from "../components/Shell.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 
-afterEach(cleanup);
+afterEach(() => {
+  localStorage.removeItem("dezin.shell.sidebar.width");
+  cleanup();
+});
 
 const SKILLS = [
   { id: "frontend-design", name: "Frontend design", description: "d", mode: "prototype", triggers: [], designSystem: true },
@@ -25,6 +29,22 @@ test("HomeScreen shows an empty state with no projects", () => {
   expect(screen.getByText(/No projects yet/i)).toBeInTheDocument();
 });
 
+test("Shell sidebar can be resized outside project pages", () => {
+  window.history.pushState({}, "", "/");
+  render(
+    <Shell dark={false} onToggleDark={() => {}} onOpenSettings={() => {}}>
+      <div>Content</div>
+    </Shell>,
+  );
+  const resize = screen.getByRole("separator", { name: "Resize app sidebar" });
+  expect(resize).toHaveAttribute("data-separator");
+  expect(resize).toHaveClass("dezin-resize-separator", "app-no-drag");
+  expect(resize.className).not.toContain("primary");
+  expect(resize.className).not.toContain("focus-visible");
+  expect(resize.className).not.toContain("w-1");
+  expect(screen.queryByRole("button", { name: "Browser extension" })).toBeNull();
+});
+
 test("HomeScreen lists projects and opens them", () => {
   const onOpenProject = vi.fn();
   renderWithApi(<HomeScreen projects={[project("p1", "Pricing page")]} onOpenProject={onOpenProject} />, {
@@ -32,6 +52,17 @@ test("HomeScreen lists projects and opens them", () => {
   });
   fireEvent.click(screen.getByText("Pricing page"));
   expect(onOpenProject).toHaveBeenCalledWith("p1");
+});
+
+test("HomeScreen project toolbar orders sort, layout, then search", () => {
+  renderWithApi(<HomeScreen projects={[project("p1", "Pricing page")]} />, {
+    listSkills: async () => SKILLS,
+  });
+  const sort = screen.getByRole("combobox", { name: "Sort projects" });
+  const layout = screen.getByRole("group", { name: "Layout" });
+  const search = screen.getByLabelText("Search projects");
+  expect(sort.compareDocumentPosition(layout) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(layout.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
 test("HomeScreen Build passes the brief, skillId, and designSystemId", async () => {
@@ -64,7 +95,10 @@ test("DesignSystemsScreen loads systems from the daemon", async () => {
       { id: "editorial", name: "Editorial", category: "Editorial & Print", summary: "print" },
     ],
   });
-  expect(screen.getByRole("heading", { name: "Design systems" })).toBeInTheDocument();
+  const heading = screen.getByRole("heading", { name: "Design systems" });
+  expect(heading).toHaveClass("text-2xl", "font-semibold", "tracking-tight", "text-foreground");
+  const subtitle = screen.getByText(/The brand visual language each artifact is built from/i);
+  expect(subtitle).toHaveClass("mt-1.5", "text-sm", "leading-relaxed", "text-muted-foreground");
   expect(await screen.findByText("Modern Minimal")).toBeInTheDocument();
   expect(screen.getByText("Editorial")).toBeInTheDocument();
 });
@@ -105,6 +139,7 @@ test("DesignSystemDetailScreen loads a system and sets it as default", async () 
   }));
   renderWithApi(<DesignSystemDetailScreen id="modern-minimal" />, { getDesignSystem, updateSettings });
   await screen.findByRole("heading", { name: "Modern Minimal" });
+  expect(screen.getByRole("separator", { name: "Resize spec navigation" })).toHaveAttribute("data-separator");
   expect(getDesignSystem).toHaveBeenCalledWith("modern-minimal");
   fireEvent.click(await screen.findByRole("button", { name: /Set default/ }));
   await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ defaultDesignSystemId: "modern-minimal" }));

@@ -74,8 +74,8 @@ export function DesignSystemsScreen() {
       <div className="mx-auto max-w-5xl">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-title font-semibold tracking-tight">Design systems</h1>
-            <p className="mt-2 max-w-xl text-[15px] text-muted-foreground">
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Design systems</h1>
+            <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-muted-foreground">
               The brand visual language each artifact is built from. {systems ? `${systems.length} systems.` : ""}
             </p>
           </div>

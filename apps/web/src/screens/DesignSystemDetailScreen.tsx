@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import { ChevronLeft, Check, Wand2, Palette, Type as TypeIcon, Ruler, Component, BookOpen } from "lucide-react";
-import { Badge, Button, Loading, ResizeHandle } from "../components/ui/index.ts";
+import { Badge, Button, Loading } from "../components/ui/index.ts";
 import { Markdown } from "../components/Markdown.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
 import { setPendingComposer } from "../lib/pending-composer.ts";
 import { groupTokens, scopedTokens, tokenScope, type Token } from "../lib/ds-tokens.ts";
+import { readPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import type { DesignSystemDetail } from "../lib/api.ts";
 
 const NAV = [
@@ -16,6 +18,9 @@ const NAV = [
   { id: "scale", label: "Spacing & Radii", icon: Ruler },
   { id: "components", label: "Components", icon: Component },
 ];
+const DESIGN_SYSTEM_NAV_WIDTH_KEY = "dezin.design-system-detail.nav.width";
+const DESIGN_SYSTEM_NAV_PANEL = "nav";
+const DESIGN_SYSTEM_CONTENT_PANEL = "content";
 
 function stripFrontHeading(md: string): string {
   return md.replace(/^#\s+\S.*\n+(>\s.*\n+)?/, "").trim();
@@ -52,8 +57,7 @@ export function DesignSystemDetailScreen({ id, embedded = false }: { id: string;
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState("overview");
   const scrollRef = useRef<HTMLDivElement>(null);
-  const splitRef = useRef<HTMLDivElement>(null);
-  const [navSplit, setNavSplit] = useState(0.18);
+  const navPercent = readPanelPercent(DESIGN_SYSTEM_NAV_WIDTH_KEY, 18, 12, 32);
 
   useEffect(() => {
     let alive = true;
@@ -152,62 +156,70 @@ export function DesignSystemDetailScreen({ id, embedded = false }: { id: string;
         </div>
       </div>
 
-      <div ref={splitRef} className="flex min-h-0 flex-1">
+      <Group
+        id="dezin-design-system-detail-layout"
+        className="min-h-0 flex-1"
+        defaultLayout={twoPanelLayout(DESIGN_SYSTEM_NAV_PANEL, navPercent, DESIGN_SYSTEM_CONTENT_PANEL)}
+        onLayoutChanged={(layout) => savePanelFraction(DESIGN_SYSTEM_NAV_WIDTH_KEY, layout, DESIGN_SYSTEM_NAV_PANEL)}
+        resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
+      >
         {/* Left nav */}
-        <nav
-          aria-label="Spec sections"
-          style={{ width: `${navSplit * 100}%` }}
-          className="hidden min-w-[170px] shrink-0 flex-col gap-0.5 p-3 sm:flex"
-        >
-          {NAV.map((n) => {
-            const Icon = n.icon;
-            const on = active === n.id;
-            return (
-              <button
-                key={n.id}
-                type="button"
-                onClick={() => goTo(n.id)}
-                aria-current={on ? "true" : undefined}
-                className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
-                  on ? "bg-surface-2 font-medium text-foreground" : "text-muted-foreground hover:bg-surface-2/60 hover:text-foreground"
-                }`}
-              >
-                <Icon size={15} strokeWidth={1.75} className={on ? "text-brand" : ""} />
-                {n.label}
-              </button>
-            );
-          })}
-        </nav>
+        <Panel id={DESIGN_SYSTEM_NAV_PANEL} minSize="170px" maxSize="320px" groupResizeBehavior="preserve-pixel-size">
+          <nav
+            aria-label="Spec sections"
+            className="flex h-full min-w-0 flex-col gap-0.5 p-3"
+          >
+            {NAV.map((n) => {
+              const Icon = n.icon;
+              const on = active === n.id;
+              return (
+                <button
+                  key={n.id}
+                  type="button"
+                  onClick={() => goTo(n.id)}
+                  aria-current={on ? "true" : undefined}
+                  className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
+                    on ? "bg-surface-2 font-medium text-foreground" : "text-muted-foreground hover:bg-surface-2/60 hover:text-foreground"
+                  }`}
+                >
+                  <Icon size={15} strokeWidth={1.75} className={on ? "text-brand" : ""} />
+                  {n.label}
+                </button>
+              );
+            })}
+          </nav>
+        </Panel>
 
-        <ResizeHandle containerRef={splitRef} onResize={setNavSplit} min={0.12} max={0.32} />
+        <Separator aria-label="Resize spec navigation" className={RESIZE_SEPARATOR_CLASS} />
 
         {/* Right content */}
-        <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
-          <div className="max-w-7xl space-y-12 px-8 py-8">
-            <Section id="overview" label="Overview" icon={BookOpen}>
-              <p className="max-w-prose text-[15px] leading-relaxed text-foreground-2">{detail.summary}</p>
-              {/* Brand lockup on light + dark */}
-              <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                {(["light", "dark"] as const).map((m) => (
-                  <div key={m} className="overflow-hidden rounded-xl border border-border">
-                    <div
-                      className={`${scope} grid h-28 place-items-center`}
-                      style={{ background: m === "dark" ? "var(--fg)" : "var(--bg)", color: m === "dark" ? "var(--bg)" : "var(--fg)" }}
-                    >
-                      <span className="text-2xl font-semibold tracking-tight" style={{ fontFamily: "var(--font-display)" }}>
-                        {detail.name}
-                      </span>
+        <Panel id={DESIGN_SYSTEM_CONTENT_PANEL} minSize="360px">
+          <div ref={scrollRef} className="h-full min-w-0 overflow-auto">
+            <div className="max-w-7xl space-y-12 px-8 py-8">
+              <Section id="overview" label="Overview" icon={BookOpen}>
+                <p className="max-w-prose text-[15px] leading-relaxed text-foreground-2">{detail.summary}</p>
+                {/* Brand lockup on light + dark */}
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  {(["light", "dark"] as const).map((m) => (
+                    <div key={m} className="overflow-hidden rounded-xl border border-border">
+                      <div
+                        className={`${scope} grid h-28 place-items-center`}
+                        style={{ background: m === "dark" ? "var(--fg)" : "var(--bg)", color: m === "dark" ? "var(--bg)" : "var(--fg)" }}
+                      >
+                        <span className="text-2xl font-semibold tracking-tight" style={{ fontFamily: "var(--font-display)" }}>
+                          {detail.name}
+                        </span>
+                      </div>
+                      <div className="label-mono border-t border-border px-3 py-1.5">On {m}</div>
                     </div>
-                    <div className="label-mono border-t border-border px-3 py-1.5">On {m}</div>
-                  </div>
-                ))}
-              </div>
-              {stripFrontHeading(detail.designMd) ? (
-                <div className="mt-6 border-t border-border pt-6">
-                  <Markdown>{stripFrontHeading(detail.designMd)}</Markdown>
+                  ))}
                 </div>
-              ) : null}
-            </Section>
+                {stripFrontHeading(detail.designMd) ? (
+                  <div className="mt-6 border-t border-border pt-6">
+                    <Markdown>{stripFrontHeading(detail.designMd)}</Markdown>
+                  </div>
+                ) : null}
+              </Section>
 
             <Section id="colors" label="Colors" icon={Palette}>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
@@ -308,9 +320,10 @@ export function DesignSystemDetailScreen({ id, embedded = false }: { id: string;
                 </div>
               </div>
             </Section>
+            </div>
           </div>
-        </div>
-      </div>
+        </Panel>
+      </Group>
     </div>
   );
 }

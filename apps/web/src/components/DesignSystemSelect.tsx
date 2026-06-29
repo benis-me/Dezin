@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Shapes } from "lucide-react";
-import { Badge, Button, Popover, PopoverContent, PopoverTrigger, ScrollArea, SearchInput } from "./ui/index.ts";
+import { Badge, Button, Popover, PopoverContent, PopoverTrigger, ScrollArea, SearchInput, Tabs } from "./ui/index.ts";
 import { BrandGlyph, DesignSystemMark, hasBrandLogo } from "./design-system-logos.tsx";
 import { navigate } from "../router.tsx";
 import type { DesignSystemCard, Swatch } from "../lib/api.ts";
@@ -177,22 +177,18 @@ export function DesignSystemSelect({
               Create
             </Button>
           </div>
-          <div className="mx-1 mb-1 flex shrink-0 items-center gap-0.5 rounded-md bg-surface-2/70 p-0.5">
-            {(["built-in", "custom"] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setTab(t)}
-                className={`flex-1 rounded-[5px] py-1 text-xs font-medium transition-colors ${
-                  tab === t ? "bg-card text-foreground ring-1 ring-border" : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {t === "built-in" ? "Built-in" : "Custom"}
-              </button>
-            ))}
-          </div>
+          <Tabs
+            aria-label="Design system type"
+            className="mx-1 flex w-auto"
+            value={tab}
+            onChange={(v) => setTab(v as "built-in" | "custom")}
+            items={[
+              { value: "built-in", label: "Built-in" },
+              { value: "custom", label: "Custom" },
+            ]}
+          />
           <ScrollArea viewportClassName="max-h-[min(18rem,calc(var(--radix-popover-content-available-height,40rem)-8.5rem))]">
-          <ul className="px-1" onMouseLeave={() => setPreview(null)}>
+          <ul aria-label="Design systems" className="px-1 py-1" onMouseLeave={() => setPreview(null)}>
             {filtered.length === 0 ? (
               <li className="px-2 py-6 text-center text-sm text-muted-foreground">
                 No {tab === "custom" ? "custom systems yet" : "matches"}
@@ -223,14 +219,14 @@ export function DesignSystemSelect({
             )}
           </ul>
           </ScrollArea>
-          <div className="mt-1 flex shrink-0 items-center gap-2 border-t border-border px-2 pt-2">
+          <div className="flex shrink-0 items-center gap-2 border-t border-border/60 px-2">
             <button
               type="button"
               onClick={() => {
                 onChange("");
                 setOpen(false);
               }}
-              className="flex w-full items-center gap-2.5 rounded-lg px-1 py-1 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+              className="flex w-full items-center gap-2.5 rounded-lg px-1 py-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
             >
               <span className="grid size-6 shrink-0 place-items-center rounded-md border border-dashed border-border-strong/60">
                 <Shapes size={13} strokeWidth={1.75} />

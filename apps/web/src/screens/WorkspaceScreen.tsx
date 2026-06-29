@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, Plus, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Group, Panel, Separator } from "react-resizable-panels";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
@@ -19,6 +20,7 @@ import { navigate } from "../router.tsx";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
 import type { Conversation, Variant, DesignSystemCard, Message, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
+import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 
 const TABS = ["Preview", "Files", "Quality", "Versions"] as const;
 type Tab = (typeof TABS)[number];
@@ -33,6 +35,11 @@ const SEVERITY_STYLE: Record<string, string> = {
 };
 
 const SPLIT_KEY = "dezin.workspace.split";
+const FILES_SPLIT_KEY = "dezin.workspace.files.split";
+const WORKSPACE_CONVERSATION_PANEL = "conversation";
+const WORKSPACE_ARTIFACT_PANEL = "artifact";
+const FILES_BROWSER_PANEL = "browser";
+const FILES_PREVIEW_PANEL = "preview";
 const REPLAYABLE_RUN_STATUSES = new Set(["running", "pending", "cancelled", "failed"]);
 
 function queueKey(projectId: string): string {
@@ -484,16 +491,32 @@ function FilesPanel({
   running: boolean;
   onOpen: (path: string) => void;
 }) {
+  const browserPercent = readPanelPercent(FILES_SPLIT_KEY, 38, 22, 58);
+
   if (files.length === 0) return emptyPane(running ? "Generating…" : "No files yet. Run to generate.");
   return (
-    <div className="flex h-full bg-surface">
-      <div className="w-[38%] min-w-[220px] max-w-[360px] shrink-0 border-r border-border">
-        <FilesBrowser files={files} activeFile={activeFile} onOpen={onOpen} />
-      </div>
-      <div className="min-w-0 flex-1">
-        {activeFile ? <CodeView name={activeFile} text={fileText} /> : emptyPane("Select a file to preview")}
-      </div>
-    </div>
+    <Group
+      id="dezin-files-layout"
+      className="h-full bg-surface"
+      defaultLayout={twoPanelLayout(FILES_BROWSER_PANEL, browserPercent, FILES_PREVIEW_PANEL)}
+      onLayoutChanged={(layout) => savePanelFraction(FILES_SPLIT_KEY, layout, FILES_BROWSER_PANEL)}
+      resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
+    >
+      <Panel id={FILES_BROWSER_PANEL} minSize="200px" maxSize="480px" groupResizeBehavior="preserve-pixel-size">
+        <div className="h-full min-w-0">
+          <FilesBrowser files={files} activeFile={activeFile} onOpen={onOpen} />
+        </div>
+      </Panel>
+      <Separator
+        aria-label="Resize file browser"
+        className={RESIZE_SEPARATOR_CLASS}
+      />
+      <Panel id={FILES_PREVIEW_PANEL} minSize="240px">
+        <div className="h-full min-w-0">
+          {activeFile ? <CodeView name={activeFile} text={fileText} /> : emptyPane("Select a file to preview")}
+        </div>
+      </Panel>
+    </Group>
   );
 }
 
@@ -693,14 +716,13 @@ function emptyPane(label: string) {
   );
 }
 
-function readSplit(): number {
-  try {
-    const v = Number(localStorage.getItem(SPLIT_KEY));
-    if (v >= 0.24 && v <= 0.55) return v;
-  } catch {
-    /* ignore */
-  }
-  return 0.33;
+function ToolbarTooltip({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent sideOffset={2}>{label}</TooltipContent>
+    </Tooltip>
+  );
 }
 
 export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: string; onOpenSettings?: (section?: string) => void }) {
@@ -751,7 +773,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [diff, setDiff] = useState<{ label: string; lines: DiffLine[] } | null>(null);
-  const [split, setSplit] = useState(readSplit);
+  const workspaceConversationPercent =
+    readStoredPanelPercent(SPLIT_KEY, 24, 55) ??
+    panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 33, 24, 55);
   const msgId = useRef(0);
   const activeConv = useRef<string | null>(null);
   const modeRef = useRef<ProjectMode>("prototype");
@@ -764,7 +788,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const terminalEventRef = useRef(false);
   const liveQualityRef = useRef(false);
   const reattachedRunsRef = useRef<Set<string>>(new Set());
-  const splitRef = useRef<HTMLDivElement>(null);
 
   const setActive = (id: string | null) => {
     activeConv.current = id;
@@ -1515,32 +1538,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (previewSrc) setPreviewSrc(previewSrc.startsWith("http") ? `${previewSrc.split("?")[0]}?t=${Date.now()}` : `${api.previewUrl(projectId)}?t=${Date.now()}`);
   };
 
-  const startDrag = (e: ReactMouseEvent) => {
-    e.preventDefault();
-    const onMove = (ev: MouseEvent) => {
-      const el = splitRef.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0) return;
-      const frac = (ev.clientX - rect.left) / rect.width;
-      setSplit(Math.min(0.55, Math.max(0.24, frac)));
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      setSplit((s) => {
-        try {
-          localStorage.setItem(SPLIT_KEY, String(s));
-        } catch {
-          /* ignore */
-        }
-        return s;
-      });
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  };
-
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
   const visualFindings = lintFindings.filter(isVisualFinding);
@@ -1574,14 +1571,18 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
 
   return (
-    <div ref={splitRef} className="flex flex-1 overflow-hidden">
-      <section
-        aria-label="Conversation"
-        style={{ width: `${split * 100}%` }}
-        className="relative flex min-w-[320px] shrink-0 flex-col"
+    <>
+      <Group
+        id="dezin-workspace-layout"
+        className="flex-1"
+        defaultLayout={twoPanelLayout(WORKSPACE_CONVERSATION_PANEL, workspaceConversationPercent, WORKSPACE_ARTIFACT_PANEL)}
+        onLayoutChanged={(layout) => savePanelFraction(SPLIT_KEY, layout, WORKSPACE_CONVERSATION_PANEL)}
+        resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
       >
-        <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
-          <div className="flex min-w-0 items-center gap-1.5">
+        <Panel id={WORKSPACE_CONVERSATION_PANEL} minSize="320px" maxSize="55%">
+          <section aria-label="Conversation" className="relative flex h-full min-w-0 flex-col">
+            <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
+          <div className="flex min-w-0 items-center gap-1">
             <button
               type="button"
               aria-label="Back to home"
@@ -1619,19 +1620,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           </div>
           {isExisting ? (
             <div className="flex shrink-0 items-center gap-0.5">
-              {conversations.length > 0 ? (
-                <ConversationSelect
-                  conversations={conversations}
-                  activeId={activeConvId}
-                  onSwitch={(id) => void switchTo(id)}
-                  onRename={renameConv}
-                  onDelete={(id) => void deleteConv(id)}
-                  label={convLabel}
-                />
-              ) : null}
-              <IconButton aria-label="New conversation" title="New conversation" onClick={() => void newConversation()}>
-                <Plus size={15} strokeWidth={2} />
-              </IconButton>
+              <ConversationSelect
+                conversations={conversations}
+                activeId={activeConvId}
+                onSwitch={(id) => void switchTo(id)}
+                onRename={renameConv}
+                onDelete={(id) => void deleteConv(id)}
+                onCreate={() => void newConversation()}
+                label={convLabel}
+              />
             </div>
           ) : null}
         </div>
@@ -1879,76 +1876,91 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           </div>
           </div>
         </div>
-      </section>
+        </section>
+      </Panel>
 
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize panels"
-        onMouseDown={startDrag}
-        className="w-px shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary"
-      />
+      <Separator aria-label="Resize panels" className={RESIZE_SEPARATOR_CLASS} />
 
-      <section aria-label="Artifact" className="flex flex-1 flex-col">
-        <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2">
-          <Tabs aria-label="Artifact views" items={tabItems} value={tab} onChange={(v) => setTab(v as Tab)} />
-          <div className="flex items-center gap-1">
-            {tab === "Preview" && previewSrc ? (
-              <>
-                <Segmented
-                  ariaLabel="Device"
-                  size="sm"
-                  value={device}
-                  onChange={setDevice}
-                  className="mr-1"
-                  options={[
-                    { value: "desktop", title: "Desktop", icon: <Monitor size={14} strokeWidth={1.75} /> },
-                    { value: "tablet", title: "Tablet", icon: <Tablet size={14} strokeWidth={1.75} /> },
-                    { value: "mobile", title: "Mobile", icon: <Smartphone size={14} strokeWidth={1.75} /> },
-                  ]}
-                />
-                <IconButton
-                  aria-label="Select an element"
-                  title={selectMode ? "Click an element in the preview" : "Select an element to refine"}
-                  onClick={() => setSelectMode((v) => !v)}
-                  className={selectMode ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}
-                >
-                  <MousePointerClick size={15} strokeWidth={1.75} />
-                </IconButton>
-                <IconButton aria-label="Refresh preview" title="Refresh preview" onClick={refreshPreview}>
-                  <motion.span animate={{ rotate: refreshSpin * 360 }} transition={{ duration: 0.5, ease: [0.25, 1, 0.5, 1] }}>
-                    <RotateCw size={15} strokeWidth={1.75} />
-                  </motion.span>
-                </IconButton>
-              </>
-            ) : null}
-            {canExport ? (
-              <a
-                href={api.exportUrl(projectId)}
-                download
-                className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
-              >
-                <Download size={14} strokeWidth={1.75} />
-                Export
-              </a>
-            ) : null}
-            <IconButton
-              aria-label="Full screen preview"
-              title="Full screen"
-              disabled={!previewSrc}
-              onClick={() => setFullscreen(true)}
-            >
-              <Maximize2 size={15} strokeWidth={1.75} />
-            </IconButton>
-            {onOpenSettings ? (
-              <>
-                <span className="mx-0.5 h-5 w-px bg-border" aria-hidden />
-                <IconButton aria-label="Settings" title="Settings" onClick={() => onOpenSettings()}>
-                  <Settings size={15} strokeWidth={1.75} />
-                </IconButton>
-              </>
-            ) : null}
-          </div>
+      <Panel id={WORKSPACE_ARTIFACT_PANEL} minSize="360px">
+        <section aria-label="Artifact" className="flex h-full min-w-0 flex-col">
+          <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
+          <Tabs
+            aria-label="Artifact views"
+            className="[&_[role=tab]]:px-2.5"
+            items={tabItems}
+            value={tab}
+            onChange={(v) => setTab(v as Tab)}
+            variant="plain"
+          />
+          <TooltipProvider delayDuration={120}>
+            <div className="flex items-center gap-1">
+              {tab === "Preview" && previewSrc ? (
+                <>
+                  <Segmented
+                    ariaLabel="Device"
+                    size="xs"
+                    value={device}
+                    onChange={setDevice}
+                    className="app-no-drag mr-1"
+                    options={[
+                      { value: "desktop", title: "Desktop", icon: <Monitor size={13} strokeWidth={1.75} /> },
+                      { value: "tablet", title: "Tablet", icon: <Tablet size={13} strokeWidth={1.75} /> },
+                      { value: "mobile", title: "Mobile", icon: <Smartphone size={13} strokeWidth={1.75} /> },
+                    ]}
+                  />
+                  <ToolbarTooltip label={selectMode ? "Click an element in the preview" : "Select an element to refine"}>
+                    <IconButton
+                      aria-label="Select an element"
+                      onClick={() => setSelectMode((v) => !v)}
+                      className={`app-no-drag ${selectMode ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}`}
+                    >
+                      <MousePointerClick size={15} strokeWidth={1.75} />
+                    </IconButton>
+                  </ToolbarTooltip>
+                  <ToolbarTooltip label="Refresh preview">
+                    <IconButton aria-label="Refresh preview" onClick={refreshPreview} className="app-no-drag">
+                      <motion.span animate={{ rotate: refreshSpin * 360 }} transition={{ duration: 0.5, ease: [0.25, 1, 0.5, 1] }}>
+                        <RotateCw size={15} strokeWidth={1.75} />
+                      </motion.span>
+                    </IconButton>
+                  </ToolbarTooltip>
+                </>
+              ) : null}
+              {canExport ? (
+                <ToolbarTooltip label="Export">
+                  <a
+                    href={api.exportUrl(projectId)}
+                    download
+                    aria-label="Export project"
+                    className="app-no-drag grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                  >
+                    <Download size={15} strokeWidth={1.75} />
+                  </a>
+                </ToolbarTooltip>
+              ) : null}
+              <ToolbarTooltip label="Full screen preview">
+                <span className="app-no-drag inline-flex">
+                  <IconButton
+                    aria-label="Full screen preview"
+                    disabled={!previewSrc}
+                    onClick={() => setFullscreen(true)}
+                  >
+                    <Maximize2 size={15} strokeWidth={1.75} />
+                  </IconButton>
+                </span>
+              </ToolbarTooltip>
+              {onOpenSettings ? (
+                <>
+                  <span className="mx-0.5 h-5 w-px bg-border" aria-hidden />
+                  <ToolbarTooltip label="Settings">
+                    <IconButton aria-label="Settings" onClick={() => onOpenSettings()} className="app-no-drag">
+                      <Settings size={15} strokeWidth={1.75} />
+                    </IconButton>
+                  </ToolbarTooltip>
+                </>
+              ) : null}
+            </div>
+          </TooltipProvider>
         </div>
 
         <div className="dz-canvas relative flex-1 overflow-hidden">
@@ -2157,7 +2169,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             emptyPane(running ? "Generating…" : "Your preview will appear here")
           )}
         </div>
-      </section>
+        </section>
+      </Panel>
+      </Group>
 
       {pendingMark ? <MarkUpPopover mark={pendingMark} onAdd={addMark} onCancel={dismissMark} /> : null}
       {compare ? <VersionCompare open onClose={() => setCompare(null)} a={compare.a} b={compare.b} /> : null}
@@ -2198,6 +2212,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           </div>
         </Dialog>
       ) : null}
-    </div>
+    </>
   );
 }

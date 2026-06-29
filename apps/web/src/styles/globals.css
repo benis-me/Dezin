@@ -229,6 +229,37 @@
   );
 }
 
+.dezin-resize-separator {
+  position: relative;
+  z-index: 40;
+  flex: 0 0 1px;
+  width: 1px;
+  cursor: col-resize;
+  outline: none;
+}
+.dezin-resize-separator::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-color: var(--border);
+}
+.dezin-resize-separator::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline: -3px;
+}
+.dezin-resize-separator:hover::before,
+.dezin-resize-separator:active::before,
+.dezin-resize-separator[data-separator="hover"]::before {
+  background-image: linear-gradient(
+    to bottom,
+    var(--border),
+    color-mix(in oklch, var(--foreground) 18%, var(--border)) 50%,
+    var(--border)
+  );
+}
+
 /* Custom scrollbars — thin, subtle, themed; replaces the chunky system bars everywhere. */
 * {
   scrollbar-width: thin;
@@ -257,6 +288,11 @@
 /* Electron: draggable chrome + traffic-light clearance (no effect in a plain browser). */
 .electron .app-drag {
   -webkit-app-region: drag;
+}
+.electron .app-no-drag,
+.electron .app-no-drag::before,
+.electron .app-no-drag::after {
+  -webkit-app-region: no-drag;
 }
 .electron .app-drag :where(button, a, input, textarea, select, label, [role="button"], [role="tab"], [role="combobox"], [role="menuitem"], [contenteditable="true"]) {
   -webkit-app-region: no-drag;
