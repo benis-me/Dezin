@@ -29,14 +29,14 @@ export interface AgentInfo {
 /** Real prober: `<command> --version` on the augmented PATH, with a short timeout. */
 export const defaultAgentProber: AgentProber = (command) => probeVersion(command);
 
-export async function detectAgents(prober: AgentProber): Promise<AgentInfo[]> {
+export async function detectAgents(prober: AgentProber, deep = false): Promise<AgentInfo[]> {
   return Promise.all(
     AGENT_PROVIDERS.map(async (p) => {
       const probe = await prober(p.command);
       let models = p.seedModels;
       if (probe.available && p.discoverModels) {
         try {
-          const real = await p.discoverModels(p.command);
+          const real = await p.discoverModels(p.command, deep);
           if (real.length) models = real;
         } catch {
           /* keep the seed on any discovery failure */
@@ -55,7 +55,8 @@ let inflight: Promise<AgentInfo[]> | null = null;
 export async function getAgents(prober: AgentProber, force = false): Promise<AgentInfo[]> {
   if (cache && !force) return cache;
   if (!force && inflight) return inflight;
-  inflight = detectAgents(prober).then((a) => {
+  // A forced rescan does a deep probe (e.g. CodeBuddy's slow PTY `/model list` scrape).
+  inflight = detectAgents(prober, force).then((a) => {
     cache = a;
     inflight = null;
     return a;

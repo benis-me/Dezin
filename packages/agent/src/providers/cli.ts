@@ -5,11 +5,16 @@
 
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
+import { dirname } from "node:path";
 
-/** PATH augmented with well-known toolchain dirs so a minimal-env daemon still finds CLIs. */
+/** PATH augmented with well-known toolchain dirs so a minimal-env daemon (e.g. the desktop
+ *  app launched from Finder, or a fresh machine) still finds CLIs. Critically this includes
+ *  the running Node's own bin dir — npm-global CLIs like `codex`/`codebuddy` install next to
+ *  `node`, so without it they vanish whenever the launch PATH lacks the toolchain dir. */
 export function augmentedPath(): string {
   const home = homedir();
   const extra = [
+    dirname(process.execPath), // the active node's bin dir — where npm-global agents live
     `${home}/.local/bin`,
     `${home}/.bun/bin`,
     `${home}/.deno/bin`,

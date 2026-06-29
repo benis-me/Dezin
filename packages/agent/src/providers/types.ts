@@ -21,8 +21,9 @@ export interface AgentProvider {
   fastModel?: string;
   /** Generic CLI argv config (non-Claude agents); absent for the stream-json runner. */
   genericConfig?: GenericAgentConfig;
-  /** Probe the CLI/API for its real model list (returns [] when unavailable). */
-  discoverModels?(command: string): Promise<string[]>;
+  /** Probe the CLI/API for its real model list (returns [] when unavailable). `deep` permits
+   *  slow methods (e.g. a PTY scrape) that should only run on an explicit rescan, not at boot. */
+  discoverModels?(command: string, deep?: boolean): Promise<string[]>;
   /** Build the generation runner. */
   createRunner(opts: { command: string; model?: string }): AgentRunner;
   /** Argv for a one-shot prompt that reads files in cwd (used by the image analyzer). */
