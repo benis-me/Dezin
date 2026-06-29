@@ -78,6 +78,28 @@ interface Msg {
  *  render interleaved (chronologically) during generation, not split into separate blocks. */
 type LiveItem = { type: "text"; text: string } | { type: "tool"; summary: string };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object";
+}
+
+function normalizeFindings(value: unknown): QualityFinding[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((f): f is QualityFinding => {
+    if (!isRecord(f)) return false;
+    return typeof f.id === "string" && typeof f.message === "string" && typeof f.severity === "string" && (f.fix === undefined || typeof f.fix === "string");
+  });
+}
+
+function normalizeResultMeta(value: unknown): ResultMeta | undefined {
+  if (!isRecord(value)) return undefined;
+  const meta: ResultMeta = {};
+  if (typeof value.passed === "boolean") meta.passed = value.passed;
+  if (typeof value.score === "number" || value.score === null) meta.score = value.score;
+  if (typeof value.rounds === "number") meta.rounds = value.rounds;
+  if (typeof value.error === "boolean") meta.error = value.error;
+  return meta;
+}
+
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
   return t.length === 0 ? "Untitled" : t.length > 48 ? `${t.slice(0, 48)}…` : t;
@@ -89,10 +111,13 @@ function convLabel(c: Conversation, i: number): string {
 
 function toMsg(m: Message, id: number): Msg {
   if (m.role === "system") {
-    // Persisted process record: a JSON { steps } blob stored by the daemon.
+    // Persisted process/result records are JSON blobs stored by the daemon.
     try {
-      const parsed = JSON.parse(m.content) as { steps?: unknown };
-      if (Array.isArray(parsed.steps)) return { id, kind: "process", text: "", steps: parsed.steps as string[], at: m.createdAt };
+      const parsed = JSON.parse(m.content) as unknown;
+      if (isRecord(parsed) && isRecord(parsed.result) && typeof parsed.result.text === "string") {
+        return { id, kind: "result", text: parsed.result.text, meta: normalizeResultMeta(parsed.result.meta), at: m.createdAt };
+      }
+      if (isRecord(parsed) && Array.isArray(parsed.steps)) return { id, kind: "process", text: "", steps: parsed.steps as string[], at: m.createdAt };
     } catch {
       /* fall through */
     }
@@ -291,6 +316,32 @@ function CodeView({ name, text }: { name: string; text: string }) {
   );
 }
 
+const MARKUP_POPOVER = { width: 288, height: 192, margin: 12, gap: 8 };
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.min(Math.max(n, min), max);
+}
+
+export function computeMarkupPosition(
+  iframeRect: { left: number; top: number; width: number; height: number } | null | undefined,
+  elementRect: { x: number; y: number; w: number; h: number } | null | undefined,
+  viewport: { width: number; height: number },
+): { x: number; y: number } {
+  const maxX = Math.max(MARKUP_POPOVER.margin, viewport.width - MARKUP_POPOVER.width - MARKUP_POPOVER.margin);
+  const maxY = Math.max(MARKUP_POPOVER.margin, viewport.height - MARKUP_POPOVER.height - MARKUP_POPOVER.margin);
+  if (!iframeRect || !elementRect) return { x: maxX, y: Math.min(120, maxY) };
+
+  const anchorX = iframeRect.left + elementRect.x;
+  const belowY = iframeRect.top + elementRect.y + elementRect.h + MARKUP_POPOVER.gap;
+  const aboveY = iframeRect.top + elementRect.y - MARKUP_POPOVER.height - MARKUP_POPOVER.gap;
+  const y = belowY <= maxY ? belowY : aboveY >= MARKUP_POPOVER.margin ? clamp(aboveY, MARKUP_POPOVER.margin, maxY) : clamp(belowY, MARKUP_POPOVER.margin, maxY);
+
+  return {
+    x: clamp(anchorX, MARKUP_POPOVER.margin, maxX),
+    y,
+  };
+}
+
 /** Floating annotation popover shown when an element is picked in the preview. */
 function MarkUpPopover({
   mark,
@@ -306,7 +357,7 @@ function MarkUpPopover({
     <>
       <div className="fixed inset-0 z-40" onClick={onCancel} aria-hidden />
       <div
-        className="fixed z-50 w-72 rounded-xl border border-border bg-popover p-3 shadow-pop"
+        className="fixed z-50 max-h-[calc(100vh-24px)] w-72 overflow-auto rounded-xl border border-border bg-popover p-3 shadow-pop"
         style={{ left: mark.x, top: mark.y }}
         role="dialog"
         aria-label="Mark up element"
@@ -545,6 +596,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       const latest = rs[0]; // newest-first
       if (latest && typeof latest.score === "number") {
         setScore((cur) => cur ?? latest.score);
+        setLintFindings(normalizeFindings(latest.findings));
         setRanOnce(true);
       }
       if (latest && REPLAYABLE_RUN_STATUSES.has(latest.status) && !reattachedRunsRef.current.has(latest.id)) {
@@ -690,6 +742,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         activeRunIdRef.current = null;
         const rounds = typeof ev.rounds === "number" ? ev.rounds : 0;
         const s = typeof ev.score === "number" ? ev.score : null;
+        if (Array.isArray(ev.findings)) setLintFindings(normalizeFindings(ev.findings));
         setScore(s);
         setLiveStatus(null);
         materializeLive();
@@ -1026,9 +1079,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         // Position a "Mark up" popover near the clicked element (iframe coords → page coords).
         const ir = previewIframeRef.current?.getBoundingClientRect();
         const r = d.rect;
-        const x = ir && r ? Math.min(ir.left + r.x, window.innerWidth - 300) : window.innerWidth - 320;
-        const y = ir && r ? ir.top + r.y + r.h + 8 : 120;
-        setPendingMark({ selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", x: Math.max(12, x), y: Math.max(12, y) });
+        const pos = computeMarkupPosition(ir, r, { width: window.innerWidth, height: window.innerHeight });
+        setPendingMark({ selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", x: pos.x, y: pos.y });
         setSelectMode(false);
       } else if (d.type === "cancel") {
         setSelectMode(false);
@@ -1722,7 +1774,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 </ul>
               ) : (
                 <div className="flex-1">
-                  {emptyPane(running ? "Generating…" : ranOnce ? "No anti-slop issues. Clean." : "Run to check quality")}
+                  {emptyPane(
+                    running
+                      ? "Generating…"
+                      : ranOnce && typeof score === "number" && score < 100
+                        ? "No stored anti-slop details for this run."
+                        : ranOnce
+                          ? "No anti-slop issues. Clean."
+                          : "Run to check quality",
+                  )}
                 </div>
               )}
             </div>

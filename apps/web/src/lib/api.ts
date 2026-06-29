@@ -193,6 +193,14 @@ export interface ProjectFile {
   size: number;
 }
 
+/** One anti-slop finding, as emitted on a run's `lint` SSE event and persisted on runs. */
+export interface QualityFinding {
+  severity: string;
+  id: string;
+  message: string;
+  fix?: string;
+}
+
 export interface RunSummary {
   id: string;
   conversationId?: string;
@@ -200,16 +208,9 @@ export interface RunSummary {
   score: number | null;
   repairRounds: number;
   lintPassed: boolean;
+  findings?: QualityFinding[];
   createdAt: number;
   finishedAt: number | null;
-}
-
-/** One anti-slop finding, as emitted on a run's `lint` SSE event. */
-export interface QualityFinding {
-  severity: string;
-  id: string;
-  message: string;
-  fix?: string;
 }
 
 export interface ApiClient {

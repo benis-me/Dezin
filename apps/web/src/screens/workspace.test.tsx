@@ -1,7 +1,7 @@
 import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
-import { WorkspaceScreen } from "./WorkspaceScreen.tsx";
+import { computeMarkupPosition, WorkspaceScreen } from "./WorkspaceScreen.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type { RunEvent } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
@@ -383,6 +383,78 @@ test("the Quality tab surfaces the run's lint findings + fix", async () => {
   expect(screen.getByText(/Use text-align: left/)).toBeInTheDocument();
 });
 
+test("the Quality tab shows final run-done findings even when no repair lint event fired", async () => {
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-score", conversationId: "c1" };
+      yield { type: "turn-end", round: 0, text: "Built it." };
+      yield {
+        type: "run-done",
+        runId: "r-score",
+        passed: true,
+        rounds: 0,
+        score: 94,
+        previewUrl: "/projects/p1/preview/",
+        findings: [
+          { severity: "P2", id: "raw-hex", message: "2 raw hex values outside :root.", fix: "Move colours into tokens." },
+          { severity: "P2", id: "oversized-radius", message: "Large rounded card radius.", fix: "Use a tighter radius." },
+        ],
+      };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  await screen.findByText(/Done, quality 94\/100/);
+  fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
+  expect(await screen.findByText(/raw hex values/)).toBeInTheDocument();
+  expect(screen.getByText(/Large rounded card radius/)).toBeInTheDocument();
+  expect(screen.queryByText(/No anti-slop issues\. Clean/)).toBeNull();
+});
+
+test("reopening a project restores persisted result cards and quality findings", async () => {
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [
+      { id: "m1", conversationId: "c1", role: "user" as const, content: "make a pricing page", createdAt: 1 },
+      { id: "m2", conversationId: "c1", role: "assistant" as const, content: "Built it.", createdAt: 2 },
+      {
+        id: "m3",
+        conversationId: "c1",
+        role: "system" as const,
+        content: JSON.stringify({ result: { text: "Done, quality 94/100.", meta: { passed: true, score: 94, rounds: 0 } } }),
+        createdAt: 3,
+      },
+    ],
+    listRuns: async () => [
+      {
+        id: "r-score",
+        conversationId: "c1",
+        status: "succeeded",
+        score: 94,
+        repairRounds: 0,
+        lintPassed: true,
+        createdAt: 2,
+        finishedAt: 3,
+        findings: [{ severity: "P2", id: "raw-hex", message: "2 raw hex values outside :root.", fix: "Move colours into tokens." }],
+      },
+    ],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  expect(await screen.findByText("Done, quality 94/100.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
+  expect(await screen.findByText(/raw hex values/)).toBeInTheDocument();
+  expect(screen.queryByText(/No anti-slop issues\. Clean/)).toBeNull();
+});
+
 test("a clean run shows the Quality pane's clean empty state", async () => {
   const fake = makeFakeApi({
     streamRun: async function* (): AsyncGenerator<RunEvent> {
@@ -401,6 +473,33 @@ test("a clean run shows the Quality pane's clean empty state", async () => {
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
   expect(await screen.findByText(/No anti-slop issues\. Clean/)).toBeInTheDocument();
   expect(screen.getAllByText("100/100").length).toBeGreaterThan(0); // shown in the score header (and result card)
+});
+
+test("a non-perfect restored score without stored findings does not claim clean", async () => {
+  const fake = makeFakeApi({
+    listRuns: async () => [
+      { id: "r-old", status: "succeeded", score: 94, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
+    ],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  fireEvent.click(await screen.findByRole("tab", { name: /Quality/ }));
+  expect(await screen.findByText(/No stored anti-slop details/)).toBeInTheDocument();
+  expect(screen.queryByText(/No anti-slop issues\. Clean/)).toBeNull();
+});
+
+test("markup popover position is clamped into the viewport", () => {
+  const pos = computeMarkupPosition(
+    { left: 900, top: 700, width: 160, height: 120 },
+    { x: 180, y: 120, w: 80, h: 60 },
+    { width: 1024, height: 768 },
+  );
+  expect(pos.x).toBeLessThanOrEqual(724);
+  expect(pos.y).toBeGreaterThanOrEqual(12);
+  expect(pos.y).toBeLessThanOrEqual(564);
 });
 
 test("repair rounds surface a lint status line", async () => {

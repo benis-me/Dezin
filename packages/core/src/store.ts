@@ -15,6 +15,7 @@ import type {
   Run,
   Artifact,
   MessageRole,
+  QualityFinding,
   RunStatus,
   CreateProjectInput,
   Settings,
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS runs (
   repair_rounds INTEGER NOT NULL DEFAULT 0,
   lint_passed INTEGER NOT NULL DEFAULT 0,
   score INTEGER,
+  final_findings TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL,
   finished_at INTEGER
 );
@@ -137,6 +139,26 @@ function asMessage(r: Row): Message {
     createdAt: Number(r.created_at),
   };
 }
+function asQualityFindings(value: unknown): QualityFinding[] {
+  if (typeof value !== "string" || !value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((f): f is QualityFinding => {
+      if (!f || typeof f !== "object") return false;
+      const x = f as Record<string, unknown>;
+      return (
+        (x.severity === "P0" || x.severity === "P1" || x.severity === "P2") &&
+        typeof x.id === "string" &&
+        typeof x.message === "string" &&
+        typeof x.fix === "string" &&
+        (x.snippet === undefined || typeof x.snippet === "string")
+      );
+    });
+  } catch {
+    return [];
+  }
+}
 function asRun(r: Row): Run {
   return {
     id: r.id as string,
@@ -146,6 +168,7 @@ function asRun(r: Row): Run {
     repairRounds: Number(r.repair_rounds),
     lintPassed: Number(r.lint_passed) === 1,
     score: r.score == null ? null : Number(r.score),
+    findings: asQualityFindings(r.final_findings),
     createdAt: Number(r.created_at),
     finishedAt: r.finished_at == null ? null : Number(r.finished_at),
   };
@@ -189,6 +212,7 @@ export class Store {
       }
     };
     ensureColumn("runs", "score", "score INTEGER");
+    ensureColumn("runs", "final_findings", "final_findings TEXT NOT NULL DEFAULT '[]'");
     ensureColumn("projects", "mode", "mode TEXT");
     ensureColumn("settings", "image_api_base_url", "image_api_base_url TEXT");
     ensureColumn("settings", "image_api_key", "image_api_key TEXT");
@@ -383,7 +407,7 @@ export class Store {
 
   updateRun(
     id: string,
-    patch: Partial<Pick<Run, "status" | "repairRounds" | "lintPassed" | "score" | "finishedAt">>,
+    patch: Partial<Pick<Run, "status" | "repairRounds" | "lintPassed" | "score" | "findings" | "finishedAt">>,
   ): Run {
     const cur = this.getRun(id);
     if (!cur) throw new Error(`run not found: ${id}`);
@@ -392,13 +416,14 @@ export class Store {
       repairRounds: patch.repairRounds ?? cur.repairRounds,
       lintPassed: patch.lintPassed ?? cur.lintPassed,
       score: patch.score !== undefined ? patch.score : cur.score,
+      findings: patch.findings !== undefined ? patch.findings : cur.findings,
       finishedAt: patch.finishedAt !== undefined ? patch.finishedAt : cur.finishedAt,
     };
     this.db
       .prepare(
-        `UPDATE runs SET status = ?, repair_rounds = ?, lint_passed = ?, score = ?, finished_at = ? WHERE id = ?`,
+        `UPDATE runs SET status = ?, repair_rounds = ?, lint_passed = ?, score = ?, final_findings = ?, finished_at = ? WHERE id = ?`,
       )
-      .run(next.status, next.repairRounds, next.lintPassed ? 1 : 0, next.score, next.finishedAt, id);
+      .run(next.status, next.repairRounds, next.lintPassed ? 1 : 0, next.score, JSON.stringify(next.findings), next.finishedAt, id);
     return this.getRun(id)!;
   }
 

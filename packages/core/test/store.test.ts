@@ -124,6 +124,25 @@ test("updateRun persists a quality score; listRuns is newest-first", () => {
   s.close();
 });
 
+test("updateRun persists final quality findings", () => {
+  const s = freshStore();
+  const p = s.createProject({ name: "P" });
+  const c = s.createConversation(p.id);
+  const r = s.createRun(p.id, c.id);
+  s.updateRun(r.id, {
+    status: "succeeded",
+    score: 94,
+    lintPassed: true,
+    findings: [{ severity: "P2", id: "raw-hex", message: "2 raw hex values outside :root.", fix: "Move colours into tokens." }],
+  });
+
+  const run = s.getRun(r.id)!;
+  assert.equal(run.findings.length, 1);
+  assert.equal(run.findings[0]?.id, "raw-hex");
+  assert.equal(s.listRuns(p.id)[0]?.findings[0]?.message, "2 raw hex values outside :root.");
+  s.close();
+});
+
 test("artifacts record per project, newest first", () => {
   const s = freshStore();
   const p = s.createProject({ name: "P" });

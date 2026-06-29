@@ -56,6 +56,14 @@ export interface Message {
   createdAt: number;
 }
 
+export interface QualityFinding {
+  severity: "P0" | "P1" | "P2";
+  id: string;
+  message: string;
+  fix: string;
+  snippet?: string;
+}
+
 export interface Run {
   id: string;
   projectId: string;
@@ -67,6 +75,8 @@ export interface Run {
   lintPassed: boolean;
   /** 0–100 anti-slop quality score of the final artifact (null until finished). */
   score: number | null;
+  /** Final anti-slop findings for this run. Empty means clean or no details persisted. */
+  findings: QualityFinding[];
   createdAt: number;
   finishedAt: number | null;
 }

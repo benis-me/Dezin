@@ -81,10 +81,10 @@ test("clean run: streams SSE, persists, serves the artifact back", async () => {
     assert.equal(preview.status, 200);
     assert.ok((await preview.text()).includes(CLEAN));
 
-    // persisted: one artifact, run succeeded, user+assistant messages
+    // persisted: one artifact, run succeeded, user+assistant messages plus the result card
     assert.equal(store.listArtifacts(project.id).length, 1);
     const convId = events.find((e) => e.type === "run-start")!.conversationId as string;
-    assert.equal(store.listMessages(convId).length, 2);
+    assert.equal(store.listMessages(convId).length, 3);
     const runId = done.runId as string;
     const run = store.getRun(runId)!;
     assert.equal(run.status, "succeeded");
@@ -184,6 +184,26 @@ test("GET /api/projects/:id/runs lists finished runs with a score", async () => 
 
     const miss = await fetch(`${base}/api/projects/nope/runs`);
     assert.equal(miss.status, 404);
+  });
+});
+
+test("GET /api/projects/:id/runs includes final quality findings", async () => {
+  await withRunServer(new FakeRunner({ artifacts: [SLOPPY] }), async ({ base, store }) => {
+    const project = store.createProject({ name: "P" });
+    const conv = store.createConversation(project.id);
+    const run = store.createRun(project.id, conv.id);
+    store.updateRun(run.id, {
+      status: "succeeded",
+      score: 94,
+      lintPassed: true,
+      findings: [{ severity: "P2", id: "raw-hex", message: "2 raw hex values outside :root.", fix: "Move colours into tokens." }],
+    });
+
+    const res = await fetch(`${base}/api/projects/${project.id}/runs`);
+    assert.equal(res.status, 200);
+    const runs = (await res.json()) as Array<{ findings?: Array<{ id: string; message: string }> }>;
+    assert.equal(runs[0]?.findings?.[0]?.id, "raw-hex");
+    assert.equal(runs[0]?.findings?.[0]?.message, "2 raw hex values outside :root.");
   });
 });
 

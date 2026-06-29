@@ -89,6 +89,10 @@ interface RunBody {
   model?: string;
 }
 
+function resultMessage(text: string, meta: Record<string, unknown>): string {
+  return JSON.stringify({ result: { text, meta } });
+}
+
 export async function handleRun(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
   const body = (await readJsonBody(req)) as RunBody;
 
@@ -207,12 +211,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       await gitCommit(dir, brief);
       store.addMessage(conversation.id, "assistant", result.text);
       persistProcess();
-      store.updateRun(run.id, { status: "succeeded", repairRounds: 0, lintPassed: true, score: null, finishedAt: Date.now() });
+      store.addMessage(conversation.id, "system", resultMessage("Done. Updated the project; the dev preview reflects it live.", { passed: true, score: null, rounds: 0 }));
+      store.updateRun(run.id, { status: "succeeded", repairRounds: 0, lintPassed: true, score: null, findings: [], finishedAt: Date.now() });
       sse({ type: "run-done", runId: run.id, passed: true, rounds: 0, score: null, mode: "standard", findings: [] });
     } catch (err) {
       const cancelled = ctrl.signal.aborted || isAbortError(err);
       store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
       persistProcess();
+      const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
+      store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
       sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
     } finally {
       finishRun(run.id);
@@ -258,11 +265,17 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     store.recordArtifact(project.id, result.artifactPath, result.passed);
     store.addMessage(conversation.id, "assistant", result.turns.at(-1)?.text ?? "");
     persistProcess();
+    const score = lintScore(result.findings);
+    const fixes = result.rounds ? ` after ${result.rounds} fix${result.rounds > 1 ? "es" : ""}` : "";
+    const quality = `, quality ${score}/100`;
+    const text = result.passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`;
+    store.addMessage(conversation.id, "system", resultMessage(text, { passed: result.passed, score, rounds: result.rounds }));
     store.updateRun(run.id, {
       status: "succeeded",
       repairRounds: result.rounds,
       lintPassed: result.passed,
-      score: lintScore(result.findings),
+      score,
+      findings: result.findings,
       finishedAt: Date.now(),
     });
 
@@ -271,7 +284,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       runId: run.id,
       passed: result.passed,
       rounds: result.rounds,
-      score: lintScore(result.findings),
+      score,
       previewUrl: `/projects/${project.id}/preview/`,
       findings: result.findings,
     });
@@ -281,6 +294,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const cancelled = ctrl.signal.aborted || isAbortError(err);
     store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
     persistProcess(); // keep the partial process record + whatever the agent wrote to disk
+    const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
+    store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
     sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
   } finally {
     stopPoll();
