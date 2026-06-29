@@ -35,9 +35,9 @@ faithful recreation.
    - Desktop app: `http://127.0.0.1:7457` (default — the desktop pins this port)
    - Dev server: `http://localhost:5173`
 
-The handoff uses a one-shot endpoint: the extension `POST`s to `/api/capture`; the Dezin
-home reads and clears it on load **and whenever the window regains focus**, so an
-already-open app picks up an Import without a reload.
+The handoff is one-shot: the extension `POST`s to `/api/capture`; the Dezin home explicitly
+consumes it on load **and whenever the window regains focus**, so an already-open app picks
+up an Import without a reload while passive reads cannot clear it.
 
 ## Not included
 

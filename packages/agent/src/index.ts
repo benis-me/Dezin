@@ -46,6 +46,7 @@ export {
   probeVersion,
   runCapture,
   augmentedPath,
+  agentSpawnEnv,
   dedupModels,
   type AgentProvider,
   type VersionProbe,

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { Store } from "../../../packages/core/src/index.ts";
 import { FakeRunner } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
@@ -17,6 +18,7 @@ const SLOPPY = `<style>.hero{background:#6366f1}</style><h1>🚀 Launch</h1><p>1
 
 interface RunCtx {
   base: string;
+  dataDir: string;
   store: Store;
 }
 
@@ -31,7 +33,7 @@ async function withRunServer(
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
-    await fn({ base: `http://127.0.0.1:${port}`, store });
+    await fn({ base: `http://127.0.0.1:${port}`, dataDir, store });
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
     store.close();
@@ -333,6 +335,136 @@ test("POST /api/runs validation", async () => {
     });
     assert.equal(noProj.status, 404);
   });
+});
+
+test("POST /api/runs rejects a conversation from another project", async () => {
+  await withRunServer(new FakeRunner({ artifacts: [CLEAN] }), async ({ base, store }) => {
+    const project = store.createProject({ name: "A" });
+    const other = store.createProject({ name: "B" });
+    const otherConversation = store.createConversation(other.id);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, conversationId: otherConversation.id, brief: "go" }),
+    });
+    assert.equal(res.status, 400);
+    assert.match(await res.text(), /conversation does not belong to project/);
+  });
+});
+
+test("standard run fails when the agent finishes without changing files", async () => {
+  const runner: AgentRunner = {
+    id: "noop",
+    async runTurn() {
+      return { text: "done", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Std", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(dir, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "package.json"), "{}");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+    });
+    const events = parseSse(await res.text());
+    assert.ok(events.some((e) => e.type === "run-error"));
+    const runId = events.find((e) => e.type === "run-start")!.runId as string;
+    assert.equal(store.getRun(runId)?.status, "failed");
+  });
+});
+
+test("standard run succeeds only after project files change", async () => {
+  const runner: AgentRunner = {
+    id: "standard-change",
+    async runTurn(input) {
+      writeFileSync(join(input.projectDir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Std", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(dir, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "package.json"), "{}");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+    });
+    const events = parseSse(await res.text());
+    const done = events.find((e) => e.type === "run-done")!;
+    assert.equal(done.mode, "standard");
+    assert.equal(done.passed, true);
+    assert.equal(store.getRun(done.runId as string)?.status, "succeeded");
+  });
+});
+
+test("standard run persists visual QA findings and score when enabled", async () => {
+  let expectedDir = "";
+  const runner: AgentRunner = {
+    id: "standard-visual",
+    async runTurn(input) {
+      writeFileSync(join(input.projectDir, "index.html"), "<main><h1>Done</h1></main>");
+      writeFileSync(join(input.projectDir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: true });
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      expectedDir = dir;
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), "{}");
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better", agentCommand: "codex", model: "gpt-5" }),
+      });
+      const events = parseSse(await res.text());
+      const visual = events.find((e) => e.type === "visual-qa")!;
+      const done = events.find((e) => e.type === "run-done")!;
+      assert.equal((visual.findings as Array<{ id: string }>)[0]?.id, "visual-fixed-offscreen");
+      assert.equal(done.score, 92);
+      const run = store.getRun(done.runId as string)!;
+      assert.equal(run.score, 92);
+      assert.equal(run.findings[0]?.id, "visual-fixed-offscreen");
+    },
+    {
+      visualQa: async (input) => {
+        assert.equal(input.projectRoot, expectedDir);
+        assert.match(input.htmlPath, /index\.html$/);
+        assert.equal(input.agentCommand, "codex");
+        assert.equal(input.model, "gpt-5");
+        assert.deepEqual(input.conversationHistory?.map((m) => m.content), ["make it better", "changed"]);
+        return [
+          {
+            severity: "P1",
+            id: "visual-fixed-offscreen",
+            message: "A fixed toolbar is outside the viewport.",
+            fix: "Clamp the toolbar inside the viewport.",
+          },
+        ];
+      },
+    },
+  );
 });
 
 test("the composed prompt includes the active skill body and design-system tokens", async () => {

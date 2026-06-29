@@ -10,6 +10,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { agentSpawnEnv } from "../../../packages/agent/src/index.ts";
 
 export function templateDir(name = "react-vite-gsap"): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "content", "templates", name);
@@ -27,11 +28,26 @@ const runtimes = new Map<string, Runtime>();
 
 function run(command: string, args: string[], cwd: string): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, stdio: "ignore" });
+    const child = spawn(command, args, { cwd, stdio: "ignore", env: agentSpawnEnv() });
     child.on("error", () => resolve(1));
     child.on("close", (code) => resolve(code ?? 1));
   });
 }
+
+function capture(command: string, args: string[], cwd: string): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv() });
+    let out = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (d: string) => (out += d));
+    child.stderr?.on("data", (d: string) => (out += d));
+    child.on("error", (err) => resolve({ code: 1, out: err.message }));
+    child.on("close", (code) => resolve({ code: code ?? 1, out }));
+  });
+}
+
+const GIT_IDENTITY = ["-c", "user.name=Dezin", "-c", "user.email=dezin@local"];
 
 /** Copy the template, git init + initial commit, then npm install (the slow part). */
 export async function setupStandardProject(projectId: string, projectDir: string): Promise<void> {
@@ -41,11 +57,11 @@ export async function setupStandardProject(projectId: string, projectDir: string
     await mkdir(projectDir, { recursive: true });
     await cp(templateDir(), projectDir, { recursive: true });
     await run("git", ["init", "-q"], projectDir);
-    await run("git", ["add", "-A"], projectDir);
-    await run("git", ["commit", "-q", "-m", "Dezin: scaffold Vite + React + GSAP"], projectDir);
+    await gitCommit(projectDir, "Dezin: scaffold Vite + React + GSAP");
 
     rt.phase = "installing";
     const code = await run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error"], projectDir);
+    if (code === 0) await gitCommit(projectDir, "Dezin: install dependencies");
     rt.phase = code === 0 ? "ready" : "error";
     if (code !== 0) rt.error = "npm install failed";
   } catch (err) {
@@ -102,6 +118,7 @@ export async function ensureDevServer(projectId: string, projectDir: string): Pr
   const proc = spawn("npm", ["run", "dev", "--", "--port", String(port), "--strictPort", "--host", "127.0.0.1"], {
     cwd: projectDir,
     stdio: "ignore",
+    env: agentSpawnEnv(),
     detached: false,
   });
   proc.on("close", () => {
@@ -118,11 +135,20 @@ export async function ensureDevServer(projectId: string, projectDir: string): Pr
   return { url }; // return anyway; the iframe will retry
 }
 
-/** Commit the project's current state as a version (best-effort). */
-export async function gitCommit(projectDir: string, message: string): Promise<void> {
-  if (!existsSync(join(projectDir, ".git"))) return;
+export async function workingTreeFingerprint(projectDir: string): Promise<string> {
+  if (!existsSync(join(projectDir, ".git"))) return "__no_git__";
+  const res = await capture("git", ["status", "--porcelain=v1"], projectDir);
+  return res.code === 0 ? res.out.trim() : `__git_status_failed__:${res.out.trim()}`;
+}
+
+/** Commit the project's current state as a version. */
+export async function gitCommit(projectDir: string, message: string): Promise<{ changed: boolean; committed: boolean }> {
+  if (!existsSync(join(projectDir, ".git"))) return { changed: false, committed: false };
   await run("git", ["add", "-A"], projectDir);
-  await run("git", ["commit", "-q", "-m", message.replace(/\s+/g, " ").slice(0, 72) || "Dezin update"], projectDir);
+  const status = await workingTreeFingerprint(projectDir);
+  if (!status) return { changed: false, committed: false };
+  const code = await run("git", [...GIT_IDENTITY, "commit", "-q", "-m", message.replace(/\s+/g, " ").slice(0, 72) || "Dezin update"], projectDir);
+  return { changed: true, committed: code === 0 };
 }
 
 /** Stop all dev servers (called on daemon shutdown). */

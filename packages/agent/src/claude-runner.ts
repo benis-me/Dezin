@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { AgentRunner, AgentTurnInput, AgentTurnResult } from "./types.ts";
 import { abortError } from "./types.ts";
 import { parseClaudeStream, parseClaudeLine } from "./claude-stream.ts";
+import { agentSpawnEnv } from "./providers/cli.ts";
 
 /**
  * A compact transcript of earlier turns, prepended to a turn's message so the agent has the
@@ -58,16 +59,7 @@ export interface ProcessSpawner {
 export class NodeSpawner implements ProcessSpawner {
   run(input: SpawnInput): Promise<SpawnOutput> {
     return new Promise<SpawnOutput>((resolve, reject) => {
-      // Generation runs in a clean room: Dezin has its own anti-slop quality kernel,
-      // so the host's design hooks must not second-guess the agent mid-build. We
-      // disable the impeccable design hook (env override it honors) and silence
-      // CLAUDE.md auto-discovery so the agent isn't steered by host repo context.
-      const env = {
-        ...process.env,
-        IMPECCABLE_HOOK_DISABLED: "1",
-        IMPECCABLE_HOOK_QUIET: "1",
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-      };
+      const env = agentSpawnEnv();
       if (input.signal?.aborted) return reject(abortError());
       const child = spawn(input.command, input.args, { cwd: input.cwd, stdio: ["pipe", "pipe", "pipe"], env });
       let stdout = "";

@@ -41,4 +41,4 @@ export const GENERIC_AGENTS: Record<string, GenericAgentConfig> = Object.fromEnt
 );
 
 export type { AgentProvider } from "./types.ts";
-export { probeVersion, runCapture, augmentedPath, dedupModels, type VersionProbe } from "./cli.ts";
+export { probeVersion, runCapture, augmentedPath, agentSpawnEnv, dedupModels, type VersionProbe } from "./cli.ts";

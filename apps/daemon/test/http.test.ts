@@ -110,10 +110,43 @@ test("validation + routing errors", async () => {
       body: JSON.stringify({}),
     });
     assert.equal(bad.status, 400);
+    const malformed = await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    });
+    assert.equal(malformed.status, 400);
     // unknown route → 404
     assert.equal((await fetch(`${base}/api/nope`)).status, 404);
     // wrong method on a known path → 405
     assert.equal((await fetch(`${base}/api/health`, { method: "POST" })).status, 405);
+  });
+});
+
+test("capture handoff is only cleared by explicit consume", async () => {
+  await withServer(async ({ base }) => {
+    const post = await fetch(`${base}/api/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ images: [{ name: "shot.png", base64: "abcd" }], note: "brief", source: "extension" }),
+    });
+    assert.equal(post.status, 200);
+
+    const peek1 = (await (await fetch(`${base}/api/capture`)).json()) as { images: unknown[]; note: string };
+    const peek2 = (await (await fetch(`${base}/api/capture`)).json()) as { images: unknown[]; note: string };
+    assert.equal(peek1.images.length, 1);
+    assert.equal(peek2.images.length, 1);
+
+    const consumed = (await (
+      await fetch(`${base}/api/capture/consume`, { method: "POST" })
+    ).json()) as { images: unknown[]; note: string };
+    assert.equal(consumed.images.length, 1);
+    assert.equal(consumed.note, "brief");
+
+    const empty = (await (
+      await fetch(`${base}/api/capture/consume`, { method: "POST" })
+    ).json()) as { images: unknown[] };
+    assert.equal(empty.images.length, 0);
   });
 });
 

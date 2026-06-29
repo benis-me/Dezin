@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getProvider } from "../../../packages/agent/src/index.ts";
+import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
 
 const ANALYZE_PROMPT =
   "Look at the design screenshot saved as reference.png in this folder. Write ONE concise paragraph (2 to 4 sentences, plain text, no preamble, no markdown, no lists, no code) describing it as a recreation brief for rebuilding it as a responsive web page: its overall layout, type treatment, colour system, key components, and mood. Do not create, edit, or write any files — only print the paragraph.";
@@ -33,12 +33,7 @@ export async function analyzeImage(command: string, base64: string, model?: stri
 
 function spawnText(command: string, args: string[], cwd: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const env = {
-      ...process.env,
-      IMPECCABLE_HOOK_DISABLED: "1",
-      IMPECCABLE_HOOK_QUIET: "1",
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    };
+    const env = agentSpawnEnv();
     let child;
     try {
       child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env });

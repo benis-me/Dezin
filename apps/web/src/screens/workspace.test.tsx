@@ -614,6 +614,17 @@ test("markup popover position is clamped into the viewport", () => {
   expect(pos.y).toBeLessThanOrEqual(564);
 });
 
+test("markup popover position honors the measured popover size", () => {
+  const pos = computeMarkupPosition(
+    { left: 40, top: 40, width: 320, height: 240 },
+    { x: 260, y: 170, w: 80, h: 40 },
+    { width: 360, height: 280 },
+    { width: 340, height: 240, margin: 12, gap: 8 },
+  );
+  expect(pos.x).toBe(12);
+  expect(pos.y).toBeLessThanOrEqual(28);
+});
+
 test("repair rounds surface a lint status line", async () => {
   const fake = makeFakeApi({
     streamRun: async function* (): AsyncGenerator<RunEvent> {

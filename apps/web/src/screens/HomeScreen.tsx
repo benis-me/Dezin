@@ -162,10 +162,8 @@ export function HomeScreen({
   // while it was in the background.
   useEffect(() => {
     if (projectsOverride) return;
-    // The GET is one-shot (the daemon clears it on read, serializing concurrent reads), so
-    // we do NOT gate the consume on an `alive` flag — under StrictMode's double-invoke the
-    // first read would clear the capture and the second would find nothing. Whichever read
-    // wins applies the state; a stray read-after-unmount is a harmless no-op.
+    // Capture consumption is explicit (POST /consume), so passive GETs/prefetches cannot clear
+    // the handoff. StrictMode can still double-invoke this, but whichever consume wins applies it.
     const pull = () => {
       void api
         .getCapture()

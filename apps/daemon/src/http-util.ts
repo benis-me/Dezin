@@ -26,18 +26,35 @@ export function send(
 
 const MAX_BODY = 4 * 1024 * 1024;
 
+export class HttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export function isHttpError(value: unknown): value is HttpError {
+  return value instanceof HttpError;
+}
+
 export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > MAX_BODY) throw new Error("request body too large");
+    if (size > MAX_BODY) throw new HttpError(413, "request body too large");
     chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (!raw) return {};
-  return JSON.parse(raw);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new HttpError(400, "invalid JSON body");
+  }
 }
 
 /** Read a raw binary request body (for file uploads). Allows larger payloads than JSON. */
@@ -47,7 +64,7 @@ export async function readRawBody(req: IncomingMessage, max = 64 * 1024 * 1024):
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > max) throw new Error("request body too large");
+    if (size > max) throw new HttpError(413, "request body too large");
     chunks.push(buf);
   }
   return Buffer.concat(chunks);

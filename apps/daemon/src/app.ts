@@ -13,7 +13,7 @@ import { Store } from "../../../packages/core/src/index.ts";
 import type { CreateProjectInput, Settings } from "../../../packages/core/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import type { DesignRegistry } from "../../../packages/design/src/index.ts";
-import { sendJson, sendError, send, readJsonBody, readRawBody, matchPath } from "./http-util.ts";
+import { sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
 import { serveProjectFile, serveVariantFile, projectDir } from "./serve-static.ts";
 import { figToJson, summarizeFig } from "./parse-fig.ts";
 import { serveWeb, defaultWebDir } from "./serve-web.ts";
@@ -50,6 +50,8 @@ export interface AppDeps {
   webDir?: string;
   /** Visual QA runner for final prototype artifacts (defaults to screenshot + geometry checks). */
   visualQa?: VisualQaRunner;
+  /** Standard project setup hook; tests can replace the slow npm-installing default. */
+  standardProjectSetup?: (projectId: string, projectDir: string) => void | Promise<void>;
 }
 
 type Handler = (
@@ -122,9 +124,17 @@ const routes: Route[] = [
     },
   },
   {
-    // Dezin home polls this on load and clears it (one-shot).
+    // Peek at the pending browser-extension handoff without consuming it.
     method: "GET",
     pattern: "/api/capture",
+    handler: (_req, res) => {
+      sendJson(res, 200, pendingCapture ?? { images: [], note: "", source: "" });
+    },
+  },
+  {
+    // Dezin home explicitly consumes the handoff; passive GETs must not clear it.
+    method: "POST",
+    pattern: "/api/capture/consume",
     handler: (_req, res) => {
       const cap = pendingCapture;
       pendingCapture = null;
@@ -218,7 +228,8 @@ const routes: Route[] = [
   {
     method: "POST",
     pattern: "/api/projects",
-    handler: async (req, res, _p, { store, dataDir }) => {
+    handler: async (req, res, _p, deps) => {
+      const { store, dataDir } = deps;
       const body = (await readJsonBody(req)) as Partial<CreateProjectInput>;
       if (!isNonEmptyString(body.name)) return sendError(res, 400, "name is required");
       const mode = body.mode === "standard" ? "standard" : "prototype";
@@ -229,7 +240,7 @@ const routes: Route[] = [
         mode,
       });
       // Standard projects scaffold a real Vite project + install deps in the background.
-      if (mode === "standard") void setupStandardProject(project.id, projectDir(dataDir, project.id));
+      if (mode === "standard") void (deps.standardProjectSetup ?? setupStandardProject)(project.id, projectDir(dataDir, project.id));
       sendJson(res, 201, project);
     },
   },
@@ -486,6 +497,11 @@ export function createApp(deps: AppDeps): http.Server {
       if (method === "GET" && hasWeb && !pathname.startsWith("/api/")) return serveWeb(res, webDir, pathname);
       sendError(res, 404, "not found");
     } catch (err) {
+      if (isHttpError(err)) {
+        if (!res.headersSent) sendError(res, err.status, err.message);
+        else res.end();
+        return;
+      }
       const message = err instanceof Error ? err.message : "internal error";
       if (!res.headersSent) sendError(res, 500, message);
       else res.end();

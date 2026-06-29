@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   ClaudeCodeRunner,
+  NodeSpawner,
   type ProcessSpawner,
   type SpawnInput,
   type SpawnOutput,
@@ -96,6 +97,23 @@ test("model option adds --model", () => {
   const args = runner.buildArgs("SYS");
   const i = args.indexOf("--model");
   assert.ok(i >= 0 && args[i + 1] === "claude-opus-4-8");
+});
+
+test("NodeSpawner uses the augmented agent environment", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-"));
+  const out = await new NodeSpawner().run({
+    command: process.execPath,
+    args: [
+      "-e",
+      "process.stdout.write(JSON.stringify({path:process.env.PATH, hook:process.env.IMPECCABLE_HOOK_DISABLED, quiet:process.env.IMPECCABLE_HOOK_QUIET}))",
+    ],
+    cwd: dir,
+    stdin: "",
+  });
+  const env = JSON.parse(out.stdout) as { path: string; hook: string; quiet: string };
+  assert.ok(env.path.split(":").includes(dirname(process.execPath)));
+  assert.equal(env.hook, "1");
+  assert.equal(env.quiet, "1");
 });
 
 test("missing artifact file yields empty artifactHtml (agent wrote nothing)", async () => {

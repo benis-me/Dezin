@@ -25,7 +25,7 @@ import { lintScore } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
 import { captureCover } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
-import { gitCommit } from "./project-runtime.ts";
+import { ensureDevServer, gitCommit, workingTreeFingerprint } from "./project-runtime.ts";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
@@ -94,6 +94,11 @@ function resultMessage(text: string, meta: Record<string, unknown>): string {
   return JSON.stringify({ result: { text, meta } });
 }
 
+function requestOrigin(req: IncomingMessage): string | undefined {
+  const host = req.headers.host;
+  return typeof host === "string" && host ? `http://${host}` : undefined;
+}
+
 async function runVisualQa(
   deps: AppDeps,
   htmlPath: string,
@@ -102,11 +107,12 @@ async function runVisualQa(
   model: string | undefined,
   brief: string,
   conversationHistory: VisualQaInput["conversationHistory"],
+  options: Pick<VisualQaInput, "projectRoot" | "renderUrl"> = {},
 ): Promise<QualityFinding[]> {
   if (!settings.visualQaEnabled) return [];
   try {
     const runner = deps.visualQa ?? auditVisualArtifact;
-    return await runner({ htmlPath, settings, agentCommand, model, brief, conversationHistory });
+    return await runner({ htmlPath, settings, agentCommand, model, brief, conversationHistory, ...options });
   } catch (err) {
     return [
       {
@@ -139,6 +145,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     ? store.getConversation(body.conversationId)
     : store.createConversation(project.id);
   if (!conversation) return sendError(res, 404, "conversation not found");
+  if (conversation.projectId !== project.id) return sendError(res, 400, "conversation does not belong to project");
 
   // Resolve the active design system (the project's, else the settings default).
   const registry = deps.designRegistry ?? defaultRegistry();
@@ -201,6 +208,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
 
   const dir = projectDir(deps.dataDir, project.id);
   await mkdir(dir, { recursive: true });
+  const origin = requestOrigin(req);
 
   // Record the agent's tool steps so the conversation keeps a permanent process record.
   const steps: string[] = [];
@@ -216,6 +224,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // No closed lint loop on one file; run a turn, commit the diff to git as a version.
   if (project.mode === "standard") {
     try {
+      const beforeTree = await workingTreeFingerprint(dir);
       sse({ type: "turn-start", round: 0, isRepair: false });
       const result = await runTurnWithRetry(
         runner,
@@ -236,12 +245,50 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         },
       );
       sse({ type: "turn-end", round: 0, text: result.text });
-      await gitCommit(dir, brief);
+      const afterTree = await workingTreeFingerprint(dir);
+      if (afterTree === beforeTree) throw new Error("The selected Agent finished without changing project files.");
+      const commit = await gitCommit(dir, brief);
+      if (!commit.changed) throw new Error("The selected Agent did not leave any project changes to save.");
+      if (!commit.committed) throw new Error("Project files changed, but Dezin could not commit a version snapshot.");
+      const visualConversation = [
+        ...history,
+        { role: "user" as const, content: brief },
+        ...(result.text ? [{ role: "assistant" as const, content: result.text }] : []),
+      ];
+      let visualFindings: QualityFinding[] = [];
+      if (settings.visualQaEnabled) {
+        let renderUrl: string | undefined;
+        if (!deps.visualQa) {
+          try {
+            renderUrl = (await ensureDevServer(project.id, dir)).url;
+          } catch (err) {
+            visualFindings = [
+              {
+                severity: "P2",
+                id: "visual-devserver-unavailable",
+                message: `Visual QA could not open the standard project preview: ${err instanceof Error ? err.message : "dev server unavailable"}.`,
+                fix: "Wait for dependencies to finish installing, refresh the preview, and rerun visual QA.",
+              },
+            ];
+          }
+        }
+        if (!visualFindings.length) {
+          visualFindings = await runVisualQa(deps, join(dir, "index.html"), settings, runAgentCommand, runModel, brief, visualConversation, {
+            projectRoot: dir,
+            renderUrl,
+          });
+        }
+        sse({ type: "visual-qa", findings: visualFindings });
+      }
+      const score = settings.visualQaEnabled ? lintScore(visualFindings) : null;
+      const passed = !visualFindings.some((f) => f.severity === "P0");
       store.addMessage(conversation.id, "assistant", result.text);
       persistProcess();
-      store.addMessage(conversation.id, "system", resultMessage("Done. Updated the project; the dev preview reflects it live.", { passed: true, score: null, rounds: 0 }));
-      store.updateRun(run.id, { status: "succeeded", repairRounds: 0, lintPassed: true, score: null, findings: [], finishedAt: Date.now() });
-      sse({ type: "run-done", runId: run.id, passed: true, rounds: 0, score: null, mode: "standard", findings: [] });
+      const quality = score !== null ? `, quality ${score}/100` : "";
+      const message = passed ? `Done${quality}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
+      store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: 0 }));
+      store.updateRun(run.id, { status: "succeeded", repairRounds: 0, lintPassed: passed, score, findings: visualFindings, finishedAt: Date.now() });
+      sse({ type: "run-done", runId: run.id, passed, rounds: 0, score, mode: "standard", findings: visualFindings });
     } catch (err) {
       const cancelled = ctrl.signal.aborted || isAbortError(err);
       store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
@@ -304,6 +351,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       runModel,
       brief,
       visualConversation,
+      { projectRoot: dir, renderUrl: origin ? `${origin}/projects/${project.id}/preview/` : undefined },
     );
     sse({ type: "visual-qa", findings: visualFindings });
     const finalFindings = [...result.findings, ...visualFindings];

@@ -86,6 +86,30 @@ test("auditVisualArtifact is disabled by settings", async () => {
   assert.deepEqual(findings, []);
 });
 
+test("reviewScreenshotWithAgent reports when screenshot capture never happened", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-missing-shot-"));
+  writeFileSync(join(root, "index.html"), "<h1>Pricing</h1>", "utf8");
+  const findings = await reviewScreenshotWithAgent(
+    {
+      htmlPath: join(root, "index.html"),
+      settings: {
+        agentCommand: "agent-that-should-not-run",
+        model: "",
+        apiBaseUrl: "",
+        apiKey: "",
+        defaultDesignSystemId: "modern-minimal",
+        customInstructions: "",
+        imageApiBaseUrl: "",
+        imageApiKey: "",
+        imageModel: "",
+        visualQaEnabled: true,
+      },
+    },
+    join(root, ".visual-qa", "screenshot.png"),
+  );
+  assert.equal(findings[0]?.id, "visual-screenshot-missing");
+});
+
 test("reviewScreenshotWithAgent runs in the project directory with artifact and screenshot context", async () => {
   const root = mkdtempSync(join(tmpdir(), "dezin-visual-review-"));
   const screenshot = join(root, ".visual-qa", "screenshot.png");

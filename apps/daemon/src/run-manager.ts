@@ -7,7 +7,8 @@
  */
 
 import { EventEmitter } from "node:events";
-import { appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, existsSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 
 interface RunEntry {
@@ -17,6 +18,7 @@ interface RunEntry {
   buffer: unknown[];
   emitter: EventEmitter;
   ctrl: AbortController;
+  writeQueue: Promise<void>;
   done: boolean;
 }
 
@@ -37,7 +39,16 @@ export function createRun(meta: { runId: string; conversationId: string; dataDir
   }
   const emitter = new EventEmitter();
   emitter.setMaxListeners(64);
-  const entry: RunEntry = { runId: meta.runId, conversationId: meta.conversationId, logPath, buffer: [], emitter, ctrl: new AbortController(), done: false };
+  const entry: RunEntry = {
+    runId: meta.runId,
+    conversationId: meta.conversationId,
+    logPath,
+    buffer: [],
+    emitter,
+    ctrl: new AbortController(),
+    writeQueue: Promise.resolve(),
+    done: false,
+  };
   runs.set(meta.runId, entry);
   activeByConversation.set(meta.conversationId, meta.runId);
   return entry.ctrl;
@@ -48,11 +59,13 @@ export function pushEvent(runId: string, ev: unknown): void {
   const e = runs.get(runId);
   if (!e) return;
   e.buffer.push(ev);
+  let line = "";
   try {
-    appendFileSync(e.logPath, `${JSON.stringify(ev)}\n`);
+    line = `${JSON.stringify(ev)}\n`;
   } catch {
-    /* best-effort persistence */
+    line = "";
   }
+  if (line) e.writeQueue = e.writeQueue.catch(() => {}).then(() => appendFile(e.logPath, line)).catch(() => {});
   e.emitter.emit("event", ev);
 }
 
@@ -60,10 +73,13 @@ export function pushEvent(runId: string, ev: unknown): void {
 export function finishRun(runId: string): void {
   const e = runs.get(runId);
   if (!e) return;
-  e.done = true;
-  e.emitter.emit("done");
-  if (activeByConversation.get(e.conversationId) === runId) activeByConversation.delete(e.conversationId);
-  runs.delete(runId);
+  void e.writeQueue.finally(() => {
+    if (runs.get(runId) !== e) return;
+    e.done = true;
+    e.emitter.emit("done");
+    if (activeByConversation.get(e.conversationId) === runId) activeByConversation.delete(e.conversationId);
+    runs.delete(runId);
+  });
 }
 
 export function cancelRun(runId: string): boolean {

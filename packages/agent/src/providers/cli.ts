@@ -28,12 +28,24 @@ export function augmentedPath(): string {
   return [process.env.PATH ?? "", ...extra].filter(Boolean).join(":");
 }
 
+/** Environment shared by real agent/tool spawns, matching probe PATH and disabling host hooks. */
+export function agentSpawnEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    PATH: augmentedPath(),
+    IMPECCABLE_HOOK_DISABLED: "1",
+    IMPECCABLE_HOOK_QUIET: "1",
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    ...extra,
+  };
+}
+
 /** Spawn `<command> <args>` on the augmented PATH and capture stdout+stderr (bounded). */
 export function runCapture(command: string, args: string[], timeoutMs: number): Promise<{ code: number; out: string } | null> {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PATH: augmentedPath() } });
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv() });
     } catch {
       return resolve(null);
     }

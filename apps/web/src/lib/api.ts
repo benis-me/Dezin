@@ -254,7 +254,7 @@ export interface ApiClient {
   uploadRef(id: string, name: string, contentBase64: string): Promise<{ name: string; path: string }>;
   /** Parse a Figma .fig file into an agent-ready design summary. */
   parseFig(file: Blob, name: string): Promise<{ name: string; summary: string }>;
-  /** One-shot pending capture from the browser extension (cleared on read). */
+  /** Explicitly consume the one-shot pending capture from the browser extension. */
   getCapture(): Promise<{ images: { name: string; base64: string }[]; note: string; source: string }>;
   previewUrl(id: string): string;
   /** URL serving an uploaded reference file (e.g. an image), given its `.refs/<name>` path. */
@@ -420,7 +420,10 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
         headers: { "content-type": "application/octet-stream", "x-filename": encodeURIComponent(name) },
         body: file,
       }),
-    getCapture: () => json<{ images: { name: string; base64: string }[]; note: string; source: string }>("/api/capture"),
+    getCapture: () =>
+      json<{ images: { name: string; base64: string }[]; note: string; source: string }>("/api/capture/consume", {
+        method: "POST",
+      }),
     getFileText: async (id, path) => {
       const rel = path.split("/").map(enc).join("/");
       const res = await f(`${baseUrl}/projects/${enc(id)}/preview/${rel}`);

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Code, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, Plus, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
@@ -437,19 +437,34 @@ export function computeMarkupPosition(
   iframeRect: { left: number; top: number; width: number; height: number } | null | undefined,
   elementRect: { x: number; y: number; w: number; h: number } | null | undefined,
   viewport: { width: number; height: number },
+  popover: { width: number; height: number; margin?: number; gap?: number } = MARKUP_POPOVER,
 ): { x: number; y: number } {
-  const maxX = Math.max(MARKUP_POPOVER.margin, viewport.width - MARKUP_POPOVER.width - MARKUP_POPOVER.margin);
-  const maxY = Math.max(MARKUP_POPOVER.margin, viewport.height - MARKUP_POPOVER.height - MARKUP_POPOVER.margin);
+  const margin = popover.margin ?? MARKUP_POPOVER.margin;
+  const gap = popover.gap ?? MARKUP_POPOVER.gap;
+  const maxX = Math.max(margin, viewport.width - popover.width - margin);
+  const maxY = Math.max(margin, viewport.height - popover.height - margin);
   if (!iframeRect || !elementRect) return { x: maxX, y: Math.min(120, maxY) };
 
   const anchorX = iframeRect.left + elementRect.x;
-  const belowY = iframeRect.top + elementRect.y + elementRect.h + MARKUP_POPOVER.gap;
-  const aboveY = iframeRect.top + elementRect.y - MARKUP_POPOVER.height - MARKUP_POPOVER.gap;
-  const y = belowY <= maxY ? belowY : aboveY >= MARKUP_POPOVER.margin ? clamp(aboveY, MARKUP_POPOVER.margin, maxY) : clamp(belowY, MARKUP_POPOVER.margin, maxY);
+  const belowY = iframeRect.top + elementRect.y + elementRect.h + gap;
+  const aboveY = iframeRect.top + elementRect.y - popover.height - gap;
+  const y = belowY <= maxY ? belowY : aboveY >= margin ? clamp(aboveY, margin, maxY) : clamp(belowY, margin, maxY);
 
   return {
-    x: clamp(anchorX, MARKUP_POPOVER.margin, maxX),
+    x: clamp(anchorX, margin, maxX),
     y,
+  };
+}
+
+function clampMarkupPopover(
+  position: { x: number; y: number },
+  viewport: { width: number; height: number },
+  size: { width: number; height: number },
+): { x: number; y: number } {
+  const margin = MARKUP_POPOVER.margin;
+  return {
+    x: clamp(position.x, margin, Math.max(margin, viewport.width - size.width - margin)),
+    y: clamp(position.y, margin, Math.max(margin, viewport.height - size.height - margin)),
   };
 }
 
@@ -464,12 +479,27 @@ function MarkUpPopover({
   onCancel: () => void;
 }) {
   const [note, setNote] = useState("");
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ x: mark.x, y: mark.y });
+
+  useLayoutEffect(() => {
+    const update = (): void => {
+      const rect = ref.current?.getBoundingClientRect();
+      const size = rect ? { width: rect.width, height: rect.height } : MARKUP_POPOVER;
+      setPos(clampMarkupPopover({ x: mark.x, y: mark.y }, { width: window.innerWidth, height: window.innerHeight }, size));
+    };
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [mark.x, mark.y, mark.selector, mark.note]);
+
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onCancel} aria-hidden />
       <div
+        ref={ref}
         className="fixed z-50 max-h-[calc(100vh-24px)] w-72 overflow-auto rounded-xl border border-border bg-popover p-3 shadow-pop"
-        style={{ left: mark.x, top: mark.y }}
+        style={{ left: pos.x, top: pos.y }}
         role="dialog"
         aria-label="Mark up element"
       >
@@ -662,6 +692,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const runningRef = useRef(false);
   const activeRunIdRef = useRef<string | null>(null);
   const terminalEventRef = useRef(false);
+  const liveQualityRef = useRef(false);
   const reattachedRunsRef = useRef<Set<string>>(new Set());
   const splitRef = useRef<HTMLDivElement>(null);
 
@@ -706,9 +737,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       // Reflect the latest run's score in the Quality tab when reopening a project.
       const latest = rs[0]; // newest-first
       if (latest && typeof latest.score === "number") {
-        setScore((cur) => cur ?? latest.score);
+        setScore(latest.score);
         setLintFindings(normalizeFindings(latest.findings));
         setRanOnce(true);
+        liveQualityRef.current = false;
+      } else {
+        if (!liveQualityRef.current) {
+          setScore(null);
+          setLintFindings([]);
+          setRanOnce(Boolean(latest));
+        }
       }
       if (latest && REPLAYABLE_RUN_STATUSES.has(latest.status) && !reattachedRunsRef.current.has(latest.id)) {
         void reattachRun(latest.id, latest.status);
@@ -801,6 +839,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         }
         setLintFindings([]);
         setScore(null);
+        liveQualityRef.current = false;
         setLiveItems([]);
         liveItemsRef.current = [];
         gotTurnText.current = false;
@@ -855,6 +894,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         const s = typeof ev.score === "number" ? ev.score : null;
         if (Array.isArray(ev.findings)) setLintFindings(normalizeFindings(ev.findings));
         setScore(s);
+        liveQualityRef.current = true;
         setLiveStatus(null);
         materializeLive();
         const fixes = rounds ? ` after ${rounds} fix${rounds > 1 ? "es" : ""}` : "";
@@ -1049,6 +1089,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   useEffect(() => {
     if (projectId === "new") return;
     let alive = true;
+    liveQualityRef.current = false;
+    setScore(null);
+    setLintFindings([]);
+    setRanOnce(false);
     setLoading(true);
     void (async () => {
       try {

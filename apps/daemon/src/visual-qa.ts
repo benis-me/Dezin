@@ -5,11 +5,13 @@ import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
-import { getProvider } from "../../../packages/agent/src/index.ts";
+import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
 import { findChrome } from "./capture-cover.ts";
 
 export interface VisualQaInput {
   htmlPath: string;
+  projectRoot?: string;
+  renderUrl?: string;
   settings: Settings;
   screenshotPath?: string;
   agentCommand?: string;
@@ -60,7 +62,7 @@ function toRel(root: string, file: string): string {
 }
 
 function agentReviewPrompt(input: VisualQaInput, screenshotPath: string): string {
-  const projectDir = dirname(input.htmlPath);
+  const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const artifactRel = toRel(projectDir, input.htmlPath);
   const screenshotRel = toRel(projectDir, screenshotPath);
   const brief = input.brief?.trim();
@@ -72,6 +74,7 @@ function agentReviewPrompt(input: VisualQaInput, screenshotPath: string): string
     "You are reviewing the latest rendered result for the current Dezin conversation.",
     `Rendered screenshot: ${screenshotRel}`,
     `Final artifact: ${artifactRel}`,
+    input.renderUrl ? `Rendered URL: ${input.renderUrl}` : "",
     history ? `Current conversation context:\n${history}` : "",
     brief ? `Current user request:\nUSER: ${brief}` : "",
     "Use the screenshot as the primary evidence. Use the conversation context to judge whether the visual result matches the user's intent.",
@@ -188,9 +191,18 @@ export function parseVisualReview(text: string): QualityFinding[] {
   return normalized;
 }
 
-async function collectGeometry(htmlPath: string, screenshotPath?: string): Promise<QualityFinding[]> {
+async function collectGeometry(htmlPath: string, screenshotPath?: string, renderUrl?: string): Promise<QualityFinding[]> {
   const executablePath = findChrome();
-  if (!executablePath) return [];
+  if (!executablePath) {
+    return [
+      {
+        severity: "P2",
+        id: "visual-chrome-unavailable",
+        message: "Visual QA could not run because Chrome was not found on this machine.",
+        fix: "Install Chrome/Chromium or disable Visual QA in Settings for this environment.",
+      },
+    ];
+  }
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
   try {
     browser = await puppeteer.launch({ executablePath, headless: true, args: ["--no-sandbox", "--hide-scrollbars"] });
@@ -198,7 +210,7 @@ async function collectGeometry(htmlPath: string, screenshotPath?: string): Promi
     for (const viewport of VIEWPORTS) {
       const page = await browser.newPage();
       await page.setViewport({ width: viewport.width, height: viewport.height, deviceScaleFactor: 1 });
-      await page.goto(pathToFileURL(htmlPath).href, { waitUntil: "domcontentloaded", timeout: 10000 });
+      await page.goto(renderUrl ?? pathToFileURL(htmlPath).href, { waitUntil: "domcontentloaded", timeout: 10000 });
       await new Promise((r) => setTimeout(r, 400));
       const snapshot = await page.evaluate(() => {
         const win = globalThis as any;
@@ -284,12 +296,7 @@ async function collectGeometry(htmlPath: string, screenshotPath?: string): Promi
 
 function spawnAgentText(command: string, args: string[], cwd: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const env = {
-      ...process.env,
-      IMPECCABLE_HOOK_DISABLED: "1",
-      IMPECCABLE_HOOK_QUIET: "1",
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-    };
+    const env = agentSpawnEnv();
     let child;
     try {
       child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env });
@@ -319,8 +326,18 @@ function spawnAgentText(command: string, args: string[], cwd: string, timeoutMs:
 }
 
 export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshotPath: string): Promise<QualityFinding[]> {
-  if (!input.settings.visualQaEnabled || !existsSync(screenshotPath)) return [];
-  const projectDir = dirname(input.htmlPath);
+  if (!input.settings.visualQaEnabled) return [];
+  if (!existsSync(screenshotPath)) {
+    return [
+      {
+        severity: "P2",
+        id: "visual-screenshot-missing",
+        message: "Agent visual review could not run because the rendered screenshot was not produced.",
+        fix: "Open Preview and check whether the page can be captured, then rerun the generation.",
+      },
+    ];
+  }
+  const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const command = input.agentCommand || input.settings.agentCommand || "claude";
   const provider = getProvider(command);
   const model = input.model || input.settings.model || undefined;
@@ -343,9 +360,19 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
 
 export async function auditVisualArtifact(input: VisualQaInput): Promise<QualityFinding[]> {
   if (!input.settings.visualQaEnabled) return [];
-  if (!existsSync(input.htmlPath)) return [];
-  const screenshotPath = input.screenshotPath ?? join(dirname(input.htmlPath), ".visual-qa", "screenshot.png");
-  const geometry = await collectGeometry(input.htmlPath, screenshotPath);
+  if (!existsSync(input.htmlPath)) {
+    return [
+      {
+        severity: "P2",
+        id: "visual-artifact-missing",
+        message: "Visual QA could not run because the final artifact file is missing.",
+        fix: "Rerun generation and confirm the selected Agent writes the expected project files.",
+      },
+    ];
+  }
+  const projectDir = input.projectRoot ?? dirname(input.htmlPath);
+  const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
+  const geometry = await collectGeometry(input.htmlPath, screenshotPath, input.renderUrl);
   const ai = await reviewScreenshotWithAgent(input, screenshotPath);
   return [...geometry, ...ai];
 }

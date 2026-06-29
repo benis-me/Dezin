@@ -1,11 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { cp } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp } from "../src/index.ts";
+import { templateDir } from "../src/project-runtime.ts";
 
 interface Ctx {
   base: string;
@@ -16,7 +19,14 @@ interface Ctx {
 async function withServer(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-files-"));
   const store = new Store(":memory:");
-  const server = createApp({ store, dataDir });
+  const server = createApp({
+    store,
+    dataDir,
+    standardProjectSetup: async (_projectId, dir) => {
+      await cp(templateDir(), dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+    },
+  });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
@@ -79,6 +89,9 @@ test("standard mode: POST /api/projects scaffolds a Vite project + git, reports 
     await new Promise((r) => setTimeout(r, 300)); // let scaffold (copy + git) land
     assert.ok(existsSync(join(dir, "package.json")), "package.json scaffolded");
     assert.ok(existsSync(join(dir, "src", "App.jsx")), "App.jsx scaffolded");
+    const viteConfig = readFileSync(join(dir, "vite.config.js"), "utf8");
+    assert.match(viteConfig, /data-dezin-id/);
+    assert.match(viteConfig, /nth-of-type/);
 
     const setup = (await (await fetch(`${base}/api/projects/${project.id}/setup`)).json()) as { phase: string };
     assert.ok(["scaffolding", "installing", "ready", "error"].includes(setup.phase));
