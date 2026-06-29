@@ -21,11 +21,6 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
   const [model, setModel] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // A thorough scan on first run, matching the Settings Rescan (the boot scan is the fast path).
-  useEffect(() => {
-    void rescan();
-  }, [rescan]);
-
   const available = agents.filter((a) => a.available);
 
   // Default to the first available agent once the scan resolves.
@@ -35,7 +30,9 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
 
   const current = available.find((a) => a.command === agent);
   const models = current?.models ?? [];
-  const busy = loading || scanning;
+  // Block only until we have *something* to show; once agents are in, the deep scan refines
+  // them in the background without holding up the picker.
+  const busy = loading || (scanning && available.length === 0);
 
   const finish = async () => {
     setSaving(true);
@@ -64,10 +61,17 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
         <div className="rounded-2xl border border-border bg-card p-4">
           <div className="mb-3 flex items-center justify-between">
             <span className="label-mono">Agent</span>
-            <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground" disabled={busy} onClick={() => void rescan()}>
-              <RotateCw size={13} strokeWidth={1.75} />
-              Rescan
-            </Button>
+            {scanning ? (
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Spinner size={13} />
+                Scanning…
+              </span>
+            ) : (
+              <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs text-muted-foreground" onClick={() => void rescan()}>
+                <RotateCw size={13} strokeWidth={1.75} />
+                Rescan
+              </Button>
+            )}
           </div>
 
           {busy ? (

@@ -170,7 +170,7 @@ function renderSettings(over = {}) {
     imageModel: "",
     ...p,
   }));
-  const api = makeFakeApi({ listAgents: async () => AGENTS, listDesignSystems: async () => DSYS, updateSettings, ...over });
+  const api = makeFakeApi({ listAgents: async () => AGENTS, rescanAgents: async () => AGENTS, listDesignSystems: async () => DSYS, updateSettings, ...over });
   render(
     <ApiProvider client={api}>
       <AgentsProvider>

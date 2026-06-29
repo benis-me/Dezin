@@ -52,9 +52,18 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
     }
   }, [api]);
 
+  // Fast first (a cached GET, instant — the UI never blocks), then a deep rescan in the
+  // background to refine results (e.g. CodeBuddy's live PTY model list). The deep POST
+  // resolves after the fast GET, so it always wins — fast never overwrites deep.
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    let alive = true;
+    void reload().then(() => {
+      if (alive) void rescan();
+    });
+    return () => {
+      alive = false;
+    };
+  }, [reload, rescan]);
 
   return <AgentsContext.Provider value={{ agents, loading, scanning, rescan, reload }}>{children}</AgentsContext.Provider>;
 }
