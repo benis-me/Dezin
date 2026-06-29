@@ -73,9 +73,9 @@ export interface Run {
   repairRounds: number;
   /** Whether the final artifact passed the blocking lint gate. */
   lintPassed: boolean;
-  /** 0–100 anti-slop quality score of the final artifact (null until finished). */
+  /** 0-100 final quality score after static and visual checks (null until finished). */
   score: number | null;
-  /** Final anti-slop findings for this run. Empty means clean or no details persisted. */
+  /** Final quality findings for this run. Empty means clean or no details persisted. */
   findings: QualityFinding[];
   createdAt: number;
   finishedAt: number | null;
@@ -117,4 +117,6 @@ export interface Settings {
   imageApiKey: string;
   /** Optional image model, e.g. "gpt-image-1" / "dall-e-3". */
   imageModel: string;
+  /** When enabled, the selected Agent/model reviews a rendered screenshot after prototype runs. */
+  visualQaEnabled: boolean;
 }

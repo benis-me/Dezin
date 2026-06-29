@@ -84,7 +84,8 @@ CREATE TABLE IF NOT EXISTS settings (
   custom_instructions TEXT,
   image_api_base_url TEXT,
   image_api_key TEXT,
-  image_model TEXT
+  image_model TEXT,
+  visual_qa_enabled INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -98,6 +99,7 @@ const DEFAULT_SETTINGS: Settings = {
   imageApiBaseUrl: "",
   imageApiKey: "",
   imageModel: "",
+  visualQaEnabled: false,
 };
 
 type Row = Record<string, unknown>;
@@ -217,6 +219,7 @@ export class Store {
     ensureColumn("settings", "image_api_base_url", "image_api_base_url TEXT");
     ensureColumn("settings", "image_api_key", "image_api_key TEXT");
     ensureColumn("settings", "image_model", "image_model TEXT");
+    ensureColumn("settings", "visual_qa_enabled", "visual_qa_enabled INTEGER NOT NULL DEFAULT 0");
     ensureColumn("projects", "archived_at", "archived_at INTEGER");
     ensureColumn("projects", "active_variant_id", "active_variant_id TEXT");
     ensureColumn("runs", "variant_id", "variant_id TEXT");
@@ -480,6 +483,7 @@ export class Store {
       imageApiBaseUrl: str(r.image_api_base_url, DEFAULT_SETTINGS.imageApiBaseUrl),
       imageApiKey: str(r.image_api_key, DEFAULT_SETTINGS.imageApiKey),
       imageModel: str(r.image_model, DEFAULT_SETTINGS.imageModel),
+      visualQaEnabled: Number(r.visual_qa_enabled ?? 0) === 1,
     };
   }
 
@@ -495,12 +499,14 @@ export class Store {
       imageApiBaseUrl: patch.imageApiBaseUrl ?? cur.imageApiBaseUrl,
       imageApiKey: patch.imageApiKey ?? cur.imageApiKey,
       imageModel: patch.imageModel ?? cur.imageModel,
+      visualQaEnabled: patch.visualQaEnabled ?? cur.visualQaEnabled,
     };
     this.db
       .prepare(
         `INSERT INTO settings (id, agent_command, model, api_base_url, api_key, default_design_system_id, custom_instructions,
-                               image_api_base_url, image_api_key, image_model)
-         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               image_api_base_url, image_api_key, image_model,
+                               visual_qa_enabled)
+         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            agent_command = excluded.agent_command,
            model = excluded.model,
@@ -510,7 +516,8 @@ export class Store {
            custom_instructions = excluded.custom_instructions,
            image_api_base_url = excluded.image_api_base_url,
            image_api_key = excluded.image_api_key,
-           image_model = excluded.image_model`,
+           image_model = excluded.image_model,
+           visual_qa_enabled = excluded.visual_qa_enabled`,
       )
       .run(
         next.agentCommand,
@@ -522,6 +529,7 @@ export class Store {
         next.imageApiBaseUrl,
         next.imageApiKey,
         next.imageModel,
+        next.visualQaEnabled ? 1 : 0,
       );
     return next;
   }

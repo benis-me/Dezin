@@ -183,6 +183,7 @@ test("/projects/new preserves the selected agent and model for the first run", a
       imageApiBaseUrl: "",
       imageApiKey: "",
       imageModel: "",
+      visualQaEnabled: false,
     }),
   });
   const user = userEvent.setup();
@@ -413,7 +414,41 @@ test("the Quality tab shows final run-done findings even when no repair lint eve
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
   expect(await screen.findByText(/raw hex values/)).toBeInTheDocument();
   expect(screen.getByText(/Large rounded card radius/)).toBeInTheDocument();
-  expect(screen.queryByText(/No anti-slop issues\. Clean/)).toBeNull();
+  expect(screen.queryByText(/No quality issues\. Clean/)).toBeNull();
+});
+
+test("the Quality tab groups visual QA findings separately from anti-slop findings", async () => {
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-visual", conversationId: "c1" };
+      yield {
+        type: "run-done",
+        runId: "r-visual",
+        passed: true,
+        rounds: 0,
+        score: 89,
+        previewUrl: "/projects/p1/preview/",
+        findings: [
+          { severity: "P1", id: "visual-horizontal-overflow", message: "Desktop viewport has horizontal overflow.", fix: "Constrain wide sections." },
+          { severity: "P2", id: "raw-hex", message: "2 raw hex values outside :root.", fix: "Move colours into tokens." },
+        ],
+      };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  await screen.findByText(/Done, quality 89\/100/);
+  fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
+
+  expect(await screen.findByText("Visual QA")).toBeInTheDocument();
+  expect(screen.getByText("Anti-slop")).toBeInTheDocument();
+  expect(screen.getByText(/Desktop viewport has horizontal overflow/)).toBeInTheDocument();
+  expect(screen.getByText(/raw hex values/)).toBeInTheDocument();
 });
 
 test("reopening a project restores persisted result cards and quality findings", async () => {
@@ -452,7 +487,7 @@ test("reopening a project restores persisted result cards and quality findings",
   expect(await screen.findByText("Done, quality 94/100.")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
   expect(await screen.findByText(/raw hex values/)).toBeInTheDocument();
-  expect(screen.queryByText(/No anti-slop issues\. Clean/)).toBeNull();
+  expect(screen.queryByText(/No quality issues\. Clean/)).toBeNull();
 });
 
 test("a clean run shows the Quality pane's clean empty state", async () => {
@@ -471,7 +506,7 @@ test("a clean run shows the Quality pane's clean empty state", async () => {
   fireEvent.click(screen.getByLabelText("Send"));
   await screen.findByTitle("Artifact preview");
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
-  expect(await screen.findByText(/No anti-slop issues\. Clean/)).toBeInTheDocument();
+  expect(await screen.findByText(/No quality issues\. Clean/)).toBeInTheDocument();
   expect(screen.getAllByText("100/100").length).toBeGreaterThan(0); // shown in the score header (and result card)
 });
 
@@ -487,8 +522,8 @@ test("a non-perfect restored score without stored findings does not claim clean"
     </ApiProvider>,
   );
   fireEvent.click(await screen.findByRole("tab", { name: /Quality/ }));
-  expect(await screen.findByText(/No stored anti-slop details/)).toBeInTheDocument();
-  expect(screen.queryByText(/No anti-slop issues\. Clean/)).toBeNull();
+  expect(await screen.findByText(/No stored quality details/)).toBeInTheDocument();
+  expect(screen.queryByText(/No quality issues\. Clean/)).toBeNull();
 });
 
 test("markup popover position is clamped into the viewport", () => {

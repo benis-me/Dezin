@@ -39,6 +39,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
       imageApiBaseUrl: "",
       imageApiKey: "",
       imageModel: "",
+      visualQaEnabled: false,
     }),
     updateSettings: notImpl as ApiClient["updateSettings"],
     listAgents: async () => [],
