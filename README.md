@@ -116,4 +116,5 @@ The node suite uses `node --experimental-strip-types --experimental-sqlite --tes
 Dezin was built from scratch; its direction was informed by ideas from these projects:
 
 - [open-design](https://github.com/nexu-io/open-design) — for the anti-AI-slop craft direction and the idea of composing generation from a brand/system content model.
+- [Claude Design](https://claude.ai) — Anthropic's Claude interface, a touchstone for the restrained, content-first product aesthetic Dezin aims for.
 - [simple-icons](https://github.com/simple-icons/simple-icons) — the brand marks used for the built-in design systems.

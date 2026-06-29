@@ -7,7 +7,7 @@
  */
 
 import { dirname, join } from "node:path";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
@@ -21,6 +21,14 @@ const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
 const PORT = process.env.DEZIN_PORT !== undefined ? Number(process.env.DEZIN_PORT) : 0;
 const DATA_DIR = process.env.DEZIN_DATA_DIR ?? join(homedir(), ".dezin");
 const PORT_FILE = process.env.DEZIN_PORTFILE ?? join(DATA_DIR, "daemon.json");
+// Single source of truth: the repo's package.json version, so About always matches it.
+const VERSION = (() => {
+  try {
+    return (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")).version as string) || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 
 function main(): void {
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
@@ -28,7 +36,7 @@ function main(): void {
   const runner = new ClaudeCodeRunner({ command: process.env.DEZIN_AGENT_CMD ?? "claude" });
   // One shared registry: bundled systems + any the user has imported (persisted to disk).
   const designRegistry = new DesignRegistry([...BUNDLED_DESIGN_SYSTEMS, ...loadDesignSystems(userDesignDir(DATA_DIR))]);
-  const server = createApp({ store, dataDir: DATA_DIR, version: "0.0.0", runner, designRegistry });
+  const server = createApp({ store, dataDir: DATA_DIR, version: VERSION, runner, designRegistry });
 
   server.listen(PORT, HOST, () => {
     const { port } = server.address() as AddressInfo;

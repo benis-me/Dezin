@@ -1240,8 +1240,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               if (e.currentTarget === e.target) setDragging(false);
             }}
             onDrop={isExisting ? onComposerDrop : undefined}
-            className={`pointer-events-auto relative rounded-2xl border bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 ${
-              dragging ? "border-ring ring-2 ring-ring/40" : "border-input"
+            className={`pointer-events-auto relative rounded-2xl border bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring ${
+              dragging ? "border-ring ring-2 ring-ring/40" : "border-input hover:border-border-strong"
             }`}
           >
             {dragging ? (

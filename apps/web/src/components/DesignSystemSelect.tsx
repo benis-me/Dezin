@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Shapes } from "lucide-react";
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, ScrollArea, SearchInput } from "./ui/index.ts";
@@ -58,6 +58,29 @@ export function DesignSystemSelect({
   const [q, setQ] = useState("");
   const [tab, setTab] = useState<"built-in" | "custom">("built-in");
   const [preview, setPreview] = useState<{ system: DesignSystemCard; top: number; left: number } | null>(null);
+  const selectedRef = useRef<HTMLButtonElement>(null);
+
+  // On open, reveal the current selection: switch to its tab and centre it in the list.
+  // setTimeout (not rAF — which is paused in background tabs) retries until the Radix
+  // popover has positioned and the viewport is scrollable.
+  useEffect(() => {
+    if (!open) return;
+    let timer = 0;
+    let tries = 0;
+    const attempt = (): void => {
+      const row = selectedRef.current;
+      const vp = row?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null;
+      if (row && vp && vp.scrollHeight > vp.clientHeight) {
+        const r = row.getBoundingClientRect();
+        const v = vp.getBoundingClientRect();
+        vp.scrollTop += r.top - v.top - (v.height - r.height) / 2;
+        return;
+      }
+      if (tries++ < 15) timer = window.setTimeout(attempt, 16);
+    };
+    timer = window.setTimeout(attempt, 0);
+    return () => clearTimeout(timer);
+  }, [open, tab]);
 
   const showPreview = (e: React.MouseEvent, system: DesignSystemCard): void => {
     const row = e.currentTarget.getBoundingClientRect();
@@ -89,7 +112,10 @@ export function DesignSystemSelect({
       open={open}
       onOpenChange={(o) => {
         setOpen(o);
-        if (!o) {
+        if (o) {
+          const cur = systems.find((s) => s.id === value);
+          if (cur) setTab(cur.origin ?? "built-in");
+        } else {
           setQ("");
           setPreview(null);
         }
@@ -176,6 +202,7 @@ export function DesignSystemSelect({
                 <li key={s.id}>
                   <button
                     type="button"
+                    ref={s.id === value ? selectedRef : undefined}
                     onMouseEnter={(e) => showPreview(e, s)}
                     onClick={() => {
                       onChange(s.id);
