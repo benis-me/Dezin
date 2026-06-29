@@ -14,6 +14,7 @@ beforeEach(() => {
   takePendingAgent();
   takePendingModel();
   localStorage.removeItem("dezin.workspace.queue.p1");
+  localStorage.removeItem("dezin.workspace.split");
   localStorage.removeItem("dezin.workspace.files.split");
 });
 afterEach(cleanup);
@@ -22,6 +23,33 @@ const AGENTS = [
   { id: "claude", command: "claude", available: true, version: "claude 1.2.3", models: ["opus", "sonnet"] },
   { id: "codex", command: "codex", available: true, version: "codex 1.0.0", models: ["gpt-5"] },
 ];
+
+test("workspace conversation panel defaults to 400px before the user resizes it", async () => {
+  const innerWidth = vi.spyOn(window, "innerWidth", "get").mockReturnValue(1000);
+  try {
+    render(
+      <ApiProvider client={makeFakeApi()}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("conversation")).toHaveStyle({ flexGrow: "40" }));
+  } finally {
+    innerWidth.mockRestore();
+  }
+});
+
+test("workspace conversation panel keeps a saved user resize instead of the 400px default", () => {
+  localStorage.setItem("dezin.workspace.split", "0.25");
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  expect(screen.getByTestId("conversation")).toHaveStyle({ flexGrow: "25" });
+  expect(screen.getByTestId("conversation")).not.toHaveStyle({ flexBasis: "400px" });
+});
 
 test("sending a brief streams events into the chat and shows the preview + export", async () => {
   const fake = makeFakeApi({
@@ -420,7 +448,9 @@ test("the Files tab lists project files and previews the selected file's source"
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
   const fileResize = await screen.findByRole("separator", { name: "Resize file browser" });
   expect(fileResize).toHaveAttribute("data-separator");
-  expect(fileResize).toHaveClass("w-px", "bg-border");
+  expect(fileResize).toHaveClass("dezin-resize-separator", "app-no-drag");
+  expect(fileResize.className).not.toContain("primary");
+  expect(fileResize.className).not.toContain("focus-visible");
   expect((await screen.findAllByText("index.html")).length).toBeGreaterThan(0);
   // assets is a folder at root; double-click into it, then open the file
   expect(screen.getByText("assets")).toBeInTheDocument();

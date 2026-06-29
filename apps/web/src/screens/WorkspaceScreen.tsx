@@ -20,7 +20,7 @@ import { navigate } from "../router.tsx";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
 import type { Conversation, Variant, DesignSystemCard, Message, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
-import { readPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
+import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 
 const TABS = ["Preview", "Files", "Quality", "Versions"] as const;
 type Tab = (typeof TABS)[number];
@@ -773,7 +773,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [diff, setDiff] = useState<{ label: string; lines: DiffLine[] } | null>(null);
-  const workspaceConversationPercent = readPanelPercent(SPLIT_KEY, 33, 24, 55);
+  const workspaceConversationPercent =
+    readStoredPanelPercent(SPLIT_KEY, 24, 55) ??
+    panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 33, 24, 55);
   const msgId = useRef(0);
   const activeConv = useRef<string | null>(null);
   const modeRef = useRef<ProjectMode>("prototype");

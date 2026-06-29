@@ -38,7 +38,9 @@ test("Shell sidebar can be resized outside project pages", () => {
   );
   const resize = screen.getByRole("separator", { name: "Resize app sidebar" });
   expect(resize).toHaveAttribute("data-separator");
-  expect(resize).toHaveClass("w-px", "bg-border");
+  expect(resize).toHaveClass("dezin-resize-separator", "app-no-drag");
+  expect(resize.className).not.toContain("primary");
+  expect(resize.className).not.toContain("focus-visible");
   expect(resize.className).not.toContain("w-1");
   expect(screen.queryByRole("button", { name: "Browser extension" })).toBeNull();
 });

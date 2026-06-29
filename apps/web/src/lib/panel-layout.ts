@@ -4,9 +4,11 @@ function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));
 }
 
-export function readPanelPercent(key: string, fallback: number, min: number, max: number): number {
+export function readStoredPanelPercent(key: string, min: number, max: number): number | null {
   try {
-    const raw = Number(localStorage.getItem(key));
+    const stored = localStorage.getItem(key);
+    if (stored === null || stored.trim() === "") return null;
+    const raw = Number(stored);
     if (Number.isFinite(raw)) {
       const percent = raw <= 1 ? raw * 100 : raw;
       return clamp(percent, min, max);
@@ -14,7 +16,18 @@ export function readPanelPercent(key: string, fallback: number, min: number, max
   } catch {
     /* localStorage may be unavailable */
   }
+  return null;
+}
+
+export function readPanelPercent(key: string, fallback: number, min: number, max: number): number {
+  const stored = readStoredPanelPercent(key, min, max);
+  if (stored !== null) return stored;
   return fallback;
+}
+
+export function panelPercentFromPixels(pixels: number, totalPixels: number, fallback: number, min: number, max: number): number {
+  if (!Number.isFinite(pixels) || !Number.isFinite(totalPixels) || totalPixels <= 0) return fallback;
+  return clamp((pixels / totalPixels) * 100, min, max);
 }
 
 export function twoPanelLayout(firstId: string, firstPercent: number, secondId: string): Layout {
@@ -33,4 +46,4 @@ export function savePanelFraction(key: string, layout: Layout, panelId: string):
 }
 
 export const RESIZE_SEPARATOR_CLASS =
-  "app-no-drag w-px cursor-col-resize bg-border outline-none transition-colors hover:bg-primary focus-visible:bg-primary data-[separator=active]:bg-primary";
+  "dezin-resize-separator app-no-drag";
