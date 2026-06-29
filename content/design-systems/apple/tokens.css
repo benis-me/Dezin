@@ -1,0 +1,32 @@
+:root {
+  --bg: #ffffff;
+  --surface: #f5f5f7;
+  --surface-2: #ececef;
+  --fg: #1d1d1f;
+  --fg-2: #515154;
+  --muted: #86868b;
+  --border: #d2d2d7;
+  --border-strong: #b8b8be;
+
+  --accent: #0071e3;
+  --accent-fg: #ffffff;
+
+  --font-display: -apple-system, "SF Pro Display", ui-sans-serif, system-ui, sans-serif;
+  --font-body: -apple-system, "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-6: 24px; --space-8: 32px; --space-12: 48px;
+  --radius-sm: 8px; --radius: 12px; --radius-lg: 18px; --radius-pill: 980px;
+  --container-max: 980px;
+}
+[data-theme="dark"] {
+  --bg: #0b0b0c;
+  --surface: #161617;
+  --surface-2: #1f1f21;
+  --fg: #f5f5f7;
+  --fg-2: #a1a1a6;
+  --muted: #86868b;
+  --border: #2a2a2c;
+  --border-strong: #3a3a3d;
+  --accent: #2997ff;
+}

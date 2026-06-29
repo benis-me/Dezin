@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.od/
+.DS_Store
+*.log
+.dezin/
+.claude/
+.omks/
+.impeccable/

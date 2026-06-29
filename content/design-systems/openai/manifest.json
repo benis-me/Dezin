@@ -1,0 +1,6 @@
+{
+  "name": "OpenAI",
+  "category": "AI & LLM",
+  "summary": "Clean neutral white, near-black text, one muted-green accent, product-like calm.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage"] }
+}

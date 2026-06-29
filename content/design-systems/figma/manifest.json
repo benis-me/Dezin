@@ -1,0 +1,9 @@
+{
+  "name": "Figma",
+  "category": "Developer Tools",
+  "summary": "Bright, friendly tool UI — white canvas, Figma blue, the multicolor identity used sparingly.",
+  "craft": {
+    "applies": ["typography", "color", "anti-ai-slop", "state-coverage"],
+    "suggested": ["accessibility-baseline", "animation-discipline"]
+  }
+}

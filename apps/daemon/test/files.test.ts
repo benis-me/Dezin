@@ -1,0 +1,104 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { Store } from "../../../packages/core/src/index.ts";
+import { createApp } from "../src/index.ts";
+
+interface Ctx {
+  base: string;
+  dataDir: string;
+  store: Store;
+}
+
+async function withServer(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-files-"));
+  const store = new Store(":memory:");
+  const server = createApp({ store, dataDir });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await fn({ base: `http://127.0.0.1:${port}`, dataDir, store });
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    store.close();
+  }
+}
+
+test("GET /api/projects/:id/files lists the project's files with sizes", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "P" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, "assets"), { recursive: true });
+    writeFileSync(join(dir, "index.html"), "<h1>hello</h1>");
+    writeFileSync(join(dir, "assets", "style.css"), ":root{}");
+
+    const res = await fetch(`${base}/api/projects/${project.id}/files`);
+    assert.equal(res.status, 200);
+    const files = (await res.json()) as Array<{ path: string; size: number }>;
+    assert.deepEqual(
+      files.map((f) => f.path),
+      ["assets/style.css", "index.html"], // sorted
+    );
+    const html = files.find((f) => f.path === "index.html");
+    assert.ok(html && html.size > 0, "index.html has a non-zero size");
+  });
+});
+
+test("GET /api/projects/:id/files returns [] before any run", async () => {
+  await withServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Empty" });
+    const res = await fetch(`${base}/api/projects/${project.id}/files`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), []);
+  });
+});
+
+test("GET /api/projects/:id/files 404s for an unknown project", async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/api/projects/nope/files`);
+    assert.equal(res.status, 404);
+  });
+});
+
+test("standard mode: POST /api/projects scaffolds a Vite project + git, reports setup", async () => {
+  await withServer(async ({ base, dataDir }) => {
+    const res = await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Std", mode: "standard" }),
+    });
+    assert.equal(res.status, 201);
+    const project = (await res.json()) as { id: string; mode: string };
+    assert.equal(project.mode, "standard");
+
+    // the template was copied into the project dir (scaffold runs synchronously up to install)
+    const dir = join(dataDir, "projects", project.id);
+    await new Promise((r) => setTimeout(r, 300)); // let scaffold (copy + git) land
+    assert.ok(existsSync(join(dir, "package.json")), "package.json scaffolded");
+    assert.ok(existsSync(join(dir, "src", "App.jsx")), "App.jsx scaffolded");
+
+    const setup = (await (await fetch(`${base}/api/projects/${project.id}/setup`)).json()) as { phase: string };
+    assert.ok(["scaffolding", "installing", "ready", "error"].includes(setup.phase));
+  });
+});
+
+test("POST /api/projects/:id/refs saves a ref under .refs, hidden from Files", async () => {
+  await withServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "P" });
+    const res = await fetch(`${base}/api/projects/${project.id}/refs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "../weird name.png", contentBase64: Buffer.from("img").toString("base64") }),
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { name: string; path: string };
+    assert.equal(body.path, ".refs/weird_name.png"); // sanitized + namespaced
+
+    // .refs is excluded from the Files listing
+    const files = (await (await fetch(`${base}/api/projects/${project.id}/files`)).json()) as Array<{ path: string }>;
+    assert.ok(!files.some((f) => f.path.includes(".refs")), ".refs is hidden from Files");
+  });
+});

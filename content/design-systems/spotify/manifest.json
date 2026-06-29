@@ -1,0 +1,9 @@
+{
+  "name": "Spotify",
+  "category": "Media & Entertainment",
+  "summary": "Dark-native music stage; near-black canvas, heavy display type, one vivid green, full-pill controls.",
+  "craft": {
+    "applies": ["typography", "color", "anti-ai-slop", "state-coverage"],
+    "suggested": ["animation-discipline"]
+  }
+}

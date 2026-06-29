@@ -1,0 +1,6 @@
+{
+  "name": "Clean",
+  "category": "Modern & Minimal",
+  "summary": "Bright airy SaaS; lots of white, crisp blue accent, tidy rounded components.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "laws-of-ux"] }
+}

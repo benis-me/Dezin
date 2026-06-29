@@ -1,0 +1,6 @@
+{
+  "name": "Apple",
+  "category": "Consumer & Brand",
+  "summary": "Spacious, premium; soft cool-gray surfaces, big type, one blue accent, pill buttons.",
+  "craft": { "applies": ["typography", "typography-hierarchy", "color", "anti-ai-slop"] }
+}

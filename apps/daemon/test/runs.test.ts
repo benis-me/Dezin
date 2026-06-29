@@ -1,0 +1,289 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { Store } from "../../../packages/core/src/index.ts";
+import { FakeRunner } from "../../../packages/agent/src/index.ts";
+import type { AgentRunner } from "../../../packages/agent/src/index.ts";
+import { createApp } from "../src/index.ts";
+
+const CLEAN =
+  `<style>:root{--accent:#2563eb}</style>\n` +
+  `<section data-od-id="x"><h1>Hi there</h1><p>Real copy describing the thing.</p></section>`;
+const SLOPPY = `<style>.hero{background:#6366f1}</style><h1>🚀 Launch</h1><p>10x faster.</p>`;
+
+interface RunCtx {
+  base: string;
+  store: Store;
+}
+
+async function withRunServer(
+  runner: AgentRunner | undefined,
+  fn: (ctx: RunCtx) => Promise<void>,
+): Promise<void> {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-"));
+  const store = new Store(":memory:");
+  const server = createApp({ store, dataDir, runner });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await fn({ base: `http://127.0.0.1:${port}`, store });
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    store.close();
+  }
+}
+
+function parseSse(text: string): Array<Record<string, unknown>> {
+  return text
+    .split("\n\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((b) => JSON.parse(b.replace(/^data:\s?/, "")) as Record<string, unknown>);
+}
+
+async function createProject(base: string, body: object = { name: "P" }): Promise<{ id: string }> {
+  const res = await fetch(`${base}/api/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return (await res.json()) as { id: string };
+}
+
+test("clean run: streams SSE, persists, serves the artifact back", async () => {
+  await withRunServer(new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }), async ({ base, store }) => {
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+
+    const events = parseSse(await res.text());
+    const types = events.map((e) => e.type);
+    assert.ok(types.includes("run-start"));
+    assert.ok(types.includes("turn-start"));
+    assert.ok(types.includes("done"));
+    const done = events.find((e) => e.type === "run-done")!;
+    assert.equal(done.passed, true);
+    assert.equal(done.rounds, 0);
+    assert.equal(done.score, 100); // a clean artifact scores 100
+    assert.equal(done.previewUrl, `/projects/${project.id}/preview/`);
+
+    // artifact served back over /preview/ (with the picker bridge injected)
+    const preview = await fetch(`${base}/projects/${project.id}/preview/`);
+    assert.equal(preview.status, 200);
+    assert.ok((await preview.text()).includes(CLEAN));
+
+    // persisted: one artifact, run succeeded, user+assistant messages
+    assert.equal(store.listArtifacts(project.id).length, 1);
+    const convId = events.find((e) => e.type === "run-start")!.conversationId as string;
+    assert.equal(store.listMessages(convId).length, 2);
+    const runId = done.runId as string;
+    const run = store.getRun(runId)!;
+    assert.equal(run.status, "succeeded");
+    assert.equal(run.lintPassed, true);
+    assert.equal(run.repairRounds, 0);
+  });
+});
+
+test("sloppy→clean run: closed loop repairs over SSE, serves the fixed artifact", async () => {
+  await withRunServer(new FakeRunner({ artifacts: [SLOPPY, CLEAN] }), async ({ base, store }) => {
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+    });
+    const events = parseSse(await res.text());
+    const types = events.map((e) => e.type);
+    assert.ok(types.includes("lint"), "a lint event was streamed");
+    // a repair turn ran (round 1, isRepair)
+    assert.ok(events.some((e) => e.type === "turn-start" && e.isRepair === true));
+    const done = events.find((e) => e.type === "run-done")!;
+    assert.equal(done.passed, true);
+    assert.equal(done.rounds, 1);
+
+    // the served artifact is the repaired (clean) one, not the sloppy draft
+    const preview = await fetch(`${base}/projects/${project.id}/preview/`);
+    assert.ok((await preview.text()).includes(CLEAN));
+
+    const runId = done.runId as string;
+    assert.equal(store.getRun(runId)?.repairRounds, 1);
+    assert.equal(store.getRun(runId)?.lintPassed, true);
+  });
+});
+
+test("craft references reach the composed prompt (skill's craft sections)", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({ name: "P", skillId: "frontend-design", designSystemId: "modern-minimal" });
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "go" }),
+    });
+    await res.text();
+    const prompt = runner.calls[0]?.systemPrompt ?? "";
+    assert.match(prompt, /Active craft references/);
+    assert.match(prompt, /0\.06em/); // the typography tracking rule reached the agent
+  });
+});
+
+test("a run snapshots its artifact; versions can be served and restored", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({ name: "P" });
+    await (
+      await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "go" }),
+      })
+    ).text();
+    const runs = (await (await fetch(`${base}/api/projects/${project.id}/runs`)).json()) as Array<{ id: string }>;
+    const runId = runs[0]!.id;
+
+    const v = await fetch(`${base}/api/projects/${project.id}/versions/${runId}`);
+    assert.equal(v.status, 200);
+    assert.match(await v.text(), /Hi there/); // the CLEAN snapshot content
+
+    const restore = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/restore`, { method: "POST" });
+    assert.equal(restore.status, 200);
+
+    const miss = await fetch(`${base}/api/projects/${project.id}/versions/nope`);
+    assert.equal(miss.status, 404);
+  });
+});
+
+test("GET /api/projects/:id/runs lists finished runs with a score", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({ name: "P" });
+    await (
+      await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "go" }),
+      })
+    ).text();
+
+    const res = await fetch(`${base}/api/projects/${project.id}/runs`);
+    assert.equal(res.status, 200);
+    const runs = (await res.json()) as Array<Record<string, unknown>>;
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0]!.status, "succeeded");
+    assert.equal(typeof runs[0]!.score, "number");
+    assert.equal(runs[0]!.score, 100); // CLEAN artifact
+
+    const miss = await fetch(`${base}/api/projects/nope/runs`);
+    assert.equal(miss.status, 404);
+  });
+});
+
+test("a deck-skill project gets the deck framework in its prompt", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({ name: "P", skillId: "deck", designSystemId: "modern-minimal" });
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "go" }),
+    });
+    await res.text();
+    assert.match(runner.calls[0]?.systemPrompt ?? "", /Deck framework/);
+  });
+});
+
+test("settings.customInstructions are injected into the composed prompt", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    store.updateSettings({ customInstructions: "NO EMOJI EVER" });
+    const project = store.createProject({ name: "P" });
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "go" }),
+    });
+    await res.text();
+    assert.match(runner.calls[0]?.systemPrompt ?? "", /NO EMOJI EVER/);
+  });
+});
+
+test("settings.defaultDesignSystemId is used when the project pins none", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    store.updateSettings({ defaultDesignSystemId: "editorial" });
+    const project = store.createProject({ name: "P" }); // no designSystemId
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "go" }),
+    });
+    await res.text();
+    // editorial's ink-red accent token appears verbatim in the prompt
+    assert.match(runner.calls[0]?.systemPrompt ?? "", /--accent:\s*#b3261e/);
+  });
+});
+
+test("POST /api/runs validation", async () => {
+  await withRunServer(new FakeRunner({ artifacts: [CLEAN] }), async ({ base }) => {
+    // missing brief
+    const noBrief = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: "x" }),
+    });
+    assert.equal(noBrief.status, 400);
+    // unknown project
+    const noProj = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: "nope", brief: "go" }),
+    });
+    assert.equal(noProj.status, 404);
+  });
+});
+
+test("the composed prompt includes the active skill body and design-system tokens", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({
+      name: "P",
+      skillId: "frontend-design",
+      designSystemId: "modern-minimal",
+    });
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+    });
+    await res.text(); // drain the SSE stream
+
+    const prompt = runner.calls[0]?.systemPrompt ?? "";
+    assert.match(prompt, /Active skill — Frontend design/, "skill section present");
+    assert.match(prompt, /Paste its/, "skill body text present");
+    assert.match(prompt, /AUTHORITATIVE/, "design-system declared authoritative");
+    assert.match(prompt, /--accent: #2563eb/, "verbatim design-system token present");
+  });
+});
+
+test("an unknown skillId is tolerated — skill omitted, run still succeeds", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({ name: "P", skillId: "does-not-exist" });
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "go" }),
+    });
+    const events = parseSse(await res.text());
+    assert.ok(events.some((e) => e.type === "run-done"), "run completed");
+    assert.doesNotMatch(runner.calls[0]?.systemPrompt ?? "", /Active skill/, "no skill section");
+  });
+});

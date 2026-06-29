@@ -1,0 +1,293 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Dark mode keyed off a `.dark` class on <html> (not prefers-color-scheme). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* shadcn/ui token scheme mapped onto Dezin's cobalt + neutral palette, plus a few
+   Dezin-specific extras (surface, surface-2, foreground-2, border-strong, success,
+   accent-soft) and an expressive type scale. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Sidebar tokens (used by the Settings sidebar). */
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+
+  /* Dezin extras. */
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-foreground-2: var(--foreground-2);
+  --color-border-strong: var(--border-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-primary-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-primary-strong: var(--primary);
+
+  /* Warm interactive accent (active/selected/focus) + its soft tint. */
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-brand-soft: var(--brand-soft);
+
+  --font-sans: var(--font-display);
+  --font-mono: var(--font-mono-stack);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-xl2: 1.25rem;
+
+  /* Expressive type scale. */
+  --text-display: 3.5rem;
+  --text-display--line-height: 1.02;
+  --text-display--letter-spacing: -0.03em;
+  --text-title: 2rem;
+  --text-title--line-height: 1.1;
+  --text-title--letter-spacing: -0.02em;
+
+  /* Elevation — borders do the separating; shadow only for true overlays (menus,
+     dialogs). Flat surfaces carry no shadow. */
+  --shadow-pop: 0 4px 14px oklch(0.145 0 0 / 0.07), 0 18px 48px oklch(0.145 0 0 / 0.11);
+  --shadow-card: 0 1px 1px oklch(0.145 0 0 / 0.025);
+
+  --ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+:root {
+  --radius: 0.75rem;
+
+  /* Soft, warm-neutral base — graphite ink, a coral interactive accent, green for data. */
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.3);
+  --destructive-foreground: oklch(0.985 0 0);
+
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+
+  /* Dezin extras. */
+  --surface: oklch(0.985 0 0);
+  --surface-2: oklch(0.968 0.001 90);
+  --foreground-2: oklch(0.43 0 0);
+  --border-strong: oklch(0.87 0 0);
+  --accent-soft: oklch(0.97 0 0);
+  --success: oklch(0.55 0.14 150);
+
+  /* Interactive accent — monochrome (near-black), matching primary. */
+  --brand: oklch(0.205 0 0);
+  --brand-foreground: oklch(0.985 0 0);
+  --brand-soft: oklch(0.97 0 0);
+
+  --font-display: "Geist", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono-stack: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-brand: "Space Grotesk", "Geist", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* The Dezin wordmark. */
+.font-brand {
+  font-family: var(--font-brand);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.185 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.245 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.245 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.26 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.2);
+  --destructive-foreground: oklch(0.985 0 0);
+
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 13%);
+  --ring: oklch(0.556 0 0);
+
+  --sidebar: oklch(0.165 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.26 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 9%);
+
+  --surface: oklch(0.185 0 0);
+  --surface-2: oklch(0.245 0 0);
+  --foreground-2: oklch(0.72 0 0);
+  --border-strong: oklch(1 0 0 / 17%);
+  --accent-soft: oklch(0.26 0 0);
+  --success: oklch(0.7 0.15 150);
+
+  --brand: oklch(0.985 0 0);
+  --brand-foreground: oklch(0.205 0 0);
+  --brand-soft: oklch(0.26 0 0);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    font-family: var(--font-display);
+    background: var(--background);
+    color: var(--foreground);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* Chrome is not selectable; opt real content back in below. */
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  input,
+  textarea,
+  [contenteditable="true"],
+  .dz-selectable,
+  .dz-selectable * {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+}
+
+/* Tabular numerics for figures (Dezin posture). */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Monospace, uppercase, letter-spaced label — the signature meta/label treatment. */
+.label-mono {
+  font-family: var(--font-mono-stack);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+/* Subtle diagonal-hatch canvas — the design-tool backdrop behind previews/empty areas. */
+.dz-canvas {
+  background-color: var(--surface-2);
+  background-image: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklch, var(--foreground) 3.5%, transparent) 0 1px,
+    transparent 1px 9px
+  );
+}
+
+/* Custom scrollbars — thin, subtle, themed; replaces the chunky system bars everywhere. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--foreground) 22%, transparent) transparent;
+}
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklch, var(--foreground) 20%, transparent);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklch, var(--foreground) 34%, transparent);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Electron: draggable chrome + traffic-light clearance (no effect in a plain browser). */
+.electron .app-drag {
+  -webkit-app-region: drag;
+}
+.electron .app-drag :where(button, a, input, textarea, select, label, [role="button"], [role="tab"], [role="combobox"], [role="menuitem"], [contenteditable="true"]) {
+  -webkit-app-region: no-drag;
+}
+.electron-mac .titlebar-pad-top {
+  padding-top: 1.5rem;
+}
+.electron-mac .titlebar-pad-left {
+  padding-left: 4.75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+@keyframes dz-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.dz-animate-in {
+  animation: dz-fade-in 0.18s var(--ease-out) both;
+}

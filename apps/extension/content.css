@@ -1,0 +1,20 @@
+.dezin-capture-btn {
+  position: fixed;
+  z-index: 2147483646;
+  padding: 5px 10px;
+  margin: 0;
+  border: 0;
+  border-radius: 8px;
+  background: #18181b;
+  color: #fff;
+  font: 600 12px/1 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  box-shadow: 0 4px 14px -4px rgba(0, 0, 0, 0.45);
+}
+.dezin-capture-btn:hover {
+  background: #000;
+}
+.dezin-capture-btn:active {
+  transform: translateY(1px);
+}

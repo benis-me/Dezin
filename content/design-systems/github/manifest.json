@@ -1,0 +1,6 @@
+{
+  "name": "GitHub",
+  "category": "Developer Tools",
+  "summary": "Dense developer UI; bordered list rows, one blue accent, light + dim-dark.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage", "accessibility-baseline"] }
+}

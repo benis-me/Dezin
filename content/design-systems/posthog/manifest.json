@@ -1,0 +1,9 @@
+{
+  "name": "PostHog",
+  "category": "Developer Tools",
+  "summary": "Playful high-contrast dev tool; cream canvas, black hairline frames, hard offset shadows, bold orange.",
+  "craft": {
+    "applies": ["typography", "color", "anti-ai-slop", "state-coverage"],
+    "suggested": ["animation-discipline", "laws-of-ux"]
+  }
+}

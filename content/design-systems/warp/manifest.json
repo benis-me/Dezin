@@ -1,0 +1,6 @@
+{
+  "name": "Warp",
+  "category": "Developer Tools",
+  "summary": "Modern terminal; very dark blue-black, vivid teal accent, framed command blocks.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage"] }
+}

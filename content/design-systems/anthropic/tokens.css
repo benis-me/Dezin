@@ -1,0 +1,30 @@
+:root {
+  --bg: #f7f5ef;
+  --surface: #f0ede4;
+  --surface-2: #e7e3d7;
+  --fg: #181613;
+  --fg-2: #3c3a35;
+  --muted: #6f6b61;
+  --border: #e1ddd0;
+  --border-strong: #cdc8b8;
+  --accent: #b8553a;
+  --accent-fg: #fdfcf9;
+  --font-display: "Tiempos Headline", "Canela", Georgia, "Times New Roman", serif;
+  --font-body: "Styrene B", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Tiempos Text", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-6: 24px; --space-8: 32px;
+  --radius-sm: 2px; --radius: 4px; --radius-lg: 8px; --radius-pill: 999px;
+  --container-max: 1180px;
+}
+[data-theme="dark"] {
+  --bg: #1a1714;
+  --surface: #221e19;
+  --surface-2: #2b2620;
+  --fg: #efe9df;
+  --fg-2: #b9b1a4;
+  --muted: #8a8276;
+  --border: #2f2a23;
+  --border-strong: #41392e;
+  --accent: #d6795a;
+}

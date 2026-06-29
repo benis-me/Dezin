@@ -1,0 +1,6 @@
+{
+  "name": "Resend",
+  "category": "Developer Tools",
+  "summary": "Near-monochrome dev brand; white surfaces, near-black accent, big type, hairlines.",
+  "craft": { "applies": ["typography", "typography-hierarchy", "color", "anti-ai-slop"] }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Stripe",
+  "category": "Fintech & SaaS",
+  "summary": "Polished fintech; white surfaces, ink-navy text, one indigo brand accent, tabular currency.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage", "laws-of-ux"] }
+}

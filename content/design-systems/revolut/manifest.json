@@ -1,0 +1,9 @@
+{
+  "name": "Revolut",
+  "category": "Fintech & SaaS",
+  "summary": "Clean global fintech; white surfaces, deep-ink text, tabular amounts, one electric-blue accent.",
+  "craft": {
+    "applies": ["typography", "color", "anti-ai-slop", "state-coverage"],
+    "suggested": ["accessibility-baseline", "laws-of-ux"]
+  }
+}

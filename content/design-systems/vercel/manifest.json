@@ -1,0 +1,6 @@
+{
+  "name": "Vercel",
+  "category": "Developer Tools",
+  "summary": "High-contrast black & white, geometric Geist, one electric-blue accent.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage"] }
+}

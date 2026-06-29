@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/test/**/*.ts",
+    "apps/daemon/src/**/*.ts",
+    "apps/daemon/test/**/*.ts",
+    "scripts/**/*.ts"
+  ]
+}

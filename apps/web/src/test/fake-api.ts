@@ -1,0 +1,63 @@
+import type { ApiClient } from "../lib/api.ts";
+
+/** Build a fake ApiClient for tests; override only the methods a test needs. */
+export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
+  const notImpl = () => {
+    throw new Error("not implemented in fake");
+  };
+  return {
+    listProjects: async () => [],
+    createProject: notImpl as ApiClient["createProject"],
+    getSetup: async () => ({ phase: "ready" as const }),
+    getDevServerUrl: async (id: string) => ({ url: `http://127.0.0.1:5300/${id}` }),
+    getProject: notImpl as ApiClient["getProject"],
+    patchProject: notImpl as ApiClient["patchProject"],
+    saveCover: async () => {},
+    deleteProject: notImpl as ApiClient["deleteProject"],
+    listConversations: async () => [],
+    createConversation: notImpl as ApiClient["createConversation"],
+    getConversation: notImpl as ApiClient["getConversation"],
+    renameConversation: notImpl as ApiClient["renameConversation"],
+    deleteConversation: async () => {},
+    listVariants: async () => [],
+    createVariant: async () => [],
+    activateVariant: async () => [],
+    renameVariant: async () => [],
+    deleteVariant: async () => [],
+    listMessages: async () => [],
+    listDesignSystems: async () => [],
+    getDesignSystem: notImpl as ApiClient["getDesignSystem"],
+    importBrand: notImpl as ApiClient["importBrand"],
+    listSkills: async () => [],
+    getSettings: async () => ({
+      agentCommand: "claude",
+      model: "",
+      apiBaseUrl: "",
+      apiKey: "",
+      defaultDesignSystemId: "modern-minimal",
+      customInstructions: "",
+      imageApiBaseUrl: "",
+      imageApiKey: "",
+      imageModel: "",
+    }),
+    updateSettings: notImpl as ApiClient["updateSettings"],
+    listAgents: async () => [],
+    rescanAgents: async () => [],
+    getHealth: async () => ({ ok: true, version: "0.0.0" }),
+    listFiles: async () => [],
+    getFileText: async () => "",
+    listRuns: async () => [],
+    versionPreviewUrl: (id: string, runId: string) => `/api/projects/${id}/versions/${runId}`,
+    getVersionText: async () => "",
+    restoreVersion: notImpl as ApiClient["restoreVersion"],
+    uploadRef: async (_id: string, name: string) => ({ name, path: `.refs/${name}` }),
+    parseFig: async (_file, name: string) => ({ name, summary: "" }),
+    getCapture: async () => ({ images: [], note: "", source: "" }),
+    previewUrl: (id: string) => `/projects/${id}/preview/`,
+    variantPreviewUrl: (id: string, vid: string) => `/api/projects/${id}/variants/${vid}/preview/`,
+    exportUrl: (id: string) => `/api/projects/${id}/export`,
+    // eslint-disable-next-line require-yield
+    streamRun: async function* () {},
+    ...over,
+  };
+}

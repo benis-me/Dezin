@@ -1,0 +1,18 @@
+:root {
+  --bg: #121212;
+  --surface: #181818;
+  --surface-2: #282828;
+  --fg: #ffffff;
+  --fg-2: #b3b3b3;
+  --muted: #7a7a7a;
+  --border: #2a2a2a;
+  --border-strong: #3e3e3e;
+  --accent: #1ed760;
+  --accent-fg: #0a0a0a;
+  --font-display: "Spotify Mix", "Circular", "Gotham", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Spotify Mix", "Circular", "Gotham", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-6: 24px; --space-8: 32px;
+  --radius-sm: 4px; --radius: 8px; --radius-lg: 16px; --radius-pill: 999px;
+  --container-max: 1280px;
+}

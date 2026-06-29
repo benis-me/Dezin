@@ -1,0 +1,41 @@
+:root {
+  --bg: #ffffff;
+  --surface: #fafafa;
+  --surface-2: #f4f4f5;
+  --fg: #111111;
+  --fg-2: #52525b;
+  --muted: #71717a;
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+
+  --success: #16a34a;
+  --warn: #b45309;
+  --danger: #dc2626;
+
+  --font-display: "Geist", ui-sans-serif, sans-serif;
+  --font-body: "Geist", ui-sans-serif, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --space-1: 4px; --space-2: 8px; --space-3: 12px;
+  --space-4: 16px; --space-6: 24px; --space-8: 32px; --space-12: 48px;
+
+  --radius-sm: 6px; --radius: 8px; --radius-lg: 12px; --radius-pill: 999px;
+
+  --container-max: 1120px;
+  --motion-fast: 150ms;
+  --ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+}
+[data-theme="dark"] {
+  --bg: #0a0a0a;
+  --surface: #131316;
+  --surface-2: #1c1c20;
+  --fg: #fafafa;
+  --fg-2: #a1a1aa;
+  --muted: #8b8b94;
+  --border: rgba(255,255,255,0.10);
+  --border-strong: rgba(255,255,255,0.16);
+  --accent: #3b82f6;
+}

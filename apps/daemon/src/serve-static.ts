@@ -1,0 +1,103 @@
+/**
+ * Serve a generated artifact file from a project's on-disk directory, with
+ * path-traversal protection. Artifacts live at <dataDir>/projects/<id>/...
+ */
+
+import { readFile, stat } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
+import type { ServerResponse } from "node:http";
+import { send, sendError, contentTypeFor } from "./http-util.ts";
+
+export function projectDir(dataDir: string, projectId: string): string {
+  return join(dataDir, "projects", projectId);
+}
+
+/**
+ * A tiny element-picker bridge injected into served prototype HTML. The workspace
+ * toggles it via postMessage; on click it reports the clicked element's selector +
+ * text back to the parent, so the user can point at a region and refine it in chat.
+ */
+const SELECT_BRIDGE = `<script data-dezin-bridge>(function(){
+if(window.__dezinSelect)return;window.__dezinSelect=1;
+var on=false,pinned=false,box;
+function mkbox(){box=document.createElement('div');box.style.cssText='position:fixed;pointer-events:none;z-index:2147483647;border:2px solid #2563eb;background:rgba(37,99,235,.10);border-radius:3px;display:none';document.body.appendChild(box);}
+function path(el){if(!el||el===document.body||el===document.documentElement)return el?el.tagName.toLowerCase():'';if(el.id)return el.tagName.toLowerCase()+'#'+el.id;var parts=[],n=el,depth=0;while(n&&n.nodeType===1&&n!==document.body&&depth<4){var p=n.tagName.toLowerCase();if(n.classList&&n.classList.length)p+='.'+[].slice.call(n.classList).slice(0,2).join('.');parts.unshift(p);n=n.parentElement;depth++;}return parts.join(' > ');}
+function fit(el){if(!box)return;var r=el.getBoundingClientRect();box.style.display='block';box.style.left=r.left+'px';box.style.top=r.top+'px';box.style.width=r.width+'px';box.style.height=r.height+'px';}
+function move(e){if(!on||pinned)return;fit(e.target);}
+function click(e){if(!on)return;e.preventDefault();e.stopPropagation();var el=e.target;var r=el.getBoundingClientRect();fit(el);pinned=true;on=false;parent.postMessage({source:'dezin',type:'selected',selector:path(el),tag:el.tagName.toLowerCase(),text:(el.textContent||'').replace(/\\s+/g,' ').trim().slice(0,90),rect:{x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)}},'*');}
+function mode(v){on=v;if(v)pinned=false;if(box&&!v&&!pinned)box.style.display='none';try{document.body.style.cursor=v?'crosshair':'';}catch(_){}}
+function clearMark(){pinned=false;if(box)box.style.display='none';try{document.body.style.cursor='';}catch(_){}}
+function init(){mkbox();document.addEventListener('mousemove',move,true);document.addEventListener('click',click,true);document.addEventListener('keydown',function(e){if((on||pinned)&&e.key==='Escape'){parent.postMessage({source:'dezin',type:'cancel'},'*');mode(false);clearMark();}},true);window.addEventListener('message',function(e){var d=e.data;if(!d||d.source!=='dezin-parent')return;if(d.type==='select-mode')mode(!!d.on);else if(d.type==='clear')clearMark();});}
+if(document.body)init();else document.addEventListener('DOMContentLoaded',init);
+})();</script>`;
+
+/** Inject the picker bridge before </body> (or append) for HTML responses. */
+export function injectSelectBridge(html: string): string {
+  const i = html.lastIndexOf("</body>");
+  return i >= 0 ? html.slice(0, i) + SELECT_BRIDGE + html.slice(i) : html + SELECT_BRIDGE;
+}
+
+/** Resolve a relative request path inside `root`, or null if it escapes. */
+export function safeJoin(root: string, rel: string): string | null {
+  const target = resolve(root, rel);
+  const base = resolve(root);
+  if (target !== base && !target.startsWith(base + sep)) return null;
+  return target;
+}
+
+export async function serveProjectFile(
+  res: ServerResponse,
+  dataDir: string,
+  projectId: string,
+  relPath: string,
+): Promise<void> {
+  return serveFromBase(res, projectDir(dataDir, projectId), relPath);
+}
+
+/** Serve a branch's artifact: the active branch lives at the root, others under .variants/<id>/. */
+export async function serveVariantFile(
+  res: ServerResponse,
+  dataDir: string,
+  projectId: string,
+  variantId: string,
+  activeVariantId: string | null,
+  relPath: string,
+): Promise<void> {
+  const base =
+    variantId === activeVariantId
+      ? projectDir(dataDir, projectId)
+      : safeJoin(projectDir(dataDir, projectId), join(".variants", variantId));
+  if (!base) {
+    sendError(res, 400, "invalid path");
+    return;
+  }
+  return serveFromBase(res, base, relPath);
+}
+
+async function serveFromBase(res: ServerResponse, root: string, relPath: string): Promise<void> {
+  const rel = relPath === "" ? "index.html" : relPath;
+  const target = safeJoin(root, rel);
+  if (!target) {
+    sendError(res, 400, "invalid path");
+    return;
+  }
+  try {
+    const s = await stat(target);
+    const file = s.isDirectory() ? safeJoin(target, "index.html") : target;
+    if (!file) {
+      sendError(res, 400, "invalid path");
+      return;
+    }
+    const contentType = contentTypeFor(file);
+    // Inject the element-picker bridge into the previewed HTML document only.
+    if (contentType.startsWith("text/html")) {
+      const html = injectSelectBridge(await readFile(file, "utf8"));
+      send(res, 200, html, contentType);
+      return;
+    }
+    const bytes = await readFile(file);
+    send(res, 200, bytes, contentType);
+  } catch {
+    sendError(res, 404, "not found");
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "Framer",
+  "category": "Modern & Minimal",
+  "summary": "Black canvas, electric Framer blue, big confident type — the high-design site-builder look.",
+  "craft": {
+    "applies": ["typography", "color", "anti-ai-slop", "state-coverage"],
+    "suggested": ["animation-discipline", "accessibility-baseline"]
+  }
+}

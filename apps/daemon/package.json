@@ -1,0 +1,19 @@
+{
+  "name": "@dezin/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dezin daemon — a tiny node:http server: health, project CRUD (node:sqlite), static artifact serving, and (next) the generate run loop.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types --experimental-sqlite --no-warnings src/start.ts",
+    "test": "node --experimental-strip-types --experimental-sqlite --no-warnings --test 'test/*.test.ts'"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "kiwi-schema": "^0.5.0",
+    "puppeteer-core": "^25.2.1"
+  }
+}

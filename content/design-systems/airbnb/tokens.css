@@ -1,0 +1,29 @@
+:root {
+  --bg: #ffffff;
+  --surface: #f7f7f7;
+  --surface-2: #ebebeb;
+  --fg: #222222;
+  --fg-2: #484848;
+  --muted: #717171;
+  --border: #dddddd;
+  --border-strong: #c2c2c2;
+  --accent: #ff385c;
+  --accent-fg: #ffffff;
+  --font-display: "Airbnb Cereal", "Circular", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Airbnb Cereal", "Circular", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-6: 24px; --space-8: 32px;
+  --radius-sm: 8px; --radius: 12px; --radius-lg: 16px; --radius-pill: 999px;
+  --container-max: 1120px;
+}
+[data-theme="dark"] {
+  --bg: #1a1a1a;
+  --surface: #222222;
+  --surface-2: #2c2c2c;
+  --fg: #ebebeb;
+  --fg-2: #b0b0b0;
+  --muted: #8a8a8a;
+  --border: #2e2e2e;
+  --border-strong: #3f3f3f;
+  --accent: #ff5a6e;
+}

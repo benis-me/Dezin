@@ -1,0 +1,37 @@
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+// Dezin previews this project by loading its dev server in an iframe. host + open
+// allowedHosts let that work; Dezin assigns the port.
+
+// Element-picker bridge — injected ONLY into the dev server's HTML (never the build),
+// so Dezin's "select an element" tool works in standard mode too. Mirrors the prototype
+// bridge in apps/daemon/src/serve-static.ts.
+const PICKER_BRIDGE = `<script data-dezin-bridge>(function(){
+if(window.__dezinSelect)return;window.__dezinSelect=1;
+var on=false,pinned=false,box;
+function mkbox(){box=document.createElement('div');box.style.cssText='position:fixed;pointer-events:none;z-index:2147483647;border:2px solid #2563eb;background:rgba(37,99,235,.10);border-radius:3px;display:none';document.body.appendChild(box);}
+function path(el){if(!el||el===document.body||el===document.documentElement)return el?el.tagName.toLowerCase():'';if(el.id)return el.tagName.toLowerCase()+'#'+el.id;var parts=[],n=el,depth=0;while(n&&n.nodeType===1&&n!==document.body&&depth<4){var p=n.tagName.toLowerCase();if(n.classList&&n.classList.length)p+='.'+[].slice.call(n.classList).slice(0,2).join('.');parts.unshift(p);n=n.parentElement;depth++;}return parts.join(' > ');}
+function fit(el){if(!box)return;var r=el.getBoundingClientRect();box.style.display='block';box.style.left=r.left+'px';box.style.top=r.top+'px';box.style.width=r.width+'px';box.style.height=r.height+'px';}
+function move(e){if(!on||pinned)return;fit(e.target);}
+function click(e){if(!on)return;e.preventDefault();e.stopPropagation();var el=e.target;var r=el.getBoundingClientRect();fit(el);pinned=true;on=false;parent.postMessage({source:'dezin',type:'selected',selector:path(el),tag:el.tagName.toLowerCase(),text:(el.textContent||'').replace(/\\s+/g,' ').trim().slice(0,90),rect:{x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)}},'*');}
+function mode(v){on=v;if(v)pinned=false;if(box&&!v&&!pinned)box.style.display='none';try{document.body.style.cursor=v?'crosshair':'';}catch(_){}}
+function clearMark(){pinned=false;if(box)box.style.display='none';try{document.body.style.cursor='';}catch(_){}}
+function init(){mkbox();document.addEventListener('mousemove',move,true);document.addEventListener('click',click,true);document.addEventListener('keydown',function(e){if((on||pinned)&&e.key==='Escape'){parent.postMessage({source:'dezin',type:'cancel'},'*');mode(false);clearMark();}},true);window.addEventListener('message',function(e){var d=e.data;if(!d||d.source!=='dezin-parent')return;if(d.type==='select-mode')mode(!!d.on);else if(d.type==='clear')clearMark();});}
+if(document.body)init();else document.addEventListener('DOMContentLoaded',init);
+})();</script>`;
+
+function dezinPicker() {
+  return {
+    name: "dezin-picker",
+    apply: "serve",
+    transformIndexHtml(html) {
+      return html.includes("</body>") ? html.replace("</body>", PICKER_BRIDGE + "</body>") : html + PICKER_BRIDGE;
+    },
+  };
+}
+
+export default defineConfig({
+  plugins: [react(), dezinPicker()],
+  server: { host: "127.0.0.1", allowedHosts: true },
+});

@@ -1,0 +1,9 @@
+{
+  "name": "Retool",
+  "category": "Developer Tools",
+  "summary": "Dense internal-tools aesthetic; tight grey surfaces, compact tabular rows, one restrained muted-blue accent.",
+  "craft": {
+    "applies": ["typography", "color", "anti-ai-slop", "state-coverage", "laws-of-ux"],
+    "suggested": ["accessibility-baseline"]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Dezin Capture",
+  "version": "0.1.0",
+  "description": "Capture cover art and design shots from Pinterest, Behance, and Dribbble straight into Dezin.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["*://*.pinterest.com/*", "*://*.behance.net/*", "*://*.dribbble.com/*", "*://dribbble.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": { "default_popup": "popup.html", "default_title": "Dezin Capture" }
+}

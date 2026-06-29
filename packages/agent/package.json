@@ -1,0 +1,13 @@
+{
+  "name": "@dezin/agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent runner abstraction + generateArtifact(): wires the @dezin/quality lint→repair closed loop into a runner-driven generation.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'"
+  }
+}

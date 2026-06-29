@@ -1,0 +1,13 @@
+{
+  "name": "dezin-desktop",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Dezin desktop shell (Electron) — wraps the daemon + web app, adds native file access.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

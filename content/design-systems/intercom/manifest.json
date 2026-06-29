@@ -1,0 +1,6 @@
+{
+  "name": "Intercom",
+  "category": "Productivity & SaaS",
+  "summary": "Friendly conversational UI; light surfaces, product blue, rounded message bubbles.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage"] }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Perplexity",
+  "category": "AI & LLM",
+  "summary": "Answer-first calm; soft off-white, deep teal accent, cited reading column.",
+  "craft": { "applies": ["typography", "typography-hierarchy", "color", "anti-ai-slop"] }
+}

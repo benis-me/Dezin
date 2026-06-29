@@ -1,0 +1,13 @@
+{
+  "name": "@dezin/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dezin domain types + a node:sqlite-backed local store (metadata only; artifacts live on disk).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --experimental-sqlite --no-warnings --test 'test/*.test.ts'"
+  }
+}

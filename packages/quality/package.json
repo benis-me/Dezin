@@ -1,0 +1,14 @@
+{
+  "name": "@dezin/quality",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dezin anti-AI-slop quality kernel: a deterministic artifact linter plus the lint→repair closed loop.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test 'test/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

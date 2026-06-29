@@ -1,0 +1,13 @@
+{
+  "name": "@dezin/skills",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Lazy filesystem loader for Dezin skills (SKILL.md = flat frontmatter + workflow body). No YAML dependency.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'"
+  }
+}

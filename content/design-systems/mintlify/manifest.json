@@ -1,0 +1,6 @@
+{
+  "name": "Mintlify",
+  "category": "Docs & SaaS",
+  "summary": "Airy documentation; bright reading surface, fresh teal accent, 3-column docs layout.",
+  "craft": { "applies": ["typography", "typography-hierarchy", "color", "anti-ai-slop", "accessibility-baseline"] }
+}

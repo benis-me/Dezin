@@ -1,0 +1,6 @@
+{
+  "name": "Minimal",
+  "category": "Modern & Minimal",
+  "summary": "Quiet cool neutrals, one soft-blue accent, even restrained rhythm.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage"] }
+}

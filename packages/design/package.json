@@ -1,0 +1,13 @@
+{
+  "name": "@dezin/design",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bundled Dezin design systems (9-section DESIGN.md + tokens) and a registry. Default = modern-minimal (Linear/Vercel).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'"
+  }
+}

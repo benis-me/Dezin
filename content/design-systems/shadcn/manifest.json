@@ -1,0 +1,6 @@
+{
+  "name": "shadcn/ui",
+  "category": "Modern & Minimal",
+  "summary": "Zinc neutrals, a near-black/near-white primary, subtle borders, small radii.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage", "accessibility-baseline"] }
+}

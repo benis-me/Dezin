@@ -1,0 +1,6 @@
+{
+  "name": "Mono",
+  "category": "Modern & Minimal",
+  "summary": "Strict grayscale; zero chroma — hierarchy via type, weight, spacing, and one line.",
+  "craft": { "applies": ["typography", "typography-hierarchy", "color", "anti-ai-slop"] }
+}

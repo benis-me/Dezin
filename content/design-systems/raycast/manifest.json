@@ -1,0 +1,6 @@
+{
+  "name": "Raycast",
+  "category": "Developer Tools",
+  "summary": "Dark command-launcher; near-black surfaces, coral accent, kbd-hint rows.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage"] }
+}

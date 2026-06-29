@@ -1,0 +1,30 @@
+:root {
+  --bg: #faf9f5;
+  --surface: #f0eee6;
+  --surface-2: #e8e5da;
+  --fg: #181715;
+  --fg-2: #4a4641;
+  --muted: #837c6f;
+  --border: #e3dfd4;
+  --border-strong: #ccc5b6;
+  --accent: #cc785c;
+  --accent-fg: #ffffff;
+  --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Source Serif 4", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-6: 24px; --space-8: 32px;
+  --radius-sm: 6px; --radius: 10px; --radius-lg: 14px; --radius-pill: 999px;
+  --container-max: 760px;
+}
+[data-theme="dark"] {
+  --bg: #1a1714;
+  --surface: #221e1a;
+  --surface-2: #2b2621;
+  --fg: #efe9e1;
+  --fg-2: #b8b0a5;
+  --muted: #8b8378;
+  --border: #2f2a24;
+  --border-strong: #41392f;
+  --accent: #e08a63;
+}

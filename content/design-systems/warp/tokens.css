@@ -1,0 +1,18 @@
+:root {
+  --bg: #0c0c12;
+  --surface: #15151f;
+  --surface-2: #1e1e2a;
+  --fg: #e4e4ef;
+  --fg-2: #b0b0c2;
+  --muted: #82828f;
+  --border: #262632;
+  --border-strong: #383848;
+  --accent: #00c8d4;
+  --accent-fg: #04181a;
+  --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-6: 24px; --space-8: 32px;
+  --radius-sm: 6px; --radius: 8px; --radius-lg: 10px; --radius-pill: 999px;
+  --container-max: 1100px;
+}

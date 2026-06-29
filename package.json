@@ -1,0 +1,28 @@
+{
+  "name": "dezin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first, tasteful design generator.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "bash scripts/dev.sh",
+    "desktop": "pnpm --filter ./apps/web build && pnpm --filter ./apps/desktop start",
+    "desktop:dev": "DEZIN_DEV_URL=http://localhost:5173 pnpm --filter ./apps/desktop start",
+    "test": "bash scripts/test-all.sh",
+    "test:quality": "pnpm --filter @dezin/quality test",
+    "typecheck": "bash scripts/typecheck.sh",
+    "benchmark": "node --experimental-strip-types --experimental-sqlite --no-warnings scripts/benchmark.ts"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Editorial",
+  "category": "Editorial & Print",
+  "summary": "Print-grade serif typography on warm paper, dramatic scale, one ink-red accent.",
+  "craft": {
+    "applies": ["typography", "typography-hierarchy", "typography-hierarchy-editorial", "color", "anti-ai-slop"]
+  }
+}

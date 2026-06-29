@@ -1,0 +1,9 @@
+{
+  "name": "Supabase",
+  "category": "Developer Tools",
+  "summary": "Dark-native developer console — near-black surfaces, one electric Supabase green.",
+  "craft": {
+    "applies": ["typography", "color", "anti-ai-slop", "state-coverage"],
+    "suggested": ["accessibility-baseline", "animation-discipline"]
+  }
+}

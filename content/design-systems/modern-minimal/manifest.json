@@ -1,0 +1,9 @@
+{
+  "name": "Modern Minimal",
+  "category": "Modern & Minimal",
+  "summary": "Linear/Vercel neutral grayscale, one cobalt accent, borders over shadows.",
+  "craft": {
+    "applies": ["typography", "color", "anti-ai-slop", "state-coverage"],
+    "suggested": ["animation-discipline", "accessibility-baseline"]
+  }
+}

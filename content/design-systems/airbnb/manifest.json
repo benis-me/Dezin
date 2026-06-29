@@ -1,0 +1,9 @@
+{
+  "name": "Airbnb",
+  "category": "Consumer & Marketplace",
+  "summary": "Warm white marketplace; Cereal-style geometric sans, generous rounding, one coral Rausch accent.",
+  "craft": {
+    "applies": ["typography", "color", "anti-ai-slop", "state-coverage", "laws-of-ux"],
+    "suggested": ["accessibility-baseline"]
+  }
+}

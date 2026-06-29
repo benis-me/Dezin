@@ -1,0 +1,13 @@
+{
+  "name": "@dezin/prompt",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dezin system-prompt composer: a lean, layered composeSystemPrompt.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Cursor",
+  "category": "Developer Tools",
+  "summary": "Dark-native code-editor aesthetic; deep charcoal, one calm blue accent, mono for code.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage"] }
+}

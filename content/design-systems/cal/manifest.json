@@ -1,0 +1,6 @@
+{
+  "name": "Cal",
+  "category": "Productivity & SaaS",
+  "summary": "Near-monochrome scheduling calm; white, near-black primary, rounded controls, tabular times.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage"] }
+}

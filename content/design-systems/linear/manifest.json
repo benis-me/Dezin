@@ -1,0 +1,6 @@
+{
+  "name": "Linear",
+  "category": "Productivity & SaaS",
+  "summary": "Dark-native, dense, restrained; low-chroma indigo brand accent.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "state-coverage"] }
+}

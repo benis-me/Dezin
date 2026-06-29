@@ -1,0 +1,14 @@
+{
+  "name": "@dezin/craft",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Craft docs generated from @dezin/quality's slop-rules — one source of truth shared by the linter and the prompt-injected doc.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
+    "regen": "node --experimental-strip-types --no-warnings ../../scripts/regen-craft.ts"
+  }
+}

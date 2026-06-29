@@ -1,0 +1,6 @@
+{
+  "name": "Arc",
+  "category": "Consumer & Brand",
+  "summary": "Playful-but-composed; light surfaces, one expressive violet, soft rounded shapes.",
+  "craft": { "applies": ["typography", "color", "anti-ai-slop", "animation-discipline"] }
+}
