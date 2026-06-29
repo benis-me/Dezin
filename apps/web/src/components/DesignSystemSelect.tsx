@@ -1,11 +1,46 @@
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { Check, ChevronDown, Shapes } from "lucide-react";
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, ScrollArea, SearchInput } from "./ui/index.ts";
-import { DesignSystemMark } from "./design-system-logos.tsx";
+import { BrandGlyph, DesignSystemMark, hasBrandLogo } from "./design-system-logos.tsx";
 import { navigate } from "../router.tsx";
-import type { DesignSystemCard } from "../lib/api.ts";
+import type { DesignSystemCard, Swatch } from "../lib/api.ts";
 
-/** The "Design system" picker from the reference — searchable, with Clear + Create. */
+const FALLBACK_SWATCH: Swatch = { bg: "var(--surface)", surface: "var(--surface-2)", fg: "var(--foreground)", accent: "var(--muted-foreground)" };
+
+/** A compact, on-hover specimen of a design system: palette, type, and component shapes. */
+function DesignSystemPreview({ system }: { system: DesignSystemCard }) {
+  const sw = system.swatch ?? FALLBACK_SWATCH;
+  return (
+    <div className="dz-animate-in w-56 overflow-hidden rounded-lg border border-border bg-popover shadow-pop">
+      <div className="px-3 py-2.5" style={{ background: sw.bg, color: sw.fg }}>
+        <div className="flex items-center gap-1.5">
+          {hasBrandLogo(system.id) ? <BrandGlyph id={system.id} className="size-3.5 shrink-0" /> : null}
+          <span className="truncate text-[13px] font-semibold tracking-tight">{system.name}</span>
+        </div>
+        <div className="mt-0.5 text-[11px]" style={{ opacity: 0.55 }}>
+          Aa — the quick brown fox
+        </div>
+        <div className="mt-2 flex items-center gap-1.5">
+          <span className="rounded px-2 py-0.5 text-[10px] font-medium" style={{ background: sw.accent, color: "#fff" }}>
+            Button
+          </span>
+          <span className="rounded px-2 py-0.5 text-[10px]" style={{ background: sw.surface, color: sw.fg, border: `1px solid ${sw.accent}22` }}>
+            Input
+          </span>
+        </div>
+      </div>
+      <div className="flex h-5">
+        {[sw.bg, sw.surface, sw.fg, sw.accent].map((c, i) => (
+          <span key={i} className="flex-1" style={{ background: c }} />
+        ))}
+      </div>
+      {system.category ? <div className="truncate px-3 py-1.5 text-[10px] text-muted-foreground">{system.category}</div> : null}
+    </div>
+  );
+}
+
+/** The "Design system" picker — searchable, with Clear + Create and an on-hover preview. */
 export function DesignSystemSelect({
   systems,
   value,
@@ -22,6 +57,23 @@ export function DesignSystemSelect({
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [tab, setTab] = useState<"built-in" | "custom">("built-in");
+  const [preview, setPreview] = useState<{ system: DesignSystemCard; top: number; left: number } | null>(null);
+
+  const showPreview = (e: React.MouseEvent, system: DesignSystemCard): void => {
+    const row = e.currentTarget.getBoundingClientRect();
+    const pop = (e.currentTarget as HTMLElement).closest('[data-slot="popover-content"]')?.getBoundingClientRect();
+    const W = 224;
+    const H = 150;
+    const gap = 8;
+    const right = pop?.right ?? row.right;
+    const left = pop?.left ?? row.left;
+    let x = right + gap;
+    if (x + W > window.innerWidth - 8) x = Math.max(8, left - W - gap);
+    let y = row.top - 4;
+    if (y + H > window.innerHeight - 8) y = window.innerHeight - 8 - H;
+    if (y < 8) y = 8;
+    setPreview({ system, top: y, left: x });
+  };
 
   const current = systems.find((s) => s.id === value);
   const label = value === "" ? "None" : (current?.name ?? "Select");
@@ -37,7 +89,10 @@ export function DesignSystemSelect({
       open={open}
       onOpenChange={(o) => {
         setOpen(o);
-        if (!o) setQ("");
+        if (!o) {
+          setQ("");
+          setPreview(null);
+        }
       }}
       modal
     >
@@ -111,7 +166,7 @@ export function DesignSystemSelect({
             ))}
           </div>
           <ScrollArea viewportClassName="max-h-[min(18rem,calc(var(--radix-popover-content-available-height,40rem)-8.5rem))]">
-          <ul className="px-1">
+          <ul className="px-1" onMouseLeave={() => setPreview(null)}>
             {filtered.length === 0 ? (
               <li className="px-2 py-6 text-center text-sm text-muted-foreground">
                 No {tab === "custom" ? "custom systems yet" : "matches"}
@@ -121,6 +176,7 @@ export function DesignSystemSelect({
                 <li key={s.id}>
                   <button
                     type="button"
+                    onMouseEnter={(e) => showPreview(e, s)}
                     onClick={() => {
                       onChange(s.id);
                       setOpen(false);
@@ -157,6 +213,14 @@ export function DesignSystemSelect({
             </button>
           </div>
       </PopoverContent>
+      {open && preview
+        ? createPortal(
+            <div className="pointer-events-none fixed z-[60]" style={{ top: preview.top, left: preview.left }}>
+              <DesignSystemPreview system={preview.system} />
+            </div>,
+            document.body,
+          )
+        : null}
     </Popover>
   );
 }
