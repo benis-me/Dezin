@@ -21,7 +21,7 @@
     "typecheck": "bash scripts/typecheck.sh",
     "benchmark": "node --experimental-strip-types --experimental-sqlite --no-warnings scripts/benchmark.ts"
   },
-  "packageManager": "pnpm@9.15.0",
+  "packageManager": "pnpm@11.9.0",
   "devDependencies": {
     "@types/node": "^26.0.0",
     "typescript": "^6.0.3"

@@ -1,3 +1,7 @@
 packages:
   - packages/*
   - apps/*
+allowBuilds:
+  electron: true
+minimumReleaseAgeExclude:
+  - simple-icons@16.24.1
