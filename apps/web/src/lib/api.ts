@@ -205,6 +205,7 @@ export interface QualityFinding {
 export interface RunSummary {
   id: string;
   conversationId?: string;
+  variantId?: string | null;
   status: string;
   score: number | null;
   repairRounds: number;
@@ -247,7 +248,7 @@ export interface ApiClient {
   getHealth(): Promise<Health>;
   listFiles(id: string): Promise<ProjectFile[]>;
   getFileText(id: string, path: string): Promise<string>;
-  listRuns(id: string): Promise<RunSummary[]>;
+  listRuns(id: string, options?: { all?: boolean }): Promise<RunSummary[]>;
   versionPreviewUrl(id: string, runId: string): string;
   getVersionText(id: string, runId: string): Promise<string>;
   restoreVersion(id: string, runId: string): Promise<void>;
@@ -400,7 +401,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     rescanAgents: () => json<AgentInfo[]>("/api/agents/rescan", { method: "POST" }),
     getHealth: () => json<Health>("/api/health"),
     listFiles: (id) => json<ProjectFile[]>(`/api/projects/${enc(id)}/files`),
-    listRuns: (id) => json<RunSummary[]>(`/api/projects/${enc(id)}/runs`),
+    listRuns: (id, options) => json<RunSummary[]>(`/api/projects/${enc(id)}/runs${options?.all ? "?all=1" : ""}`),
     versionPreviewUrl: (id, runId) => `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`,
     getVersionText: async (id, runId) => {
       const res = await f(`${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`);

@@ -387,7 +387,7 @@ test("New conversation creates one and clears the transcript", async () => {
   expect(createConversation).toHaveBeenCalledWith("p1");
 });
 
-test("the Files tab lists project files and Code shows the selected file's source", async () => {
+test("the Files tab lists project files and previews the selected file's source", async () => {
   const fake = makeFakeApi({
     listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
     listMessages: async () => [],
@@ -403,8 +403,9 @@ test("the Files tab lists project files and Code shows the selected file's sourc
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
+  expect(screen.queryByRole("tab", { name: "Code" })).toBeNull();
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
-  expect(await screen.findByText("index.html")).toBeInTheDocument();
+  expect((await screen.findAllByText("index.html")).length).toBeGreaterThan(0);
   // assets is a folder at root; double-click into it, then open the file
   expect(screen.getByText("assets")).toBeInTheDocument();
   fireEvent.doubleClick(screen.getByText("assets"));
@@ -412,14 +413,18 @@ test("the Files tab lists project files and Code shows the selected file's sourc
   expect(await screen.findByText(/--accent:#101010/)).toBeInTheDocument();
 });
 
-test("the History tab lists versions with View + Restore", async () => {
+test("the Versions tab groups branch versions with View + Restore", async () => {
   const restoreVersion = vi.fn(async () => {});
   const fake = makeFakeApi({
     listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
     listMessages: async () => [],
+    listVariants: async () => [
+      { id: "main", projectId: "p1", name: "Main", createdAt: 1, active: false },
+      { id: "branch", projectId: "p1", name: "Exploration", createdAt: 2, active: true },
+    ],
     listRuns: async () => [
-      { id: "r2", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1700000001000, finishedAt: 1700000001001 },
-      { id: "r1", status: "succeeded" as const, score: 92, repairRounds: 1, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
+      { id: "r2", variantId: "branch", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1700000001000, finishedAt: 1700000001001 },
+      { id: "r1", variantId: "main", status: "succeeded" as const, score: 92, repairRounds: 1, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
     ],
     restoreVersion,
   });
@@ -428,10 +433,13 @@ test("the History tab lists versions with View + Restore", async () => {
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
-  fireEvent.click(await screen.findByRole("tab", { name: "History" }));
+  expect(screen.queryByRole("tab", { name: "History" })).toBeNull();
+  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+  expect(await screen.findByText("Main")).toBeInTheDocument();
+  expect((await screen.findAllByText("Exploration")).length).toBeGreaterThan(0);
   expect(await screen.findByText("92/100")).toBeInTheDocument();
-  // the newest version has no Restore (it IS current); the older one does
-  fireEvent.click(screen.getByRole("button", { name: "Restore v1" }));
+  // the active branch's newest version has no Restore (it IS current); the older branch version does
+  fireEvent.click(screen.getByRole("button", { name: "Restore Main v1" }));
   await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith("p1", "r1"));
 });
 

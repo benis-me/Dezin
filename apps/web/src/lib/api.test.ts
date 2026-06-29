@@ -169,12 +169,20 @@ test("listFiles GETs the files endpoint", async () => {
   expect(fetchImpl).toHaveBeenCalledWith("http://d/api/projects/p1/files", undefined);
 });
 
-test("listRuns GETs the runs endpoint", async () => {
-  const runs = [{ id: "r1", status: "succeeded", score: 92, repairRounds: 1, lintPassed: true, createdAt: 1, finishedAt: 2 }];
+test("listRuns GETs the active-branch runs endpoint by default", async () => {
+  const runs = [{ id: "r1", variantId: "v1", status: "succeeded", score: 92, repairRounds: 1, lintPassed: true, createdAt: 1, finishedAt: 2 }];
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(runs));
   const api = createApiClient({ baseUrl: "http://d", fetchImpl });
   expect(await api.listRuns("p1")).toEqual(runs);
   expect(fetchImpl).toHaveBeenCalledWith("http://d/api/projects/p1/runs", undefined);
+});
+
+test("listRuns can request all branch runs", async () => {
+  const runs = [{ id: "r1", variantId: "v1", status: "succeeded", score: 92, repairRounds: 1, lintPassed: true, createdAt: 1, finishedAt: 2 }];
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(runs));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  expect(await api.listRuns("p1", { all: true })).toEqual(runs);
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/projects/p1/runs?all=1", undefined);
 });
 
 test("getFileText fetches the static preview file as text", async () => {

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Code, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, Plus, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, Plus, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
@@ -20,7 +20,7 @@ import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, 
 import type { Conversation, Variant, DesignSystemCard, Message, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 
-const TABS = ["Preview", "Code", "Files", "Quality", "History"] as const;
+const TABS = ["Preview", "Files", "Quality", "Versions"] as const;
 type Tab = (typeof TABS)[number];
 
 type Device = "desktop" | "tablet" | "mobile";
@@ -70,7 +70,7 @@ interface Msg {
   text: string;
   meta?: ResultMeta;
   steps?: string[];
-  /** DB createdAt — used to link a History run back to its triggering message. */
+  /** DB createdAt — used to link a Versions run back to its triggering message. */
   at?: number;
 }
 
@@ -299,6 +299,50 @@ function shortTime(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
+const UNASSIGNED_VARIANT_ID = "__unassigned__";
+
+interface VersionGroup {
+  id: string;
+  name: string;
+  active: boolean;
+  runs: RunSummary[];
+}
+
+function activeVariantIdOf(variants: Variant[]): string | null {
+  return variants.find((v) => v.active)?.id ?? variants[0]?.id ?? null;
+}
+
+function buildVersionGroups(runs: RunSummary[], variants: Variant[]): VersionGroup[] {
+  const fallbackVariantId = activeVariantIdOf(variants) ?? UNASSIGNED_VARIANT_ID;
+  const byVariant = new Map<string, RunSummary[]>();
+  for (const run of runs) {
+    const variantId = run.variantId ?? fallbackVariantId;
+    const groupRuns = byVariant.get(variantId);
+    if (groupRuns) groupRuns.push(run);
+    else byVariant.set(variantId, [run]);
+  }
+
+  const known = new Set<string>();
+  const groups = variants.map((variant) => {
+    known.add(variant.id);
+    return { id: variant.id, name: variant.name, active: !!variant.active, runs: byVariant.get(variant.id) ?? [] };
+  });
+  for (const [id, groupRuns] of byVariant) {
+    if (!known.has(id)) {
+      groups.push({ id, name: id === UNASSIGNED_VARIANT_ID ? "Unassigned" : "Archived branch", active: false, runs: groupRuns });
+    }
+  }
+
+  return groups.filter((group) => group.runs.length > 0 || group.active || variants.length > 1);
+}
+
+function statusDotClass(status: string): string {
+  if (status === "succeeded") return "bg-success";
+  if (status === "failed") return "bg-destructive";
+  if (status === "running" || status === "pending") return "bg-primary";
+  return "bg-border-strong";
+}
+
 /** A folder-navigable file browser: breadcrumb + back/forward, double-click into folders. */
 function FilesBrowser({ files, activeFile, onOpen }: { files: ProjectFile[]; activeFile: string | null; onOpen: (path: string) => void }) {
   const [history, setHistory] = useState<string[]>([""]);
@@ -422,6 +466,32 @@ function CodeView({ name, text }: { name: string; text: string }) {
             <code>{text}</code>
           </pre>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function FilesPanel({
+  files,
+  activeFile,
+  fileText,
+  running,
+  onOpen,
+}: {
+  files: ProjectFile[];
+  activeFile: string | null;
+  fileText: string;
+  running: boolean;
+  onOpen: (path: string) => void;
+}) {
+  if (files.length === 0) return emptyPane(running ? "Generating…" : "No files yet. Run to generate.");
+  return (
+    <div className="flex h-full bg-surface">
+      <div className="w-[38%] min-w-[220px] max-w-[360px] shrink-0 border-r border-border">
+        <FilesBrowser files={files} activeFile={activeFile} onOpen={onOpen} />
+      </div>
+      <div className="min-w-0 flex-1">
+        {activeFile ? <CodeView name={activeFile} text={fileText} /> : emptyPane("Select a file to preview")}
       </div>
     </div>
   );
@@ -727,15 +797,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const openFile = (path: string): void => {
     setActiveFile(path);
-    setTab("Code");
+    setTab("Files");
   };
 
-  const loadRuns = async (): Promise<void> => {
+  const loadRuns = async (scopeVariants: Variant[] = variants): Promise<void> => {
     try {
-      const rs = await api.listRuns(projectId);
+      const rs = await api.listRuns(projectId, { all: true });
       setRuns(rs);
-      // Reflect the latest run's score in the Quality tab when reopening a project.
-      const latest = rs[0]; // newest-first
+      // Reflect the active branch's latest run in the Quality tab when reopening a project.
+      const activeVariantId = activeVariantIdOf(scopeVariants);
+      const latest = activeVariantId ? (rs.find((run) => (run.variantId ?? activeVariantId) === activeVariantId) ?? null) : (rs[0] ?? null);
       if (latest && typeof latest.score === "number") {
         setScore(latest.score);
         setLintFindings(normalizeFindings(latest.findings));
@@ -1123,8 +1194,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       if (alive) {
         setLoading(false);
         void loadFiles();
-        void loadRuns();
-        void loadVariants();
+        void (async () => {
+          const vs = await loadVariants();
+          await loadRuns(vs);
+        })();
       }
       const pendingImgs = takePendingImages();
       const pendingRefList = takePendingRefs();
@@ -1172,9 +1245,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  // Fetch the selected file's source whenever the Code tab is shown for it.
+  // Fetch the selected file's source whenever the Files tab is shown for it.
   useEffect(() => {
-    if (tab !== "Code" || !activeFile) return;
+    if (tab !== "Files" || !activeFile) return;
     let alive = true;
     void api.getFileText(projectId, activeFile).then(
       (t) => alive && setFileText(t),
@@ -1199,7 +1272,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
-  /** History → chat: switch to the run's conversation and scroll to the message that triggered it. */
+  /** Versions → chat: switch to the run's conversation and scroll to the message that triggered it. */
   const jumpToRun = async (run: RunSummary): Promise<void> => {
     if (run.conversationId && run.conversationId !== activeConvId) await switchTo(run.conversationId);
     window.setTimeout(() => {
@@ -1295,35 +1368,40 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
-  const loadVariants = async (): Promise<void> => {
-    if (!isExisting) return;
+  const loadVariants = async (): Promise<Variant[]> => {
+    if (!isExisting) return [];
     try {
-      setVariants(await api.listVariants(projectId));
+      const vs = await api.listVariants(projectId);
+      setVariants(vs);
+      return vs;
     } catch {
       /* none yet */
+      return [];
     }
   };
 
   // Switching/forking a branch swaps the artifact at the project root — reload everything.
-  const reloadArtifact = (): void => {
+  const reloadArtifact = (scopeVariants: Variant[] = variants): void => {
     void loadFiles();
-    void loadRuns();
+    void loadRuns(scopeVariants);
     if (modeRef.current === "standard") void loadDevPreview();
     else setPreviewSrc(`${api.previewUrl(projectId)}?t=${Date.now()}`);
   };
 
   const switchVariant = async (vid: string): Promise<void> => {
     try {
-      setVariants(await api.activateVariant(projectId, vid));
-      reloadArtifact();
+      const next = await api.activateVariant(projectId, vid);
+      setVariants(next);
+      reloadArtifact(next);
     } catch {
       toast("Couldn't switch branch.", { variant: "error" });
     }
   };
   const createVariant = async (): Promise<void> => {
     try {
-      setVariants(await api.createVariant(projectId));
-      reloadArtifact();
+      const next = await api.createVariant(projectId);
+      setVariants(next);
+      reloadArtifact(next);
       toast("Forked a new branch.");
     } catch {
       toast("Couldn't create a branch.", { variant: "error" });
@@ -1334,9 +1412,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     void api.renameVariant(projectId, vid, name).catch(() => toast("Couldn't rename the branch.", { variant: "error" }));
   };
   const deleteVariant = async (vid: string): Promise<void> => {
-    if (!window.confirm("Delete this branch? Its artifact and history are removed.")) return;
+    if (!window.confirm("Delete this branch? Its artifact and versions are removed.")) return;
     try {
-      setVariants(await api.deleteVariant(projectId, vid));
+      const next = await api.deleteVariant(projectId, vid);
+      setVariants(next);
+      reloadArtifact(next);
     } catch {
       toast("Couldn't delete the branch.", { variant: "error" });
     }
@@ -1469,13 +1549,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     { label: "Visual QA", desc: "Rendered screenshot and viewport geometry", findings: visualFindings },
     { label: "Anti-slop", desc: "Static design and accessibility rules", findings: antiSlopFindings },
   ].filter((group) => group.findings.length > 0);
+  const versionGroups = buildVersionGroups(runs, variants);
+  const activeVersionGroup = versionGroups.find((group) => group.active) ?? versionGroups[0] ?? null;
+  const currentRun = activeVersionGroup?.runs[0] ?? null;
 
   const TAB_ICON: Record<Tab, ReactNode> = {
     Preview: <Eye size={13} strokeWidth={1.75} />,
-    Code: <Code size={13} strokeWidth={1.75} />,
     Files: <Folder size={13} strokeWidth={1.75} />,
     Quality: <ShieldCheck size={13} strokeWidth={1.75} />,
-    History: <History size={13} strokeWidth={1.75} />,
+    Versions: <History size={13} strokeWidth={1.75} />,
   };
   const tabItems: TabItem[] = TABS.map((t) => ({
     value: t,
@@ -1909,11 +1991,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               emptyPane(running ? "Generating…" : "Your preview will appear here")
             )
           ) : tab === "Files" ? (
-            files.length > 0 ? (
-              <FilesBrowser files={files} activeFile={activeFile} onOpen={openFile} />
-            ) : (
-              emptyPane(running ? "Generating…" : "No files yet. Run to generate.")
-            )
+            <FilesPanel files={files} activeFile={activeFile} fileText={fileText} running={running} onOpen={openFile} />
           ) : tab === "Quality" ? (
             <div className="flex h-full flex-col bg-surface">
               {ranOnce && score !== null ? (
@@ -1968,78 +2046,115 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 </div>
               )}
             </div>
-          ) : tab === "History" ? (
-            runs.length > 0 ? (
-              <ul className="h-full space-y-2 overflow-auto bg-surface p-3 text-sm">
-                {runs.map((r, i) => (
-                  <li key={r.id} className="group flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5">
-                    <span
-                      className={`h-2 w-2 shrink-0 rounded-full ${
-                        r.status === "succeeded" ? "bg-success" : r.status === "failed" ? "bg-destructive" : "bg-border-strong"
-                      }`}
-                      aria-hidden
-                    />
-                    <span className="text-sm font-medium">v{runs.length - i}</span>
-                    {r.score !== null ? (
-                      <span className="tnum rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">{r.score}/100</span>
-                    ) : null}
-                    <span className="text-xs text-muted-foreground">
-                      {r.repairRounds} fix{r.repairRounds === 1 ? "" : "es"} · {shortTime(r.createdAt)}
-                    </span>
-                    <div className="ml-auto flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        aria-label={`Jump to the message for v${runs.length - i}`}
-                        title="Jump to the chat message"
-                        onClick={() => void jumpToRun(r)}
-                      >
-                        <CornerUpLeft size={14} strokeWidth={1.75} />
-                        Chat
-                      </Button>
-                      <Button variant="ghost" size="sm" aria-label={`View v${runs.length - i}`} onClick={() => viewVersion(r.id)}>
-                        View
-                      </Button>
-                      {i !== 0 ? (
-                        <>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            aria-label={`Diff v${runs.length - i}`}
-                            onClick={() => void openDiff(r.id, `v${runs.length - i}`)}
-                          >
-                            Diff
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            aria-label={`Compare v${runs.length - i} visually`}
-                            title="Visual compare with the latest version"
-                            onClick={() =>
-                              setCompare({
-                                a: { url: api.versionPreviewUrl(projectId, r.id), label: `v${runs.length - i}` },
-                                b: { url: api.versionPreviewUrl(projectId, runs[0]!.id), label: `v${runs.length} · current` },
-                              })
-                            }
-                          >
-                            Compare
-                          </Button>
-                          <Button variant="outline" size="sm" aria-label={`Restore v${runs.length - i}`} onClick={() => void restoreVersion(r.id)}>
-                            Restore
-                          </Button>
-                        </>
-                      ) : null}
+          ) : tab === "Versions" ? (
+            versionGroups.length > 0 ? (
+              <div className="h-full overflow-auto bg-surface p-3 text-sm">
+                {versionGroups.map((group) => (
+                  <section key={group.id} className="mb-4 last:mb-0">
+                    <div className="mb-2 flex items-center justify-between gap-3 px-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="truncate text-xs font-semibold text-foreground">{group.name}</span>
+                        {group.active ? (
+                          <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                            Current branch
+                          </span>
+                        ) : null}
+                      </div>
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        {group.runs.length} version{group.runs.length === 1 ? "" : "s"}
+                      </span>
                     </div>
-                  </li>
+                    {group.runs.length > 0 ? (
+                      <ul className="space-y-2">
+                        {group.runs.map((r, i) => {
+                          const label = `v${group.runs.length - i}`;
+                          const isCurrent = currentRun?.id === r.id;
+                          return (
+                            <li key={r.id} className="group flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5">
+                              <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(r.status)}`} aria-hidden />
+                              <span className="text-sm font-medium">{label}</span>
+                              {isCurrent ? (
+                                <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">Current</span>
+                              ) : null}
+                              {r.score !== null ? (
+                                <span className="tnum rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">
+                                  {r.score}/100
+                                </span>
+                              ) : null}
+                              <span className="min-w-0 truncate text-xs text-muted-foreground">
+                                {r.repairRounds} fix{r.repairRounds === 1 ? "" : "es"} · {shortTime(r.createdAt)}
+                              </span>
+                              <div className="ml-auto flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  aria-label={`Jump to the message for ${group.name} ${label}`}
+                                  title="Jump to the chat message"
+                                  onClick={() => void jumpToRun(r)}
+                                >
+                                  <CornerUpLeft size={14} strokeWidth={1.75} />
+                                  Chat
+                                </Button>
+                                <Button variant="ghost" size="sm" aria-label={`View ${group.name} ${label}`} onClick={() => viewVersion(r.id)}>
+                                  View
+                                </Button>
+                                {!isCurrent ? (
+                                  <>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      aria-label={`Diff ${group.name} ${label}`}
+                                      onClick={() => void openDiff(r.id, `${group.name} ${label}`)}
+                                    >
+                                      Diff
+                                    </Button>
+                                    {currentRun ? (
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        aria-label={`Compare ${group.name} ${label} visually`}
+                                        title="Visual compare with the current version"
+                                        onClick={() =>
+                                          setCompare({
+                                            a: { url: api.versionPreviewUrl(projectId, r.id), label: `${group.name} ${label}` },
+                                            b: {
+                                              url: api.versionPreviewUrl(projectId, currentRun.id),
+                                              label: `${activeVersionGroup?.name ?? "Current branch"} current`,
+                                            },
+                                          })
+                                        }
+                                      >
+                                        Compare
+                                      </Button>
+                                    ) : null}
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      aria-label={`Restore ${group.name} ${label}`}
+                                      onClick={() => void restoreVersion(r.id)}
+                                    >
+                                      Restore
+                                    </Button>
+                                  </>
+                                ) : null}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : (
+                      <div className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                        No versions on this branch yet.
+                      </div>
+                    )}
+                  </section>
                 ))}
-              </ul>
+              </div>
             ) : (
               emptyPane(running ? "Generating…" : "No runs yet")
             )
-          ) : activeFile ? (
-            <CodeView name={activeFile} text={fileText} />
           ) : (
-            emptyPane(running ? "Generating…" : "Your code will appear here")
+            emptyPane(running ? "Generating…" : "Your preview will appear here")
           )}
         </div>
       </section>

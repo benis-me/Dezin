@@ -1,6 +1,6 @@
 /**
  * GET /api/projects/:id/files — list the project's on-disk artifact files as
- * [{path, size}] (sorted). Backs the workspace Files/Code tabs.
+ * [{path, size}] (sorted). Backs the workspace Files tab.
  */
 
 import { stat } from "node:fs/promises";

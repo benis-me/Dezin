@@ -166,6 +166,7 @@ function asRun(r: Row): Run {
     id: r.id as string,
     projectId: r.project_id as string,
     conversationId: r.conversation_id as string,
+    variantId: (r.variant_id as string | null | undefined) ?? null,
     status: r.status as RunStatus,
     repairRounds: Number(r.repair_rounds),
     lintPassed: Number(r.lint_passed) === 1,

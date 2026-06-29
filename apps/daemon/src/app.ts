@@ -375,8 +375,10 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/runs",
-    handler: (_req, res, params, deps) => {
+    handler: (req, res, params, deps) => {
       if (!deps.store.getProject(params.id!)) return sendError(res, 404, "project not found");
+      const all = new URL(req.url ?? "", "http://localhost").searchParams.get("all") === "1";
+      if (all) return sendJson(res, 200, deps.store.listRuns(params.id!));
       const active = deps.store.ensureMainVariant(params.id!);
       sendJson(res, 200, deps.store.listRuns(params.id!, active.id));
     },

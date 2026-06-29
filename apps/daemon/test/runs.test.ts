@@ -253,6 +253,41 @@ test("GET /api/projects/:id/runs lists finished runs with a score", async () => 
   });
 });
 
+test("GET /api/projects/:id/runs can list all branch runs", async () => {
+  await withRunServer(new FakeRunner({ artifacts: [CLEAN] }), async ({ base, store }) => {
+    const project = store.createProject({ name: "P" });
+    const conv = store.createConversation(project.id);
+    const main = store.ensureMainVariant(project.id);
+    const branch = store.createVariant(project.id, "Exploration");
+    store.setActiveVariant(project.id, branch.id);
+    const mainRun = store.createRun(project.id, conv.id, main.id);
+    store.updateRun(mainRun.id, { status: "succeeded", score: 92, lintPassed: true });
+    const branchRun = store.createRun(project.id, conv.id, branch.id);
+    store.updateRun(branchRun.id, { status: "succeeded", score: 100, lintPassed: true });
+
+    const activeRes = await fetch(`${base}/api/projects/${project.id}/runs`);
+    assert.equal(activeRes.status, 200);
+    const activeRuns = (await activeRes.json()) as Array<{ id: string; variantId?: string | null }>;
+    assert.deepEqual(
+      activeRuns.map((run) => run.id),
+      [branchRun.id],
+    );
+    assert.equal(activeRuns[0]?.variantId, branch.id);
+
+    const allRes = await fetch(`${base}/api/projects/${project.id}/runs?all=1`);
+    assert.equal(allRes.status, 200);
+    const allRuns = (await allRes.json()) as Array<{ id: string; variantId?: string | null }>;
+    assert.deepEqual(
+      allRuns.map((run) => run.id),
+      [branchRun.id, mainRun.id],
+    );
+    assert.deepEqual(
+      allRuns.map((run) => run.variantId),
+      [branch.id, main.id],
+    );
+  });
+});
+
 test("GET /api/projects/:id/runs includes final quality findings", async () => {
   await withRunServer(new FakeRunner({ artifacts: [SLOPPY] }), async ({ base, store }) => {
     const project = store.createProject({ name: "P" });

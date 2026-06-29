@@ -68,6 +68,8 @@ export interface Run {
   id: string;
   projectId: string;
   conversationId: string;
+  /** Design branch this run belongs to. */
+  variantId: string | null;
   status: RunStatus;
   /** Number of lint→repair rounds that ran for this generation. */
   repairRounds: number;
