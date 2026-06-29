@@ -32,8 +32,8 @@ faithful recreation.
    dialog has no path field, but you can press **Cmd+Shift+G** (Go to Folder), paste the
    path, Enter, then open the `apps/extension` folder.
 4. Click the extension icon and confirm the **Dezin daemon URL**:
-   - Desktop app: `http://127.0.0.1:7457` (default — the desktop pins this port)
-   - Dev server: `http://localhost:5173`
+   - Desktop app or `pnpm dev`: `http://127.0.0.1:7457` by default
+   - If you override `DEZIN_PORT`, use that daemon URL instead. This is not the Vite web UI URL.
 
 The handoff is one-shot: the extension `POST`s to `/api/capture`; the Dezin home explicitly
 consumes it on load **and whenever the window regains focus**, so an already-open app picks

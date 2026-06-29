@@ -9,8 +9,10 @@ Dezin is an early open-source release. The core loop — describe → generate �
 - **Prototype** (single HTML) and **Standard** (Vite + React + GSAP project) build modes.
 - **33 built-in design systems** with brand marks; import your own from a code folder or a `.fig` file.
 - **Variant branches**: fork, iterate independently, and **compare** with a draggable slider.
+- **Versions workspace**: per-branch run/version history, file preview, restore, diff, compare, and chat jump actions.
 - **References**: attach another project's real artifact, drop screenshots, paste local paths.
-- Streaming **process view**, sandboxed preview, `.zip` export, command palette, dark mode.
+- Streaming **process view**, durable run event replay/reconnect, sandboxed preview, `.zip` export, command palette, dark mode.
+- Optional **agent-backed visual QA** for rendered screenshots and viewport geometry.
 - **Electron desktop** shell with off-screen capture, and a **Chrome extension** for cover-image capture.
 
 ## TODO / rough edges
@@ -22,7 +24,7 @@ Dezin is an early open-source release. The core loop — describe → generate �
 - [ ] **Desktop packaging.** The Electron app runs, but code-signing, notarization, and distribution (installers, auto-update) are intentionally not done.
 - [ ] **Chrome extension polish.** Functional capture-to-composer; not packaged for the Web Store, limited site coverage.
 - [ ] **CI / release automation.** Not set up for this initial release.
-- [ ] **Broader test coverage** for the newer UI surfaces (variants, compare, agent scan, references).
+- [ ] **Broader test coverage** for newer UI surfaces and workflows (agent scan, references, Standard-mode edge cases).
 
 ## Explicitly out of scope
 

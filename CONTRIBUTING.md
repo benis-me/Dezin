@@ -4,7 +4,7 @@ Thanks for taking a look. Dezin is small and opinionated by design — contribut
 
 ## Setup
 
-Prerequisites: **Node ≥ 22.12**, **pnpm 9**. For real generation you also need a coding-agent CLI on your PATH (Claude Code, Codex, Gemini CLI, Cursor Agent, opencode, or Aider), authenticated.
+Prerequisites: **Node ≥ 22.12**, **pnpm 11**. For real generation you also need a coding-agent CLI on your PATH (Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, or Aider), authenticated.
 
 ```sh
 pnpm install
@@ -17,8 +17,8 @@ You can develop and run the whole test suite **without any agent installed** —
 
 ```sh
 pnpm typecheck                 # type-check every package
-pnpm test                      # node suite (zero install)
-cd apps/web && pnpm test       # web suite (vitest)
+pnpm test                      # node suite across packages + daemon
+pnpm --filter @dezin/web test  # web suite (vitest)
 ```
 
 All three must pass. There is no CI yet, so these are the gate.

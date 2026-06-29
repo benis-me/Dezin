@@ -11,7 +11,7 @@ Describe what you want; Dezin drives the coding-agent CLI you already have to bu
 
 Dezin is deliberately minimal — no telemetry, no automation, no connectors, no paid model router, no plugin marketplace. Just the loop that makes generation good.
 
-**BYOK, nothing leaves your machine.** Dezin shells out to a coding-agent CLI you already have installed and authenticated — Claude Code, Codex, Gemini CLI, Cursor Agent, opencode, or Aider. There is no Dezin account, no hosted inference, no API key to paste. The daemon binds to `127.0.0.1` and writes everything under `~/.dezin`.
+**BYOK, nothing leaves your machine.** Dezin shells out to a coding-agent CLI you already have installed and authenticated — Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, or Aider. There is no Dezin account, no hosted inference, no API key to paste. The daemon binds to `127.0.0.1` and writes everything under `~/.dezin`.
 
 ## What makes it work
 
@@ -19,6 +19,7 @@ Three ideas do the work:
 
 - **An anti-AI-slop quality kernel.** A deterministic linter flags the tells of machine-generated design — default Tailwind indigo, two-stop "trust" gradients, emoji-as-icons, invented metrics, filler copy, shadow-heavy cards — as P0 regressions, tuned to a neutral, borders-over-shadows aesthetic.
 - **A closed lint → repair loop.** After the agent writes an artifact, it is linted, and any P0 finding feeds back as the next turn until it's clean. Anti-slop is enforced, not advised.
+- **Optional visual QA.** When enabled, the selected agent reviews rendered screenshots and viewport geometry so obvious layout problems can be reported alongside static anti-slop findings.
 - **One source of truth.** The linter's rule lists generate the craft doc (`content/craft/anti-ai-slop.md`); a drift test fails if they diverge, so the prompt and the linter can never disagree.
 
 The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that does not trip its own linter.
@@ -29,6 +30,8 @@ The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that d
 - **Two build modes.** *Prototype* — one self-contained HTML file, fastest to iterate. *Standard* — a real Vite + React + GSAP project with components and routing.
 - **33 built-in design systems.** Brand visual languages modelled on Airbnb, Apple, Linear, Stripe, Vercel, Notion, Figma, and more (each a 9-section `DESIGN.md` + tokens), plus neutral house styles. Import your own from a code folder or a `.fig` file.
 - **Variant branches.** Fork a design into parallel branches, iterate each differently, then compare them side by side with a draggable before/after slider.
+- **Files and Versions workspace.** Browse generated files with an in-pane source preview, and review per-branch versions grouped by branch with View, Diff, Compare, Restore, and Chat jump actions.
+- **Durable run state.** Run events are persisted and replayed when you reopen a project or navigate back. In-app navigation can reconnect to a running agent; if the desktop app quits, the interrupted run reopens at its last known state.
 - **Reference real work.** Attach another project as a reference (its actual artifact is handed to the agent), drop in screenshots to recreate, or paste local paths.
 - **Live process view.** The agent's reasoning and file writes stream into the chat as it works; the artifact renders in a sandboxed iframe; export downloads a `.zip`.
 - **Desktop app.** An Electron shell (`apps/desktop`) with native window chrome and pixel-perfect off-screen capture for previews.
@@ -37,7 +40,7 @@ The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that d
 
 ## Quick start
 
-Prerequisites: **Node ≥ 22.12**, **pnpm 9**, and at least one **coding-agent CLI on your PATH** (e.g. `claude`), authenticated, for real generation.
+Prerequisites: **Node ≥ 22.12**, **pnpm 11**, and at least one **coding-agent CLI on your PATH** (e.g. `claude`), authenticated, for real generation.
 
 ```sh
 pnpm install      # install the workspace
@@ -94,8 +97,8 @@ Generation is driven by a **3-axis content model**: `skills` (what to build) × 
 ## Test
 
 ```sh
-pnpm test                      # node suite (154 tests) — zero install
-cd apps/web && pnpm test       # web suite (55 tests) — vitest
+pnpm test                      # node suite across packages + daemon
+pnpm --filter @dezin/web test  # web suite (vitest)
 pnpm typecheck                 # type-check every package
 ```
 
