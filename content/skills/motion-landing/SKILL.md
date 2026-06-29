@@ -4,6 +4,7 @@ description: An awwwards-grade animated landing — multi-act narrative, GSAP sc
 mode: prototype
 craft: [typography, color, anti-ai-slop, animation-discipline, accessibility-baseline, laws-of-ux]
 triggers: [awwwards, animated landing, motion, gsap, shader, webgl, scrollytelling, immersive, creative landing]
+libraries: [css, waapi, motion, gsap, remotion, webgl, three, ogl]
 designSystem: true
 ---
 
@@ -17,16 +18,26 @@ must earn its place by directing attention or revealing structure.
 This is the one skill where expressiveness is the brief. But expressive ≠ sloppy:
 the discipline below is what separates an award winner from an AI demo.
 
-## Build it as ONE self-contained index.html
+## Output shape
 
-Inline everything (CSS in `<style>`, JS in `<script>`). Load libraries from a CDN:
+Honor the Dezin output mode above everything else:
+
+- Prototype mode: build ONE self-contained `index.html`. Inline CSS in `<style>`
+  and JS in `<script>`. Load libraries from a CDN only when the motion idea needs
+  them:
 
 ```html
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
 ```
 
-Use system/brand fonts or a single Google Font `<link>`. No build step, no frameworks.
+- Standard mode: build inside the Vite + React project. Use the scaffolded GSAP
+  dependency for timeline/scroll work. Install `motion` only for React-specific
+  layout/presence/gesture motion. Install Remotion only if the user explicitly asks
+  for a video/timeline renderable composition, not for a normal web landing page.
+
+Use system/brand fonts or one real web font source. No library is mandatory just
+because the skill is animation-focused.
 
 ## Narrative structure (5–7 acts, not a skeleton)
 

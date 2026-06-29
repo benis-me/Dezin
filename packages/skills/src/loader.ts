@@ -34,6 +34,7 @@ export function toSkillInfo(id: string, data: Record<string, FrontmatterValue>, 
     mode: asMode(data.mode),
     craft: asArray(data.craft),
     triggers: asArray(data.triggers),
+    libraries: asArray(data.libraries),
     designSystem: asBool(data.designSystem, true),
     body,
   };
