@@ -231,6 +231,7 @@
 
 .dezin-resize-separator {
   position: relative;
+  z-index: 40;
   flex: 0 0 1px;
   width: 1px;
   cursor: col-resize;
@@ -287,6 +288,11 @@
 /* Electron: draggable chrome + traffic-light clearance (no effect in a plain browser). */
 .electron .app-drag {
   -webkit-app-region: drag;
+}
+.electron .app-no-drag,
+.electron .app-no-drag::before,
+.electron .app-no-drag::after {
+  -webkit-app-region: no-drag;
 }
 .electron .app-drag :where(button, a, input, textarea, select, label, [role="button"], [role="tab"], [role="combobox"], [role="menuitem"], [contenteditable="true"]) {
   -webkit-app-region: no-drag;
