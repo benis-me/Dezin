@@ -99,7 +99,7 @@ export function AgentModelSelect({
                   onClick={() => onModelChange(m)}
                   className={cn(
                     "rounded-md border px-2 py-1 text-xs font-medium transition-colors",
-                    model === m ? "border-ring bg-surface text-foreground ring-1 ring-ring/30" : "border-border text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
+                    model === m ? "border-ring bg-surface text-foreground ring-1 ring-inset ring-ring/30" : "border-border text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
                   )}
                 >
                   {m || "Default"}
