@@ -16,10 +16,11 @@ const ANALYZE_PROMPT =
   "Look at the design screenshot saved as reference.png in this folder. Write ONE concise paragraph (2 to 4 sentences, plain text, no preamble, no markdown, no lists, no code) describing it as a recreation brief for rebuilding it as a responsive web page: its overall layout, type treatment, colour system, key components, and mood. Do not create, edit, or write any files — only print the paragraph.";
 
 /** A fast, non-thinking model per agent for a quick pass (omitted when unknown). */
-const FAST_MODEL: Record<string, string> = { claude: "claude-haiku-4-5" };
+const FAST_MODEL: Record<string, string> = { claude: "claude-haiku-4-5", codebuddy: "claude-haiku-4.5" };
 
 function argvFor(command: string, model: string | undefined): string[] {
-  if (command === "claude") {
+  // Claude and CodeBuddy (a Claude-Code fork) share the same headless invocation.
+  if (command === "claude" || command === "codebuddy") {
     const args = ["-p", ANALYZE_PROMPT, "--permission-mode", "bypassPermissions"];
     if (model) args.push("--model", model);
     return args;

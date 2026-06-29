@@ -43,9 +43,10 @@ export function buildRunner(settings: Settings, override: { agentCommand?: strin
   const model = override.model || settings.model || undefined;
   const base = command.split("/").pop() ?? command;
 
-  // Claude gets the rich stream-json runner (live tool activity); other agents use
-  // the generic CLI runner with their documented headless invocation.
-  if (base === "claude") return new ClaudeCodeRunner({ command, model });
+  // Claude (and CodeBuddy, a Claude-Code fork that speaks the same stream-json protocol)
+  // get the rich stream-json runner (live tool activity); other agents use the generic CLI
+  // runner with their documented headless invocation.
+  if (base === "claude" || base === "codebuddy") return new ClaudeCodeRunner({ command, model });
 
   const config = GENERIC_AGENTS[base] ?? {
     // Unknown CLI: best-effort positional prompt.

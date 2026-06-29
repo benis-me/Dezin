@@ -1,4 +1,4 @@
-import { Bot, SquareTerminal, Terminal } from "lucide-react";
+import { Bot, MessageSquareCode, SquareTerminal, Terminal } from "lucide-react";
 
 // Brand marks (simple-icons paths, 24×24). Agents without a public mark fall back to a
 // neutral terminal glyph. Logos keep their brand colour — they're identity, not UI accent.
@@ -13,6 +13,7 @@ const CURSOR =
 
 const LABELS: Record<string, string> = {
   claude: "Claude Code",
+  codebuddy: "CodeBuddy",
   codex: "Codex",
   gemini: "Gemini CLI",
   "cursor-agent": "Cursor Agent",
@@ -55,6 +56,7 @@ export function AgentLogo({ id, className = "size-5" }: { id: string; className?
         <path d={CURSOR} />
       </svg>
     );
+  if (id === "codebuddy") return <MessageSquareCode className={className} strokeWidth={1.75} aria-hidden />;
   if (id === "opencode") return <SquareTerminal className={className} strokeWidth={1.75} aria-hidden />;
   if (id === "aider") return <Bot className={className} strokeWidth={1.75} aria-hidden />;
   return <Terminal className={className} strokeWidth={1.75} aria-hidden />;
