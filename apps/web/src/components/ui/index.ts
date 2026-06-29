@@ -50,5 +50,4 @@ export { Spinner, Skeleton, Loading } from "./feedback.tsx";
 export { Picker, type PickerOption } from "./Picker.tsx";
 export { Segmented, type SegmentedOption } from "./SegmentedControl.tsx";
 export { PanelBar } from "./PanelBar.tsx";
-export { ResizeHandle } from "./ResizeHandle.tsx";
 export { FadeIn, Stagger, StaggerItem } from "./motion-primitives.tsx";

@@ -36,7 +36,9 @@ test("Shell sidebar can be resized outside project pages", () => {
       <div>Content</div>
     </Shell>,
   );
-  expect(screen.getByRole("separator", { name: "Resize app sidebar" })).toBeInTheDocument();
+  const resize = screen.getByRole("separator", { name: "Resize app sidebar" });
+  expect(resize).toHaveAttribute("data-separator");
+  expect(screen.queryByRole("button", { name: "Browser extension" })).toBeNull();
 });
 
 test("HomeScreen lists projects and opens them", () => {
@@ -133,6 +135,7 @@ test("DesignSystemDetailScreen loads a system and sets it as default", async () 
   }));
   renderWithApi(<DesignSystemDetailScreen id="modern-minimal" />, { getDesignSystem, updateSettings });
   await screen.findByRole("heading", { name: "Modern Minimal" });
+  expect(screen.getByRole("separator", { name: "Resize spec navigation" })).toHaveAttribute("data-separator");
   expect(getDesignSystem).toHaveBeenCalledWith("modern-minimal");
   fireEvent.click(await screen.findByRole("button", { name: /Set default/ }));
   await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ defaultDesignSystemId: "modern-minimal" }));

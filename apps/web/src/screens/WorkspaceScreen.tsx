@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, ResizeHandle, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
+import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
 import { PreviewModal } from "../components/PreviewModal.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
@@ -19,6 +20,7 @@ import { navigate } from "../router.tsx";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
 import type { Conversation, Variant, DesignSystemCard, Message, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
+import { readPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 
 const TABS = ["Preview", "Files", "Quality", "Versions"] as const;
 type Tab = (typeof TABS)[number];
@@ -34,6 +36,10 @@ const SEVERITY_STYLE: Record<string, string> = {
 
 const SPLIT_KEY = "dezin.workspace.split";
 const FILES_SPLIT_KEY = "dezin.workspace.files.split";
+const WORKSPACE_CONVERSATION_PANEL = "conversation";
+const WORKSPACE_ARTIFACT_PANEL = "artifact";
+const FILES_BROWSER_PANEL = "browser";
+const FILES_PREVIEW_PANEL = "preview";
 const REPLAYABLE_RUN_STATUSES = new Set(["running", "pending", "cancelled", "failed"]);
 
 function queueKey(projectId: string): string {
@@ -485,38 +491,32 @@ function FilesPanel({
   running: boolean;
   onOpen: (path: string) => void;
 }) {
-  const filesSplitRef = useRef<HTMLDivElement | null>(null);
-  const [filesSplit, setFilesSplit] = useState(readFilesSplit);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(FILES_SPLIT_KEY, String(filesSplit));
-    } catch {
-      /* ignore */
-    }
-  }, [filesSplit]);
+  const browserPercent = readPanelPercent(FILES_SPLIT_KEY, 38, 22, 58);
 
   if (files.length === 0) return emptyPane(running ? "Generating…" : "No files yet. Run to generate.");
   return (
-    <div ref={filesSplitRef} className="flex h-full bg-surface">
-      <div
-        style={{ width: `${filesSplit * 100}%` }}
-        className="min-w-[200px] max-w-[480px] shrink-0"
-      >
-        <FilesBrowser files={files} activeFile={activeFile} onOpen={onOpen} />
-      </div>
-      <ResizeHandle
-        containerRef={filesSplitRef}
-        value={filesSplit}
-        onResize={setFilesSplit}
-        min={0.22}
-        max={0.58}
-        label="Resize file browser"
+    <Group
+      id="dezin-files-layout"
+      className="h-full bg-surface"
+      defaultLayout={twoPanelLayout(FILES_BROWSER_PANEL, browserPercent, FILES_PREVIEW_PANEL)}
+      onLayoutChanged={(layout) => savePanelFraction(FILES_SPLIT_KEY, layout, FILES_BROWSER_PANEL)}
+      resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
+    >
+      <Panel id={FILES_BROWSER_PANEL} minSize="200px" maxSize="480px" groupResizeBehavior="preserve-pixel-size">
+        <div className="h-full min-w-0">
+          <FilesBrowser files={files} activeFile={activeFile} onOpen={onOpen} />
+        </div>
+      </Panel>
+      <Separator
+        aria-label="Resize file browser"
+        className={RESIZE_SEPARATOR_CLASS}
       />
-      <div className="min-w-0 flex-1">
-        {activeFile ? <CodeView name={activeFile} text={fileText} /> : emptyPane("Select a file to preview")}
-      </div>
-    </div>
+      <Panel id={FILES_PREVIEW_PANEL} minSize="240px">
+        <div className="h-full min-w-0">
+          {activeFile ? <CodeView name={activeFile} text={fileText} /> : emptyPane("Select a file to preview")}
+        </div>
+      </Panel>
+    </Group>
   );
 }
 
@@ -725,26 +725,6 @@ function ToolbarTooltip({ label, children }: { label: string; children: ReactNod
   );
 }
 
-function readSplit(): number {
-  try {
-    const v = Number(localStorage.getItem(SPLIT_KEY));
-    if (v >= 0.24 && v <= 0.55) return v;
-  } catch {
-    /* ignore */
-  }
-  return 0.33;
-}
-
-function readFilesSplit(): number {
-  try {
-    const v = Number(localStorage.getItem(FILES_SPLIT_KEY));
-    if (v >= 0.22 && v <= 0.58) return v;
-  } catch {
-    /* ignore */
-  }
-  return 0.38;
-}
-
 export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: string; onOpenSettings?: (section?: string) => void }) {
   const api = useApi();
   const { toast } = useToast();
@@ -793,7 +773,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [diff, setDiff] = useState<{ label: string; lines: DiffLine[] } | null>(null);
-  const [split, setSplit] = useState(readSplit);
+  const workspaceConversationPercent = readPanelPercent(SPLIT_KEY, 33, 24, 55);
   const msgId = useRef(0);
   const activeConv = useRef<string | null>(null);
   const modeRef = useRef<ProjectMode>("prototype");
@@ -806,20 +786,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const terminalEventRef = useRef(false);
   const liveQualityRef = useRef(false);
   const reattachedRunsRef = useRef<Set<string>>(new Set());
-  const splitRef = useRef<HTMLDivElement>(null);
 
   const setActive = (id: string | null) => {
     activeConv.current = id;
     setActiveConvId(id);
   };
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(SPLIT_KEY, String(split));
-    } catch {
-      /* ignore */
-    }
-  }, [split]);
 
   const push = (kind: Msg["kind"], text: string) =>
     setMessages((m) => [...m, { id: msgId.current++, kind, text, at: Date.now() }]);
@@ -1598,13 +1569,17 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
 
   return (
-    <div ref={splitRef} className="flex flex-1 overflow-hidden">
-      <section
-        aria-label="Conversation"
-        style={{ width: `${split * 100}%` }}
-        className="relative flex min-w-[320px] shrink-0 flex-col"
+    <>
+      <Group
+        id="dezin-workspace-layout"
+        className="flex-1"
+        defaultLayout={twoPanelLayout(WORKSPACE_CONVERSATION_PANEL, workspaceConversationPercent, WORKSPACE_ARTIFACT_PANEL)}
+        onLayoutChanged={(layout) => savePanelFraction(SPLIT_KEY, layout, WORKSPACE_CONVERSATION_PANEL)}
+        resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
       >
-        <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
+        <Panel id={WORKSPACE_CONVERSATION_PANEL} minSize="320px" maxSize="55%">
+          <section aria-label="Conversation" className="relative flex h-full min-w-0 flex-col">
+            <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
           <div className="flex min-w-0 items-center gap-1">
             <button
               type="button"
@@ -1899,19 +1874,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           </div>
           </div>
         </div>
-      </section>
+        </section>
+      </Panel>
 
-      <ResizeHandle
-        containerRef={splitRef}
-        value={split}
-        onResize={setSplit}
-        min={0.24}
-        max={0.55}
-        label="Resize panels"
-      />
+      <Separator aria-label="Resize panels" className={RESIZE_SEPARATOR_CLASS} />
 
-      <section aria-label="Artifact" className="flex flex-1 flex-col">
-        <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
+      <Panel id={WORKSPACE_ARTIFACT_PANEL} minSize="360px">
+        <section aria-label="Artifact" className="flex h-full min-w-0 flex-col">
+          <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
           <Tabs
             aria-label="Artifact views"
             className="[&_[role=tab]]:px-2.5"
@@ -2197,7 +2167,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             emptyPane(running ? "Generating…" : "Your preview will appear here")
           )}
         </div>
-      </section>
+        </section>
+      </Panel>
+      </Group>
 
       {pendingMark ? <MarkUpPopover mark={pendingMark} onAdd={addMark} onCancel={dismissMark} /> : null}
       {compare ? <VersionCompare open onClose={() => setCompare(null)} a={compare.a} b={compare.b} /> : null}
@@ -2238,6 +2210,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           </div>
         </Dialog>
       ) : null}
-    </div>
+    </>
   );
 }
