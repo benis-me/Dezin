@@ -126,6 +126,11 @@ export interface AgentInfo {
   models: string[];
 }
 
+/** Streamed progress from a rescan: per-agent "probe"/"models" steps, then a final "done". */
+export type ScanEvent =
+  | { type: "progress"; id: string; label: string; phase: "probe" | "models" }
+  | { type: "done"; agents: AgentInfo[] };
+
 export interface Health {
   ok: boolean;
   version: string;
@@ -235,6 +240,8 @@ export interface ApiClient {
   updateSettings(patch: Partial<Settings>): Promise<Settings>;
   listAgents(): Promise<AgentInfo[]>;
   rescanAgents(): Promise<AgentInfo[]>;
+  /** Rescan with per-agent progress (SSE). Yields progress events, then a final "done". */
+  scanAgentsStream(): AsyncGenerator<ScanEvent>;
   getHealth(): Promise<Health>;
   listFiles(id: string): Promise<ProjectFile[]>;
   getFileText(id: string, path: string): Promise<string>;
@@ -301,9 +308,52 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     }
   }
 
+  async function* scanAgentsStream(): AsyncGenerator<ScanEvent> {
+    const res = await f(baseUrl + "/api/agents/rescan-stream", { method: "POST" });
+    if (!res.ok) throw new ApiError(res.status, await safeText(res));
+    const handle = (block: string): ScanEvent | null => {
+      const data = block
+        .split("\n")
+        .filter((l) => l.startsWith("data:"))
+        .map((l) => l.slice(5).trim())
+        .join("");
+      if (!data) return null;
+      try {
+        return JSON.parse(data) as ScanEvent;
+      } catch {
+        return null;
+      }
+    };
+    if (!res.body) {
+      for (const block of (await res.text()).split("\n\n")) {
+        const ev = handle(block);
+        if (ev) yield ev;
+      }
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const ev = handle(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 2);
+        if (ev) yield ev;
+      }
+    }
+    buffer += decoder.decode();
+    const ev = handle(buffer.trim());
+    if (ev) yield ev;
+  }
+
   const enc = (id: string) => encodeURIComponent(id);
 
   return {
+    scanAgentsStream,
     listProjects: () => json<Project[]>("/api/projects"),
     createProject: (input) => json<Project>("/api/projects", jsonInit("POST", input)),
     getSetup: (id) => json<SetupStatus>(`/api/projects/${enc(id)}/setup`),

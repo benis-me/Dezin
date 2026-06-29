@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Check, RotateCw } from "lucide-react";
 import { Button, Spinner } from "../components/ui/index.ts";
 import { AgentLogo, agentLabel } from "../components/agent-logos.tsx";
@@ -16,10 +16,19 @@ import { native } from "../lib/native.ts";
 export function OnboardingScreen({ onDone }: { onDone: () => void }) {
   const api = useApi();
   const { toast } = useToast();
-  const { agents, loading, scanning, rescan } = useAgents();
+  const { agents, loading, scanning, status: scanStatus, rescan } = useAgents();
   const [agent, setAgent] = useState("");
   const [model, setModel] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // First run does a full (deep) scan so the results are accurate and get persisted for next
+  // launch. Guarded so StrictMode's double-mount doesn't kick off two scans.
+  const started = useRef(false);
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    void rescan();
+  }, [rescan]);
 
   const available = agents.filter((a) => a.available);
 
@@ -33,14 +42,8 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
   // First run does the full (deep) scan and waits for it — a slower first cold start is fine,
   // and the results then match a manual Rescan instead of the fast-path seed.
   const busy = loading || scanning;
-  const cbScanning = scanning && agents.some((a) => a.id === "codebuddy" && a.available);
-  const status = loading
-    ? "Detecting installed agents…"
-    : cbScanning
-      ? "Reading CodeBuddy's model list…"
-      : scanning
-        ? "Reading installed model lists…"
-        : "";
+  const status = scanStatus || "Detecting installed agents…";
+  const cbScanning = scanStatus.includes("CodeBuddy");
 
   const finish = async () => {
     setSaving(true);

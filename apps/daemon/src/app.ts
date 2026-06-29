@@ -31,7 +31,7 @@ import { handleGetVersion, handleRestoreVersion } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer } from "./project-runtime.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
-import { handleListAgents, handleRescanAgents, warmAgents, type AgentProber } from "./agents-handler.ts";
+import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
 
 export interface AppDeps {
@@ -206,6 +206,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/agents/rescan",
     handler: (_req, res, _p, deps) => handleRescanAgents(res, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/agents/rescan-stream",
+    handler: (_req, res, _p, deps) => handleScanAgentsStream(res, deps),
   },
   {
     method: "POST",
@@ -435,7 +440,7 @@ const routes: Route[] = [
 export function createApp(deps: AppDeps): http.Server {
   const webDir = deps.webDir ?? defaultWebDir();
   const hasWeb = existsSync(webDir);
-  warmAgents(deps.agentProber); // scan installed agents once in the background at startup
+  warmAgents(deps.agentProber, deps.dataDir); // reload the persisted scan (or probe once) at startup
   return http.createServer(async (req, res) => {
     const method = req.method ?? "GET";
     let pathname = "/";

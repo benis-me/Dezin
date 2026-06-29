@@ -35,7 +35,7 @@ export function SettingsScreen({
     SECTIONS.some((s) => s.id === initialSection) ? (initialSection as SectionId) : "appearance",
   );
   const [settings, setSettings] = useState<Settings | null>(null);
-  const { agents, loading: agentsInitial, scanning, rescan } = useAgents();
+  const { agents, loading: agentsInitial, scanning, status: scanStatus, rescan } = useAgents();
   const agentsLoading = agentsInitial || scanning;
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
   const [version, setVersion] = useState<string>("");
@@ -125,7 +125,7 @@ export function SettingsScreen({
                       {agentsLoading ? (
                         <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                           <Spinner size={13} />
-                          Scanning…
+                          {scanStatus || "Scanning…"}
                         </span>
                       ) : (
                         <Button

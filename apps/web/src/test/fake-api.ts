@@ -43,6 +43,9 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     updateSettings: notImpl as ApiClient["updateSettings"],
     listAgents: async () => [],
     rescanAgents: async () => [],
+    async *scanAgentsStream() {
+      yield { type: "done" as const, agents: await (over.rescanAgents ?? (async () => []))() };
+    },
     getHealth: async () => ({ ok: true, version: "0.0.0" }),
     listFiles: async () => [],
     getFileText: async () => "",

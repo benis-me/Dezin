@@ -12,6 +12,8 @@ interface AgentsValue {
   loading: boolean;
   /** A forced rescan in progress. */
   scanning: boolean;
+  /** Human-readable progress of the current rescan, e.g. "Scanning CodeBuddy…" ("" when idle). */
+  status: string;
   rescan: () => Promise<void>;
   reload: () => Promise<void>;
 }
@@ -20,6 +22,7 @@ const AgentsContext = createContext<AgentsValue>({
   agents: [],
   loading: true,
   scanning: false,
+  status: "",
   rescan: async () => {},
   reload: async () => {},
 });
@@ -29,6 +32,7 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
+  const [status, setStatus] = useState("");
 
   const reload = useCallback(async () => {
     try {
@@ -40,32 +44,43 @@ export function AgentsProvider({ children }: { children: ReactNode }) {
     }
   }, [api]);
 
+  // Stream the rescan so the UI can show which agent is being probed; fall back to the plain
+  // POST if streaming isn't available.
   const rescan = useCallback(async () => {
     setScanning(true);
+    setStatus("");
     try {
-      setAgents(await api.rescanAgents());
+      let done = false;
+      for await (const ev of api.scanAgentsStream()) {
+        if (ev.type === "progress") {
+          setStatus(ev.phase === "models" ? `Reading ${ev.label}'s models…` : `Scanning ${ev.label}…`);
+        } else {
+          setAgents(ev.agents);
+          done = true;
+        }
+      }
+      if (!done) setAgents(await api.rescanAgents());
     } catch {
-      /* keep the last good list */
+      try {
+        setAgents(await api.rescanAgents());
+      } catch {
+        /* keep the last good list */
+      }
     } finally {
       setScanning(false);
+      setStatus("");
       setLoading(false);
     }
   }, [api]);
 
-  // Fast first (a cached GET, instant — the UI never blocks), then a deep rescan in the
-  // background to refine results (e.g. CodeBuddy's live PTY model list). The deep POST
-  // resolves after the fast GET, so it always wins — fast never overwrites deep.
+  // Just load — the daemon persists each scan and reloads it at startup, so this returns the
+  // last (deep) result instantly. A fresh scan is explicit (first-run onboarding, or Rescan),
+  // so a launch never re-probes the slow CLIs or shows fast-path results.
   useEffect(() => {
-    let alive = true;
-    void reload().then(() => {
-      if (alive) void rescan();
-    });
-    return () => {
-      alive = false;
-    };
-  }, [reload, rescan]);
+    void reload();
+  }, [reload]);
 
-  return <AgentsContext.Provider value={{ agents, loading, scanning, rescan, reload }}>{children}</AgentsContext.Provider>;
+  return <AgentsContext.Provider value={{ agents, loading, scanning, status, rescan, reload }}>{children}</AgentsContext.Provider>;
 }
 
 export const useAgents = (): AgentsValue => useContext(AgentsContext);
