@@ -18,7 +18,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentRunner, AgentTurnInput, AgentTurnResult } from "./types.ts";
-import { NodeSpawner, type ProcessSpawner } from "./claude-runner.ts";
+import { NodeSpawner, historyPreamble, type ProcessSpawner } from "./claude-runner.ts";
 
 export interface GenericAgentConfig {
   /** Build the full argv given the optional model and the combined prompt. */
@@ -60,7 +60,7 @@ export class GenericCliRunner implements AgentRunner {
   async runTurn(input: AgentTurnInput): Promise<AgentTurnResult> {
     const artifactPath = this.opts.artifactPath ?? "index.html";
     const spawner = this.opts.spawner ?? new NodeSpawner();
-    const prompt = `${input.systemPrompt}\n\n--- TASK ---\n\n${input.message}`;
+    const prompt = `${input.systemPrompt}\n\n--- TASK ---\n\n${historyPreamble(input.history)}${input.message}`;
     input.onActivity?.({ kind: "tool", name: this.command, summary: `Generating with ${this.command}…` });
 
     const { stdout } = await spawner.run({

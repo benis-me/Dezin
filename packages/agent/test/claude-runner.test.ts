@@ -69,6 +69,28 @@ test("ClaudeCodeRunner assembles args/stdin, runs, and reads back the artifact",
   assert.match(spawner.last?.stdin ?? "", /make me a hero/);
 });
 
+test("ClaudeCodeRunner prepends prior conversation turns to the message", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-"));
+  const spawner = new FakeSpawner(STREAM, "<section></section>");
+  const runner = new ClaudeCodeRunner({ spawner, command: "claude" });
+
+  await runner.runTurn({
+    systemPrompt: "SYSTEM-PROMPT",
+    message: "now make it bigger",
+    projectDir: dir,
+    history: [
+      { role: "user", content: "make a hero" },
+      { role: "assistant", content: "Built a hero." },
+    ],
+  });
+
+  const stdin = spawner.last?.stdin ?? "";
+  assert.match(stdin, /Conversation so far/);
+  assert.match(stdin, /make a hero/); // prior user turn
+  assert.match(stdin, /Built a hero\./); // prior assistant turn
+  assert.match(stdin, /now make it bigger/); // current message still present
+});
+
 test("model option adds --model", () => {
   const runner = new ClaudeCodeRunner({ model: "claude-opus-4-8" });
   const args = runner.buildArgs("SYS");

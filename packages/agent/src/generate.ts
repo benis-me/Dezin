@@ -52,6 +52,8 @@ export interface GenerateInput {
   onEvent?: (event: GenerateEvent) => void;
   /** Abort to cancel the run (terminates the active turn + stops the loop). */
   signal?: AbortSignal;
+  /** Prior turns in this conversation, so the agent has chat context (not just the artifact). */
+  history?: { role: TurnRole; content: string }[];
 }
 
 export type GenerateEvent =
@@ -77,7 +79,7 @@ export interface GenerateResult {
 
 export async function generateArtifact(input: GenerateInput): Promise<GenerateResult> {
   const { runner, systemPrompt, brief, projectDir, lint, onEvent, signal } = input;
-  const history: { role: TurnRole; content: string }[] = [];
+  const history: { role: TurnRole; content: string }[] = [...(input.history ?? [])];
   const turns: AgentTurnResult[] = [];
 
   const runTurn = async (message: string, round: number, isRepair: boolean): Promise<AgentTurnResult> => {

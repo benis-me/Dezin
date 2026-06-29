@@ -13,6 +13,26 @@ import type { AgentRunner, AgentTurnInput, AgentTurnResult } from "./types.ts";
 import { abortError } from "./types.ts";
 import { parseClaudeStream, parseClaudeLine } from "./claude-stream.ts";
 
+/**
+ * A compact transcript of earlier turns, prepended to a turn's message so the agent has the
+ * conversation's context (not just the artifact on disk). Bounded to the most recent turns
+ * within a char budget so long chats don't blow up the prompt.
+ */
+export function historyPreamble(history?: { role: string; content: string }[]): string {
+  if (!history?.length) return "";
+  const picked: string[] = [];
+  let used = 0;
+  for (let i = history.length - 1; i >= 0 && used < 8000; i--) {
+    const m = history[i]!;
+    const who = m.role === "assistant" ? "Assistant" : "You";
+    const content = m.content.length > 1500 ? `${m.content.slice(0, 1500)}…` : m.content;
+    const line = `${who}: ${content}`;
+    picked.unshift(line);
+    used += line.length;
+  }
+  return `## Conversation so far\n\nThis continues an existing conversation. Earlier turns, oldest first:\n\n${picked.join("\n\n")}\n\n--- Current request ---\n\n`;
+}
+
 export interface SpawnInput {
   command: string;
   args: string[];
@@ -127,8 +147,10 @@ export class ClaudeCodeRunner implements AgentRunner {
     const artifactPath = this.opts.artifactPath ?? "index.html";
     const spawner = this.opts.spawner ?? new NodeSpawner();
 
-    // One stream-json user turn on stdin (avoids argv length limits for the message).
-    const stdin = JSON.stringify({ type: "user", message: { role: "user", content: input.message } }) + "\n";
+    // One stream-json user turn on stdin (avoids argv length limits for the message). Prior
+    // turns are prepended as context so the agent follows the conversation, not just the file.
+    const content = historyPreamble(input.history) + input.message;
+    const stdin = JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
 
     // Buffer stdout into whole lines and surface each as live activity as it streams.
     let buffer = "";

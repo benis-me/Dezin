@@ -129,6 +129,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   });
 
   const brief = body.brief.trim();
+  // Prior turns in this conversation become the agent's chat context (captured before we add
+  // the new user message). System/process records are excluded.
+  const history = store
+    .listMessages(conversation.id)
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
   store.addMessage(conversation.id, "user", brief);
   const run = store.createRun(project.id, conversation.id);
   store.updateRun(run.id, { status: "running" });
@@ -173,6 +179,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           systemPrompt,
           message: brief,
           projectDir: dir,
+          history,
           onActivity: (activity) => {
             recordStep(activity);
             sse({ type: "activity", round: 0, activity });
@@ -211,6 +218,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       systemPrompt,
       brief,
       projectDir: dir,
+      history,
       lint: { maxRounds: body.maxRounds ?? 2 },
       signal: ctrl.signal,
       onEvent: (e: GenerateEvent) => {
