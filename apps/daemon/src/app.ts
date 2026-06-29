@@ -404,6 +404,12 @@ const routes: Route[] = [
     handler: (req, res, params, deps) => handleUploadRef(req, res, params, deps),
   },
   {
+    // Serve an uploaded reference file (image thumbnails in the chat). safeJoin blocks traversal.
+    method: "GET",
+    pattern: "/api/projects/:id/refs/*rest",
+    handler: (_req, res, { id, rest }, { dataDir }) => serveProjectFile(res, dataDir, id!, join(".refs", rest ?? "")),
+  },
+  {
     method: "GET",
     pattern: "/api/projects/:id/export",
     handler: (_req, res, params, deps) => handleExport(res, params, deps),

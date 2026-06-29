@@ -255,6 +255,8 @@ export interface ApiClient {
   /** One-shot pending capture from the browser extension (cleared on read). */
   getCapture(): Promise<{ images: { name: string; base64: string }[]; note: string; source: string }>;
   previewUrl(id: string): string;
+  /** URL serving an uploaded reference file (e.g. an image), given its `.refs/<name>` path. */
+  refUrl(id: string, refPath: string): string;
   variantPreviewUrl(id: string, vid: string): string;
   exportUrl(id: string): string;
   streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent>;
@@ -416,6 +418,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       return res.text();
     },
     previewUrl: (id) => `${baseUrl}/projects/${enc(id)}/preview/`,
+    refUrl: (id, refPath) => `${baseUrl}/api/projects/${enc(id)}/refs/${refPath.replace(/^\.refs\//, "").split("/").map(encodeURIComponent).join("/")}`,
     variantPreviewUrl: (id, vid) => `${baseUrl}/api/projects/${enc(id)}/variants/${enc(vid)}/preview/`,
     exportUrl: (id) => `${baseUrl}/api/projects/${enc(id)}/export`,
     streamRun,

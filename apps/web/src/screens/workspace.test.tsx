@@ -83,6 +83,33 @@ test("rehydrates the prior transcript and reuses the conversation on the next ru
   expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "c1", brief: "tweak it" }), expect.anything());
 });
 
+test("user message shows attached images as thumbnails, not the .refs path text", async () => {
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [
+      {
+        id: "m1",
+        conversationId: "c1",
+        role: "user" as const,
+        content: "make it like this\n\nReference files (read them from disk): .refs/shot.png",
+        createdAt: 1,
+      },
+    ],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  // the prose renders; the auto-generated path line does not
+  expect(await screen.findByText("make it like this")).toBeInTheDocument();
+  expect(screen.queryByText(/read them from disk/)).toBeNull();
+  expect(screen.queryByText(/\.refs\/shot\.png/)).toBeNull();
+  // a thumbnail points at the ref-serving URL
+  const img = screen.getAllByAltText("reference")[0] as HTMLImageElement;
+  expect(img.getAttribute("src")).toBe("/api/projects/p1/refs/shot.png");
+});
+
 test("conversation switcher lists conversations and switches between them", async () => {
   const fake = makeFakeApi({
     listConversations: async () => [

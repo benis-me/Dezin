@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Code, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, Plus, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, type TabItem } from "../components/ui/index.ts";
+import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
 import { PreviewModal } from "../components/PreviewModal.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
@@ -75,6 +75,54 @@ function toMsg(m: Message, id: number): Msg {
     return { id, kind: "process", text: "", steps: [], at: m.createdAt };
   }
   return { id, kind: m.role === "user" ? "user" : "assistant", text: m.content, at: m.createdAt };
+}
+
+const IMG_REF_RE = /\.refs\/[^\s,"'`)]+\.(?:png|jpe?g|gif|webp|svg|avif)/gi;
+
+/** Split a user message into its prose and any attached image refs, dropping the
+ *  auto-generated "(read them from disk): …" reference lines from the visible text. */
+function parseUserMessage(text: string): { body: string; images: string[] } {
+  const images = [...new Set(text.match(IMG_REF_RE) ?? [])];
+  const body = text
+    .split(/\n{2,}/)
+    .filter((p) => !/read them from disk/i.test(p))
+    .join("\n\n")
+    .trim();
+  return { body, images };
+}
+
+/** A user turn: attached images render as 1:1 thumbnails (hover to preview), right-aligned
+ *  above the message bubble — instead of the raw ".refs/…" paths the agent reads from disk. */
+function UserMessage({ text, srcFor }: { text: string; srcFor: (refPath: string) => string }) {
+  const { body, images } = parseUserMessage(text);
+  return (
+    <div className="flex flex-col items-end gap-1.5">
+      {images.length ? (
+        <TooltipProvider delayDuration={120}>
+          <div className="flex flex-wrap justify-end gap-1.5">
+            {images.map((p) => {
+              const src = srcFor(p);
+              return (
+                <Tooltip key={p}>
+                  <TooltipTrigger asChild>
+                    <img src={src} alt="reference" loading="lazy" className="size-12 cursor-zoom-in rounded-lg border border-border object-cover" />
+                  </TooltipTrigger>
+                  <TooltipContent className="overflow-hidden rounded-lg p-0">
+                    <img src={src} alt="reference" className="max-h-72 max-w-[18rem] object-contain" />
+                  </TooltipContent>
+                </Tooltip>
+              );
+            })}
+          </div>
+        </TooltipProvider>
+      ) : null}
+      {body ? (
+        <span className="dz-selectable max-w-[88%] rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground">
+          {body}
+        </span>
+      ) : null}
+    </div>
+  );
 }
 
 function formatBytes(n: number): string {
@@ -1225,11 +1273,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     }`}
                   >
                     {m.kind === "user" ? (
-                      <div className="flex justify-end">
-                        <span className="dz-selectable max-w-[88%] rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground">
-                          {m.text}
-                        </span>
-                      </div>
+                      <UserMessage text={m.text} srcFor={(p) => api.refUrl(projectId, p)} />
                     ) : m.kind === "assistant" ? (
                       <Markdown>{m.text}</Markdown>
                     ) : m.kind === "process" ? (

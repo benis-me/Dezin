@@ -57,6 +57,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     parseFig: async (_file, name: string) => ({ name, summary: "" }),
     getCapture: async () => ({ images: [], note: "", source: "" }),
     previewUrl: (id: string) => `/projects/${id}/preview/`,
+    refUrl: (id: string, refPath: string) => `/api/projects/${id}/refs/${refPath.replace(/^\.refs\//, "")}`,
     variantPreviewUrl: (id: string, vid: string) => `/api/projects/${id}/variants/${vid}/preview/`,
     exportUrl: (id: string) => `/api/projects/${id}/export`,
     // eslint-disable-next-line require-yield
