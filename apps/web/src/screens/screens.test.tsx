@@ -48,6 +48,17 @@ test("HomeScreen lists projects and opens them", () => {
   expect(onOpenProject).toHaveBeenCalledWith("p1");
 });
 
+test("HomeScreen project toolbar orders sort, layout, then search", () => {
+  renderWithApi(<HomeScreen projects={[project("p1", "Pricing page")]} />, {
+    listSkills: async () => SKILLS,
+  });
+  const sort = screen.getByRole("combobox", { name: "Sort projects" });
+  const layout = screen.getByRole("group", { name: "Layout" });
+  const search = screen.getByLabelText("Search projects");
+  expect(sort.compareDocumentPosition(layout) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(layout.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
 test("HomeScreen Build passes the brief, skillId, and designSystemId", async () => {
   const user = userEvent.setup();
   const onNewProject = vi.fn();
@@ -78,7 +89,10 @@ test("DesignSystemsScreen loads systems from the daemon", async () => {
       { id: "editorial", name: "Editorial", category: "Editorial & Print", summary: "print" },
     ],
   });
-  expect(screen.getByRole("heading", { name: "Design systems" })).toBeInTheDocument();
+  const heading = screen.getByRole("heading", { name: "Design systems" });
+  expect(heading).toHaveClass("text-2xl", "font-semibold", "tracking-tight", "text-foreground");
+  const subtitle = screen.getByText(/The brand visual language each artifact is built from/i);
+  expect(subtitle).toHaveClass("mt-1.5", "text-sm", "leading-relaxed", "text-muted-foreground");
   expect(await screen.findByText("Modern Minimal")).toBeInTheDocument();
   expect(screen.getByText("Editorial")).toBeInTheDocument();
 });

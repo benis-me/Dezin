@@ -109,7 +109,7 @@ export function AgentModelSelect({
           </>
         ) : null}
 
-        <div className="mt-2.5 border-t border-border pt-1.5">
+        <div className="mt-2.5 border-t border-border/60 pt-1.5">
           <button
             type="button"
             onClick={() => void rescan()}

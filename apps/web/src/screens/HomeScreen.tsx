@@ -537,16 +537,6 @@ export function HomeScreen({
             ]}
           />
           <div className="ml-auto flex items-center gap-1.5">
-            <Segmented
-              ariaLabel="Layout"
-              size="sm"
-              value={layout}
-              onChange={(v) => setLayout(v as typeof layout)}
-              options={[
-                { value: "grid", title: "Grid", icon: <LayoutGrid size={14} strokeWidth={1.75} /> },
-                { value: "list", title: "List", icon: <List size={14} strokeWidth={1.75} /> },
-              ]}
-            />
             <Picker
               ariaLabel="Sort projects"
               size="sm"
@@ -557,6 +547,16 @@ export function HomeScreen({
                 { value: "recent", label: "Recent" },
                 { value: "name", label: "Name" },
                 { value: "oldest", label: "Oldest" },
+              ]}
+            />
+            <Segmented
+              ariaLabel="Layout"
+              size="sm"
+              value={layout}
+              onChange={(v) => setLayout(v as typeof layout)}
+              options={[
+                { value: "grid", title: "Grid", icon: <LayoutGrid size={14} strokeWidth={1.75} /> },
+                { value: "list", title: "List", icon: <List size={14} strokeWidth={1.75} /> },
               ]}
             />
             <SearchInput

@@ -1605,7 +1605,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         className="relative flex min-w-[320px] shrink-0 flex-col"
       >
         <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
-          <div className="flex min-w-0 items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-1">
             <button
               type="button"
               aria-label="Back to home"
@@ -1912,7 +1912,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
       <section aria-label="Artifact" className="flex flex-1 flex-col">
         <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
-          <Tabs aria-label="Artifact views" items={tabItems} value={tab} onChange={(v) => setTab(v as Tab)} variant="plain" />
+          <Tabs
+            aria-label="Artifact views"
+            className="[&_[role=tab]]:px-2.5"
+            items={tabItems}
+            value={tab}
+            onChange={(v) => setTab(v as Tab)}
+            variant="plain"
+          />
           <TooltipProvider delayDuration={120}>
             <div className="flex items-center gap-1">
               {tab === "Preview" && previewSrc ? (

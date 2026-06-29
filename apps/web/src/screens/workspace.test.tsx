@@ -365,9 +365,17 @@ test("conversation switcher lists conversations and switches between them", asyn
   );
   // defaults to the latest conversation (c2)
   expect(await screen.findByText("second message")).toBeInTheDocument();
+  const trigger = screen.getByRole("button", { name: "Conversations" });
+  expect(trigger).not.toHaveTextContent("Conversations");
   const user = userEvent.setup();
   expect(screen.queryByRole("button", { name: /Second/ })).toBeNull();
-  await user.click(screen.getByRole("button", { name: "Conversations" }));
+  await user.click(trigger);
+  const activeConversation = (await screen.findAllByRole("button", { name: /Second/ })).find((el) => !el.hasAttribute("aria-label"));
+  expect(activeConversation).toBeTruthy();
+  const activeConversationButton = activeConversation!;
+  expect(activeConversationButton.firstElementChild?.tagName.toLowerCase()).toBe("svg");
+  expect(activeConversationButton.firstElementChild?.getAttribute("class")).toContain("text-foreground");
+  expect(activeConversationButton.children[1]?.getAttribute("class")).toContain("text-muted-foreground");
   await user.click(await screen.findByText("First"));
   expect(await screen.findByText("first message")).toBeInTheDocument();
 });
@@ -408,6 +416,7 @@ test("the Files tab lists project files and previews the selected file's source"
     </ApiProvider>,
   );
   expect(screen.queryByRole("tab", { name: "Code" })).toBeNull();
+  expect(screen.getByRole("tablist", { name: "Artifact views" }).className).toContain("[&_[role=tab]]:px-2.5");
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
   expect(await screen.findByRole("separator", { name: "Resize file browser" })).toBeInTheDocument();
   expect((await screen.findAllByText("index.html")).length).toBeGreaterThan(0);

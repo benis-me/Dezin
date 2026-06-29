@@ -41,11 +41,11 @@ export function ConversationSelect({
   return (
     <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger
+        type="button"
         aria-label="Conversations"
-        className="flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
+        className="flex h-7 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
       >
         <MessageSquare size={13} strokeWidth={1.75} />
-        <span className="font-medium text-foreground">Conversations</span>
         <ChevronDown size={13} strokeWidth={2} />
       </PopoverTrigger>
       <PopoverContent align="start" className="w-72 p-1">
@@ -97,6 +97,11 @@ export function ConversationSelect({
                         }}
                         className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
                       >
+                        {c.id === activeId ? (
+                          <Check size={13} strokeWidth={2.5} className="shrink-0 text-foreground" />
+                        ) : (
+                          <span aria-hidden className="size-[13px] shrink-0" />
+                        )}
                         <MessageSquare size={13} strokeWidth={1.75} className="shrink-0 text-muted-foreground" />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-medium leading-tight">{label(c, i)}</span>
@@ -104,7 +109,6 @@ export function ConversationSelect({
                             {c.turns ?? 0} turn{c.turns === 1 ? "" : "s"} · {relTime(c.createdAt)}
                           </span>
                         </span>
-                        {c.id === activeId ? <Check size={13} strokeWidth={2.5} className="shrink-0 text-foreground" /> : null}
                       </button>
                       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                         <button
