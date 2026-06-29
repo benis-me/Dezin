@@ -21,7 +21,7 @@ async function withServer(fn: (base: string) => Promise<void>): Promise<void> {
 }
 
 async function getSettings(base: string) {
-  return (await (await fetch(`${base}/api/settings`)).json()) as Record<string, string>;
+  return (await (await fetch(`${base}/api/settings`)).json()) as Record<string, string | boolean>;
 }
 async function putSettings(base: string, patch: object) {
   return await fetch(`${base}/api/settings`, {
@@ -37,20 +37,28 @@ test("GET /api/settings returns defaults", async () => {
     assert.equal(s.agentCommand, "claude");
     assert.equal(s.defaultDesignSystemId, "modern-minimal");
     assert.equal(s.model, "");
+    assert.equal(s.visualQaEnabled, false);
   });
 });
 
 test("PUT /api/settings merges and persists", async () => {
   await withServer(async (base) => {
-    const res = await putSettings(base, { agentCommand: "codex", model: "o3", apiKey: "sk-local" });
+    const res = await putSettings(base, {
+      agentCommand: "codex",
+      model: "o3",
+      apiKey: "sk-local",
+      visualQaEnabled: true,
+    });
     assert.equal(res.status, 200);
-    const updated = (await res.json()) as Record<string, string>;
+    const updated = (await res.json()) as Record<string, unknown>;
     assert.equal(updated.agentCommand, "codex");
     assert.equal(updated.model, "o3");
+    assert.equal(updated.visualQaEnabled, true);
 
     const fetched = await getSettings(base);
     assert.equal(fetched.agentCommand, "codex");
     assert.equal(fetched.apiKey, "sk-local");
+    assert.equal(fetched.visualQaEnabled, true);
     assert.equal(fetched.defaultDesignSystemId, "modern-minimal"); // untouched default
   });
 });

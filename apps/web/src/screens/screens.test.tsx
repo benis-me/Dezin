@@ -167,6 +167,7 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
     imageApiBaseUrl: "",
     imageApiKey: "",
     imageModel: "",
+    visualQaEnabled: false,
   };
   render(
     <ApiProvider
@@ -200,6 +201,7 @@ function renderSettings(over = {}) {
     imageApiBaseUrl: "",
     imageApiKey: "",
     imageModel: "",
+    visualQaEnabled: false,
     ...p,
   }));
   const api = makeFakeApi({ listAgents: async () => AGENTS, rescanAgents: async () => AGENTS, listDesignSystems: async () => DSYS, updateSettings, ...over });
@@ -215,7 +217,7 @@ function renderSettings(over = {}) {
 
 test("SettingsScreen sidebar lists sections; Provider + Defaults show daemon data", async () => {
   renderSettings();
-  for (const name of ["Appearance", "Provider", "Connection", "Defaults", "Custom instructions", "About"]) {
+  for (const name of ["Appearance", "Provider", "Connection", "Quality", "Defaults", "Custom instructions", "About"]) {
     expect(screen.getByRole("button", { name })).toBeInTheDocument();
   }
   fireEvent.click(screen.getByRole("button", { name: "Provider" }));
@@ -239,6 +241,10 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
   fireEvent.change(ci, { target: { value: "be terse" } });
   fireEvent.blur(ci);
   expect(updateSettings).toHaveBeenCalledWith({ customInstructions: "be terse" });
+
+  fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+  await user.click(await screen.findByRole("switch", { name: "Agent visual review" }));
+  expect(updateSettings).toHaveBeenCalledWith({ visualQaEnabled: true });
 });
 
 test("SettingsScreen theme toggle calls onToggleDark", async () => {

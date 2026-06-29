@@ -116,6 +116,7 @@ export interface Settings {
   imageApiBaseUrl: string;
   imageApiKey: string;
   imageModel: string;
+  visualQaEnabled: boolean;
 }
 
 export interface AgentInfo {

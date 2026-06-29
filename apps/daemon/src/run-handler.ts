@@ -24,8 +24,9 @@ import { loadCraftSections } from "../../../packages/craft/src/index.ts";
 import { lintScore } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
 import { captureCover } from "./capture-cover.ts";
+import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
 import { gitCommit } from "./project-runtime.ts";
-import type { Settings } from "../../../packages/core/src/index.ts";
+import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
@@ -93,6 +94,31 @@ function resultMessage(text: string, meta: Record<string, unknown>): string {
   return JSON.stringify({ result: { text, meta } });
 }
 
+async function runVisualQa(
+  deps: AppDeps,
+  htmlPath: string,
+  settings: Settings,
+  agentCommand: string,
+  model: string | undefined,
+  brief: string,
+  conversationHistory: VisualQaInput["conversationHistory"],
+): Promise<QualityFinding[]> {
+  if (!settings.visualQaEnabled) return [];
+  try {
+    const runner = deps.visualQa ?? auditVisualArtifact;
+    return await runner({ htmlPath, settings, agentCommand, model, brief, conversationHistory });
+  } catch (err) {
+    return [
+      {
+        severity: "P2",
+        id: "visual-qa-failed",
+        message: `Visual QA failed: ${err instanceof Error ? err.message : "unknown error"}.`,
+        fix: "Open Preview and inspect the generated layout manually.",
+      },
+    ];
+  }
+}
+
 export async function handleRun(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
   const body = (await readJsonBody(req)) as RunBody;
 
@@ -101,6 +127,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
 
   const { store } = deps;
   const settings = store.getSettings();
+  const runAgentCommand = body.agentCommand || settings.agentCommand || "claude";
+  const runModel = body.model || settings.model || undefined;
   // deps.runner is the test override; production builds from settings (live changes apply).
   const runner = deps.runner ?? buildRunner(settings, { agentCommand: body.agentCommand, model: body.model });
 
@@ -262,31 +290,49 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     await writeFile(join(dir, result.artifactPath), finalHtml, "utf8");
     await mkdir(join(dir, ".versions"), { recursive: true });
     await writeFile(join(dir, ".versions", `${run.id}.html`), finalHtml, "utf8");
-    store.recordArtifact(project.id, result.artifactPath, result.passed);
+    const assistantText = result.turns.at(-1)?.text ?? "";
+    const visualConversation = [
+      ...history,
+      { role: "user" as const, content: brief },
+      ...(assistantText ? [{ role: "assistant" as const, content: assistantText }] : []),
+    ];
+    const visualFindings = await runVisualQa(
+      deps,
+      join(dir, result.artifactPath),
+      settings,
+      runAgentCommand,
+      runModel,
+      brief,
+      visualConversation,
+    );
+    sse({ type: "visual-qa", findings: visualFindings });
+    const finalFindings = [...result.findings, ...visualFindings];
+    const passed = result.passed && !finalFindings.some((f) => f.severity === "P0");
+    store.recordArtifact(project.id, result.artifactPath, passed);
     store.addMessage(conversation.id, "assistant", result.turns.at(-1)?.text ?? "");
     persistProcess();
-    const score = lintScore(result.findings);
+    const score = lintScore(finalFindings);
     const fixes = result.rounds ? ` after ${result.rounds} fix${result.rounds > 1 ? "es" : ""}` : "";
     const quality = `, quality ${score}/100`;
-    const text = result.passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`;
-    store.addMessage(conversation.id, "system", resultMessage(text, { passed: result.passed, score, rounds: result.rounds }));
+    const text = passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`;
+    store.addMessage(conversation.id, "system", resultMessage(text, { passed, score, rounds: result.rounds }));
     store.updateRun(run.id, {
       status: "succeeded",
       repairRounds: result.rounds,
-      lintPassed: result.passed,
+      lintPassed: passed,
       score,
-      findings: result.findings,
+      findings: finalFindings,
       finishedAt: Date.now(),
     });
 
     sse({
       type: "run-done",
       runId: run.id,
-      passed: result.passed,
+      passed,
       rounds: result.rounds,
       score,
       previewUrl: `/projects/${project.id}/preview/`,
-      findings: result.findings,
+      findings: finalFindings,
     });
     // Headless-screenshot the finished artifact as the gallery cover (best-effort, async).
     void captureCover(join(dir, result.artifactPath), join(dir, ".cover.png"));

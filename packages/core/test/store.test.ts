@@ -191,11 +191,18 @@ test("settings: defaults, round-trip, and partial merge", () => {
   assert.equal(d.agentCommand, "claude");
   assert.equal(d.defaultDesignSystemId, "modern-minimal");
   assert.equal(d.model, "");
+  assert.equal(d.visualQaEnabled, false);
 
-  const u = s.updateSettings({ agentCommand: "codex", model: "o3", customInstructions: "be terse" });
+  const u = s.updateSettings({
+    agentCommand: "codex",
+    model: "o3",
+    customInstructions: "be terse",
+    visualQaEnabled: true,
+  });
   assert.equal(u.agentCommand, "codex");
   assert.equal(u.model, "o3");
   assert.equal(s.getSettings().customInstructions, "be terse");
+  assert.equal(s.getSettings().visualQaEnabled, true);
 
   // a partial update only changes the given fields
   s.updateSettings({ model: "o4" });
@@ -203,6 +210,7 @@ test("settings: defaults, round-trip, and partial merge", () => {
   assert.equal(after.model, "o4");
   assert.equal(after.agentCommand, "codex");
   assert.equal(after.customInstructions, "be terse");
+  assert.equal(after.visualQaEnabled, true);
   s.close();
 });
 

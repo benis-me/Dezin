@@ -12,5 +12,6 @@ export type {
   RunStatus,
   CreateProjectInput,
   Settings,
+  QualityFinding,
 } from "./types.ts";
 export { Store, type StoreClock } from "./store.ts";

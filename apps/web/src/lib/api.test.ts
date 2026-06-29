@@ -110,10 +110,32 @@ test("listDesignSystems and listSkills GET the catalog", async () => {
 test("settings + agents + health endpoints", async () => {
   const fetchImpl = vi.fn<FetchLike>(async (url, init) => {
     if (url.endsWith("/api/settings") && init?.method === "PUT") {
-      return jsonResponse({ agentCommand: "codex", model: "o3", apiBaseUrl: "", apiKey: "", defaultDesignSystemId: "modern-minimal", customInstructions: "" });
+      return jsonResponse({
+        agentCommand: "codex",
+        model: "o3",
+        apiBaseUrl: "",
+        apiKey: "",
+        defaultDesignSystemId: "modern-minimal",
+        customInstructions: "",
+        imageApiBaseUrl: "",
+        imageApiKey: "",
+        imageModel: "",
+        visualQaEnabled: false,
+      });
     }
     if (url.endsWith("/api/settings")) {
-      return jsonResponse({ agentCommand: "claude", model: "", apiBaseUrl: "", apiKey: "", defaultDesignSystemId: "modern-minimal", customInstructions: "" });
+      return jsonResponse({
+        agentCommand: "claude",
+        model: "",
+        apiBaseUrl: "",
+        apiKey: "",
+        defaultDesignSystemId: "modern-minimal",
+        customInstructions: "",
+        imageApiBaseUrl: "",
+        imageApiKey: "",
+        imageModel: "",
+        visualQaEnabled: false,
+      });
     }
     if (url.endsWith("/api/agents")) return jsonResponse([{ id: "claude", command: "claude", available: true, version: "1.2.3" }]);
     return jsonResponse({ ok: true, version: "0.0.0" });

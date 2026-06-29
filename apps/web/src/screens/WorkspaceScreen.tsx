@@ -105,6 +105,10 @@ function normalizeFindings(value: unknown): QualityFinding[] {
   });
 }
 
+function isVisualFinding(finding: QualityFinding): boolean {
+  return finding.id.startsWith("visual-");
+}
+
 function normalizeResultMeta(value: unknown): ResultMeta | undefined {
   if (!isRecord(value)) return undefined;
   const meta: ResultMeta = {};
@@ -1415,6 +1419,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
+  const visualFindings = lintFindings.filter(isVisualFinding);
+  const antiSlopFindings = lintFindings.filter((finding) => !isVisualFinding(finding));
+  const findingGroups = [
+    { label: "Visual QA", desc: "Rendered screenshot and viewport geometry", findings: visualFindings },
+    { label: "Anti-slop", desc: "Static design and accessibility rules", findings: antiSlopFindings },
+  ].filter((group) => group.findings.length > 0);
 
   const TAB_ICON: Record<Tab, ReactNode> = {
     Preview: <Eye size={13} strokeWidth={1.75} />,
@@ -1868,32 +1878,47 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   <span className="tnum font-mono font-semibold text-foreground">{score}/100</span>
                 </PanelBar>
               ) : null}
-              {lintFindings.length > 0 ? (
-                <ul className="flex-1 space-y-2 overflow-auto p-3 text-sm">
-                  {lintFindings.map((f, idx) => (
-                    <li key={`${f.id}-${idx}`} className="rounded-lg border border-border p-3">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] ${SEVERITY_STYLE[f.severity] ?? "border-border text-muted-foreground"}`}
-                        >
-                          {f.severity}
+              {findingGroups.length > 0 ? (
+                <div className="flex-1 space-y-4 overflow-auto p-3 text-sm">
+                  {findingGroups.map((group) => (
+                    <section key={group.label} className="space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-xs font-semibold text-foreground">{group.label}</div>
+                          <div className="text-[11px] text-muted-foreground">{group.desc}</div>
+                        </div>
+                        <span className="rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          {group.findings.length}
                         </span>
-                        <span className="font-mono text-xs text-muted-foreground">{f.id}</span>
                       </div>
-                      <p className="mt-1.5 text-sm leading-snug text-foreground">{f.message}</p>
-                      {f.fix ? <p className="mt-1 text-xs leading-snug text-muted-foreground">Fix: {f.fix}</p> : null}
-                    </li>
+                      <ul className="space-y-2">
+                        {group.findings.map((f, idx) => (
+                          <li key={`${f.id}-${idx}`} className="rounded-lg border border-border bg-card p-3">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] ${SEVERITY_STYLE[f.severity] ?? "border-border text-muted-foreground"}`}
+                              >
+                                {f.severity}
+                              </span>
+                              <span className="font-mono text-xs text-muted-foreground">{f.id}</span>
+                            </div>
+                            <p className="mt-1.5 text-sm leading-snug text-foreground">{f.message}</p>
+                            {f.fix ? <p className="mt-1 text-xs leading-snug text-muted-foreground">Fix: {f.fix}</p> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
                   ))}
-                </ul>
+                </div>
               ) : (
                 <div className="flex-1">
                   {emptyPane(
                     running
                       ? "Generating…"
                       : ranOnce && typeof score === "number" && score < 100
-                        ? "No stored anti-slop details for this run."
+                        ? "No stored quality details for this run."
                         : ranOnce
-                          ? "No anti-slop issues. Clean."
+                          ? "No quality issues. Clean."
                           : "Run to check quality",
                   )}
                 </div>

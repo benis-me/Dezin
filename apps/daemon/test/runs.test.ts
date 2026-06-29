@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { Store } from "../../../packages/core/src/index.ts";
 import { FakeRunner } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
-import { createApp } from "../src/index.ts";
+import { createApp, type AppDeps } from "../src/index.ts";
 
 const CLEAN =
   `<style>:root{--accent:#2563eb}</style>\n` +
@@ -23,10 +23,11 @@ interface RunCtx {
 async function withRunServer(
   runner: AgentRunner | undefined,
   fn: (ctx: RunCtx) => Promise<void>,
+  extraDeps: Partial<Omit<AppDeps, "store" | "dataDir" | "runner">> = {},
 ): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-"));
   const store = new Store(":memory:");
-  const server = createApp({ store, dataDir, runner });
+  const server = createApp({ store, dataDir, runner, visualQa: async () => [], ...extraDeps });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
@@ -91,6 +92,69 @@ test("clean run: streams SSE, persists, serves the artifact back", async () => {
     assert.equal(run.lintPassed, true);
     assert.equal(run.repairRounds, 0);
   });
+});
+
+test("prototype run folds visual QA findings into score, result, and persisted run", async () => {
+  await withRunServer(
+    new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }),
+    async ({ base, store }) => {
+      store.updateSettings({ visualQaEnabled: true });
+      const project = await createProject(base);
+      const conversation = store.createConversation(project.id);
+      store.addMessage(conversation.id, "user", "previous user request");
+      store.addMessage(conversation.id, "assistant", "previous assistant answer");
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, conversationId: conversation.id, brief: "make a hero", agentCommand: "codex", model: "gpt-5" }),
+      });
+      const events = parseSse(await res.text());
+      const visual = events.find((e) => e.type === "visual-qa")!;
+      const done = events.find((e) => e.type === "run-done")!;
+      assert.equal(visual.findings && Array.isArray(visual.findings), true);
+      assert.equal(done.score, 92);
+      assert.equal((done.findings as Array<{ id: string }>)[0]?.id, "visual-horizontal-overflow");
+
+      const run = store.getRun(done.runId as string)!;
+      assert.equal(run.score, 92);
+      assert.equal(run.findings[0]?.message, "Desktop viewport has horizontal overflow.");
+
+      const convId = events.find((e) => e.type === "run-start")!.conversationId as string;
+      const result = store
+        .listMessages(convId)
+        .map((m) => {
+          try {
+            return JSON.parse(m.content) as { result?: { meta?: { score?: number } } };
+          } catch {
+            return {};
+          }
+        })
+        .find((m) => m.result);
+      assert.equal(result?.result?.meta?.score, 92);
+    },
+    {
+      visualQa: async (input) => {
+        assert.equal(input.agentCommand, "codex");
+        assert.equal(input.model, "gpt-5");
+        assert.equal(input.brief, "make a hero");
+        assert.match(input.htmlPath, /index\.html$/);
+        assert.deepEqual(input.conversationHistory?.map((m) => m.content), [
+          "previous user request",
+          "previous assistant answer",
+          "make a hero",
+          "done",
+        ]);
+        return [
+          {
+            severity: "P1",
+            id: "visual-horizontal-overflow",
+            message: "Desktop viewport has horizontal overflow.",
+            fix: "Constrain the widest element to the viewport.",
+          },
+        ];
+      },
+    },
+  );
 });
 
 test("sloppy→clean run: closed loop repairs over SSE, serves the fixed artifact", async () => {
@@ -323,6 +387,11 @@ test("daemon start honors per-run agentCommand/model instead of a fixed startup 
 const fs = require("fs");
 const path = require("path");
 fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify({cmd:"codex", args:process.argv.slice(2)}) + "\\n");
+const args = process.argv.slice(2);
+if (!args.includes("exec")) {
+  console.log("codex 1.0.0");
+  process.exit(0);
+}
 fs.writeFileSync(path.join(process.cwd(), "index.html"), \`${clean}\`);
 console.log("codex done");
 `,
@@ -334,6 +403,11 @@ console.log("codex done");
 const fs = require("fs");
 const path = require("path");
 fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify({cmd:"fake-claude", args:process.argv.slice(2)}) + "\\n");
+const args = process.argv.slice(2);
+if (!args.includes("-p")) {
+  console.log("fake-claude 1.0.0");
+  process.exit(0);
+}
 fs.writeFileSync(path.join(process.cwd(), "index.html"), \`${clean}\`);
 console.log(JSON.stringify({type:"assistant", message:{content:[{type:"text", text:"claude done"}]}}));
 `,

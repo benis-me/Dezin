@@ -33,6 +33,7 @@ import { setupStandardProject, getSetup, ensureDevServer } from "./project-runti
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
+import type { VisualQaRunner } from "./visual-qa.ts";
 
 export interface AppDeps {
   store: Store;
@@ -47,6 +48,8 @@ export interface AppDeps {
   agentProber?: AgentProber;
   /** Serve the built web app from here (SPA). Defaults to apps/web/dist when it exists. */
   webDir?: string;
+  /** Visual QA runner for final prototype artifacts (defaults to screenshot + geometry checks). */
+  visualQa?: VisualQaRunner;
 }
 
 type Handler = (

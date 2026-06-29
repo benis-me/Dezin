@@ -15,6 +15,7 @@ function settings(over: Partial<Settings>): Settings {
     imageApiBaseUrl: "",
     imageApiKey: "",
     imageModel: "",
+    visualQaEnabled: false,
     ...over,
   };
 }

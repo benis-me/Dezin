@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Check, Info, KeyRound, Palette, Puzzle, RotateCw, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
+import { Check, Eye, Info, KeyRound, Palette, Puzzle, RotateCw, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
 import { Button, Field, Input, Picker, Textarea, Loading, Spinner, Badge, ScrollArea } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import { AgentLogo, agentLabel } from "../components/agent-logos.tsx";
@@ -8,12 +8,13 @@ import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import type { DesignSystemCard, Settings } from "../lib/api.ts";
 
-type SectionId = "appearance" | "provider" | "connection" | "defaults" | "instructions" | "extension" | "about";
+type SectionId = "appearance" | "provider" | "connection" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
 const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "provider", label: "Provider", icon: Server },
   { id: "connection", label: "Connection", icon: KeyRound },
+  { id: "quality", label: "Quality", icon: Eye },
   { id: "defaults", label: "Defaults", icon: SlidersHorizontal },
   { id: "instructions", label: "Custom instructions", icon: Type },
   { id: "extension", label: "Browser extension", icon: Puzzle },
@@ -50,10 +51,10 @@ export function SettingsScreen({
     };
   }, [api]);
 
-  const setLocal = (key: keyof Settings, value: string) => setSettings((s) => (s ? { ...s, [key]: value } : s));
-  const save = (key: keyof Settings, value: string) => {
+  const setLocal = (key: keyof Settings, value: string | boolean) => setSettings((s) => (s ? { ...s, [key]: value } : s));
+  const save = (key: keyof Settings, value: string | boolean) => {
     setLocal(key, value);
-    void api.updateSettings({ [key]: value }).catch(() => toast("Couldn't save settings.", { variant: "error" }));
+    void api.updateSettings({ [key]: value } as Partial<Settings>).catch(() => toast("Couldn't save settings.", { variant: "error" }));
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);
@@ -268,6 +269,37 @@ export function SettingsScreen({
                     </Field>
                   </div>
                 </div>
+              </Panel>
+            )}
+
+            {section === "quality" && (
+              <Panel title="Quality" desc="Checks the finished prototype against visible layout problems.">
+                <Rows>
+                  <SettingRow
+                    label="Agent visual review"
+                    desc="After generation, the selected Agent/model reviews the screenshot with the full current conversation context."
+                  >
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-label="Agent visual review"
+                      aria-checked={settings.visualQaEnabled}
+                      onClick={() => save("visualQaEnabled", !settings.visualQaEnabled)}
+                      className={cn(
+                        "relative h-6 w-10 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                        settings.visualQaEnabled ? "border-primary bg-primary" : "border-border bg-surface-2",
+                      )}
+                    >
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "absolute top-0.5 size-4 rounded-full bg-background shadow-sm transition-transform",
+                          settings.visualQaEnabled ? "left-[18px]" : "left-0.5",
+                        )}
+                      />
+                    </button>
+                  </SettingRow>
+                </Rows>
               </Panel>
             )}
 
