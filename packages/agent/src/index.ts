@@ -22,10 +22,14 @@ export {
   parseClaudeStream,
   parseClaudeLine,
   extractAskUserQuestion,
+  extractFinalSummary,
+  FINAL_SUMMARY_START,
+  FINAL_SUMMARY_END,
   type ParsedClaudeStream,
   type ClaudeToolUse,
   type ClaudeActivity,
   type AskUserQuestionExtraction,
+  type FinalSummaryExtraction,
 } from "./claude-stream.ts";
 export {
   ClaudeCodeRunner,

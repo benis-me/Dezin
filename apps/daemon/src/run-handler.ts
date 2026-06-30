@@ -15,6 +15,7 @@ import {
   GenericCliRunner,
   getProvider,
   extractAskUserQuestion,
+  extractFinalSummary,
   isAbortError,
   type GenerateEvent,
   type AgentRunner,
@@ -94,6 +95,10 @@ interface RunBody {
 }
 
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
+
+function splitFinalSummary(text: string): ReturnType<typeof extractFinalSummary> {
+  return extractFinalSummary(text);
+}
 
 function resultMessage(text: string, meta: Record<string, unknown>): string {
   return JSON.stringify({ result: { text, meta } });
@@ -251,20 +256,27 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // navigation/restart without losing streamed text or the original tool order.
   const steps: string[] = [];
   const processItems: ProcessItem[] = [];
-  const recordActivity = (activity: unknown): void => {
+  let summaryBoundarySeen = false;
+  const recordActivity = (activity: unknown): unknown | null => {
     const a = activity as { kind?: string; summary?: string } | undefined;
     if (a?.kind === "tool" && a.summary) {
       if (steps[steps.length - 1] !== a.summary) steps.push(a.summary);
       const last = processItems[processItems.length - 1];
       if (!(last?.type === "tool" && last.summary === a.summary)) processItems.push({ type: "tool", summary: a.summary });
-      return;
+      return activity;
     }
     const t = (activity as { kind?: string; text?: string } | undefined)?.text;
     if (a?.kind === "text" && t) {
+      const final = splitFinalSummary(t);
+      const processText = final.hadBoundary ? final.processText : t;
+      if (final.hadBoundary) summaryBoundarySeen = true;
+      if (!processText.trim()) return null;
       const last = processItems[processItems.length - 1];
-      if (last?.type === "text") last.text += t;
-      else processItems.push({ type: "text", text: t });
+      if (last?.type === "text") last.text += processText;
+      else processItems.push({ type: "text", text: processText });
+      return { kind: "text", text: processText };
     }
+    return activity;
   };
   const processAssistantText = (): string =>
     processItems
@@ -272,9 +284,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       .map((i) => i.text)
       .join("")
       .trim();
-  const processRecordItems = (): ProcessItem[] => processItems.filter((item): item is { type: "tool"; summary: string } => item.type === "tool");
-  const persistProcess = (): void => {
-    const items = processRecordItems();
+  const processRecordItems = (includeText: boolean): ProcessItem[] =>
+    processItems.filter((item) => includeText || item.type === "tool");
+  const persistProcess = (includeText = summaryBoundarySeen): void => {
+    const items = processRecordItems(includeText);
     if (items.length) store.addMessage(conversation.id, "system", processMessage(items, Math.max(0, Date.now() - run.createdAt)));
   };
   const persistSteps = (): void => {
@@ -296,8 +309,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           projectDir: dir,
           history,
           onActivity: (activity) => {
-            recordActivity(activity);
-            sse({ type: "activity", round: 0, activity });
+            const visible = recordActivity(activity);
+            if (visible) sse({ type: "activity", round: 0, activity: visible });
           },
           signal: ctrl.signal,
         },
@@ -307,7 +320,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         },
       );
       const asked = extractAskUserQuestion(result.text);
-      sse({ type: "turn-end", round: 0, text: asked.text });
+      const final = splitFinalSummary(asked.text);
+      if (final.hadBoundary) summaryBoundarySeen = true;
+      sse({ type: "turn-end", round: 0, text: final.summaryText, summaryBoundary: final.hadBoundary });
       if (asked.question) {
         persistProcess();
         if (asked.text) store.addMessage(conversation.id, "assistant", asked.text);
@@ -326,7 +341,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const visualConversation = [
         ...history,
         { role: "user" as const, content: brief },
-        ...(asked.text ? [{ role: "assistant" as const, content: asked.text }] : []),
+        ...(final.summaryText ? [{ role: "assistant" as const, content: final.summaryText }] : []),
       ];
       let visualFindings: QualityFinding[] = [];
       if (settings.visualQaEnabled) {
@@ -356,7 +371,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const score = settings.visualQaEnabled ? lintScore(visualFindings) : null;
       const passed = !visualFindings.some((f) => f.severity === "P0");
       persistProcess();
-      const assistantMessage = store.addMessage(conversation.id, "assistant", asked.text);
+      const assistantMessage = store.addMessage(conversation.id, "assistant", final.summaryText);
       persistSteps();
       const quality = score !== null ? `, quality ${score}/100` : "";
       const message = passed ? `Done${quality}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
@@ -415,10 +430,16 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       lint: { maxRounds: body.maxRounds ?? 2 },
       signal: ctrl.signal,
       onEvent: (e: GenerateEvent) => {
-        if (e.type === "activity") recordActivity(e.activity);
+        if (e.type === "activity") {
+          const visible = recordActivity(e.activity);
+          if (visible) sse({ ...e, activity: visible });
+          return;
+        }
         if (e.type === "turn-end" && typeof e.text === "string") {
           const stripped = extractAskUserQuestion(e.text);
-          sse({ ...e, text: stripped.text });
+          const final = splitFinalSummary(stripped.text);
+          if (final.hadBoundary) summaryBoundarySeen = true;
+          sse({ ...e, text: final.summaryText, summaryBoundary: final.hadBoundary });
         } else {
           sse(e);
         }
@@ -428,7 +449,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
 
     const rawAssistantText = result.turns.at(-1)?.text ?? "";
     const asked = extractAskUserQuestion(rawAssistantText);
-    const assistantText = asked.text;
+    const final = splitFinalSummary(asked.text);
+    if (final.hadBoundary) summaryBoundarySeen = true;
+    const assistantText = final.summaryText;
     if (asked.question) {
       persistProcess();
       if (assistantText) store.addMessage(conversation.id, "assistant", assistantText);

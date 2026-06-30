@@ -113,6 +113,18 @@ Use AskUserQuestion only for blocking product/content choices, required credenti
 or missing local material the user explicitly referenced. Do not use it for ordinary
 style taste, layout preference, or low-risk assumptions. Stop after the closing marker.`;
 
+const FINAL_SUMMARY_BOUNDARY = `## Final summary boundary
+
+End:
+
+\`\`\`
+<dezin-final-summary>
+Sum
+</dezin-final-summary>
+\`\`\`
+
+Put only the final user-facing summary inside. Earlier text: process. No logs/code fences. Stop after marker`;
+
 function renderLibraryRouting(libraries: string[], mode: ComposeInput["mode"]): string | null {
   const available = Array.from(new Set(libraries.map((l) => l.trim()).filter(Boolean)));
   if (available.length === 0) return null;
@@ -173,6 +185,7 @@ export function composeSystemPrompt(input: ComposeInput = {}): string {
   parts.push(FONTS);
   parts.push(ASSET_SOURCING);
   parts.push(ASK_USER_QUESTION);
+  parts.push(FINAL_SUMMARY_BOUNDARY);
 
   if (input.craft && input.craft.trim()) {
     parts.push(

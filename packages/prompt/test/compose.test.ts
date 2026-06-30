@@ -47,6 +47,14 @@ test("prompt exposes the Dezin ask-user-question control marker", () => {
   assert.match(p, /Stop after the closing marker/);
 });
 
+test("prompt forces a Dezin final-summary boundary", () => {
+  const p = composeSystemPrompt({ mode: "standard" });
+  assert.match(p, /Final summary boundary/);
+  assert.match(p, /<dezin-final-summary>/);
+  assert.match(p, /<\/dezin-final-summary>/);
+  assert.match(p, /Put only the final user-facing summary inside/);
+});
+
 test("design system is injected as authoritative tokens, verbatim", () => {
   const p = composeSystemPrompt({ designSystem: modernMinimal });
   assert.ok(p.includes("AUTHORITATIVE"), "marks the brand authoritative");

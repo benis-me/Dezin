@@ -1066,6 +1066,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const liveItemsRef = useRef<LiveItem[]>([]);
   const currentTurnTextRef = useRef("");
   const finalSummaryTextRef = useRef("");
+  const summaryBoundaryRef = useRef(false);
   const gotTurnText = useRef(false);
   const stickBottom = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
@@ -1285,11 +1286,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   // then visible prose, then a compact steps summary. Used on completion and Stop.
   const materializeLive = ({ emitSummary = true }: { emitSummary?: boolean } = {}): string => {
     const items = liveItemsRef.current;
-    if (!items.length) return "";
     const text = finalSummaryTextRef.current.trim() || liveText(items);
     const steps = items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool").map((i) => i.summary);
     const elapsedMs = runStartedAtRef.current ? Date.now() - runStartedAtRef.current : undefined;
-    const processItems = items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool");
+    const processItems = summaryBoundaryRef.current ? items : items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool");
     const next: Msg[] = processItems.length ? [{ id: msgId.current++, kind: "process", text: "", items: processItems, elapsedMs }] : [];
     if (emitSummary && text) next.push({ id: msgId.current++, kind: "assistant", text });
     if (steps.length) next.push({ id: msgId.current++, kind: "process", text: "", steps });
@@ -1297,6 +1297,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     liveItemsRef.current = [];
     currentTurnTextRef.current = "";
     finalSummaryTextRef.current = "";
+    summaryBoundaryRef.current = false;
     setLiveItems([]);
     return text;
   };
@@ -1321,6 +1322,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         liveItemsRef.current = [];
         currentTurnTextRef.current = "";
         finalSummaryTextRef.current = "";
+        summaryBoundaryRef.current = false;
         gotTurnText.current = false;
         stickBottom.current = true;
         setLiveStatus("Starting…");
@@ -1328,6 +1330,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "turn-start":
         gotTurnText.current = false;
         currentTurnTextRef.current = "";
+        summaryBoundaryRef.current = false;
         setLiveStatus(ev.isRepair ? "Repairing the artifact…" : "Generating…");
         break;
       case "preview-update":
@@ -1356,13 +1359,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         break;
       }
       case "turn-end":
-        // Runners that don't stream text chunks still hand the full turn text here.
-        if (typeof ev.text === "string" && ev.text && !gotTurnText.current) {
-          liveItemsRef.current = [...liveItemsRef.current, { type: "text", text: ev.text }];
-          setLiveItems(liveItemsRef.current);
+        if (ev.summaryBoundary === true) summaryBoundaryRef.current = true;
+        // turn-end text is the final summary. Streamed activity remains the process.
+        if (typeof ev.text === "string" && ev.text) {
           finalSummaryTextRef.current = ev.text.trim();
-        } else if (gotTurnText.current) {
-          finalSummaryTextRef.current = (currentTurnTextRef.current || (typeof ev.text === "string" ? ev.text : "")).trim();
+        } else if (gotTurnText.current && !summaryBoundaryRef.current) {
+          finalSummaryTextRef.current = currentTurnTextRef.current.trim();
         }
         gotTurnText.current = false;
         break;
@@ -1431,6 +1433,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           liveItemsRef.current = [];
           currentTurnTextRef.current = "";
           finalSummaryTextRef.current = "";
+          summaryBoundaryRef.current = false;
           setLiveItems([]);
         } else {
           materializeLive();
@@ -1468,6 +1471,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         liveItemsRef.current = [];
         currentTurnTextRef.current = "";
         finalSummaryTextRef.current = "";
+        summaryBoundaryRef.current = false;
         pushResult(`Couldn't reconnect: ${err instanceof Error ? err.message : "stream unavailable"}`, { error: true });
       }
     } finally {
@@ -1532,6 +1536,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         liveItemsRef.current = [];
         currentTurnTextRef.current = "";
         finalSummaryTextRef.current = "";
+        summaryBoundaryRef.current = false;
         pushResult(`The run failed: ${err instanceof Error ? err.message : "run failed"}`, { error: true });
         toast("The run failed.", { variant: "error" });
       }

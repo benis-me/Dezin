@@ -31,6 +31,15 @@ export interface AskUserQuestionExtraction {
   question: string | null;
 }
 
+export interface FinalSummaryExtraction {
+  /** Agent work narrative before the final summary marker. */
+  processText: string;
+  /** Final user-facing summary text. */
+  summaryText: string;
+  /** True only when a complete Dezin final summary boundary was found. */
+  hadBoundary: boolean;
+}
+
 function asObject(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === "object" ? (v as Record<string, unknown>) : null;
 }
@@ -40,6 +49,8 @@ function str(v: unknown): string | null {
 }
 
 const ASK_USER_QUESTION_RE = /<dezin-ask-user-question>([\s\S]*?)<\/dezin-ask-user-question>/i;
+export const FINAL_SUMMARY_START = "<dezin-final-summary>";
+export const FINAL_SUMMARY_END = "</dezin-final-summary>";
 
 export function extractAskUserQuestion(text: string): AskUserQuestionExtraction {
   const match = text.match(ASK_USER_QUESTION_RE);
@@ -47,6 +58,23 @@ export function extractAskUserQuestion(text: string): AskUserQuestionExtraction 
   const question = (match[1] ?? "").trim();
   const stripped = `${text.slice(0, match.index)}${text.slice(match.index + match[0].length)}`.trim();
   return { text: stripped, question: question || null };
+}
+
+export function extractFinalSummary(text: string): FinalSummaryExtraction {
+  const start = text.toLowerCase().lastIndexOf(FINAL_SUMMARY_START);
+  if (start < 0) return { processText: "", summaryText: text.trim(), hadBoundary: false };
+
+  const end = text.toLowerCase().indexOf(FINAL_SUMMARY_END, start + FINAL_SUMMARY_START.length);
+  if (end < 0) return { processText: "", summaryText: text.trim(), hadBoundary: false };
+
+  const summaryText = text.slice(start + FINAL_SUMMARY_START.length, end).trim();
+  if (!summaryText) return { processText: "", summaryText: text.trim(), hadBoundary: false };
+
+  return {
+    processText: text.slice(0, start).trim(),
+    summaryText,
+    hadBoundary: true,
+  };
 }
 
 /** A live step in the agent's process, surfaced to the UI as it happens. */

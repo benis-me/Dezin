@@ -208,6 +208,65 @@ test("craft references reach the composed prompt (skill's craft sections)", asyn
   });
 });
 
+test("final summary boundary separates persisted process from assistant summary", async () => {
+  const runner: AgentRunner = {
+    id: "boundary-runner",
+    async runTurn(input) {
+      input.onActivity?.({ kind: "text", text: "Drafted the pricing layout." });
+      input.onActivity?.({ kind: "tool", name: "Write", summary: "Writing App.tsx" });
+      input.onActivity?.({
+        kind: "text",
+        text: "\n<dezin-final-summary>\nDone. Updated the pricing page.\n</dezin-final-summary>",
+      });
+      return {
+        text: "Drafted the pricing layout.\n<dezin-final-summary>\nDone. Updated the pricing page.\n</dezin-final-summary>",
+        artifactHtml: CLEAN,
+        artifactPath: "index.html",
+      };
+    },
+  };
+
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make a pricing page" }),
+    });
+    const events = parseSse(await res.text());
+    const textActivities = events
+      .filter((e) => e.type === "activity")
+      .map((e) => (e.activity as { kind?: string; text?: string } | undefined))
+      .filter((a): a is { kind: "text"; text: string } => a?.kind === "text");
+    assert.deepEqual(textActivities.map((a) => a.text), ["Drafted the pricing layout."]);
+
+    const turnEnd = events.find((e) => e.type === "turn-end")!;
+    assert.equal(turnEnd.text, "Done. Updated the pricing page.");
+    assert.equal(turnEnd.summaryBoundary, true);
+
+    const convId = events.find((e) => e.type === "run-start")!.conversationId as string;
+    const messages = store.listMessages(convId);
+    assert.deepEqual(
+      messages.map((m) => {
+        if (m.role !== "system") return m.role;
+        const parsed = JSON.parse(m.content) as Record<string, unknown>;
+        if ("process" in parsed) return "process";
+        if ("steps" in parsed) return "steps";
+        if ("result" in parsed) return "result";
+        return "system";
+      }),
+      ["user", "process", "assistant", "steps", "result"],
+    );
+
+    const process = JSON.parse(messages[1]!.content) as { process: { items: unknown[] } };
+    assert.deepEqual(process.process.items, [
+      { type: "text", text: "Drafted the pricing layout." },
+      { type: "tool", summary: "Writing App.tsx" },
+    ]);
+    assert.equal(messages[2]!.content, "Done. Updated the pricing page.");
+  });
+});
+
 test("a run snapshots its artifact; versions can be served and restored", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN] });
   let captured: { htmlPath: string; outPath: string } | null = null;
@@ -876,7 +935,10 @@ console.log(JSON.stringify({type:"assistant", message:{content:[{type:"text", te
     assert.ok(runCall, `expected the run to use codex, got ${JSON.stringify(calls)}`);
     assert.ok(runCall.args.includes("gpt-5"), "selected model reaches the chosen runner");
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((r) => child.once("exit", r));
+    await new Promise<void>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      child.once("exit", () => resolve());
+      child.kill("SIGTERM");
+    });
   }
 });

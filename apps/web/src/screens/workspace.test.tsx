@@ -253,6 +253,35 @@ test("completed runs collapse the interleaved process above the final summary", 
   expect(screen.getAllByText("Drafted the hero. Tightened the layout.")).toHaveLength(1);
 });
 
+test("summary-boundary runs keep process text folded and final summary outside", async () => {
+  const user = userEvent.setup();
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-boundary", conversationId: "c1" };
+      yield { type: "activity", activity: { kind: "text", text: "Drafted the pricing layout." } };
+      yield { type: "activity", activity: { kind: "tool", name: "Write", summary: "Writing App.tsx" } };
+      yield { type: "turn-end", round: 0, text: "Done. Updated the pricing page.", summaryBoundary: true };
+      yield { type: "run-done", runId: "r-boundary", passed: true, rounds: 0, score: 100, previewUrl: "/projects/p1/preview/", findings: [] };
+    },
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make a pricing page" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  expect(await screen.findByText("Done. Updated the pricing page.")).toBeInTheDocument();
+  expect(screen.queryByText("Drafted the pricing layout.")).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: /Processed/ }));
+  expect(await screen.findByText("Drafted the pricing layout.")).toBeInTheDocument();
+  expect(screen.getByText("Writing App.tsx")).toBeInTheDocument();
+});
+
 test("reopening old transcripts keeps final steps with the stopped card below the summary", async () => {
   const user = userEvent.setup();
   const fake = makeFakeApi({

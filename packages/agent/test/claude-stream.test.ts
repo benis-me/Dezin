@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractAskUserQuestion, parseClaudeStream, parseClaudeLine } from "../src/index.ts";
+import { extractAskUserQuestion, extractFinalSummary, parseClaudeStream, parseClaudeLine } from "../src/index.ts";
 
 test("parseClaudeLine surfaces live text + meaningful tool steps", () => {
   const line = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Building it. "},{"type":"tool_use","name":"Write","input":{"file_path":"src/App.tsx"}},{"type":"tool_use","name":"Bash","input":{"command":"npm install gsap"}},{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}`;
@@ -73,4 +73,20 @@ test("extracts a Dezin ask-user-question marker and strips it from assistant tex
   );
   assert.equal(out.question, "Which pricing tier should be featured?");
   assert.equal(out.text, "I need one detail.");
+});
+
+test("extracts the forced Dezin final summary boundary", () => {
+  const out = extractFinalSummary(
+    "Drafted the layout and tightened spacing.\n<dezin-final-summary>\nDone. Updated the pricing page.\n</dezin-final-summary>",
+  );
+  assert.equal(out.hadBoundary, true);
+  assert.equal(out.processText, "Drafted the layout and tightened spacing.");
+  assert.equal(out.summaryText, "Done. Updated the pricing page.");
+});
+
+test("falls back to treating unmarked text as summary only", () => {
+  const out = extractFinalSummary("Done. Updated the pricing page.");
+  assert.equal(out.hadBoundary, false);
+  assert.equal(out.processText, "");
+  assert.equal(out.summaryText, "Done. Updated the pricing page.");
 });
