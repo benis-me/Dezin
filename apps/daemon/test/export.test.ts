@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
@@ -49,8 +49,15 @@ test("export returns a zip of the project's artifact files", async () => {
     const dir = join(dataDir, "projects", project.id);
     mkdirSync(join(dir, "assets"), { recursive: true });
     mkdirSync(join(dir, ".refs"), { recursive: true });
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    mkdirSync(join(dir, ".vite"), { recursive: true });
     writeFileSync(join(dir, "index.html"), "<h1>hello</h1>");
     writeFileSync(join(dir, "assets", "style.css"), ":root{--accent:#2563eb}");
+    writeFileSync(join(dir, ".gitignore"), "node_modules\n");
+    writeFileSync(join(dir, ".env.example"), "PUBLIC_API_URL=\n");
+    writeFileSync(join(dir, ".env"), "SECRET=do-not-export\n");
+    writeFileSync(join(dir, ".git", "config"), "[remote]\n");
+    writeFileSync(join(dir, ".vite", "cache"), "cache");
     writeFileSync(join(dir, ".refs", "reference.txt"), "ref-data");
     writeFileSync(join(dir, ".cover.png"), Buffer.from([1, 2, 3]));
 
@@ -63,11 +70,16 @@ test("export returns a zip of the project's artifact files", async () => {
     assert.ok(zip.length > 0);
     assert.equal(zip.readUInt32LE(0), 0x04034b50, "is a PK zip");
     const entries = readZip(zip);
-    assert.equal(entries.length, 2);
+    assert.equal(entries.length, 4);
     const index = entries.find((e) => e.path === "index.html");
     const css = entries.find((e) => e.path === "assets/style.css");
     assert.equal(index?.data.toString("utf8"), "<h1>hello</h1>");
     assert.equal(css?.data.toString("utf8"), ":root{--accent:#2563eb}");
+    assert.equal(entries.find((e) => e.path === ".gitignore")?.data.toString("utf8"), "node_modules\n");
+    assert.equal(entries.find((e) => e.path === ".env.example")?.data.toString("utf8"), "PUBLIC_API_URL=\n");
+    assert.equal(entries.find((e) => e.path === ".env"), undefined);
+    assert.equal(entries.find((e) => e.path === ".git/config"), undefined);
+    assert.equal(entries.find((e) => e.path === ".vite/cache"), undefined);
   });
 });
 
@@ -80,8 +92,13 @@ test("full export includes project metadata, conversations, and source files", a
     const dir = join(dataDir, "projects", project.id);
     mkdirSync(join(dir, "assets"), { recursive: true });
     mkdirSync(join(dir, ".refs"), { recursive: true });
+    mkdirSync(join(dir, ".git"), { recursive: true });
     writeFileSync(join(dir, "index.html"), "<h1>hello</h1>");
     writeFileSync(join(dir, "assets", "style.css"), ":root{--accent:#2563eb}");
+    writeFileSync(join(dir, ".gitignore"), "dist\n");
+    writeFileSync(join(dir, ".env.example"), "PUBLIC_API_URL=\n");
+    writeFileSync(join(dir, ".env"), "SECRET=do-not-export\n");
+    writeFileSync(join(dir, ".git", "config"), "[remote]\n");
     writeFileSync(join(dir, ".refs", "reference.txt"), "ref-data");
     writeFileSync(join(dir, ".cover.png"), Buffer.from([1, 2, 3]));
 
@@ -106,6 +123,10 @@ test("full export includes project metadata, conversations, and source files", a
     assert.equal(manifest.conversations?.[0]?.messages?.[0]?.content, "make a hero");
     assert.equal(entries.find((e) => e.path === "source/index.html")?.data.toString("utf8"), "<h1>hello</h1>");
     assert.equal(entries.find((e) => e.path === "source/assets/style.css")?.data.toString("utf8"), ":root{--accent:#2563eb}");
+    assert.equal(entries.find((e) => e.path === "source/.gitignore")?.data.toString("utf8"), "dist\n");
+    assert.equal(entries.find((e) => e.path === "source/.env.example")?.data.toString("utf8"), "PUBLIC_API_URL=\n");
+    assert.equal(entries.find((e) => e.path === "source/.env"), undefined);
+    assert.equal(entries.find((e) => e.path === "source/.git/config"), undefined);
     assert.equal(entries.find((e) => e.path === "refs/reference.txt")?.data.toString("utf8"), "ref-data");
     assert.deepEqual([...entries.find((e) => e.path === "cover.png")!.data], [1, 2, 3]);
   });
@@ -120,8 +141,13 @@ test("import restores a full project zip as a new project", async () => {
     const dir = join(dataDir, "projects", project.id);
     mkdirSync(join(dir, "assets"), { recursive: true });
     mkdirSync(join(dir, ".refs"), { recursive: true });
+    mkdirSync(join(dir, ".git"), { recursive: true });
     writeFileSync(join(dir, "index.html"), "<main>import me</main>");
     writeFileSync(join(dir, "assets", "style.css"), "main{display:grid}");
+    writeFileSync(join(dir, ".gitignore"), "dist\n");
+    writeFileSync(join(dir, ".env.example"), "PUBLIC_API_URL=\n");
+    writeFileSync(join(dir, ".env"), "SECRET=do-not-export\n");
+    writeFileSync(join(dir, ".git", "config"), "[remote]\n");
     writeFileSync(join(dir, ".refs", "reference.txt"), "ref-data");
     writeFileSync(join(dir, ".cover.png"), Buffer.from([3, 2, 1]));
 
@@ -142,6 +168,10 @@ test("import restores a full project zip as a new project", async () => {
     assert.equal(imported.mode, "prototype");
     assert.equal(readFileSync(join(dataDir, "projects", imported.id, "index.html"), "utf8"), "<main>import me</main>");
     assert.equal(readFileSync(join(dataDir, "projects", imported.id, "assets", "style.css"), "utf8"), "main{display:grid}");
+    assert.equal(readFileSync(join(dataDir, "projects", imported.id, ".gitignore"), "utf8"), "dist\n");
+    assert.equal(readFileSync(join(dataDir, "projects", imported.id, ".env.example"), "utf8"), "PUBLIC_API_URL=\n");
+    assert.equal(existsSync(join(dataDir, "projects", imported.id, ".env")), false);
+    assert.equal(existsSync(join(dataDir, "projects", imported.id, ".git", "config")), false);
     assert.equal(readFileSync(join(dataDir, "projects", imported.id, ".refs", "reference.txt"), "utf8"), "ref-data");
     assert.deepEqual([...readFileSync(join(dataDir, "projects", imported.id, ".cover.png"))], [3, 2, 1]);
 

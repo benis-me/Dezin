@@ -22,9 +22,42 @@ export interface FileRef {
   abs: string;
 }
 
-// Dependency/build output dirs are never part of the design source.
-const IGNORE_DIRS = new Set(["node_modules", "dist", "build", ".git"]);
+// Keep source-level dotfiles, but skip dependency output, build caches,
+// Dezin runtime internals, git history, and local secrets.
+const IGNORE_DIRS = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  ".git",
+  ".refs",
+  ".versions",
+  ".runs",
+  ".variants",
+  ".dev",
+  ".vite",
+  ".turbo",
+  ".next",
+  ".cache",
+]);
+const IGNORE_FILES = new Set([".DS_Store", ".cover.png"]);
 const MANIFEST_PATH = "dezin-project.json";
+
+function isSecretEnvFile(name: string): boolean {
+  if (name === ".env" || name === ".envrc") return true;
+  if (!name.startsWith(".env.")) return false;
+  return ![".env.example", ".env.sample", ".env.template"].some(
+    (allowed) => name === allowed || name.startsWith(`${allowed}.`),
+  );
+}
+
+function shouldSkipFileName(name: string): boolean {
+  return IGNORE_FILES.has(name) || isSecretEnvFile(name);
+}
+
+function shouldSkipArchiveSourcePath(rel: string): boolean {
+  const parts = rel.split("/");
+  return parts.some((part) => IGNORE_DIRS.has(part)) || shouldSkipFileName(parts[parts.length - 1] ?? "");
+}
 
 export async function walkFiles(root: string, dir: string = root, out: FileRef[] = []): Promise<FileRef[]> {
   let entries;
@@ -34,8 +67,8 @@ export async function walkFiles(root: string, dir: string = root, out: FileRef[]
     return out;
   }
   for (const e of entries) {
-    if (e.name.startsWith(".")) continue; // skip internal dirs (.versions) + host noise (.impeccable)
-    if (e.isDirectory() && IGNORE_DIRS.has(e.name)) continue; // skip node_modules / build output
+    if (e.isDirectory() && IGNORE_DIRS.has(e.name)) continue;
+    if (e.isFile() && shouldSkipFileName(e.name)) continue;
     const abs = join(dir, e.name);
     if (e.isDirectory()) await walkFiles(root, abs, out);
     else if (e.isFile()) out.push({ rel: relative(root, abs).split(sep).join("/"), abs });
@@ -199,17 +232,21 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
 
   const source = archive.filter((entry) => entry.path.startsWith("source/"));
   if (source.length === 0) return sendError(res, 422, "project archive contains no source files");
-  const sourceFiles = source.map((entry) => {
+  const sourceFiles: Array<{ rel: string; data: Buffer }> = [];
+  for (const entry of source) {
     const rel = safeArchivePath(entry.path.slice("source/".length));
-    return rel ? { rel, data: entry.data } : null;
-  });
+    if (!rel) return sendError(res, 422, "invalid source path");
+    if (shouldSkipArchiveSourcePath(rel)) continue;
+    sourceFiles.push({ rel, data: entry.data });
+  }
+  if (sourceFiles.length === 0) return sendError(res, 422, "project archive contains no source files");
   const refFiles = archive
     .filter((entry) => entry.path.startsWith("refs/"))
     .map((entry) => {
       const rel = safeArchivePath(entry.path.slice("refs/".length));
       return rel ? { rel, data: entry.data } : null;
     });
-  if (sourceFiles.some((entry) => entry === null) || refFiles.some((entry) => entry === null)) return sendError(res, 422, "invalid source path");
+  if (refFiles.some((entry) => entry === null)) return sendError(res, 422, "invalid source path");
 
   const project = deps.store.createProject({
     name: manifest.project!.name as string,
@@ -219,7 +256,6 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
   });
   const root = projectDir(deps.dataDir, project.id);
   for (const entry of sourceFiles) {
-    if (!entry) continue;
     const target = safeJoin(root, entry.rel);
     if (!target) return sendError(res, 422, "invalid source path");
     await mkdir(dirname(target), { recursive: true });
