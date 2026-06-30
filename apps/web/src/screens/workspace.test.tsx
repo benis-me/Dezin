@@ -856,6 +856,50 @@ test("the Versions tab groups branch versions with View, set cover, and Restore"
   await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith("p1", "r1"));
 });
 
+test("standard project version Diff uses the commit diff endpoint", async () => {
+  const getVersionText = vi.fn(async () => {
+    throw new Error("prototype snapshot text should not be used for standard diffs");
+  });
+  const getVersionDiff = vi.fn(async () => [
+    { t: "del" as const, text: "export default function App(){ return <main>One</main> }" },
+    { t: "add" as const, text: "export default function App(){ return <main>Two</main> }" },
+  ]);
+  const fake = makeFakeApi({
+    getProject: async () => ({
+      id: "p1",
+      name: "Standard",
+      skillId: null,
+      designSystemId: "modern-minimal",
+      mode: "standard",
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [
+      { id: "r2", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1700000001000, finishedAt: 1700000001001 },
+      { id: "r1", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
+    ],
+    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/p1" }),
+    getVersionText,
+    getVersionDiff,
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Diff Main v1" }));
+
+  await waitFor(() => expect(getVersionDiff).toHaveBeenCalledWith("p1", "r1"));
+  expect(getVersionText).not.toHaveBeenCalled();
+  expect(await screen.findByText(/One/)).toBeInTheDocument();
+  expect(await screen.findByText(/Two/)).toBeInTheDocument();
+});
+
 test("the Quality tab surfaces the run's lint findings + fix", async () => {
   const fake = makeFakeApi({
     streamRun: async function* (): AsyncGenerator<RunEvent> {

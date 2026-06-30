@@ -48,6 +48,12 @@ function parseSse(text: string): Array<Record<string, unknown>> {
     .map((b) => JSON.parse(b.replace(/^data:\s?/, "")) as Record<string, unknown>);
 }
 
+function commitAll(dir: string, message: string): string {
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", message], { cwd: dir });
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+}
+
 async function createProject(base: string, body: object = { name: "P" }): Promise<{ id: string }> {
   const res = await fetch(`${base}/api/projects`, {
     method: "POST",
@@ -525,6 +531,68 @@ test("standard run fails when the agent finishes without changing files", async 
     const runId = events.find((e) => e.type === "run-start")!.runId as string;
     assert.equal(store.getRun(runId)?.status, "failed");
   });
+});
+
+test("standard version actions use commit snapshots instead of prototype html snapshots", async () => {
+  const devServers: Array<{ dir: string; runtimeKey?: string; url: string }> = [];
+  let captured: { url: string; outPath: string } | null = null;
+  await withRunServer(
+    undefined,
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      mkdirSync(join(dir, "src"), { recursive: true });
+      writeFileSync(join(dir, "src", "App.jsx"), "export default function App(){ return <main>One</main> }");
+      const firstCommit = commitAll(dir, "first");
+
+      writeFileSync(join(dir, "src", "App.jsx"), "export default function App(){ return <main>Two</main> }");
+      const secondCommit = commitAll(dir, "second");
+
+      const conversation = store.createConversation(project.id, "First");
+      const firstRun = store.createRun(project.id, conversation.id);
+      store.updateRun(firstRun.id, { status: "succeeded", commitHash: firstCommit, finishedAt: Date.now() });
+      const secondRun = store.createRun(project.id, conversation.id);
+      store.updateRun(secondRun.id, { status: "succeeded", commitHash: secondCommit, finishedAt: Date.now() });
+
+      const view = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}`, { redirect: "manual" });
+      assert.equal(view.status, 302);
+      assert.equal(view.headers.get("location"), "http://127.0.0.1:6201/");
+      assert.match(devServers[0]!.dir, new RegExp(`version-worktrees/${project.id}/${firstRun.id}$`));
+      assert.equal(readFileSync(join(devServers[0]!.dir, "src", "App.jsx"), "utf8"), "export default function App(){ return <main>One</main> }");
+
+      const diff = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}/diff`);
+      assert.equal(diff.status, 200);
+      const lines = (await diff.json()) as Array<{ t: string; text: string }>;
+      assert.ok(lines.some((l) => l.t === "del" && l.text.includes("One")));
+      assert.ok(lines.some((l) => l.t === "add" && l.text.includes("Two")));
+
+      const cover = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}/cover`, { method: "POST" });
+      assert.equal(cover.status, 200);
+      assert.deepEqual(await cover.json(), { captured: true });
+      assert.deepEqual(captured, {
+        url: "http://127.0.0.1:6202/",
+        outPath: join(dataDir, "projects", project.id, ".cover.png"),
+      });
+
+      const restore = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}/restore`, { method: "POST" });
+      assert.equal(restore.status, 200);
+      assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "export default function App(){ return <main>One</main> }");
+    },
+    {
+      ensureDevServer: async (_projectId, dir, runtimeKey) => {
+        const url = `http://127.0.0.1:${6201 + devServers.length}/`;
+        devServers.push({ dir, runtimeKey, url });
+        return { url };
+      },
+      captureCoverUrl: async (url, outPath) => {
+        captured = { url, outPath };
+        return true;
+      },
+    },
+  );
 });
 
 test("standard run succeeds only after project files change", async () => {

@@ -86,6 +86,13 @@ test("setVersionCover POSTs the version cover endpoint", async () => {
   );
 });
 
+test("getVersionDiff GETs the version diff endpoint", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse([{ t: "add", text: "new line" }]));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  await expect(api.getVersionDiff("p1", "r1")).resolves.toEqual([{ t: "add", text: "new line" }]);
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/projects/p1/versions/r1/diff", undefined);
+});
+
 test("forkMessage POSTs the message fork endpoint", async () => {
   const payload = { conversationId: "c2", variantId: "v2", variants: [] };
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(payload));

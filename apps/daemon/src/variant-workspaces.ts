@@ -12,8 +12,16 @@ export function standardWorktreeDir(dataDir: string, projectId: string, variantI
   return join(dataDir, "worktrees", projectId, variantId);
 }
 
+export function standardVersionWorktreeDir(dataDir: string, projectId: string, runId: string): string {
+  return join(dataDir, "version-worktrees", projectId, runId);
+}
+
 export function variantRuntimeKey(projectId: string, variantId: string): string {
   return `${projectId}:${variantId}`;
+}
+
+export function versionRuntimeKey(projectId: string, runId: string): string {
+  return `${projectId}:version:${runId}`;
 }
 
 function variantBranchName(variantId: string): string {
@@ -111,6 +119,30 @@ export async function createStandardVariantWorktreeFromCommit(
   await captureGit(root, ["worktree", "prune"]);
   await git(root, ["worktree", "add", "-b", branch, dir, commit]);
   return dir;
+}
+
+export async function standardVersionArtifactDir(deps: AppDeps, projectId: string, runId: string, commit: string): Promise<string> {
+  if (!/^[0-9a-f]{7,40}$/i.test(commit)) throw new Error("run has no valid commit snapshot");
+  const root = projectDir(deps.dataDir, projectId);
+  if (!existsSync(join(root, ".git"))) throw new Error("standard project is not a git repository yet");
+  const dir = standardVersionWorktreeDir(deps.dataDir, projectId, runId);
+  if (existsSync(join(dir, ".git"))) return dir;
+
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(dirname(dir), { recursive: true });
+  await captureGit(root, ["worktree", "prune"]);
+  await git(root, ["worktree", "add", "--detach", dir, commit]);
+  return dir;
+}
+
+export async function diffStandardArtifactDirFromCommit(dir: string, commit: string): Promise<string> {
+  if (!/^[0-9a-f]{7,40}$/i.test(commit)) throw new Error("run has no valid commit snapshot");
+  return gitOutput(dir, ["diff", "--no-color", commit, "--", "."]);
+}
+
+export async function resetStandardArtifactDirToCommit(dir: string, commit: string): Promise<void> {
+  if (!/^[0-9a-f]{7,40}$/i.test(commit)) throw new Error("run has no valid commit snapshot");
+  await git(dir, ["reset", "--hard", commit]);
 }
 
 export async function removeStandardVariantWorktree(deps: AppDeps, projectId: string, variantId: string): Promise<void> {

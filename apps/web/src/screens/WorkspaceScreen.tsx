@@ -1104,6 +1104,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const openDiff = async (runId: string, label: string): Promise<void> => {
     try {
+      if (modeRef.current === "standard") {
+        setDiff({ label: `${label} → current`, lines: await api.getVersionDiff(projectId, runId) });
+        return;
+      }
       const [versionHtml, currentHtml] = await Promise.all([
         api.getVersionText(projectId, runId),
         api.getFileText(projectId, "index.html").catch(() => ""),

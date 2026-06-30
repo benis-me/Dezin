@@ -224,6 +224,8 @@ export interface RunSummary {
   finishedAt: number | null;
 }
 
+export type VersionDiffLine = { t: "ctx" | "add" | "del"; text: string };
+
 export interface ApiClient {
   listProjects(): Promise<Project[]>;
   createProject(input: CreateProjectInput): Promise<Project>;
@@ -263,6 +265,7 @@ export interface ApiClient {
   listRuns(id: string, options?: { all?: boolean }): Promise<RunSummary[]>;
   versionPreviewUrl(id: string, runId: string): string;
   getVersionText(id: string, runId: string): Promise<string>;
+  getVersionDiff(id: string, runId: string): Promise<VersionDiffLine[]>;
   restoreVersion(id: string, runId: string): Promise<void>;
   setVersionCover(id: string, runId: string): Promise<{ captured: boolean }>;
   uploadRef(id: string, name: string, contentBase64: string): Promise<{ name: string; path: string }>;
@@ -427,6 +430,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       if (!res.ok) throw new ApiError(res.status, await safeText(res));
       return res.text();
     },
+    getVersionDiff: (id, runId) => json<VersionDiffLine[]>(`/api/projects/${enc(id)}/versions/${enc(runId)}/diff`),
     restoreVersion: (id, runId) => json<void>(`/api/projects/${enc(id)}/versions/${enc(runId)}/restore`, { method: "POST" }),
     setVersionCover: (id, runId) => json<{ captured: boolean }>(`/api/projects/${enc(id)}/versions/${enc(runId)}/cover`, { method: "POST" }),
     uploadRef: (id, name, contentBase64) =>
