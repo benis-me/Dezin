@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
@@ -214,16 +214,17 @@ function parseUserMessage(text: string): { body: string; images: string[]; targe
   return { body: bodyParts.join("\n\n").trim(), images, targets };
 }
 
-function MarkupTargetCards({ targets }: { targets: MarkupTarget[] }) {
+function MarkupTargetCards({ targets, onTargetClick }: { targets: MarkupTarget[]; onTargetClick?: (target: MarkupTarget) => void }) {
   if (!targets.length) return null;
   return (
     <div className="flex w-full flex-col items-end gap-1.5">
       {targets.map((target, idx) => (
-        <div
+        <button
           key={`${target.selector}-${idx}`}
-          role="group"
+          type="button"
           aria-label={`Marked target ${target.selector}`}
-          className="max-w-[88%] rounded-xl border border-border bg-card px-3 py-2 text-left shadow-sm"
+          onClick={() => onTargetClick?.(target)}
+          className="max-w-[88%] rounded-xl border border-border bg-card px-3 py-2 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <div className="mb-1.5 flex items-center gap-1.5">
             <MousePointerClick size={12} strokeWidth={2} className="shrink-0 text-brand" />
@@ -238,7 +239,7 @@ function MarkupTargetCards({ targets }: { targets: MarkupTarget[] }) {
           <code className="block truncate font-mono text-[11px] text-foreground-2">{target.selector}</code>
           {target.text ? <p className="mt-1 truncate text-xs text-muted-foreground">"{target.text}"</p> : null}
           {target.note ? <p className="mt-1 text-xs leading-snug text-foreground">{target.note}</p> : null}
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -259,11 +260,19 @@ function formatMarkupTarget(target: MarkupTarget): string {
 
 /** A user turn: attached images render as 1:1 thumbnails (hover to preview), right-aligned
  *  above the message bubble — instead of the raw ".refs/…" paths the agent reads from disk. */
-function UserMessage({ text, srcFor }: { text: string; srcFor: (refPath: string) => string }) {
+function UserMessage({
+  text,
+  srcFor,
+  onTargetClick,
+}: {
+  text: string;
+  srcFor: (refPath: string) => string;
+  onTargetClick?: (target: MarkupTarget) => void;
+}) {
   const { body, images, targets } = parseUserMessage(text);
   return (
     <div className="flex flex-col items-end gap-1.5">
-      <MarkupTargetCards targets={targets} />
+      <MarkupTargetCards targets={targets} onTargetClick={onTargetClick} />
       {images.length ? (
         <TooltipProvider delayDuration={120}>
           <div className="flex flex-wrap justify-end gap-1.5">
@@ -743,6 +752,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerH, setComposerH] = useState(92);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedTargets, setSelectedTargets] = useState<MarkupTarget[]>([]);
   const [pendingMark, setPendingMark] = useState<(MarkupTarget & { x: number; y: number }) | null>(null);
@@ -797,8 +807,33 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const push = (kind: Msg["kind"], text: string) =>
     setMessages((m) => [...m, { id: msgId.current++, kind, text, at: Date.now() }]);
 
+  const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "auto"): void => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    if (typeof el.scrollTo === "function") {
+      try {
+        el.scrollTo({ top: el.scrollHeight, behavior });
+      } catch {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+    stickBottom.current = true;
+    setShowScrollToBottom(false);
+  }, []);
+
+  const updateChatBottomState = useCallback((): void => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+    stickBottom.current = nearBottom;
+    setShowScrollToBottom(!nearBottom);
+  }, []);
+
   const loadMessages = async (convId: string): Promise<void> => {
     const prior = await api.listMessages(projectId, convId);
+    stickBottom.current = true;
+    setShowScrollToBottom(false);
     msgId.current = 0;
     setMessages(prior.map((m) => toMsg(m, msgId.current++)));
   };
@@ -1131,9 +1166,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   // Keep the transcript pinned to the newest content as it streams — unless the user scrolled
   // up to read (stickBottom is cleared by the container's onScroll below).
   useEffect(() => {
-    const el = chatScrollRef.current;
-    if (el && stickBottom.current) el.scrollTop = el.scrollHeight;
-  }, [liveItems, messages, liveStatus, running]);
+    if (stickBottom.current) scrollChatToBottom("auto");
+  }, [liveItems, messages, liveStatus, running, scrollChatToBottom]);
 
   // Drain queued prompts one at a time once the current run finishes.
   useEffect(() => {
@@ -1361,6 +1395,21 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const dismissMark = (): void => {
     previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "clear" }, "*");
     setPendingMark(null);
+  };
+
+  const focusMarkupTarget = (target: MarkupTarget): void => {
+    setTab("Preview");
+    const message = {
+      source: "dezin-parent",
+      type: "focus-target",
+      selector: target.selector,
+      rect: target.rect,
+    };
+    const post = (): void => {
+      previewIframeRef.current?.contentWindow?.postMessage(message, "*");
+    };
+    post();
+    window.setTimeout(post, 60);
   };
 
   const addMark = (note: string): void => {
@@ -1635,10 +1684,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
         <div
           ref={chatScrollRef}
-          onScroll={() => {
-            const el = chatScrollRef.current;
-            if (el) stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-          }}
+          data-testid="conversation-scroll"
+          onScroll={updateChatBottomState}
           className="flex-1 space-y-4 overflow-auto px-4 pt-5"
           style={{ paddingBottom: composerH + 36 }}
         >
@@ -1668,7 +1715,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     }`}
                   >
                     {m.kind === "user" ? (
-                      <UserMessage text={m.text} srcFor={(p) => api.refUrl(projectId, p)} />
+                      <UserMessage text={m.text} srcFor={(p) => api.refUrl(projectId, p)} onTargetClick={focusMarkupTarget} />
                     ) : m.kind === "assistant" ? (
                       <Markdown>{m.text}</Markdown>
                     ) : m.kind === "process" ? (
@@ -1700,6 +1747,23 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             </>
           )}
         </div>
+        <AnimatePresence>
+          {showScrollToBottom ? (
+            <motion.button
+              type="button"
+              aria-label="Scroll to bottom"
+              onClick={() => scrollChatToBottom("smooth")}
+              initial={{ opacity: 0, y: 6, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 6, scale: 0.96 }}
+              transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
+              className="app-no-drag absolute right-4 z-30 grid size-8 place-items-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              style={{ bottom: composerH + 16 }}
+            >
+              <ArrowDown size={15} strokeWidth={1.8} aria-hidden />
+            </motion.button>
+          ) : null}
+        </AnimatePresence>
         <div className="pointer-events-none absolute inset-x-0 bottom-0">
           {/* dissolve zone above the opaque strip */}
           <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />

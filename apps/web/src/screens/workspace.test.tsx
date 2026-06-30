@@ -323,12 +323,91 @@ test("user message shows markup targets as cards above the text bubble", async (
   const bubble = await screen.findByText("Make the headline shorter.");
   const target = screen.getByLabelText("Marked target section.hero > h1");
   expect(target).toBeInTheDocument();
+  expect(target.className).not.toContain("shadow");
   expect(target).toHaveTextContent("h1");
   expect(target).toHaveTextContent("320x48");
   expect(target).toHaveTextContent("Enterprise pricing made simple");
   expect(target).toHaveTextContent("Use fewer words");
   expect(screen.queryByText(/Scoped edit/)).toBeNull();
   expect(target.compareDocumentPosition(bubble) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test("clicking a marked target asks the preview to focus that element", async () => {
+  const fake = makeFakeApi({
+    listFiles: async () => [{ path: "index.html", size: 120 }],
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [
+      {
+        id: "m1",
+        conversationId: "c1",
+        role: "user" as const,
+        content:
+          "Adjust this.\n\n" +
+          "Scoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n" +
+          '- selector: `section.hero > h1`\n  tag: h1\n  rect: x=24 y=40 w=320 h=48\n  text: "Enterprise pricing made simple"',
+        createdAt: 1,
+      },
+    ],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
+  const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+  fireEvent.click(screen.getByRole("button", { name: "Marked target section.hero > h1" }));
+
+  expect(postMessage).toHaveBeenCalledWith(
+    {
+      source: "dezin-parent",
+      type: "focus-target",
+      selector: "section.hero > h1",
+      rect: { x: 24, y: 40, w: 320, h: 48 },
+    },
+    "*",
+  );
+});
+
+test("conversation opens at the bottom and shows an icon-only jump button when scrolled away", async () => {
+  const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.dataset.testid === "conversation-scroll" ? 1200 : 0;
+  });
+  const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.dataset.testid === "conversation-scroll" ? 360 : 0;
+  });
+  try {
+    const fake = makeFakeApi({
+      listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+      listMessages: async () => [
+        { id: "m1", conversationId: "c1", role: "user" as const, content: "First", createdAt: 1 },
+        { id: "m2", conversationId: "c1", role: "assistant" as const, content: "Second", createdAt: 2 },
+      ],
+    });
+    render(
+      <ApiProvider client={fake}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    await screen.findByText("Second");
+    const scroll = screen.getByTestId("conversation-scroll");
+    await waitFor(() => expect(scroll.scrollTop).toBe(1200));
+    expect(screen.queryByRole("button", { name: "Scroll to bottom" })).toBeNull();
+
+    scroll.scrollTop = 100;
+    fireEvent.scroll(scroll);
+    const jump = await screen.findByRole("button", { name: "Scroll to bottom" });
+    expect(jump.textContent).toBe("");
+    expect(jump.className).not.toContain("shadow");
+
+    fireEvent.click(jump);
+    expect(scroll.scrollTop).toBe(1200);
+  } finally {
+    scrollHeight.mockRestore();
+    clientHeight.mockRestore();
+  }
 });
 
 test("markup prompts include selector, tag, geometry, text, and note for precise scoped edits", async () => {
