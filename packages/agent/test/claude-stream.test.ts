@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseClaudeStream, parseClaudeLine } from "../src/index.ts";
+import { extractAskUserQuestion, parseClaudeStream, parseClaudeLine } from "../src/index.ts";
 
 test("parseClaudeLine surfaces live text + meaningful tool steps", () => {
   const line = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Building it. "},{"type":"tool_use","name":"Write","input":{"file_path":"src/App.tsx"}},{"type":"tool_use","name":"Bash","input":{"command":"npm install gsap"}},{"type":"tool_use","name":"Read","input":{"file_path":"x"}}]}}`;
@@ -65,4 +65,12 @@ test("accepts an array of lines too", () => {
     `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"b"}]}}`,
   ]);
   assert.equal(p.text, "ab");
+});
+
+test("extracts a Dezin ask-user-question marker and strips it from assistant text", () => {
+  const out = extractAskUserQuestion(
+    "I need one detail.\n<dezin-ask-user-question>\nWhich pricing tier should be featured?\n</dezin-ask-user-question>",
+  );
+  assert.equal(out.question, "Which pricing tier should be featured?");
+  assert.equal(out.text, "I need one detail.");
 });

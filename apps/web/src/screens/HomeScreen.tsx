@@ -90,17 +90,29 @@ const TEMPLATES: Template[] = [
  * The project cover: a real screenshot of the design when one exists, else a clean
  * placeholder (no abstract swatch art, no glyph overlay).
  */
-function ProjectThumb({ coverUrl }: { coverUrl?: string | null }) {
-  if (coverUrl) {
-    return (
-      <div className="aspect-[16/10] overflow-hidden border-b border-border bg-surface-2">
-        <img src={coverUrl} alt="" loading="lazy" className="h-full w-full object-cover object-top" />
-      </div>
-    );
-  }
+function ActiveRunBadge({ status }: { status?: Project["runStatus"] }) {
+  if (status !== "running" && status !== "pending") return null;
   return (
-    <div className="dz-canvas grid aspect-[16/10] place-items-center border-b border-border text-muted-foreground/40">
-      <ImageIcon size={22} strokeWidth={1.5} />
+    <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background/90 px-1.5 py-0.5 text-[11px] font-medium text-foreground backdrop-blur">
+      <span className="size-1.5 rounded-full bg-primary" aria-hidden />
+      {status === "pending" ? "Queued" : "Generating"}
+    </span>
+  );
+}
+
+function ProjectThumb({ coverUrl, runStatus }: { coverUrl?: string | null; runStatus?: Project["runStatus"] }) {
+  return (
+    <div className="relative aspect-[16/10] overflow-hidden border-b border-border bg-surface-2">
+      {coverUrl ? (
+        <img src={coverUrl} alt="" loading="lazy" className="h-full w-full object-cover object-top" />
+      ) : (
+        <div className="dz-canvas grid h-full w-full place-items-center text-muted-foreground/40">
+          <ImageIcon size={22} strokeWidth={1.5} />
+        </div>
+      )}
+      <div className="absolute left-2 top-2">
+        <ActiveRunBadge status={runStatus} />
+      </div>
     </div>
   );
 }
@@ -641,7 +653,7 @@ export function HomeScreen({
                   className="group cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
                   onClick={() => onOpenProject?.(p.id)}
                 >
-                  <ProjectThumb coverUrl={p.coverUrl} />
+                  <ProjectThumb coverUrl={p.coverUrl} runStatus={p.runStatus} />
                   <div className="p-3">
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
@@ -686,7 +698,10 @@ export function HomeScreen({
                   )}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
+                    <ActiveRunBadge status={p.runStatus} />
+                  </div>
                   <p className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
                     <span className="truncate">{dsName(p.designSystemId)}</span>
                     {skillName(p.skillId) ? (

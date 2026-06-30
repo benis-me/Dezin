@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { Store } from "../../../packages/core/src/index.ts";
-import { FakeRunner } from "../../../packages/agent/src/index.ts";
+import { abortError, FakeRunner } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import { createApp, type AppDeps } from "../src/index.ts";
 
@@ -204,7 +204,8 @@ test("craft references reach the composed prompt (skill's craft sections)", asyn
 
 test("a run snapshots its artifact; versions can be served and restored", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN] });
-  await withRunServer(runner, async ({ base, store }) => {
+  let captured: { htmlPath: string; outPath: string } | null = null;
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
     const project = store.createProject({ name: "P" });
     await (
       await fetch(`${base}/api/runs`, {
@@ -223,8 +224,21 @@ test("a run snapshots its artifact; versions can be served and restored", async 
     const restore = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/restore`, { method: "POST" });
     assert.equal(restore.status, 200);
 
+    const cover = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/cover`, { method: "POST" });
+    assert.equal(cover.status, 200);
+    assert.deepEqual(await cover.json(), { captured: true });
+    assert.equal(captured?.htmlPath, join(dataDir, "projects", project.id, ".versions", `${runId}.html`));
+    assert.equal(captured?.outPath, join(dataDir, "projects", project.id, ".cover.png"));
+    assert.equal(existsSync(join(dataDir, "projects", project.id, ".cover.png")), true);
+
     const miss = await fetch(`${base}/api/projects/${project.id}/versions/nope`);
     assert.equal(miss.status, 404);
+  }, {
+    captureCover: async (htmlPath, outPath) => {
+      captured = { htmlPath, outPath };
+      writeFileSync(outPath, "png");
+      return true;
+    },
   });
 });
 
@@ -250,6 +264,104 @@ test("GET /api/projects/:id/runs lists finished runs with a score", async () => 
 
     const miss = await fetch(`${base}/api/projects/nope/runs`);
     assert.equal(miss.status, 404);
+  });
+});
+
+test("GET /api/projects includes a runStatus for active generations", async () => {
+  await withRunServer(undefined, async ({ base, store }) => {
+    const project = store.createProject({ name: "P" });
+    const conv = store.createConversation(project.id);
+    const run = store.createRun(project.id, conv.id);
+    store.updateRun(run.id, { status: "running" });
+
+    const res = await fetch(`${base}/api/projects`);
+    assert.equal(res.status, 200);
+    const projects = (await res.json()) as Array<{ id: string; runStatus?: string | null }>;
+    assert.equal(projects.find((p) => p.id === project.id)?.runStatus, "running");
+  });
+});
+
+test("cancelled runs persist interleaved partial text and tool process items", async () => {
+  const runner: AgentRunner = {
+    id: "partial-stop",
+    async runTurn(input) {
+      input.onActivity?.({ kind: "text", text: "Partial copy before stop." });
+      input.onActivity?.({ kind: "tool", name: "Edit", summary: "Editing hero.tsx" });
+      throw abortError();
+    },
+  };
+
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({ name: "P" });
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "go" }),
+    });
+    const events = parseSse(await res.text());
+    assert.ok(events.some((e) => e.type === "activity"));
+    assert.ok(events.some((e) => e.type === "run-cancelled"));
+    const convId = events.find((e) => e.type === "run-start")!.conversationId as string;
+    const process = store
+      .listMessages(convId)
+      .map((m) => {
+        try {
+          return JSON.parse(m.content) as { process?: { elapsedMs?: number; items?: Array<{ type: string; text?: string; summary?: string }> } };
+        } catch {
+          return {};
+        }
+      })
+      .find((m) => m.process);
+    assert.deepEqual(process?.process?.items, [
+      { type: "text", text: "Partial copy before stop." },
+      { type: "tool", summary: "Editing hero.tsx" },
+    ]);
+    assert.equal(typeof process?.process?.elapsedMs, "number");
+  });
+});
+
+test("agent AskUserQuestion markers stream and persist as structured questions", async () => {
+  const runner = new FakeRunner({
+    artifacts: [CLEAN, CLEAN],
+    texts: ["<dezin-ask-user-question>\nWhich pricing tier should be featured?\n</dezin-ask-user-question>", "done"],
+  });
+
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({ name: "P" });
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "go" }),
+    });
+    const events = parseSse(await res.text());
+    const question = events.find((e) => e.type === "ask-user-question");
+    assert.equal(question?.question, "Which pricing tier should be featured?");
+    const done = events.find((e) => e.type === "run-cancelled");
+    assert.equal(done?.reason, "question");
+    const runId = events.find((e) => e.type === "run-start")!.runId as string;
+    assert.equal(store.getRun(runId)?.status, "cancelled");
+
+    const convId = events.find((e) => e.type === "run-start")!.conversationId as string;
+    const persisted = store
+      .listMessages(convId)
+      .map((m) => {
+        try {
+          return JSON.parse(m.content) as { question?: { text?: string } };
+        } catch {
+          return {};
+        }
+      })
+      .find((m) => m.question);
+    assert.equal(persisted?.question?.text, "Which pricing tier should be featured?");
+
+    const answer = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, conversationId: convId, brief: "Use the annual plan." }),
+    });
+    assert.equal(answer.status, 200);
+    assert.equal(runner.calls[1]?.history?.at(-1)?.role, "assistant");
+    assert.equal(runner.calls[1]?.history?.at(-1)?.content, "Which pricing tier should be featured?");
   });
 });
 

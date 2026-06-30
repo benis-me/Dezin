@@ -14,6 +14,7 @@ import {
   runTurnWithRetry,
   GenericCliRunner,
   getProvider,
+  extractAskUserQuestion,
   isAbortError,
   type GenerateEvent,
   type AgentRunner,
@@ -92,8 +93,30 @@ interface RunBody {
   variantId?: string;
 }
 
+type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
+
 function resultMessage(text: string, meta: Record<string, unknown>): string {
   return JSON.stringify({ result: { text, meta } });
+}
+
+function questionMessage(text: string, runId: string): string {
+  return JSON.stringify({ question: { text, runId } });
+}
+
+function processMessage(items: ProcessItem[], elapsedMs?: number): string {
+  return JSON.stringify({ process: { items, elapsedMs } });
+}
+
+function messageToAgentTurn(m: { role: string; content: string }): { role: "user" | "assistant"; content: string }[] {
+  if (m.role === "user" || m.role === "assistant") return [{ role: m.role, content: m.content }];
+  if (m.role !== "system") return [];
+  try {
+    const parsed = JSON.parse(m.content) as { question?: { text?: unknown } };
+    const question = parsed.question?.text;
+    return typeof question === "string" && question.trim() ? [{ role: "assistant", content: question.trim() }] : [];
+  } catch {
+    return [];
+  }
 }
 
 function requestOrigin(req: IncomingMessage): string | undefined {
@@ -190,8 +213,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // the new user message). System/process records are excluded.
   const history = store
     .listMessages(conversation.id)
-    .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+    .flatMap(messageToAgentTurn);
   store.addMessage(conversation.id, "user", brief);
   const run = store.createRun(project.id, conversation.id, targetVariantId);
   store.updateRun(run.id, { status: "running" });
@@ -225,13 +247,33 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
 
   const origin = requestOrigin(req);
 
-  // Record the agent's tool steps so the conversation keeps a permanent process record.
+  // Record the agent's interleaved process so the conversation can be restored after
+  // navigation/restart without losing streamed text or the original tool order.
   const steps: string[] = [];
-  const recordStep = (activity: unknown): void => {
+  const processItems: ProcessItem[] = [];
+  const recordActivity = (activity: unknown): void => {
     const a = activity as { kind?: string; summary?: string } | undefined;
-    if (a?.kind === "tool" && a.summary && steps[steps.length - 1] !== a.summary) steps.push(a.summary);
+    if (a?.kind === "tool" && a.summary) {
+      if (steps[steps.length - 1] !== a.summary) steps.push(a.summary);
+      const last = processItems[processItems.length - 1];
+      if (!(last?.type === "tool" && last.summary === a.summary)) processItems.push({ type: "tool", summary: a.summary });
+      return;
+    }
+    const t = (activity as { kind?: string; text?: string } | undefined)?.text;
+    if (a?.kind === "text" && t) {
+      const last = processItems[processItems.length - 1];
+      if (last?.type === "text") last.text += t;
+      else processItems.push({ type: "text", text: t });
+    }
   };
+  const processAssistantText = (): string =>
+    processItems
+      .filter((i): i is { type: "text"; text: string } => i.type === "text")
+      .map((i) => i.text)
+      .join("")
+      .trim();
   const persistProcess = (): void => {
+    if (processItems.length) store.addMessage(conversation.id, "system", processMessage(processItems, Math.max(0, Date.now() - run.createdAt)));
     if (steps.length) store.addMessage(conversation.id, "system", JSON.stringify({ steps }));
   };
 
@@ -250,7 +292,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           projectDir: dir,
           history,
           onActivity: (activity) => {
-            recordStep(activity);
+            recordActivity(activity);
             sse({ type: "activity", round: 0, activity });
           },
           signal: ctrl.signal,
@@ -260,7 +302,17 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             sse({ type: "activity", round: 0, activity: { kind: "tool", name: "retry", summary: `Agent hiccup — retrying (attempt ${attempt + 1})…` } }),
         },
       );
-      sse({ type: "turn-end", round: 0, text: result.text });
+      const asked = extractAskUserQuestion(result.text);
+      sse({ type: "turn-end", round: 0, text: asked.text });
+      if (asked.question) {
+        persistProcess();
+        if (asked.text) store.addMessage(conversation.id, "assistant", asked.text);
+        store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
+        store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
+        sse({ type: "ask-user-question", runId: run.id, question: asked.question });
+        sse({ type: "run-cancelled", runId: run.id, reason: "question" });
+        return;
+      }
       const afterTree = await workingTreeFingerprint(dir);
       if (afterTree === beforeTree) throw new Error("The selected Agent finished without changing project files.");
       const commit = await gitCommit(dir, brief);
@@ -269,7 +321,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const visualConversation = [
         ...history,
         { role: "user" as const, content: brief },
-        ...(result.text ? [{ role: "assistant" as const, content: result.text }] : []),
+        ...(asked.text ? [{ role: "assistant" as const, content: asked.text }] : []),
       ];
       let visualFindings: QualityFinding[] = [];
       if (settings.visualQaEnabled) {
@@ -298,8 +350,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       }
       const score = settings.visualQaEnabled ? lintScore(visualFindings) : null;
       const passed = !visualFindings.some((f) => f.severity === "P0");
-      store.addMessage(conversation.id, "assistant", result.text);
       persistProcess();
+      store.addMessage(conversation.id, "assistant", asked.text);
       const quality = score !== null ? `, quality ${score}/100` : "";
       const message = passed ? `Done${quality}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
       store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: 0 }));
@@ -320,6 +372,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const cancelled = ctrl.signal.aborted || isAbortError(err);
       store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
       persistProcess();
+      const partial = processAssistantText();
+      if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
       const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
       store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
       sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
@@ -345,11 +399,29 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       lint: { maxRounds: body.maxRounds ?? 2 },
       signal: ctrl.signal,
       onEvent: (e: GenerateEvent) => {
-        if (e.type === "activity") recordStep(e.activity);
-        sse(e);
+        if (e.type === "activity") recordActivity(e.activity);
+        if (e.type === "turn-end" && typeof e.text === "string") {
+          const stripped = extractAskUserQuestion(e.text);
+          sse({ ...e, text: stripped.text });
+        } else {
+          sse(e);
+        }
       },
     });
     stopPoll();
+
+    const rawAssistantText = result.turns.at(-1)?.text ?? "";
+    const asked = extractAskUserQuestion(rawAssistantText);
+    const assistantText = asked.text;
+    if (asked.question) {
+      persistProcess();
+      if (assistantText) store.addMessage(conversation.id, "assistant", assistantText);
+      store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
+      store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
+      sse({ type: "ask-user-question", runId: run.id, question: asked.question });
+      sse({ type: "run-cancelled", runId: run.id, reason: "question" });
+      return;
+    }
 
     // Generate any media the agent requested (data-gen-prompt placeholders → assets/).
     const { html: finalHtml, generated } = await generateImages(
@@ -364,7 +436,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     await writeFile(join(dir, result.artifactPath), finalHtml, "utf8");
     await mkdir(join(dir, ".versions"), { recursive: true });
     await writeFile(join(dir, ".versions", `${run.id}.html`), finalHtml, "utf8");
-    const assistantText = result.turns.at(-1)?.text ?? "";
     const visualConversation = [
       ...history,
       { role: "user" as const, content: brief },
@@ -384,8 +455,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const finalFindings = [...result.findings, ...visualFindings];
     const passed = result.passed && !finalFindings.some((f) => f.severity === "P0");
     store.recordArtifact(project.id, result.artifactPath, passed);
-    store.addMessage(conversation.id, "assistant", result.turns.at(-1)?.text ?? "");
     persistProcess();
+    store.addMessage(conversation.id, "assistant", assistantText);
     const score = lintScore(finalFindings);
     const fixes = result.rounds ? ` after ${result.rounds} fix${result.rounds > 1 ? "es" : ""}` : "";
     const quality = `, quality ${score}/100`;
@@ -415,6 +486,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const cancelled = ctrl.signal.aborted || isAbortError(err);
     store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
     persistProcess(); // keep the partial process record + whatever the agent wrote to disk
+    const partial = processAssistantText();
+    if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
     const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
     store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
     sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });

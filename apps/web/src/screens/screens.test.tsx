@@ -54,6 +54,13 @@ test("HomeScreen lists projects and opens them", () => {
   expect(onOpenProject).toHaveBeenCalledWith("p1");
 });
 
+test("HomeScreen marks projects with an active generation", () => {
+  renderWithApi(<HomeScreen projects={[{ ...project("p1", "Pricing page"), runStatus: "running" }]} />, {
+    listSkills: async () => SKILLS,
+  });
+  expect(screen.getByText("Generating")).toBeInTheDocument();
+});
+
 test("HomeScreen project toolbar orders sort, layout, then search", () => {
   renderWithApi(<HomeScreen projects={[project("p1", "Pricing page")]} />, {
     listSkills: async () => SKILLS,

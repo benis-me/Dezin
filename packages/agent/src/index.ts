@@ -21,9 +21,11 @@ export {
 export {
   parseClaudeStream,
   parseClaudeLine,
+  extractAskUserQuestion,
   type ParsedClaudeStream,
   type ClaudeToolUse,
   type ClaudeActivity,
+  type AskUserQuestionExtraction,
 } from "./claude-stream.ts";
 export {
   ClaudeCodeRunner,

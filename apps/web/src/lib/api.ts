@@ -18,6 +18,8 @@ export interface Project {
   hasArtifact?: boolean;
   /** A screenshot of the generated design, used as the gallery cover. */
   coverUrl?: string | null;
+  /** Active generation state for the project card, if a run is still in flight. */
+  runStatus?: "pending" | "running" | null;
 }
 
 export type SetupPhase = "scaffolding" | "installing" | "ready" | "error";
@@ -255,6 +257,7 @@ export interface ApiClient {
   versionPreviewUrl(id: string, runId: string): string;
   getVersionText(id: string, runId: string): Promise<string>;
   restoreVersion(id: string, runId: string): Promise<void>;
+  setVersionCover(id: string, runId: string): Promise<{ captured: boolean }>;
   uploadRef(id: string, name: string, contentBase64: string): Promise<{ name: string; path: string }>;
   /** Parse a Figma .fig file into an agent-ready design summary. */
   parseFig(file: Blob, name: string): Promise<{ name: string; summary: string }>;
@@ -416,6 +419,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       return res.text();
     },
     restoreVersion: (id, runId) => json<void>(`/api/projects/${enc(id)}/versions/${enc(runId)}/restore`, { method: "POST" }),
+    setVersionCover: (id, runId) => json<{ captured: boolean }>(`/api/projects/${enc(id)}/versions/${enc(runId)}/cover`, { method: "POST" }),
     uploadRef: (id, name, contentBase64) =>
       json<{ name: string; path: string }>(`/api/projects/${enc(id)}/refs`, {
         method: "POST",

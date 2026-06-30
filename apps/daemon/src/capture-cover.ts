@@ -20,6 +20,8 @@ const CHROME_PATHS = [
   "/usr/bin/chromium",
 ];
 
+export const COVER_CAPTURE_SETTLE_MS = 2500;
+
 export function findChrome(): string | null {
   return CHROME_PATHS.find((p) => p && existsSync(p)) ?? null;
 }
@@ -72,7 +74,7 @@ async function captureTargetViaPuppeteer(targetUrl: string, outPath: string): Pr
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
     await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 12000 });
-    await new Promise((r) => setTimeout(r, 400)); // let fonts + first paint settle
+    await new Promise((r) => setTimeout(r, COVER_CAPTURE_SETTLE_MS)); // let fonts, first paint, and intro motion settle
     await page.screenshot({ path: outPath as `${string}.png`, type: "png", clip: { x: 0, y: 0, width: 1280, height: 800 } });
     return true;
   } catch {

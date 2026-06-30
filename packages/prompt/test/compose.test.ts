@@ -40,6 +40,13 @@ test("asset guidance is flexible and forbids fake drawn media", () => {
   assert.match(p, /minimal neutral placeholder/);
 });
 
+test("prompt exposes the Dezin ask-user-question control marker", () => {
+  const p = composeSystemPrompt({ mode: "standard" });
+  assert.match(p, /AskUserQuestion/);
+  assert.match(p, /<dezin-ask-user-question>/);
+  assert.match(p, /Stop after the closing marker/);
+});
+
 test("design system is injected as authoritative tokens, verbatim", () => {
   const p = composeSystemPrompt({ designSystem: modernMinimal });
   assert.ok(p.includes("AUTHORITATIVE"), "marks the brand authoritative");

@@ -27,14 +27,14 @@ import {
   handleRenameVariant,
   handleDeleteVariant,
 } from "./variants-handler.ts";
-import { handleGetVersion, handleRestoreVersion } from "./versions-handler.ts";
+import { handleGetVersion, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } from "./project-runtime.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
-import { captureCoverUrl } from "./capture-cover.ts";
+import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import type { VisualQaRunner } from "./visual-qa.ts";
 
 export interface AppDeps {
@@ -59,6 +59,8 @@ export interface AppDeps {
   releaseDevServer?: typeof releaseDevServer;
   /** Cover capture hook for Standard dev-server URLs; tests can avoid launching Chrome. */
   captureCoverUrl?: (url: string, outPath: string) => Promise<boolean>;
+  /** Cover capture hook for HTML snapshot files; tests can avoid launching Chrome. */
+  captureCover?: typeof captureCover;
 }
 
 type Handler = (
@@ -194,6 +196,7 @@ const routes: Route[] = [
           ...p,
           hasArtifact: existsSync(join(projectDir(dataDir, p.id), "index.html")),
           coverUrl: existsSync(join(projectDir(dataDir, p.id), ".cover.png")) ? `/api/projects/${p.id}/cover?t=${p.updatedAt}` : null,
+          runStatus: store.listRuns(p.id).find((r) => r.status === "running" || r.status === "pending")?.status ?? null,
         })),
       ),
   },
@@ -453,6 +456,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/projects/:id/versions/:runId/restore",
     handler: (_req, res, params, deps) => handleRestoreVersion(res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/versions/:runId/cover",
+    handler: (_req, res, params, deps) => handleSetVersionCover(res, params, deps),
   },
   {
     method: "POST",

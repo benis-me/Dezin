@@ -11,6 +11,7 @@ import type { ServerResponse } from "node:http";
 import { sendJson, sendError } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import type { AppDeps } from "./app.ts";
+import { captureCover } from "./capture-cover.ts";
 
 function snapshotPath(deps: AppDeps, projectId: string, runId: string): string {
   // runId is path-segment-safe (a UUID); guard against traversal anyway.
@@ -37,4 +38,13 @@ export async function handleRestoreVersion(res: ServerResponse, params: Record<s
   const html = await readFile(file, "utf8");
   await writeFile(join(projectDir(deps.dataDir, params.id!), "index.html"), html, "utf8");
   sendJson(res, 200, { ok: true });
+}
+
+export async function handleSetVersionCover(res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+  if (!deps.store.getProject(params.id!)) return sendError(res, 404, "project not found");
+  const file = snapshotPath(deps, params.id!, params.runId!);
+  if (!existsSync(file)) return sendError(res, 404, "no snapshot for this run");
+  const outPath = join(projectDir(deps.dataDir, params.id!), ".cover.png");
+  const captured = await (deps.captureCover ?? captureCover)(file, outPath);
+  sendJson(res, 200, { captured });
 }

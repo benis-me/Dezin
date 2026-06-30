@@ -98,6 +98,21 @@ Do not fake photographs, videos, product shots, venue shots, or human imagery wi
 SVG, DOM, CSS gradients, or vector doodles. If no suitable real media can be found
 or used, use a minimal neutral placeholder instead of pretending it is real media.`;
 
+const ASK_USER_QUESTION = `## AskUserQuestion
+
+If one missing fact blocks a good artifact and cannot be inferred responsibly from
+the current conversation, ask exactly one concise question with this control marker:
+
+\`\`\`
+<dezin-ask-user-question>
+Your question here
+</dezin-ask-user-question>
+\`\`\`
+
+Use AskUserQuestion only for blocking product/content choices, required credentials,
+or missing local material the user explicitly referenced. Do not use it for ordinary
+style taste, layout preference, or low-risk assumptions. Stop after the closing marker.`;
+
 function renderLibraryRouting(libraries: string[], mode: ComposeInput["mode"]): string | null {
   const available = Array.from(new Set(libraries.map((l) => l.trim()).filter(Boolean)));
   if (available.length === 0) return null;
@@ -157,6 +172,7 @@ export function composeSystemPrompt(input: ComposeInput = {}): string {
 
   parts.push(FONTS);
   parts.push(ASSET_SOURCING);
+  parts.push(ASK_USER_QUESTION);
 
   if (input.craft && input.craft.trim()) {
     parts.push(

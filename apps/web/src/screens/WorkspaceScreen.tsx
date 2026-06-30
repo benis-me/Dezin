@@ -89,13 +89,17 @@ interface ResultMeta {
   score?: number | null;
   rounds?: number;
   error?: boolean;
+  status?: "done" | "stopped" | "failed";
 }
 interface Msg {
   id: number;
-  kind: "user" | "assistant" | "result" | "process";
+  kind: "user" | "assistant" | "result" | "process" | "question";
   text: string;
   meta?: ResultMeta;
   steps?: string[];
+  items?: LiveItem[];
+  elapsedMs?: number;
+  runId?: string;
   /** DB createdAt — used to link a Versions run back to its triggering message. */
   at?: number;
 }
@@ -142,7 +146,18 @@ function normalizeResultMeta(value: unknown): ResultMeta | undefined {
   if (typeof value.score === "number" || value.score === null) meta.score = value.score;
   if (typeof value.rounds === "number") meta.rounds = value.rounds;
   if (typeof value.error === "boolean") meta.error = value.error;
+  if (value.status === "done" || value.status === "stopped" || value.status === "failed") meta.status = value.status;
   return meta;
+}
+
+function normalizeLiveItems(value: unknown): LiveItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): LiveItem[] => {
+    if (!isRecord(item)) return [];
+    if (item.type === "text" && typeof item.text === "string" && item.text.trim()) return [{ type: "text", text: item.text }];
+    if (item.type === "tool" && typeof item.summary === "string" && item.summary.trim()) return [{ type: "tool", summary: item.summary }];
+    return [];
+  });
 }
 
 function briefToName(brief: string): string {
@@ -161,6 +176,20 @@ function toMsg(m: Message, id: number): Msg {
       const parsed = JSON.parse(m.content) as unknown;
       if (isRecord(parsed) && isRecord(parsed.result) && typeof parsed.result.text === "string") {
         return { id, kind: "result", text: parsed.result.text, meta: normalizeResultMeta(parsed.result.meta), at: m.createdAt };
+      }
+      if (isRecord(parsed) && isRecord(parsed.question) && typeof parsed.question.text === "string") {
+        return {
+          id,
+          kind: "question",
+          text: parsed.question.text,
+          runId: typeof parsed.question.runId === "string" ? parsed.question.runId : undefined,
+          at: m.createdAt,
+        };
+      }
+      if (isRecord(parsed) && isRecord(parsed.process)) {
+        const items = normalizeLiveItems(parsed.process.items);
+        const elapsedMs = typeof parsed.process.elapsedMs === "number" ? parsed.process.elapsedMs : undefined;
+        return { id, kind: "process", text: "", items, elapsedMs, at: m.createdAt };
       }
       if (isRecord(parsed) && Array.isArray(parsed.steps)) return { id, kind: "process", text: "", steps: parsed.steps as string[], at: m.createdAt };
     } catch {
@@ -654,22 +683,39 @@ function MarkUpPopover({
   );
 }
 
-/** A collapsed record of the agent's build steps — kept in the transcript, expandable. */
-function ProcessRecord({ steps }: { steps: string[] }) {
+function formatElapsed(ms?: number): string {
+  if (!ms || ms < 1000) return "";
+  const total = Math.max(1, Math.round(ms / 1000));
+  const min = Math.floor(total / 60);
+  const sec = total % 60;
+  return min > 0 ? `${min}m ${sec.toString().padStart(2, "0")}s` : `${sec}s`;
+}
+
+function liveText(items: LiveItem[]): string {
+  return items
+    .filter((i): i is { type: "text"; text: string } => i.type === "text")
+    .map((i) => i.text)
+    .join("")
+    .trim();
+}
+
+/** A collapsed record of the agent's process or build steps, kept in the transcript. */
+function ProcessRecord({ steps = [], items = [], elapsedMs }: { steps?: string[]; items?: LiveItem[]; elapsedMs?: number }) {
   const [open, setOpen] = useState(false);
+  const process = items.length > 0;
+  const elapsed = formatElapsed(elapsedMs);
+  const label = process ? `Processed${elapsed ? ` ${elapsed}` : ""}` : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card/60">
+    <div className="overflow-hidden rounded-lg border border-border bg-card/60">
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
         <ChevronRight size={13} strokeWidth={2} className={`transition-transform duration-200 ${open ? "rotate-90" : ""}`} />
         <Check size={13} strokeWidth={2.5} className="text-success" />
-        <span className="font-medium">
-          {steps.length} step{steps.length === 1 ? "" : "s"}
-        </span>
+        <span className="font-medium">{label}</span>
       </button>
       <AnimatePresence initial={false}>
         {open ? (
@@ -680,14 +726,31 @@ function ProcessRecord({ steps }: { steps: string[] }) {
             transition={{ duration: 0.22, ease: [0.25, 1, 0.5, 1] }}
             className="overflow-hidden"
           >
-            <ul className="space-y-1.5 border-t border-border px-3 py-2.5">
-              {steps.map((s, i) => (
-                <li key={i} className="flex items-center gap-2 font-mono text-[11px] text-foreground-2">
-                  <Check size={12} strokeWidth={2.5} className="shrink-0 text-success/70" />
-                  <span className="truncate">{s}</span>
-                </li>
-              ))}
-            </ul>
+            {process ? (
+              <div className="space-y-2 border-t border-border px-3 py-2.5">
+                {items.map((item, i) =>
+                  item.type === "text" ? (
+                    <div key={i} className="text-sm leading-relaxed text-foreground-2">
+                      <Markdown>{item.text}</Markdown>
+                    </div>
+                  ) : (
+                    <div key={i} className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                      <span aria-hidden className="size-1 shrink-0 rounded-full bg-muted-foreground/60" />
+                      <span className="truncate">{item.summary}</span>
+                    </div>
+                  ),
+                )}
+              </div>
+            ) : (
+              <ul className="space-y-1.5 border-t border-border px-3 py-2.5">
+                {steps.map((s, i) => (
+                  <li key={i} className="flex items-center gap-2 font-mono text-[11px] text-foreground-2">
+                    <Check size={12} strokeWidth={2.5} className="shrink-0 text-success/70" />
+                    <span className="truncate">{s}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </motion.div>
         ) : null}
       </AnimatePresence>
@@ -698,33 +761,73 @@ function ProcessRecord({ steps }: { steps: string[] }) {
 function ResultCard({ text, meta, onView }: { text: string; meta?: ResultMeta; onView: () => void }) {
   const error = meta?.error;
   const score = meta?.score;
+  const stopped = meta?.status === "stopped" || text === "Stopped.";
+  const label = stopped ? "Stopped" : text;
   return (
-    <div className={`rounded-xl border p-3 ${error ? "border-destructive/40 bg-destructive/5" : "border-border bg-card"}`}>
-      <div className="flex items-start gap-2.5">
+    <div className={`rounded-lg border px-3 py-1.5 ${error ? "border-destructive/40 bg-destructive/5" : "border-border bg-card/70"}`}>
+      <div className="flex items-center gap-2.5">
         <span
-          className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-lg ${
-            error ? "bg-destructive/15 text-destructive" : "bg-success/15 text-success"
+          className={`grid h-5 w-5 shrink-0 place-items-center rounded-md ${
+            error ? "bg-destructive/15 text-destructive" : stopped ? "bg-surface-2 text-muted-foreground" : "bg-success/15 text-success"
           }`}
         >
-          {error ? <CircleAlert size={14} strokeWidth={2} /> : <Check size={14} strokeWidth={2.5} />}
+          {error ? <CircleAlert size={13} strokeWidth={2} /> : stopped ? <Square size={10} strokeWidth={2.5} /> : <Check size={13} strokeWidth={2.5} />}
+        </span>
+        <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{label}</p>
+        {!error ? (
+          <div className="flex shrink-0 items-center gap-2">
+            {typeof score === "number" ? (
+              <span className="tnum rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">{score}/100</span>
+            ) : null}
+            <button
+              type="button"
+              onClick={onView}
+              className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-foreground-2 transition-colors hover:bg-surface-2 hover:text-foreground"
+            >
+              View preview
+              <ChevronRight size={13} strokeWidth={2} />
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function QuestionCard({ question, onAnswer }: { question: string; onAnswer: (answer: string) => void }) {
+  const [answer, setAnswer] = useState("");
+  const send = (): void => {
+    const text = answer.trim();
+    if (!text) return;
+    setAnswer("");
+    onAnswer(text);
+  };
+  return (
+    <div className="rounded-lg border border-border bg-card/70 px-3 py-2">
+      <div className="flex items-start gap-2.5">
+        <span className="mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-md bg-surface-2 text-foreground">
+          <MousePointerClick size={12} strokeWidth={2} />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-foreground">{text}</p>
-          {!error ? (
-            <div className="mt-2 flex items-center gap-2">
-              {typeof score === "number" ? (
-                <span className="tnum rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">{score}/100</span>
-              ) : null}
-              <button
-                type="button"
-                onClick={onView}
-                className="inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-foreground-2 transition-colors hover:bg-surface-2 hover:text-foreground"
-              >
-                View preview
-                <ChevronRight size={13} strokeWidth={2} />
-              </button>
-            </div>
-          ) : null}
+          <p className="text-sm font-medium text-foreground">{question}</p>
+          <div className="mt-2 flex items-end gap-2">
+            <textarea
+              aria-label="Answer question"
+              rows={1}
+              value={answer}
+              onChange={(e) => setAnswer(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+              className="field-sizing-content max-h-24 min-h-8 flex-1 resize-none rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+            />
+            <Button size="sm" onClick={send} disabled={!answer.trim()}>
+              Send answer
+            </Button>
+          </div>
         </div>
       </div>
     </div>
@@ -810,11 +913,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const activeConv = useRef<string | null>(null);
   const modeRef = useRef<ProjectMode>("prototype");
   const liveItemsRef = useRef<LiveItem[]>([]);
+  const currentTurnTextRef = useRef("");
+  const finalSummaryTextRef = useRef("");
   const gotTurnText = useRef(false);
   const stickBottom = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
   const runningRef = useRef(false);
   const activeRunIdRef = useRef<string | null>(null);
+  const runStartedAtRef = useRef<number | null>(null);
   const terminalEventRef = useRef(false);
   const liveQualityRef = useRef(false);
   const reattachedRunsRef = useRef<Set<string>>(new Set());
@@ -842,6 +948,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setShowScrollToBottom(false);
   }, []);
 
+  const scheduleScrollChatToBottom = useCallback(
+    (behavior: ScrollBehavior = "auto"): void => {
+      scrollChatToBottom(behavior);
+      requestAnimationFrame(() => scrollChatToBottom(behavior));
+      window.setTimeout(() => scrollChatToBottom(behavior), 80);
+    },
+    [scrollChatToBottom],
+  );
+
   const updateChatBottomState = useCallback((): void => {
     const el = chatScrollRef.current;
     if (!el) return;
@@ -856,6 +971,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setShowScrollToBottom(false);
     msgId.current = 0;
     setMessages(prior.map((m) => toMsg(m, msgId.current++)));
+    scheduleScrollChatToBottom("auto");
   };
 
   const loadFiles = async (): Promise<void> => {
@@ -962,29 +1078,44 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
+  const setVersionCover = async (runId: string): Promise<void> => {
+    try {
+      const result = await api.setVersionCover(projectId, runId);
+      toast(result.captured ? "Set that version as the project cover." : "Couldn't capture that version as a cover.", {
+        variant: result.captured ? undefined : "error",
+      });
+    } catch {
+      toast("Couldn't set that version as the cover.", { variant: "error" });
+    }
+  };
+
   const pushResult = (text: string, meta: ResultMeta): void =>
     setMessages((m) => [...m, { id: msgId.current++, kind: "result", text, meta }]);
 
-  // Turn the live (interleaved) stream into the transcript: prose → an assistant message,
-  // tool calls → a collapsible process record. Used on completion and on a Stop.
-  const materializeLive = (): void => {
+  // Turn the live (interleaved) stream into the transcript: a collapsed process record,
+  // then visible prose, then a compact steps summary. Used on completion and Stop.
+  const materializeLive = ({ emitSummary = true }: { emitSummary?: boolean } = {}): string => {
     const items = liveItemsRef.current;
-    const text = items
-      .filter((i): i is { type: "text"; text: string } => i.type === "text")
-      .map((i) => i.text)
-      .join("\n\n")
-      .trim();
+    if (!items.length) return "";
+    const text = finalSummaryTextRef.current.trim() || liveText(items);
     const steps = items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool").map((i) => i.summary);
-    if (text) setMessages((m) => [...m, { id: msgId.current++, kind: "assistant", text }]);
-    if (steps.length) setMessages((m) => [...m, { id: msgId.current++, kind: "process", text: "", steps }]);
+    const elapsedMs = runStartedAtRef.current ? Date.now() - runStartedAtRef.current : undefined;
+    const next: Msg[] = [{ id: msgId.current++, kind: "process", text: "", items: [...items], elapsedMs }];
+    if (emitSummary && text) next.push({ id: msgId.current++, kind: "assistant", text });
+    if (steps.length) next.push({ id: msgId.current++, kind: "process", text: "", steps });
+    setMessages((m) => [...m, ...next]);
     liveItemsRef.current = [];
+    currentTurnTextRef.current = "";
+    finalSummaryTextRef.current = "";
     setLiveItems([]);
+    return text;
   };
 
   const handleEvent = (ev: RunEvent, id: string): void => {
     switch (ev.type) {
       case "run-start":
         terminalEventRef.current = false;
+        runStartedAtRef.current = Date.now();
         if (typeof ev.runId === "string") activeRunIdRef.current = ev.runId;
         if (typeof ev.conversationId === "string") {
           const cid = ev.conversationId;
@@ -998,12 +1129,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         liveQualityRef.current = false;
         setLiveItems([]);
         liveItemsRef.current = [];
+        currentTurnTextRef.current = "";
+        finalSummaryTextRef.current = "";
         gotTurnText.current = false;
         stickBottom.current = true;
         setLiveStatus("Starting…");
         break;
       case "turn-start":
         gotTurnText.current = false;
+        currentTurnTextRef.current = "";
         setLiveStatus(ev.isRepair ? "Repairing the artifact…" : "Generating…");
         break;
       case "preview-update":
@@ -1023,6 +1157,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           setLiveItems(liveItemsRef.current);
         } else if (a?.kind === "text" && a.text) {
           gotTurnText.current = true;
+          currentTurnTextRef.current += a.text;
+          finalSummaryTextRef.current = currentTurnTextRef.current.trim();
           liveItemsRef.current =
             last?.type === "text" ? [...arr.slice(0, -1), { type: "text", text: last.text + a.text }] : [...arr, { type: "text", text: a.text }];
           setLiveItems(liveItemsRef.current);
@@ -1034,6 +1170,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         if (typeof ev.text === "string" && ev.text && !gotTurnText.current) {
           liveItemsRef.current = [...liveItemsRef.current, { type: "text", text: ev.text }];
           setLiveItems(liveItemsRef.current);
+          finalSummaryTextRef.current = ev.text.trim();
+        } else if (gotTurnText.current) {
+          finalSummaryTextRef.current = (currentTurnTextRef.current || (typeof ev.text === "string" ? ev.text : "")).trim();
         }
         gotTurnText.current = false;
         break;
@@ -1061,7 +1200,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             : ev.passed
               ? `Done${quality}${fixes}.`
               : `Done, with remaining issues${quality}.`,
-          { passed: !!ev.passed, score: s, rounds },
+          { passed: !!ev.passed, score: s, rounds, status: "done" },
         );
         if (modeRef.current === "standard") void loadDevPreview();
         else setPreviewSrc(`${api.previewUrl(id)}?t=${Date.now()}`);
@@ -1075,16 +1214,38 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         terminalEventRef.current = true;
         activeRunIdRef.current = null;
         setLiveStatus(null);
+        materializeLive();
         setLiveItems([]);
         liveItemsRef.current = [];
+        currentTurnTextRef.current = "";
+        finalSummaryTextRef.current = "";
         pushResult(`The run failed: ${typeof ev.message === "string" ? ev.message : "generation failed"}`, { error: true });
         break;
+      case "ask-user-question": {
+        const question = typeof ev.question === "string" ? ev.question.trim() : "";
+        if (question) {
+          materializeLive({ emitSummary: false });
+          setMessages((m) => [
+            ...m,
+            { id: msgId.current++, kind: "question", text: question, runId: typeof ev.runId === "string" ? ev.runId : undefined },
+          ]);
+        }
+        setLiveStatus(null);
+        break;
+      }
       case "run-cancelled":
         terminalEventRef.current = true;
         activeRunIdRef.current = null;
         setLiveStatus(null);
-        materializeLive();
-        pushResult("Stopped.", {});
+        if (ev.reason === "question") {
+          liveItemsRef.current = [];
+          currentTurnTextRef.current = "";
+          finalSummaryTextRef.current = "";
+          setLiveItems([]);
+        } else {
+          materializeLive();
+          pushResult("Stopped", { status: "stopped" });
+        }
         break;
       default:
         break;
@@ -1115,6 +1276,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       if (!ctrl.signal.aborted) {
         setLiveItems([]);
         liveItemsRef.current = [];
+        currentTurnTextRef.current = "";
+        finalSummaryTextRef.current = "";
         pushResult(`Couldn't reconnect: ${err instanceof Error ? err.message : "stream unavailable"}`, { error: true });
       }
     } finally {
@@ -1162,17 +1325,23 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         ctrl.signal,
       );
       for await (const ev of stream) handleEvent(ev, projectId);
+      if (ctrl.signal.aborted && !terminalEventRef.current) {
+        materializeLive();
+        pushResult("Stopped", { status: "stopped" });
+      }
     } catch (err) {
       setLiveStatus(null);
       if (ctrl.signal.aborted) {
         // User pressed Stop — keep what was generated so far, note the stop, no error.
         if (!terminalEventRef.current) {
           materializeLive();
-          pushResult("Stopped.", {});
+          pushResult("Stopped", { status: "stopped" });
         }
       } else {
         setLiveItems([]);
         liveItemsRef.current = [];
+        currentTurnTextRef.current = "";
+        finalSummaryTextRef.current = "";
         pushResult(`The run failed: ${err instanceof Error ? err.message : "run failed"}`, { error: true });
         toast("The run failed.", { variant: "error" });
       }
@@ -1186,6 +1355,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const stop = (): void => {
     const runId = activeRunIdRef.current;
+    materializeLive();
     if (runId) void api.cancelRun(runId).catch(() => {});
     abortRef.current?.abort();
   };
@@ -1746,7 +1916,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     ) : m.kind === "assistant" ? (
                       <Markdown>{m.text}</Markdown>
                     ) : m.kind === "process" ? (
-                      <ProcessRecord steps={m.steps ?? []} />
+                      <ProcessRecord steps={m.steps} items={m.items} elapsedMs={m.elapsedMs} />
+                    ) : m.kind === "question" ? (
+                      <QuestionCard question={m.text} onAnswer={(answer) => void runBrief(answer)} />
                     ) : (
                       <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} />
                     )}
@@ -2218,6 +2390,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                                 </Button>
                                 <Button variant="ghost" size="sm" aria-label={`View ${group.name} ${label}`} onClick={() => viewVersion(r.id)}>
                                   View
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  aria-label={`Set ${group.name} ${label} as cover`}
+                                  onClick={() => void setVersionCover(r.id)}
+                                >
+                                  Cover
                                 </Button>
                                 {!isCurrent ? (
                                   <>

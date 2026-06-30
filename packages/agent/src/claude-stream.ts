@@ -24,12 +24,29 @@ export interface ParsedClaudeStream {
   sessionId: string | null;
 }
 
+export interface AskUserQuestionExtraction {
+  /** Assistant text with the Dezin control marker removed. */
+  text: string;
+  /** The question to show in Dezin's AskUserQuestion card, if present. */
+  question: string | null;
+}
+
 function asObject(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === "object" ? (v as Record<string, unknown>) : null;
 }
 
 function str(v: unknown): string | null {
   return typeof v === "string" ? v : null;
+}
+
+const ASK_USER_QUESTION_RE = /<dezin-ask-user-question>([\s\S]*?)<\/dezin-ask-user-question>/i;
+
+export function extractAskUserQuestion(text: string): AskUserQuestionExtraction {
+  const match = text.match(ASK_USER_QUESTION_RE);
+  if (!match || match.index === undefined) return { text: text.trim(), question: null };
+  const question = (match[1] ?? "").trim();
+  const stripped = `${text.slice(0, match.index)}${text.slice(match.index + match[0].length)}`.trim();
+  return { text: stripped, question: question || null };
 }
 
 /** A live step in the agent's process, surfaced to the UI as it happens. */

@@ -104,6 +104,32 @@ test("opening a standard workspace backfills a missing cover from the dev previe
   await waitFor(() => expect(captureProjectCover).toHaveBeenCalledWith("p1"));
 });
 
+test("opening a project scrolls the restored conversation to the bottom", async () => {
+  const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1200);
+  const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(300);
+  try {
+    render(
+      <ApiProvider
+        client={makeFakeApi({
+          listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+          listMessages: async () => [
+            { id: "m1", conversationId: "c1", role: "user", content: "old question", createdAt: 1 },
+            { id: "m2", conversationId: "c1", role: "assistant", content: "old answer", createdAt: 2 },
+          ],
+        })}
+      >
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    const scroller = await screen.findByTestId("conversation-scroll");
+    await waitFor(() => expect(scroller.scrollTop).toBe(1200));
+  } finally {
+    scrollHeight.mockRestore();
+    clientHeight.mockRestore();
+  }
+});
+
 test("sending a brief streams events into the chat and shows the preview + export menu", async () => {
   const user = userEvent.setup();
   const fake = makeFakeApi({
@@ -150,6 +176,68 @@ test("sending a brief streams events into the chat and shows the preview + expor
   expect(source).toHaveAttribute("href", "/api/projects/p1/export");
   const full = screen.getByRole("menuitem", { name: "Full project ZIP" });
   expect(full).toHaveAttribute("href", "/api/projects/p1/export?scope=full");
+});
+
+test("completed runs collapse the interleaved process above the final summary", async () => {
+  const user = userEvent.setup();
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-process", conversationId: "c1" };
+      yield { type: "activity", activity: { kind: "text", text: "Drafted the hero." } };
+      yield { type: "activity", activity: { kind: "tool", name: "Edit", summary: "Editing App.tsx" } };
+      yield { type: "activity", activity: { kind: "text", text: " Tightened the layout." } };
+      yield { type: "run-done", runId: "r-process", passed: true, rounds: 0, score: 100, previewUrl: "/projects/p1/preview/", findings: [] };
+    },
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make a hero" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  expect(await screen.findByRole("button", { name: /Processed/ })).toBeInTheDocument();
+  expect(screen.getByText("Drafted the hero. Tightened the layout.")).toBeInTheDocument();
+  expect(screen.queryByText("Editing App.tsx")).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: /Processed/ }));
+  expect(await screen.findByText("Editing App.tsx")).toBeInTheDocument();
+});
+
+test("agent questions render as answerable transcript cards", async () => {
+  const user = userEvent.setup();
+  const streamRun = vi.fn((input: { brief?: string }) =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      if (input.brief === "Use the annual plan") {
+        yield { type: "run-start", runId: "r-answer", conversationId: "c1" };
+        yield { type: "turn-end", round: 0, text: "Continuing with annual." };
+        yield { type: "run-done", runId: "r-answer", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+        return;
+      }
+      yield { type: "run-start", runId: "r-question", conversationId: "c1" };
+      yield { type: "ask-user-question", runId: "r-question", question: "Which billing plan should the pricing page feature?" };
+      yield { type: "run-cancelled", runId: "r-question", reason: "question" };
+    })(),
+  );
+
+  render(
+    <ApiProvider client={makeFakeApi({ streamRun: streamRun as never })}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make a pricing page" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  expect(await screen.findByText("Which billing plan should the pricing page feature?")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Answer question"), { target: { value: "Use the annual plan" } });
+  await user.click(screen.getByRole("button", { name: "Send answer" }));
+
+  await waitFor(() => expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ brief: "Use the annual plan", conversationId: "c1" }), expect.anything()));
+  expect(await screen.findByText("Continuing with annual.")).toBeInTheDocument();
 });
 
 test("mount reattaches the latest running run and replays its stream", async () => {
@@ -209,6 +297,8 @@ test("Stop explicitly cancels the active daemon run", async () => {
   const fake = makeFakeApi({
     streamRun: async function* (_input, signal): AsyncGenerator<RunEvent> {
       yield { type: "run-start", runId: "r-stop", conversationId: "c1" };
+      yield { type: "activity", activity: { kind: "text", text: "Partial output before stop." } };
+      yield { type: "activity", activity: { kind: "tool", name: "Edit", summary: "Editing hero.tsx" } };
       await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
     },
     cancelRun,
@@ -225,6 +315,9 @@ test("Stop explicitly cancels the active daemon run", async () => {
   fireEvent.click(await screen.findByLabelText("Stop"));
 
   await waitFor(() => expect(cancelRun).toHaveBeenCalledWith("r-stop"));
+  expect(await screen.findByRole("button", { name: /Processed/ })).toBeInTheDocument();
+  expect(screen.getByText("Partial output before stop.")).toBeInTheDocument();
+  expect(await screen.findByText("Stopped")).toBeInTheDocument();
 });
 
 test("queued prompts survive remount and drain on the next workspace entry", async () => {
@@ -598,8 +691,9 @@ test("the Files tab lists project files and previews the selected file's source"
   expect(await screen.findByText(/--accent:#101010/)).toBeInTheDocument();
 });
 
-test("the Versions tab groups branch versions with View + Restore", async () => {
+test("the Versions tab groups branch versions with View, set cover, and Restore", async () => {
   const restoreVersion = vi.fn(async () => {});
+  const setVersionCover = vi.fn(async () => ({ captured: true }));
   const fake = makeFakeApi({
     listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
     listMessages: async () => [],
@@ -612,6 +706,7 @@ test("the Versions tab groups branch versions with View + Restore", async () => 
       { id: "r1", variantId: "main", status: "succeeded" as const, score: 92, repairRounds: 1, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
     ],
     restoreVersion,
+    setVersionCover,
   });
   render(
     <ApiProvider client={fake}>
@@ -623,6 +718,8 @@ test("the Versions tab groups branch versions with View + Restore", async () => 
   expect(await screen.findByText("Main")).toBeInTheDocument();
   expect((await screen.findAllByText("Exploration")).length).toBeGreaterThan(0);
   expect(await screen.findByText("92/100")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Set Main v1 as cover" }));
+  await waitFor(() => expect(setVersionCover).toHaveBeenCalledWith("p1", "r1"));
   // the active branch's newest version has no Restore (it IS current); the older branch version does
   fireEvent.click(screen.getByRole("button", { name: "Restore Main v1" }));
   await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith("p1", "r1"));
