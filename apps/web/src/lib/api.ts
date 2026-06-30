@@ -66,6 +66,72 @@ export interface CreateProjectInput {
   mode?: ProjectMode;
 }
 
+export type MoodboardNodeType = "image" | "note" | "section" | "video";
+
+export interface Moodboard {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  archivedAt?: number | null;
+  coverAssetId?: string | null;
+  coverUrl?: string | null;
+}
+
+export interface MoodboardAsset {
+  id: string;
+  boardId: string;
+  kind: "image" | "video";
+  fileName: string;
+  mimeType: string;
+  width: number | null;
+  height: number | null;
+  source: "upload" | "generated";
+  createdAt: number;
+  url?: string;
+}
+
+export interface MoodboardNode {
+  id: string;
+  boardId: string;
+  type: MoodboardNodeType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  zIndex: number;
+  data: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SaveMoodboardNodeInput {
+  id?: string;
+  type: MoodboardNodeType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation?: number;
+  zIndex?: number;
+  data?: Record<string, unknown>;
+}
+
+export interface MoodboardMessage {
+  id: string;
+  boardId: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  createdAt: number;
+}
+
+export interface MoodboardDetail extends Moodboard {
+  assets: MoodboardAsset[];
+  nodes: MoodboardNode[];
+  messages: MoodboardMessage[];
+}
+
 export interface RunInput {
   projectId: string;
   brief: string;
@@ -126,6 +192,9 @@ export interface Settings {
   imageApiBaseUrl: string;
   imageApiKey: string;
   imageModel: string;
+  videoApiBaseUrl: string;
+  videoApiKey: string;
+  videoModel: string;
   visualQaEnabled: boolean;
 }
 
@@ -281,6 +350,24 @@ export interface ApiClient {
   variantPreviewUrl(id: string, vid: string): string;
   exportUrl(id: string, scope?: "source" | "full"): string;
   importProject(file: Blob): Promise<Project>;
+  listMoodboards(): Promise<Moodboard[]>;
+  createMoodboard(input: { name: string }): Promise<Moodboard>;
+  getMoodboard(id: string): Promise<MoodboardDetail>;
+  patchMoodboard(id: string, patch: Partial<Pick<Moodboard, "name" | "coverAssetId">> & { archived?: boolean }): Promise<Moodboard>;
+  deleteMoodboard(id: string): Promise<void>;
+  listMoodboardNodes(id: string): Promise<MoodboardNode[]>;
+  saveMoodboardNodes(id: string, nodes: SaveMoodboardNodeInput[]): Promise<MoodboardNode[]>;
+  listMoodboardMessages(id: string): Promise<MoodboardMessage[]>;
+  postMoodboardMessage(id: string, content: string): Promise<{ messages: MoodboardMessage[] }>;
+  uploadMoodboardAsset(
+    id: string,
+    input: { name: string; contentBase64: string; mimeType?: string; width?: number; height?: number },
+  ): Promise<MoodboardAsset & { url: string }>;
+  generateMoodboardImage(id: string, prompt: string, options?: { x?: number; y?: number }): Promise<{
+    asset: MoodboardAsset & { url: string };
+    nodes: MoodboardNode[];
+    messages: MoodboardMessage[];
+  }>;
   streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent>;
   /** Reattach to an in-flight (or finished) run: replays its events, then streams live. */
   reattachRun(runId: string, signal?: AbortSignal, options?: { afterSeq?: number }): AsyncGenerator<RunEvent>;
@@ -469,6 +556,23 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
         headers: { "content-type": "application/zip" },
         body: file,
       }),
+    listMoodboards: () => json<Moodboard[]>("/api/moodboards"),
+    createMoodboard: (input) => json<Moodboard>("/api/moodboards", jsonInit("POST", input)),
+    getMoodboard: (id) => json<MoodboardDetail>(`/api/moodboards/${enc(id)}`),
+    patchMoodboard: (id, patch) => json<Moodboard>(`/api/moodboards/${enc(id)}`, jsonInit("PATCH", patch)),
+    deleteMoodboard: (id) => json<void>(`/api/moodboards/${enc(id)}`, { method: "DELETE" }),
+    listMoodboardNodes: (id) => json<MoodboardNode[]>(`/api/moodboards/${enc(id)}/nodes`),
+    saveMoodboardNodes: (id, nodes) => json<MoodboardNode[]>(`/api/moodboards/${enc(id)}/nodes`, jsonInit("PUT", { nodes })),
+    listMoodboardMessages: (id) => json<MoodboardMessage[]>(`/api/moodboards/${enc(id)}/messages`),
+    postMoodboardMessage: (id, content) =>
+      json<{ messages: MoodboardMessage[] }>(`/api/moodboards/${enc(id)}/messages`, jsonInit("POST", { content })),
+    uploadMoodboardAsset: (id, input) =>
+      json<MoodboardAsset & { url: string }>(`/api/moodboards/${enc(id)}/assets`, jsonInit("POST", input)),
+    generateMoodboardImage: (id, prompt, options) =>
+      json<{ asset: MoodboardAsset & { url: string }; nodes: MoodboardNode[]; messages: MoodboardMessage[] }>(
+        `/api/moodboards/${enc(id)}/generate-image`,
+        jsonInit("POST", { prompt, ...options }),
+      ),
     streamRun,
     reattachRun,
     cancelRun: (runId) => json<{ cancelled: boolean }>(`/api/runs/${enc(runId)}/cancel`, { method: "POST" }),

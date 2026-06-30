@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { LayoutGrid, Moon, Shapes, Settings, Sun, type LucideIcon } from "lucide-react";
+import { Images, LayoutGrid, Moon, Shapes, Settings, Sun, type LucideIcon } from "lucide-react";
 import { useRoute, navigate, type Route } from "../router.tsx";
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
@@ -16,6 +16,7 @@ interface NavLink {
 
 const NAV: NavLink[] = [
   { label: "Home", path: "/", icon: LayoutGrid, match: (r) => r.name === "home" },
+  { label: "Moodboard", path: "/moodboards", icon: Images, match: (r) => r.name === "moodboards" || r.name === "moodboard" },
   { label: "Design systems", path: "/design-systems", icon: Shapes, match: (r) => r.name === "design-systems" },
 ];
 
@@ -39,7 +40,7 @@ export function Shell({
   onOpenSettings: (section?: string) => void;
 }) {
   const route = useRoute();
-  const inProject = route.name === "project";
+  const inProject = route.name === "project" || route.name === "moodboard";
   const sidebarPercent = readPanelPercent(SHELL_SIDEBAR_WIDTH_KEY, 18, 12, 28);
 
   return (
@@ -113,7 +114,7 @@ export function Shell({
           <Panel id={SHELL_CONTENT_PANEL} minSize="520px">
             <main className="relative h-full overflow-hidden">
               {/* Draggable title strip over the content top (screens without their own top bar). */}
-              {native?.isElectron && (route.name === "home" || route.name === "design-systems") ? (
+              {native?.isElectron && (route.name === "home" || route.name === "moodboards" || route.name === "design-systems") ? (
                 <div className="app-drag absolute inset-x-0 top-0 z-30 h-8" aria-hidden />
               ) : null}
               {children}

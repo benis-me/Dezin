@@ -13,6 +13,8 @@ import { DesignSystemDetailScreen } from "./screens/DesignSystemDetailScreen.tsx
 import { DesignSystemNewScreen } from "./screens/DesignSystemNewScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
 import { OnboardingScreen } from "./screens/OnboardingScreen.tsx";
+import { MoodboardsScreen } from "./screens/MoodboardsScreen.tsx";
+import { MoodboardScreen } from "./screens/MoodboardScreen.tsx";
 
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
@@ -25,6 +27,10 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
   switch (route.name) {
     case "project":
       return <WorkspaceScreen projectId={route.id} onOpenSettings={onOpenSettings} />;
+    case "moodboards":
+      return <MoodboardsScreen onOpenBoard={(id) => navigate(`/moodboards/${id}`)} />;
+    case "moodboard":
+      return <MoodboardScreen boardId={route.id} onBack={() => navigate("/moodboards")} onOpenSettings={onOpenSettings} />;
     case "design-systems":
       return <DesignSystemsScreen />;
     case "design-system":

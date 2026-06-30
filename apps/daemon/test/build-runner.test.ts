@@ -15,6 +15,9 @@ function settings(over: Partial<Settings>): Settings {
     imageApiBaseUrl: "",
     imageApiKey: "",
     imageModel: "",
+    videoApiBaseUrl: "",
+    videoApiKey: "",
+    videoModel: "",
     visualQaEnabled: false,
     ...over,
   };

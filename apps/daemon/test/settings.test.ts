@@ -38,6 +38,7 @@ test("GET /api/settings returns defaults", async () => {
     assert.equal(s.defaultDesignSystemId, "modern-minimal");
     assert.equal(s.model, "");
     assert.equal(s.visualQaEnabled, false);
+    assert.equal(s.videoModel, "");
   });
 });
 
@@ -47,17 +48,20 @@ test("PUT /api/settings merges and persists", async () => {
       agentCommand: "codex",
       model: "o3",
       apiKey: "sk-local",
+      videoModel: "sora",
       visualQaEnabled: true,
     });
     assert.equal(res.status, 200);
     const updated = (await res.json()) as Record<string, unknown>;
     assert.equal(updated.agentCommand, "codex");
     assert.equal(updated.model, "o3");
+    assert.equal(updated.videoModel, "sora");
     assert.equal(updated.visualQaEnabled, true);
 
     const fetched = await getSettings(base);
     assert.equal(fetched.agentCommand, "codex");
     assert.equal(fetched.apiKey, "sk-local");
+    assert.equal(fetched.videoModel, "sora");
     assert.equal(fetched.visualQaEnabled, true);
     assert.equal(fetched.defaultDesignSystemId, "modern-minimal"); // untouched default
   });

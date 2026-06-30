@@ -254,6 +254,9 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
     imageApiBaseUrl: "",
     imageApiKey: "",
     imageModel: "",
+    videoApiBaseUrl: "",
+    videoApiKey: "",
+    videoModel: "",
     visualQaEnabled: false,
   };
   render(
@@ -288,6 +291,9 @@ function renderSettings(over = {}) {
     imageApiBaseUrl: "",
     imageApiKey: "",
     imageModel: "",
+    videoApiBaseUrl: "",
+    videoApiKey: "",
+    videoModel: "",
     visualQaEnabled: false,
     ...p,
   }));
@@ -304,7 +310,7 @@ function renderSettings(over = {}) {
 
 test("SettingsScreen sidebar lists sections; Provider + Defaults show daemon data", async () => {
   renderSettings();
-  for (const name of ["Appearance", "Provider", "Connection", "Quality", "Defaults", "Custom instructions", "About"]) {
+  for (const name of ["Appearance", "Provider", "Connection", "Media", "Quality", "Defaults", "Custom instructions", "About"]) {
     expect(screen.getByRole("button", { name })).toBeInTheDocument();
   }
   fireEvent.click(screen.getByRole("button", { name: "Provider" }));

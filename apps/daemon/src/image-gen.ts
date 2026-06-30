@@ -30,7 +30,7 @@ function decodeEntities(s: string): string {
 }
 
 /** One image via the OpenAI Images-compatible endpoint; returns base64 PNG. */
-async function requestImage(opts: ImageGenOpts, prompt: string, fetchImpl: FetchLike): Promise<string> {
+export async function requestImage(opts: ImageGenOpts, prompt: string, fetchImpl: FetchLike): Promise<string> {
   const res = await fetchImpl(`${opts.baseUrl.replace(/\/$/, "")}/images/generations`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },

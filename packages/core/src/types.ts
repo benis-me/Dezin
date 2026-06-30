@@ -98,6 +98,68 @@ export interface Artifact {
   createdAt: number;
 }
 
+export type MoodboardNodeType = "image" | "note" | "section" | "video";
+
+export interface Moodboard {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  archivedAt: number | null;
+  coverAssetId: string | null;
+}
+
+export interface MoodboardNode {
+  id: string;
+  boardId: string;
+  type: MoodboardNodeType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  zIndex: number;
+  data: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MoodboardAsset {
+  id: string;
+  boardId: string;
+  kind: "image" | "video";
+  fileName: string;
+  mimeType: string;
+  width: number | null;
+  height: number | null;
+  source: "upload" | "generated";
+  createdAt: number;
+}
+
+export interface MoodboardMessage {
+  id: string;
+  boardId: string;
+  role: MessageRole;
+  content: string;
+  createdAt: number;
+}
+
+export interface CreateMoodboardInput {
+  name: string;
+}
+
+export interface SaveMoodboardNodeInput {
+  id?: string;
+  type: MoodboardNodeType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation?: number;
+  zIndex?: number;
+  data?: Record<string, unknown>;
+}
+
 export interface CreateProjectInput {
   name: string;
   skillId?: string | null;
@@ -125,6 +187,12 @@ export interface Settings {
   imageApiKey: string;
   /** Optional image model, e.g. "gpt-image-1" / "dall-e-3". */
   imageModel: string;
+  /** Optional video-generation endpoint. Reserved for Moodboard video generation. */
+  videoApiBaseUrl: string;
+  /** Optional video-generation API key. Stored locally; never leaves the machine. */
+  videoApiKey: string;
+  /** Optional video model, e.g. "sora". */
+  videoModel: string;
   /** When enabled, the selected Agent/model reviews a rendered screenshot after prototype runs. */
   visualQaEnabled: boolean;
 }

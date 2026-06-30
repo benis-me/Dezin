@@ -77,6 +77,57 @@ test("project CRUD over HTTP", async () => {
   });
 });
 
+test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
+  await withServer(async ({ base }) => {
+    assert.deepEqual(await (await fetch(`${base}/api/moodboards`)).json(), []);
+
+    const created = await fetch(`${base}/api/moodboards`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "References" }),
+    });
+    assert.equal(created.status, 201);
+    const board = (await created.json()) as { id: string; name: string };
+    assert.equal(board.name, "References");
+
+    const upload = await fetch(`${base}/api/moodboards/${board.id}/assets`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "shot.png", mimeType: "image/png", contentBase64: Buffer.from("png").toString("base64") }),
+    });
+    assert.equal(upload.status, 201);
+    const asset = (await upload.json()) as { id: string; url: string };
+    assert.ok(asset.url.includes(asset.id));
+
+    const assetRes = await fetch(`${base}${asset.url}`);
+    assert.equal(assetRes.status, 200);
+    assert.equal(await assetRes.text(), "png");
+
+    const nodesRes = await fetch(`${base}/api/moodboards/${board.id}/nodes`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        nodes: [{ type: "image", x: 10, y: 20, width: 320, height: 240, data: { assetId: asset.id, url: asset.url } }],
+      }),
+    });
+    assert.equal(nodesRes.status, 200);
+    const nodes = (await nodesRes.json()) as Array<{ type: string; data: { assetId?: string } }>;
+    assert.equal(nodes.length, 1);
+    assert.equal(nodes[0]?.data.assetId, asset.id);
+
+    const message = await fetch(`${base}/api/moodboards/${board.id}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "Use calmer references" }),
+    });
+    assert.equal(message.status, 201);
+    const detail = (await (await fetch(`${base}/api/moodboards/${board.id}`)).json()) as { nodes: unknown[]; messages: unknown[]; coverUrl: string | null };
+    assert.equal(detail.nodes.length, 1);
+    assert.equal(detail.messages.length, 2);
+    assert.ok(detail.coverUrl);
+  });
+});
+
 test("POST /api/projects/:id/title updates a project name with a generated title", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-title-test-"));
   const store = new Store(":memory:");

@@ -39,13 +39,13 @@ export function isHttpError(value: unknown): value is HttpError {
   return value instanceof HttpError;
 }
 
-export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+export async function readJsonBody(req: IncomingMessage, max = MAX_BODY): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > MAX_BODY) throw new HttpError(413, "request body too large");
+    if (size > max) throw new HttpError(413, "request body too large");
     chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();

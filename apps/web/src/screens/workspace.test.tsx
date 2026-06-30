@@ -630,6 +630,9 @@ test("/projects/new preserves the selected agent and model for the first run", a
       imageApiBaseUrl: "",
       imageApiKey: "",
       imageModel: "",
+      videoApiBaseUrl: "",
+      videoApiKey: "",
+      videoModel: "",
       visualQaEnabled: false,
     }),
   });
