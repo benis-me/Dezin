@@ -105,6 +105,9 @@ test("standard mode: POST /api/projects scaffolds a Vite project + git, reports 
     assert.match(viteConfig, /borderWidth:s\.borderWidth/);
     assert.match(viteConfig, /gridTemplateColumns:s\.gridTemplateColumns/);
     assert.match(viteConfig, /focus-target/);
+    assert.match(viteConfig, /hoverBox/);
+    assert.match(viteConfig, /selectedBox/);
+    assert.match(viteConfig, /#f97316/);
 
     const setup = (await (await fetch(`${base}/api/projects/${project.id}/setup`)).json()) as { phase: string; logs?: Array<{ message: string }> };
     assert.ok(["scaffolding", "installing", "ready", "error"].includes(setup.phase));

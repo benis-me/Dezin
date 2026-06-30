@@ -46,6 +46,8 @@ export default defineConfig({ server: { host: "127.0.0.1" } });
     assert.match(updated, /attrs:attrs\(el\)/);
     assert.match(updated, /gridTemplateColumns:s\.gridTemplateColumns/);
     assert.match(updated, /focus-target/);
+    assert.match(updated, /selectedBox/);
+    assert.match(updated, /#f97316/);
     assert.match(updated, /server: \{ host: "127\.0\.0\.1" \}/);
     assert.doesNotMatch(updated, /old bridge without attrs/);
     assert.doesNotMatch(updated, /\\\\const PICKER_BRIDGE/);
@@ -63,6 +65,7 @@ test("ensureProjectPickerBridge repairs a bridge corrupted by replacement tokens
     const corruptedSnippet =
       "v.replace(/[^a-zA-Z0-9_-]/g,'\\\\\\\\const PICKER_BRIDGE = `<script data-dezin-bridge>old bridge without attrs</script>`;');";
     assert.match(template, /attrs:attrs\(el\)/);
+    assert.match(template, /selectedBox/);
     assert.ok(template.includes(originalSnippet));
     writeFileSync(join(dir, "vite.config.js"), template.replace(originalSnippet, corruptedSnippet));
 
