@@ -287,7 +287,7 @@ test("GET /api/projects includes a runStatus for active generations", async () =
   });
 });
 
-test("cancelled runs persist interleaved partial text and tool process items", async () => {
+test("cancelled runs persist partial summary before final steps and status", async () => {
   const runner: AgentRunner = {
     id: "partial-stop",
     async runTurn(input) {
@@ -308,8 +308,15 @@ test("cancelled runs persist interleaved partial text and tool process items", a
     assert.ok(events.some((e) => e.type === "activity"));
     assert.ok(events.some((e) => e.type === "run-cancelled"));
     const convId = events.find((e) => e.type === "run-start")!.conversationId as string;
-    const process = store
-      .listMessages(convId)
+    const messages = store.listMessages(convId);
+    assert.deepEqual(
+      messages.map((m) => m.role),
+      ["user", "system", "assistant", "system", "system"],
+    );
+    assert.equal(messages[2]?.content, "Partial copy before stop.");
+    assert.match(messages[4]?.content ?? "", /Stopped/);
+
+    const process = messages
       .map((m) => {
         try {
           return JSON.parse(m.content) as { process?: { elapsedMs?: number; items?: Array<{ type: string; text?: string; summary?: string }> } };
@@ -318,11 +325,11 @@ test("cancelled runs persist interleaved partial text and tool process items", a
         }
       })
       .find((m) => m.process);
-    assert.deepEqual(process?.process?.items, [
-      { type: "text", text: "Partial copy before stop." },
-      { type: "tool", summary: "Editing hero.tsx" },
-    ]);
+    assert.deepEqual(process?.process?.items, [{ type: "tool", summary: "Editing hero.tsx" }]);
     assert.equal(typeof process?.process?.elapsedMs, "number");
+
+    const steps = JSON.parse(messages[3]!.content) as { steps?: string[] };
+    assert.deepEqual(steps.steps, ["Editing hero.tsx"]);
   });
 });
 

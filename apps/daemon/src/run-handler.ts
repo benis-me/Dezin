@@ -272,8 +272,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       .map((i) => i.text)
       .join("")
       .trim();
+  const processRecordItems = (): ProcessItem[] => processItems.filter((item): item is { type: "tool"; summary: string } => item.type === "tool");
   const persistProcess = (): void => {
-    if (processItems.length) store.addMessage(conversation.id, "system", processMessage(processItems, Math.max(0, Date.now() - run.createdAt)));
+    const items = processRecordItems();
+    if (items.length) store.addMessage(conversation.id, "system", processMessage(items, Math.max(0, Date.now() - run.createdAt)));
+  };
+  const persistSteps = (): void => {
     if (steps.length) store.addMessage(conversation.id, "system", JSON.stringify({ steps }));
   };
 
@@ -307,6 +311,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       if (asked.question) {
         persistProcess();
         if (asked.text) store.addMessage(conversation.id, "assistant", asked.text);
+        persistSteps();
         store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
         store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
         sse({ type: "ask-user-question", runId: run.id, question: asked.question });
@@ -352,6 +357,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const passed = !visualFindings.some((f) => f.severity === "P0");
       persistProcess();
       const assistantMessage = store.addMessage(conversation.id, "assistant", asked.text);
+      persistSteps();
       const quality = score !== null ? `, quality ${score}/100` : "";
       const message = passed ? `Done${quality}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
       store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: 0 }));
@@ -383,6 +389,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       persistProcess();
       const partial = processAssistantText();
       if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
+      persistSteps();
       const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
       store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
       sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
@@ -425,6 +432,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     if (asked.question) {
       persistProcess();
       if (assistantText) store.addMessage(conversation.id, "assistant", assistantText);
+      persistSteps();
       store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
       store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
       sse({ type: "ask-user-question", runId: run.id, question: asked.question });
@@ -466,6 +474,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     store.recordArtifact(project.id, result.artifactPath, passed);
     persistProcess();
     const assistantMessage = store.addMessage(conversation.id, "assistant", assistantText);
+    persistSteps();
     const score = lintScore(finalFindings);
     const fixes = result.rounds ? ` after ${result.rounds} fix${result.rounds > 1 ? "es" : ""}` : "";
     const quality = `, quality ${score}/100`;
@@ -498,6 +507,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     persistProcess(); // keep the partial process record + whatever the agent wrote to disk
     const partial = processAssistantText();
     if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
+    persistSteps();
     const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
     store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
     sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });

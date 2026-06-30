@@ -117,7 +117,48 @@ function isRunCardMessage(message: Msg): boolean {
   return message.kind === "process" || message.kind === "result";
 }
 
-function groupRunCardMessages(messages: Msg[]): TranscriptRow[] {
+function isStepsMessage(message: Msg | undefined): message is Msg {
+  return message?.kind === "process" && (message.steps?.length ?? 0) > 0;
+}
+
+function processSummaryText(message: Msg): string {
+  return message.kind === "process" && message.items ? liveText(message.items).replace(/\s+/g, " ").trim() : "";
+}
+
+function stripDuplicatedProcessText(message: Msg, summary?: string): Msg | null {
+  if (message.kind !== "process" || !message.items?.length) return message;
+  const normalizedSummary = (summary ?? "").replace(/\s+/g, " ").trim();
+  const normalizedProcessText = processSummaryText(message);
+  if (!normalizedSummary || normalizedSummary !== normalizedProcessText) return message;
+  const items = message.items.filter((item): item is { type: "tool"; summary: string } => item.type === "tool");
+  if (!items.length && !message.steps?.length) return null;
+  return { ...message, items };
+}
+
+function normalizeTranscriptMessages(messages: Msg[]): Msg[] {
+  const normalized: Msg[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const current = messages[i]!;
+    if (current.kind === "process" && current.items?.length) {
+      const next = messages[i + 1];
+      const assistant = isStepsMessage(next) ? messages[i + 2] : next;
+      const cleaned = stripDuplicatedProcessText(current, assistant?.kind === "assistant" ? assistant.text : undefined);
+      if (cleaned) normalized.push(cleaned);
+      continue;
+    }
+    if (isStepsMessage(current) && messages[i - 1]?.kind === "process" && messages[i + 1]?.kind === "assistant") {
+      continue;
+    }
+    normalized.push(current);
+    if (current.kind === "assistant" && messages[i - 2]?.kind === "process" && isStepsMessage(messages[i - 1])) {
+      normalized.push(messages[i - 1]!);
+    }
+  }
+  return normalized;
+}
+
+function groupRunCardMessages(source: Msg[]): TranscriptRow[] {
+  const messages = normalizeTranscriptMessages(source);
   const rows: TranscriptRow[] = [];
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
@@ -1248,7 +1289,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const text = finalSummaryTextRef.current.trim() || liveText(items);
     const steps = items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool").map((i) => i.summary);
     const elapsedMs = runStartedAtRef.current ? Date.now() - runStartedAtRef.current : undefined;
-    const next: Msg[] = [{ id: msgId.current++, kind: "process", text: "", items: [...items], elapsedMs }];
+    const processItems = items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool");
+    const next: Msg[] = processItems.length ? [{ id: msgId.current++, kind: "process", text: "", items: processItems, elapsedMs }] : [];
     if (emitSummary && text) next.push({ id: msgId.current++, kind: "assistant", text });
     if (steps.length) next.push({ id: msgId.current++, kind: "process", text: "", steps });
     setMessages((m) => [...m, ...next]);

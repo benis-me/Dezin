@@ -250,6 +250,52 @@ test("completed runs collapse the interleaved process above the final summary", 
 
   await user.click(screen.getByRole("button", { name: /Processed/ }));
   expect(await screen.findByText("Editing App.tsx")).toBeInTheDocument();
+  expect(screen.getAllByText("Drafted the hero. Tightened the layout.")).toHaveLength(1);
+});
+
+test("reopening old transcripts keeps final steps with the stopped card below the summary", async () => {
+  const user = userEvent.setup();
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [
+      { id: "m1", conversationId: "c1", role: "user" as const, content: "stop after partial", createdAt: 1 },
+      {
+        id: "m2",
+        conversationId: "c1",
+        role: "system" as const,
+        content: JSON.stringify({
+          process: {
+            items: [
+              { type: "text", text: "Partial output before stop." },
+              { type: "tool", summary: "Editing hero.tsx" },
+            ],
+            elapsedMs: 1500,
+          },
+        }),
+        createdAt: 2,
+      },
+      { id: "m3", conversationId: "c1", role: "system" as const, content: JSON.stringify({ steps: ["Editing hero.tsx"] }), createdAt: 3 },
+      { id: "m4", conversationId: "c1", role: "assistant" as const, content: "Partial output before stop.", createdAt: 4 },
+      { id: "m5", conversationId: "c1", role: "system" as const, content: JSON.stringify({ result: { text: "Stopped.", meta: {} } }), createdAt: 5 },
+    ],
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const processed = await screen.findByRole("button", { name: /Processed/ });
+  expect(screen.getByText("Partial output before stop.")).toBeInTheDocument();
+  const stack = await screen.findByTestId("run-card-stack");
+  expect(within(stack).getByRole("button", { name: "1 step" })).toBeInTheDocument();
+  expect(within(stack).getByText("Stopped")).toBeInTheDocument();
+  expect(within(stack).queryByRole("button", { name: /Processed/ })).toBeNull();
+
+  await user.click(processed);
+  expect(await screen.findByText("Editing hero.tsx")).toBeInTheDocument();
+  expect(screen.getAllByText("Partial output before stop.")).toHaveLength(1);
 });
 
 test("agent questions render as answerable transcript cards", async () => {
