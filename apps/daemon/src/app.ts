@@ -18,7 +18,7 @@ import { serveProjectFile, serveFileFromBase, projectDir } from "./serve-static.
 import { figToJson, summarizeFig } from "./parse-fig.ts";
 import { serveWeb, defaultWebDir } from "./serve-web.ts";
 import { handleRun, handleRunStream, handleCancelRun } from "./run-handler.ts";
-import { handleExport } from "./export-handler.ts";
+import { handleExport, handleImportProject } from "./export-handler.ts";
 import { handleListFiles } from "./files-handler.ts";
 import {
   handleListVariants,
@@ -246,6 +246,11 @@ const routes: Route[] = [
     },
   },
   {
+    method: "POST",
+    pattern: "/api/projects/import",
+    handler: (req, res, _p, deps) => handleImportProject(req, res, deps),
+  },
+  {
     method: "GET",
     pattern: "/api/projects/:id/setup",
     handler: (_req, res, { id }, { store, dataDir }) =>
@@ -446,7 +451,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/export",
-    handler: (_req, res, params, deps) => handleExport(res, params, deps),
+    handler: (req, res, params, deps) => handleExport(req, res, params, deps),
   },
   {
     method: "GET",

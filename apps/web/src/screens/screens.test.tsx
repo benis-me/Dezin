@@ -65,6 +65,31 @@ test("HomeScreen project toolbar orders sort, layout, then search", () => {
   expect(layout.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
+test("HomeScreen imports a full project zip from beside the project tabs", async () => {
+  let projects = [] as ReturnType<typeof project>[];
+  const imported = project("p2", "Imported project");
+  const importProject = vi.fn(async () => {
+    projects = [imported];
+    return imported;
+  });
+  renderWithApi(<HomeScreen />, {
+    listProjects: async () => projects,
+    listSkills: async () => SKILLS,
+    importProject,
+  });
+
+  const all = await screen.findByRole("tab", { name: /All/ });
+  const importButton = screen.getByLabelText("Import project");
+  expect(all.compareDocumentPosition(importButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  const input = screen.getByLabelText("Import project zip");
+  const file = new File(["zip"], "dezin-full-project.zip", { type: "application/zip" });
+  fireEvent.change(input, { target: { files: [file] } });
+
+  await waitFor(() => expect(importProject).toHaveBeenCalledWith(file));
+  expect(await screen.findByText("Imported project")).toBeInTheDocument();
+});
+
 test("HomeScreen Build passes the brief, skillId, and designSystemId", async () => {
   const user = userEvent.setup();
   const onNewProject = vi.fn();

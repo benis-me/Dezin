@@ -67,6 +67,23 @@ test("previewUrl and exportUrl build the right paths", () => {
   const api = createApiClient({ baseUrl: "http://d" });
   expect(api.previewUrl("p1")).toBe("http://d/projects/p1/preview/");
   expect(api.exportUrl("p1")).toBe("http://d/api/projects/p1/export");
+  expect(api.exportUrl("p1", "full")).toBe("http://d/api/projects/p1/export?scope=full");
+});
+
+test("importProject posts a zip file and returns the created project", async () => {
+  const imported = { ...PROJECT, id: "p2", name: "Imported" };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(imported, 201));
+  const api = createApiClient({ fetchImpl });
+  const file = new Blob(["zip"], { type: "application/zip" });
+  await expect(api.importProject(file)).resolves.toEqual(imported);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "/api/projects/import",
+    expect.objectContaining({
+      method: "POST",
+      body: file,
+      headers: { "content-type": "application/zip" },
+    }),
+  );
 });
 
 test("streamRun yields SSE events, including one split across chunks", async () => {
