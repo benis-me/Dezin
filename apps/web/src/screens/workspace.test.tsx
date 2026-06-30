@@ -342,6 +342,59 @@ test("queued prompts survive remount and drain on the next workspace entry", asy
   expect(localStorage.getItem("dezin.workspace.queue.p1")).toBe("[]");
 });
 
+test("queued prompts can be edited, reordered, and removed before they run", async () => {
+  let releaseFirstRun!: () => void;
+  const firstRunDone = new Promise<void>((resolve) => {
+    releaseFirstRun = resolve;
+  });
+  const streamRun = vi.fn((input: { brief?: string }) =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: `r-${input.brief ?? "empty"}`, conversationId: "c1" };
+      if (input.brief === "first prompt") {
+        await firstRunDone;
+      }
+      yield { type: "run-done", runId: `r-${input.brief ?? "empty"}`, passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+    })(),
+  );
+
+  render(
+    <ApiProvider client={makeFakeApi({ streamRun: streamRun as never })}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "first prompt" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  await waitFor(() => expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ brief: "first prompt" }), expect.anything()));
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "second prompt" } });
+  fireEvent.click(screen.getByLabelText("Queue"));
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "third prompt" } });
+  fireEvent.click(screen.getByLabelText("Queue"));
+
+  expect(await screen.findByLabelText("Queued prompt 1")).toHaveValue("second prompt");
+  expect(screen.getByLabelText("Queued prompt 2")).toHaveValue("third prompt");
+
+  fireEvent.change(screen.getByLabelText("Queued prompt 1"), { target: { value: "edited second prompt" } });
+  expect(screen.getByLabelText("Queued prompt 1")).toHaveValue("edited second prompt");
+
+  fireEvent.dragStart(screen.getByLabelText("Drag queued prompt 2"));
+  fireEvent.dragOver(screen.getByTestId("queued-prompt-row-0"));
+  fireEvent.drop(screen.getByTestId("queued-prompt-row-0"));
+  expect(screen.getByLabelText("Queued prompt 1")).toHaveValue("third prompt");
+  expect(screen.getByLabelText("Queued prompt 2")).toHaveValue("edited second prompt");
+
+  fireEvent.click(screen.getByLabelText("Delete queued prompt 2"));
+  expect(screen.getByLabelText("Queued prompt 1")).toHaveValue("third prompt");
+  expect(screen.queryByDisplayValue("edited second prompt")).toBeNull();
+  expect(localStorage.getItem("dezin.workspace.queue.p1")).toBe(JSON.stringify(["third prompt"]));
+
+  releaseFirstRun();
+  await waitFor(() => expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ brief: "third prompt" }), expect.anything()));
+  expect(streamRun).not.toHaveBeenCalledWith(expect.objectContaining({ brief: "edited second prompt" }), expect.anything());
+  await waitFor(() => expect(localStorage.getItem("dezin.workspace.queue.p1")).toBe("[]"));
+});
+
 test("/projects/new preserves the selected agent and model for the first run", async () => {
   const createProject = vi.fn(async () => ({
     id: "p-new",

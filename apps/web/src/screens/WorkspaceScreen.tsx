@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
@@ -956,6 +956,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const stickBottom = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
   const runningRef = useRef(false);
+  const queueRef = useRef<string[]>(queue);
   const activeRunIdRef = useRef<string | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
   const terminalEventRef = useRef(false);
@@ -969,6 +970,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const push = (kind: Msg["kind"], text: string) =>
     setMessages((m) => [...m, { id: msgId.current++, kind, text, at: Date.now() }]);
+
+  const updateQueue = useCallback(
+    (next: string[] | ((current: string[]) => string[])): void => {
+      const resolved = typeof next === "function" ? next(queueRef.current) : next;
+      queueRef.current = resolved;
+      setQueue(resolved);
+      writeQueue(projectId, resolved);
+    },
+    [projectId],
+  );
 
   const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "auto"): void => {
     const el = chatScrollRef.current;
@@ -1428,20 +1439,18 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   // Drain queued prompts one at a time once the current run finishes.
   useEffect(() => {
-    if (loading || runningRef.current || queue.length === 0) return;
-    const [next, ...rest] = queue;
-    setQueue(rest);
-    void runBrief(next!);
+    if (loading || runningRef.current || queueRef.current.length === 0) return;
+    const [next, ...rest] = queueRef.current;
+    updateQueue(rest);
+    if (next?.trim()) void runBrief(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, running, queue]);
+  }, [loading, running, queue, updateQueue]);
 
   useEffect(() => {
-    setQueue(readQueue(projectId));
+    const next = readQueue(projectId);
+    queueRef.current = next;
+    setQueue(next);
   }, [projectId]);
-
-  useEffect(() => {
-    writeQueue(projectId, queue);
-  }, [projectId, queue]);
 
   useEffect(() => {
     let alive = true;
@@ -1793,8 +1802,27 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setAttachments([]);
     setSelectedTargets([]);
     // While a run is in flight, queue the prompt to run when it finishes.
-    if (runningRef.current) setQueue((q) => [...q, text]);
+    if (runningRef.current) updateQueue((q) => [...q, text]);
     else void runBrief(text);
+  };
+
+  const updateQueuedPrompt = (index: number, value: string): void => {
+    updateQueue((items) => items.map((item, i) => (i === index ? value : item)));
+  };
+
+  const deleteQueuedPrompt = (index: number): void => {
+    updateQueue((items) => items.filter((_, i) => i !== index));
+  };
+
+  const moveQueuedPrompt = (from: number, to: number): void => {
+    updateQueue((items) => {
+      if (from === to || from < 0 || to < 0 || from >= items.length || to >= items.length) return items;
+      const next = [...items];
+      const [item] = next.splice(from, 1);
+      if (item === undefined) return items;
+      next.splice(to, 0, item);
+      return next;
+    });
   };
 
   const referenceProject = async (project: Project): Promise<void> => {
@@ -1814,6 +1842,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   };
 
   const [dragging, setDragging] = useState(false);
+  const [draggingQueueIndex, setDraggingQueueIndex] = useState<number | null>(null);
   const onComposerDrop = (e: React.DragEvent): void => {
     e.preventDefault();
     setDragging(false);
@@ -2117,10 +2146,78 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               </div>
             ) : null}
             {queue.length ? (
-              <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
-                <History size={12} strokeWidth={1.75} />
-                {queue.length} prompt{queue.length === 1 ? "" : "s"} queued — running after the current one
-              </div>
+              <TooltipProvider delayDuration={120}>
+                <div className="mb-2 rounded-lg border border-border bg-surface-2/60 p-1.5">
+                  <div className="mb-1 flex items-center gap-1.5 px-1 text-[11px] font-medium text-muted-foreground">
+                    <History size={12} strokeWidth={1.75} />
+                    {queue.length} prompt{queue.length === 1 ? "" : "s"} queued
+                  </div>
+                  <div className="space-y-1">
+                    {queue.map((prompt, i) => (
+                      <div
+                        key={i}
+                        data-testid={`queued-prompt-row-${i}`}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const raw = e.dataTransfer?.getData("application/x-dezin-queue-index") || e.dataTransfer?.getData("text/plain");
+                          const from = draggingQueueIndex ?? Number(raw);
+                          if (!Number.isNaN(from)) moveQueuedPrompt(from, i);
+                          setDraggingQueueIndex(null);
+                        }}
+                        className={`flex min-w-0 items-start gap-1 rounded-md border bg-card px-1 py-1 transition-colors ${
+                          draggingQueueIndex === i ? "border-ring" : "border-border"
+                        }`}
+                      >
+                        <ToolbarTooltip label="Drag to reorder">
+                          <button
+                            type="button"
+                            aria-label={`Drag queued prompt ${i + 1}`}
+                            draggable
+                            onDragStart={(e) => {
+                              e.stopPropagation();
+                              setDraggingQueueIndex(i);
+                              if (e.dataTransfer) {
+                                e.dataTransfer.effectAllowed = "move";
+                                e.dataTransfer.setData("application/x-dezin-queue-index", String(i));
+                                e.dataTransfer.setData("text/plain", String(i));
+                              }
+                            }}
+                            onDragEnd={(e) => {
+                              e.stopPropagation();
+                              setDraggingQueueIndex(null);
+                            }}
+                            className="mt-0.5 grid h-6 w-5 shrink-0 cursor-grab place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground active:cursor-grabbing"
+                          >
+                            <GripVertical size={13} strokeWidth={1.75} />
+                          </button>
+                        </ToolbarTooltip>
+                        <textarea
+                          aria-label={`Queued prompt ${i + 1}`}
+                          rows={1}
+                          value={prompt}
+                          onChange={(e) => updateQueuedPrompt(i, e.target.value)}
+                          className="field-sizing-content max-h-20 min-h-[28px] flex-1 resize-none bg-transparent px-1 py-1 text-xs leading-snug text-foreground outline-none placeholder:text-muted-foreground"
+                        />
+                        <ToolbarTooltip label="Delete queued prompt">
+                          <IconButton
+                            aria-label={`Delete queued prompt ${i + 1}`}
+                            onClick={() => deleteQueuedPrompt(i)}
+                            className="mt-0.5 h-6 w-6 rounded-md"
+                          >
+                            <Trash2 size={12} strokeWidth={1.75} />
+                          </IconButton>
+                        </ToolbarTooltip>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </TooltipProvider>
             ) : null}
             {isExisting ? (
               <input
