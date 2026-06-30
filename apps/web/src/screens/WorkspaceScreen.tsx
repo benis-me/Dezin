@@ -108,6 +108,9 @@ interface Msg {
 
 type RunCardStackPosition = "single" | "first" | "middle" | "last";
 type TranscriptRow = { kind: "single"; message: Msg } | { kind: "stack"; messages: Msg[] };
+type TranscriptBlock =
+  | { kind: "row"; row: TranscriptRow }
+  | { kind: "assistant-turn"; message: Msg; stack?: Msg[] };
 
 /** A live, ordered chunk of the agent's turn — assistant prose or a tool step — so the two
  *  render interleaved (chronologically) during generation, not split into separate blocks. */
@@ -172,6 +175,25 @@ function groupRunCardMessages(source: Msg[]): TranscriptRow[] {
     rows.push(group.length > 1 ? { kind: "stack", messages: group } : { kind: "single", message });
   }
   return rows;
+}
+
+function groupAssistantTurns(rows: TranscriptRow[]): TranscriptBlock[] {
+  const blocks: TranscriptBlock[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    if (row.kind === "single" && row.message.kind === "assistant") {
+      const next = rows[i + 1];
+      if (next?.kind === "stack") {
+        blocks.push({ kind: "assistant-turn", message: row.message, stack: next.messages });
+        i++;
+      } else {
+        blocks.push({ kind: "assistant-turn", message: row.message });
+      }
+      continue;
+    }
+    blocks.push({ kind: "row", row });
+  }
+  return blocks;
 }
 
 function runCardStackPosition(index: number, total: number): RunCardStackPosition {
@@ -957,7 +979,7 @@ function emptyPane(label: string) {
         <span className="grid size-10 place-items-center rounded-xl border border-border bg-card text-muted-foreground">
           <PanelsTopLeft size={18} strokeWidth={1.5} />
         </span>
-        <p className="text-sm text-muted-foreground">{label}</p>
+        <p className={cn("text-sm text-muted-foreground", label.startsWith("Generating") && "shiny-text")}>{label}</p>
       </div>
     </div>
   );
@@ -972,37 +994,44 @@ function ToolbarTooltip({ label, children }: { label: string; children: ReactNod
   );
 }
 
-function AssistantMessage({
+function MessageActions({
   message,
-  actionsDisabled,
+  disabled,
   onCopy,
   onFork,
 }: {
   message: Msg;
-  actionsDisabled: boolean;
+  disabled: boolean;
   onCopy: (text: string) => void;
   onFork: (message: Msg) => void;
 }) {
-  const canAct = !actionsDisabled && !!message.dbId;
+  const canAct = !disabled && !!message.dbId;
+  if (!canAct) return null;
   return (
-    <div data-message-kind="assistant" className="group/assistant-message">
+    <TooltipProvider delayDuration={120}>
+      <div
+        data-testid="assistant-message-actions"
+        className="mt-1 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/assistant-turn:opacity-100 focus-within:opacity-100"
+      >
+        <ToolbarTooltip label="Copy">
+          <IconButton aria-label="Copy message" className="h-7 w-7 rounded-md" onClick={() => onCopy(message.text)}>
+            <Copy size={13} strokeWidth={1.8} />
+          </IconButton>
+        </ToolbarTooltip>
+        <ToolbarTooltip label="Fork">
+          <IconButton aria-label="Fork from this message" className="h-7 w-7 rounded-md" onClick={() => onFork(message)}>
+            <GitFork size={13} strokeWidth={1.8} />
+          </IconButton>
+        </ToolbarTooltip>
+      </div>
+    </TooltipProvider>
+  );
+}
+
+function AssistantMessage({ message }: { message: Msg }) {
+  return (
+    <div data-message-kind="assistant">
       <Markdown>{message.text}</Markdown>
-      {canAct ? (
-        <TooltipProvider delayDuration={120}>
-          <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/assistant-message:opacity-100 focus-within:opacity-100">
-            <ToolbarTooltip label="Copy">
-              <IconButton aria-label="Copy message" className="h-7 w-7 rounded-md" onClick={() => onCopy(message.text)}>
-                <Copy size={13} strokeWidth={1.8} />
-              </IconButton>
-            </ToolbarTooltip>
-            <ToolbarTooltip label="Fork">
-              <IconButton aria-label="Fork from this message" className="h-7 w-7 rounded-md" onClick={() => onFork(message)}>
-                <GitFork size={13} strokeWidth={1.8} />
-              </IconButton>
-            </ToolbarTooltip>
-          </div>
-        </TooltipProvider>
-      ) : null}
     </div>
   );
 }
@@ -1211,6 +1240,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       if (modeRef.current === "standard") void api.releaseDevServer(projectId).catch(() => {});
     };
   }, [api, projectId]);
+
+  useEffect(() => {
+    const onTitle = (event: Event): void => {
+      const project = (event as CustomEvent<Project>).detail;
+      if (project?.id === projectId && typeof project.name === "string") setProjectName(project.name);
+    };
+    window.addEventListener("dezin:project-title", onTitle);
+    return () => window.removeEventListener("dezin:project-title", onTitle);
+  }, [projectId]);
 
   const viewVersion = (runId: string): void => {
     setPreviewSrc(api.versionPreviewUrl(projectId, runId));
@@ -2042,11 +2080,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   }));
 
   const transcriptRows = useMemo(() => groupRunCardMessages(messages), [messages]);
+  const transcriptBlocks = useMemo(() => groupAssistantTurns(transcriptRows), [transcriptRows]);
   const renderTranscriptMessage = (m: Msg, stackPosition: RunCardStackPosition = "single"): ReactNode =>
     m.kind === "user" ? (
       <UserMessage text={m.text} srcFor={(p) => api.refUrl(projectId, p)} onTargetClick={focusMarkupTarget} />
     ) : m.kind === "assistant" ? (
-      <AssistantMessage message={m} actionsDisabled={running} onCopy={(text) => void copyAssistantMessage(text)} onFork={(msg) => void forkAssistantMessage(msg)} />
+      <AssistantMessage message={m} />
     ) : m.kind === "process" ? (
       <ProcessRecord steps={m.steps} items={m.items} elapsedMs={m.elapsedMs} stackPosition={stackPosition} />
     ) : m.kind === "question" ? (
@@ -2054,6 +2093,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     ) : (
       <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} stackPosition={stackPosition} />
     );
+  const renderRunCardStack = (stack: Msg[]): ReactNode => (
+    <div data-testid="run-card-stack">
+      {stack.map((m, index) => (
+        <Fragment key={m.id}>{renderTranscriptMessage(m, runCardStackPosition(index, stack.length))}</Fragment>
+      ))}
+    </div>
+  );
 
   return (
     <>
@@ -2076,7 +2122,18 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               className="app-no-drag flex min-w-0 items-center gap-1 rounded-lg py-1 pl-1 pr-2 text-foreground transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               <ChevronLeft size={16} strokeWidth={2} className="shrink-0 text-muted-foreground" />
-              <span className="truncate text-sm font-medium">{projectName || "New project"}</span>
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.span
+                  key={projectName || "New project"}
+                  initial={{ opacity: 0, y: 3 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -3 }}
+                  transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
+                  className="truncate text-sm font-medium"
+                >
+                  {projectName || "New project"}
+                </motion.span>
+              </AnimatePresence>
             </button>
             {projectMode === "standard" ? (
               <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Standard</span>
@@ -2142,24 +2199,43 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             </div>
           ) : (
             <>
-              {transcriptRows.map((row) => {
-                const rowMessages = row.kind === "stack" ? row.messages : [row.message];
+              {transcriptBlocks.map((block) => {
+                const row = block.kind === "row" ? block.row : undefined;
+                const rowMessages =
+                  block.kind === "assistant-turn" ? [block.message, ...(block.stack ?? [])] : row!.kind === "stack" ? row!.messages : [row!.message];
                 const firstMessage = rowMessages[0];
                 const highlighted = highlightAt != null && rowMessages.some((m) => m.at === highlightAt);
                 return (
-                  <FadeIn key={row.kind === "stack" ? `stack-${rowMessages.map((m) => m.id).join("-")}` : firstMessage.id}>
+                  <FadeIn
+                    key={
+                      block.kind === "assistant-turn"
+                        ? `assistant-turn-${rowMessages.map((m) => m.id).join("-")}`
+                        : row!.kind === "stack"
+                          ? `stack-${rowMessages.map((m) => m.id).join("-")}`
+                          : firstMessage.id
+                    }
+                  >
                     <div
                       data-at={firstMessage.at ?? undefined}
                       className={`-mx-2 rounded-xl px-2 py-1 transition-colors duration-700 ${
+                        block.kind === "assistant-turn" ? "group/assistant-turn" : ""
+                      } ${
                         highlighted ? "bg-surface-2 ring-1 ring-border" : ""
                       }`}
                     >
-                      {row.kind === "stack" ? (
-                        <div data-testid="run-card-stack">
-                          {row.messages.map((m, index) => (
-                            <Fragment key={m.id}>{renderTranscriptMessage(m, runCardStackPosition(index, row.messages.length))}</Fragment>
-                          ))}
-                        </div>
+                      {block.kind === "assistant-turn" ? (
+                        <>
+                          <AssistantMessage message={block.message} />
+                          {block.stack ? renderRunCardStack(block.stack) : null}
+                          <MessageActions
+                            message={block.message}
+                            disabled={running}
+                            onCopy={(text) => void copyAssistantMessage(text)}
+                            onFork={(msg) => void forkAssistantMessage(msg)}
+                          />
+                        </>
+                      ) : row!.kind === "stack" ? (
+                        renderRunCardStack(row!.messages)
                       ) : (
                         renderTranscriptMessage(firstMessage)
                       )}
@@ -2181,7 +2257,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   )}
                   <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                     <Spinner size={13} />
-                    {liveStatus ?? "Working"}
+                    <span className={(liveStatus ?? "Working").startsWith("Generating") ? "shiny-text" : undefined}>
+                      {liveStatus ?? "Working"}
+                    </span>
                   </div>
                 </div>
               ) : null}

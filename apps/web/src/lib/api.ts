@@ -229,6 +229,7 @@ export type VersionDiffLine = { t: "ctx" | "add" | "del"; text: string };
 export interface ApiClient {
   listProjects(): Promise<Project[]>;
   createProject(input: CreateProjectInput): Promise<Project>;
+  generateProjectTitle(id: string, brief: string): Promise<Project>;
   getSetup(id: string): Promise<SetupStatus>;
   getDevServerUrl(id: string): Promise<{ url: string }>;
   releaseDevServer(id: string): Promise<void>;
@@ -386,6 +387,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     scanAgentsStream,
     listProjects: () => json<Project[]>("/api/projects"),
     createProject: (input) => json<Project>("/api/projects", jsonInit("POST", input)),
+    generateProjectTitle: (id, brief) => json<Project>(`/api/projects/${enc(id)}/title`, jsonInit("POST", { brief })),
     getSetup: (id) => json<SetupStatus>(`/api/projects/${enc(id)}/setup`),
     getDevServerUrl: (id) => json<{ url: string }>(`/api/projects/${enc(id)}/devserver`),
     releaseDevServer: (id) => json<{ released: boolean }>(`/api/projects/${enc(id)}/devserver`, { method: "DELETE" }).then(() => {}),

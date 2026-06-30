@@ -327,6 +327,34 @@ test("reopening old transcripts keeps final steps with the stopped card below th
   expect(screen.getAllByText("Partial output before stop.")).toHaveLength(1);
 });
 
+test("assistant copy and fork actions sit below the final cards in a completed message", async () => {
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [
+      { id: "m1", conversationId: "c1", role: "assistant" as const, content: "Built the page.", createdAt: 1 },
+      { id: "m2", conversationId: "c1", role: "system" as const, content: JSON.stringify({ steps: ["Editing App.tsx"] }), createdAt: 2 },
+      {
+        id: "m3",
+        conversationId: "c1",
+        role: "system" as const,
+        content: JSON.stringify({ result: { text: "Done.", meta: { passed: true, score: 100, rounds: 0 } } }),
+        createdAt: 3,
+      },
+    ],
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const stack = await screen.findByTestId("run-card-stack");
+  const copy = await screen.findByLabelText("Copy message");
+  expect(stack.compareDocumentPosition(copy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getByLabelText("Fork from this message")).toBeInTheDocument();
+});
+
 test("agent questions render as answerable transcript cards", async () => {
   const user = userEvent.setup();
   const streamRun = vi.fn((input: { brief?: string }) =>
@@ -385,6 +413,35 @@ test("mount reattaches the latest running run and replays its stream", async () 
   expect(await screen.findByText("Recovered streamed text.")).toBeInTheDocument();
   expect(reattachRun).toHaveBeenCalledWith("r-live", expect.anything());
   expect(await screen.findByText(/Done, quality 100\/100/)).toBeInTheDocument();
+});
+
+test("live generating status uses shiny text", async () => {
+  let finishRun!: () => void;
+  const runDone = new Promise<void>((resolve) => {
+    finishRun = resolve;
+  });
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-shiny", conversationId: "c1" };
+      yield { type: "turn-start", round: 0, isRepair: false };
+      await runDone;
+      yield { type: "run-done", runId: "r-shiny", passed: true, rounds: 0, score: 100, previewUrl: "/projects/p1/preview/", findings: [] };
+    },
+  });
+
+  try {
+    render(
+      <ApiProvider client={fake}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    expect(await screen.findByText("Generating…")).toHaveClass("shiny-text");
+  } finally {
+    finishRun?.();
+  }
 });
 
 test("mount replays an interrupted run log after daemon restart", async () => {

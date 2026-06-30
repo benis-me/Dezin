@@ -92,12 +92,24 @@ const TEMPLATES: Template[] = [
  */
 function ActiveRunBadge({ status }: { status?: Project["runStatus"] }) {
   if (status !== "running" && status !== "pending") return null;
+  const label = status === "pending" ? "Queued" : "Generating";
   return (
     <span className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background/90 px-1.5 py-0.5 text-[11px] font-medium text-foreground backdrop-blur">
       <span className="size-1.5 rounded-full bg-primary" aria-hidden />
-      {status === "pending" ? "Queued" : "Generating"}
+      <span className={status === "running" ? "shiny-text" : undefined}>{label}</span>
     </span>
   );
+}
+
+function formatUpdatedAt(value: number): string {
+  const diff = Math.max(0, Date.now() - value);
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) return "Updated just now";
+  if (diff < hour) return `Updated ${Math.floor(diff / minute)}m ago`;
+  if (diff < day) return `Updated ${Math.floor(diff / hour)}h ago`;
+  return `Updated ${Math.floor(diff / day)}d ago`;
 }
 
 function ProjectThumb({ coverUrl, runStatus }: { coverUrl?: string | null; runStatus?: Project["runStatus"] }) {
@@ -681,46 +693,54 @@ export function HomeScreen({
             ))}
           </Stagger>
         ) : (
-          <ul className="mt-5 overflow-hidden rounded-xl border border-border">
-            {visible.map((p) => (
-              <li
-                key={p.id}
-                onClick={() => onOpenProject?.(p.id)}
-                className="group flex cursor-pointer items-center gap-3 border-b border-border px-3 py-2.5 last:border-0 hover:bg-surface-2/50"
-              >
-                <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
-                  {p.coverUrl ? (
-                    <img src={p.coverUrl} alt="" className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="dz-canvas grid h-full w-full place-items-center">
-                      <ImageIcon size={13} strokeWidth={1.5} className="text-muted-foreground/60" />
+          <div data-testid="project-list-view" data-staggered="true">
+            <Stagger as="ul" className="mt-5 overflow-hidden rounded-xl border border-border">
+              {visible.map((p) => (
+                <StaggerItem as="li" key={p.id} className="border-b border-border last:border-0">
+                  <div
+                    onClick={() => onOpenProject?.(p.id)}
+                    className="group flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-2/50"
+                  >
+                    <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
+                      {p.coverUrl ? (
+                        <img src={p.coverUrl} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        <div className="dz-canvas grid h-full w-full place-items-center">
+                          <ImageIcon size={13} strokeWidth={1.5} className="text-muted-foreground/60" />
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
-                    <ActiveRunBadge status={p.runStatus} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
+                        <ActiveRunBadge status={p.runStatus} />
+                      </div>
+                      <p className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
+                        <span className="truncate">{dsName(p.designSystemId)}</span>
+                        {skillName(p.skillId) ? (
+                          <>
+                            <span className="text-border-strong">·</span>
+                            <span className="truncate">{skillName(p.skillId)}</span>
+                          </>
+                        ) : null}
+                      </p>
+                    </div>
+                    <div className="relative flex min-w-[7rem] shrink-0 justify-end" onClick={(e) => e.stopPropagation()}>
+                      <span className="text-xs text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                        {formatUpdatedAt(p.updatedAt)}
+                      </span>
+                      <div
+                        data-testid={`project-list-actions-${p.id}`}
+                        className="absolute right-0 top-1/2 flex -translate-y-1/2 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+                      >
+                        {projectActions(p)}
+                      </div>
+                    </div>
                   </div>
-                  <p className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
-                    <span className="truncate">{dsName(p.designSystemId)}</span>
-                    {skillName(p.skillId) ? (
-                      <>
-                        <span className="text-border-strong">·</span>
-                        <span className="truncate">{skillName(p.skillId)}</span>
-                      </>
-                    ) : null}
-                  </p>
-                </div>
-                <div
-                  className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  {projectActions(p)}
-                </div>
-              </li>
-            ))}
-          </ul>
+                </StaggerItem>
+              ))}
+            </Stagger>
+          </div>
         )}
         </div>
       </div>

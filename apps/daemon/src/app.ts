@@ -37,6 +37,7 @@ import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgent
 import { analyzeImage } from "./analyze-image.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import type { VisualQaRunner } from "./visual-qa.ts";
+import { handleGenerateProjectTitle, type TitleGenerator } from "./title-handler.ts";
 
 export interface AppDeps {
   store: Store;
@@ -62,6 +63,8 @@ export interface AppDeps {
   captureCoverUrl?: (url: string, outPath: string) => Promise<boolean>;
   /** Cover capture hook for HTML snapshot files; tests can avoid launching Chrome. */
   captureCover?: typeof captureCover;
+  /** Background title generator hook; tests can avoid launching an agent. */
+  titleGenerator?: TitleGenerator;
 }
 
 type Handler = (
@@ -301,6 +304,11 @@ const routes: Route[] = [
       const p = store.getProject(id!);
       return p ? sendJson(res, 200, p) : sendError(res, 404, "project not found");
     },
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/title",
+    handler: (req, res, params, deps) => handleGenerateProjectTitle(req, res, params, deps),
   },
   {
     method: "PATCH",

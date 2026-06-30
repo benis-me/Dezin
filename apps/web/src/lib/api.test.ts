@@ -39,6 +39,17 @@ test("createProject posts JSON and returns the project", async () => {
   );
 });
 
+test("generateProjectTitle POSTs the background title endpoint", async () => {
+  const titled = { ...PROJECT, name: "Pricing Control Room" };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(titled));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  await expect(api.generateProjectTitle("p1", "A dashboard for pricing experiments")).resolves.toEqual(titled);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/p1/title",
+    expect.objectContaining({ method: "POST" }),
+  );
+});
+
 test("listProjects GETs the collection", async () => {
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse([PROJECT]));
   const api = createApiClient({ fetchImpl });

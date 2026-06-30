@@ -77,6 +77,34 @@ test("project CRUD over HTTP", async () => {
   });
 });
 
+test("POST /api/projects/:id/title updates a project name with a generated title", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-title-test-"));
+  const store = new Store(":memory:");
+  const server = createApp({
+    store,
+    dataDir,
+    titleGenerator: async (input) => (input.brief.includes("pricing") ? "Pricing Control Room" : "Untitled"),
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const project = store.createProject({ name: "A dashboard for pricing experiments" });
+    const res = await fetch(`${base}/api/projects/${project.id}/title`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ brief: "A dashboard for pricing experiments" }),
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { name: string }).name, "Pricing Control Room");
+    assert.equal(store.getProject(project.id)?.name, "Pricing Control Room");
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    store.close();
+  }
+});
+
 test("conversations under a project", async () => {
   await withServer(async ({ base }) => {
     const project = (await (

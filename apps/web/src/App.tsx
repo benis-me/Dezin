@@ -39,6 +39,10 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
             try {
               const project = await api.createProject({ name: briefToName(brief), skillId, designSystemId, mode });
               setPendingBrief(brief);
+              void api
+                .generateProjectTitle(project.id, brief)
+                .then((updated) => window.dispatchEvent(new CustomEvent("dezin:project-title", { detail: updated })))
+                .catch(() => {});
               navigate(`/projects/${project.id}`);
             } catch {
               toast("Couldn't create the project.", { variant: "error" });

@@ -1,5 +1,5 @@
-import { render, screen, cleanup, fireEvent } from "@testing-library/react";
-import { test, expect, afterEach, beforeEach } from "vitest";
+import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { test, expect, afterEach, beforeEach, vi } from "vitest";
 import App from "./App.tsx";
 import { ApiProvider } from "./lib/api-context.tsx";
 import { makeFakeApi } from "./test/fake-api.ts";
@@ -59,4 +59,36 @@ test("the theme toggle flips the .dark class", () => {
   const before = document.documentElement.classList.contains("dark");
   fireEvent.click(screen.getByLabelText(/Switch to (light|dark) mode/));
   expect(document.documentElement.classList.contains("dark")).toBe(!before);
+});
+
+test("creating a project asks the daemon for a generated title in the background", async () => {
+  const createProject = vi.fn(async () => ({
+    id: "p1",
+    name: "A dashboard for pricing experiments",
+    skillId: "frontend-design",
+    designSystemId: "modern-minimal",
+    mode: "prototype" as const,
+    createdAt: 1,
+    updatedAt: 1,
+  }));
+  const generateProjectTitle = vi.fn(async () => ({
+    id: "p1",
+    name: "Pricing Control Room",
+    skillId: "frontend-design",
+    designSystemId: "modern-minimal",
+    mode: "prototype" as const,
+    createdAt: 1,
+    updatedAt: 2,
+  }));
+  render(
+    <ApiProvider client={makeFakeApi({ ...api, createProject, generateProjectTitle })}>
+      <App />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(screen.getByLabelText("Describe your design"), { target: { value: "A dashboard for pricing experiments" } });
+  fireEvent.click(screen.getByLabelText("Build"));
+
+  await waitFor(() => expect(createProject).toHaveBeenCalled());
+  await waitFor(() => expect(generateProjectTitle).toHaveBeenCalledWith("p1", "A dashboard for pricing experiments"));
 });

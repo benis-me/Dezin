@@ -58,7 +58,23 @@ test("HomeScreen marks projects with an active generation", () => {
   renderWithApi(<HomeScreen projects={[{ ...project("p1", "Pricing page"), runStatus: "running" }]} />, {
     listSkills: async () => SKILLS,
   });
-  expect(screen.getByText("Generating")).toBeInTheDocument();
+  expect(screen.getByText("Generating")).toHaveClass("shiny-text");
+});
+
+test("HomeScreen list view shows updated time until row actions are hovered", async () => {
+  const user = userEvent.setup();
+  renderWithApi(<HomeScreen projects={[project("p1", "Pricing page")]} />, {
+    listSkills: async () => SKILLS,
+  });
+
+  await user.click(screen.getByRole("button", { name: "List" }));
+
+  const list = screen.getByTestId("project-list-view");
+  expect(list).toHaveAttribute("data-staggered", "true");
+  const updated = screen.getByText(/Updated/);
+  expect(updated).toHaveClass("group-hover:opacity-0");
+  const actions = screen.getByTestId("project-list-actions-p1");
+  expect(actions).toHaveClass("opacity-0", "group-hover:opacity-100");
 });
 
 test("HomeScreen project toolbar orders sort, layout, then search", () => {

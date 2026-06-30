@@ -219,6 +219,39 @@
   color: var(--muted-foreground);
 }
 
+@keyframes dezin-shiny-text {
+  0% {
+    background-position: 140% 0;
+  }
+  100% {
+    background-position: -140% 0;
+  }
+}
+
+.shiny-text {
+  background: linear-gradient(
+    100deg,
+    var(--muted-foreground) 0%,
+    var(--foreground) 42%,
+    var(--foreground) 50%,
+    color-mix(in oklch, var(--primary) 70%, var(--foreground)) 58%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 240% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: dezin-shiny-text 2.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shiny-text {
+    animation: none;
+    background: none;
+    color: currentColor;
+  }
+}
+
 /* Subtle diagonal-hatch canvas — the design-tool backdrop behind previews/empty areas. */
 .dz-canvas {
   background-color: var(--surface-2);
