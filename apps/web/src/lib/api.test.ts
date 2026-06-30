@@ -168,6 +168,18 @@ test("streamRun yields SSE events, including one split across chunks", async () 
   );
 });
 
+test("reattachRun can request events after a sequence cursor", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () =>
+    new Response(sseStream([`data: {"type":"run-done","seq":3}\n\n`]), { status: 200 }),
+  );
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  const events = [];
+  for await (const ev of api.reattachRun("r1", undefined, { afterSeq: 2 })) events.push(ev);
+
+  expect(events).toEqual([{ type: "run-done", seq: 3 }]);
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/runs/r1/stream?after=2", { signal: undefined });
+});
+
 test("listDesignSystems and listSkills GET the catalog", async () => {
   const fetchImpl = vi.fn<FetchLike>(async (url) =>
     url.endsWith("/api/design-systems")

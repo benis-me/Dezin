@@ -366,7 +366,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             renderUrl,
           });
         }
-        sse({ type: "visual-qa", findings: visualFindings });
+        sse({ type: "visual-qa", enabled: settings.visualQaEnabled, findings: visualFindings });
       }
       const score = settings.visualQaEnabled ? lintScore(visualFindings) : null;
       const passed = !visualFindings.some((f) => f.severity === "P0");
@@ -491,7 +491,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       visualConversation,
       { projectRoot: dir, renderUrl: origin ? `${origin}/projects/${project.id}/preview/` : undefined },
     );
-    sse({ type: "visual-qa", findings: visualFindings });
+    sse({ type: "visual-qa", enabled: settings.visualQaEnabled, findings: visualFindings });
     const finalFindings = [...result.findings, ...visualFindings];
     const passed = result.passed && !finalFindings.some((f) => f.severity === "P0");
     store.recordArtifact(project.id, result.artifactPath, passed);
@@ -502,7 +502,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const fixes = result.rounds ? ` after ${result.rounds} fix${result.rounds > 1 ? "es" : ""}` : "";
     const quality = `, quality ${score}/100`;
     const text = passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`;
-    store.addMessage(conversation.id, "system", resultMessage(text, { passed, score, rounds: result.rounds }));
+    store.addMessage(
+      conversation.id,
+      "system",
+      resultMessage(text, { passed, score, rounds: result.rounds, materialSources: generated > 0 ? [`Generated image assets (${generated})`] : [] }),
+    );
     store.updateRun(run.id, {
       status: "succeeded",
       repairRounds: result.rounds,
@@ -545,6 +549,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
 /** GET /api/runs/:id/stream — reattach to a run: replays buffered/persisted events, then live. */
 export function handleRunStream(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps): void {
   const runId = params.id!;
+  const after = Number(new URL(req.url ?? "/", "http://localhost").searchParams.get("after") ?? 0);
   res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" });
   const unsub = subscribe(
     runId,
@@ -563,6 +568,7 @@ export function handleRunStream(req: IncomingMessage, res: ServerResponse, param
         /* already closed */
       }
     },
+    { afterSeq: Number.isFinite(after) ? after : 0 },
   );
   req.on("close", unsub);
 }

@@ -16,6 +16,7 @@ beforeEach(() => {
   localStorage.removeItem("dezin.workspace.queue.p1");
   localStorage.removeItem("dezin.workspace.split");
   localStorage.removeItem("dezin.workspace.files.split");
+  localStorage.removeItem("dezin.workspace.inspect.split");
 });
 afterEach(cleanup);
 
@@ -138,6 +139,39 @@ test("refreshing a standard preview revalidates the dev server lease", async () 
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
   expect(iframe.getAttribute("src") ?? "").toMatch(/^http:\/\/127\.0\.0\.1:5301\/p1\?t=\d+/);
   expect(captureProjectCover).toHaveBeenCalledTimes(1);
+});
+
+test("standard workspace shows setup and dev-server logs in Standard Doctor", async () => {
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Standard",
+          skillId: null,
+          designSystemId: "modern-minimal",
+          mode: "standard",
+          createdAt: 1,
+          updatedAt: 1,
+        }),
+        getSetup: async () => ({
+          phase: "installing",
+          logs: [
+            { at: 1, level: "info", message: "Installing dependencies" },
+            { at: 2, level: "error", message: "npm install failed" },
+          ],
+          error: "npm install failed",
+        }),
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("tab", { name: /Quality/ }));
+  expect(await screen.findByText("Standard Doctor")).toBeInTheDocument();
+  expect(screen.getByText("installing")).toBeInTheDocument();
+  expect(screen.getAllByText("npm install failed").length).toBeGreaterThan(0);
 });
 
 test("opening a project scrolls the restored conversation to the bottom", async () => {
@@ -411,7 +445,7 @@ test("mount reattaches the latest running run and replays its stream", async () 
   );
 
   expect(await screen.findByText("Recovered streamed text.")).toBeInTheDocument();
-  expect(reattachRun).toHaveBeenCalledWith("r-live", expect.anything());
+  expect(reattachRun).toHaveBeenCalledWith("r-live", expect.anything(), { afterSeq: 0 });
   expect(await screen.findByText(/Done, quality 100\/100/)).toBeInTheDocument();
 });
 
@@ -466,7 +500,7 @@ test("mount replays an interrupted run log after daemon restart", async () => {
 
   expect(await screen.findByText("Partial text before quit.")).toBeInTheDocument();
   expect(await screen.findByText("Interrupted.")).toBeInTheDocument();
-  expect(reattachRun).toHaveBeenCalledWith("r-interrupted", expect.anything());
+  expect(reattachRun).toHaveBeenCalledWith("r-interrupted", expect.anything(), { afterSeq: 0 });
 });
 
 test("Stop explicitly cancels the active daemon run", async () => {
@@ -793,6 +827,227 @@ test("clicking a marked target asks the preview to focus that element", async ()
     },
     "*",
   );
+  const inspect = screen.getByLabelText("Inspect panel");
+  expect(within(inspect).getByText("H1")).toBeInTheDocument();
+  expect(within(inspect).getAllByText("section.hero > h1").length).toBeGreaterThan(0);
+  expect(within(inspect).getAllByText("320").length).toBeGreaterThan(0);
+  expect(within(inspect).getAllByText("48").length).toBeGreaterThan(0);
+  expect(screen.getByRole("separator", { name: "Resize inspect panel" })).toBeInTheDocument();
+});
+
+test("inspect mode continuously captures real preview element attributes", async () => {
+  const fake = makeFakeApi({
+    getProject: async () => ({
+      id: "p1",
+      name: "Preview Project",
+      skillId: null,
+      designSystemId: "clean",
+      mode: "prototype",
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    listDesignSystems: async () => [
+      {
+        id: "clean",
+        name: "Clean",
+        category: "Default",
+        summary: "Neutral interface tokens",
+        swatch: { bg: "#ffffff", surface: "#f6f6f6", fg: "#111111", accent: "#2563eb" },
+      },
+    ],
+    listFiles: async () => [{ path: "index.html", size: 120 }],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
+  const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+  fireEvent.click(screen.getByLabelText("Inspect preview"));
+
+  expect(await screen.findByRole("separator", { name: "Resize inspect panel" })).toBeInTheDocument();
+  expect(screen.queryByText("Click an element to inspect · Esc to cancel")).toBeNull();
+  const emptyInspect = screen.getByLabelText("Inspect panel");
+  expect(within(emptyInspect).getByText("Project variables")).toBeInTheDocument();
+  expect(await within(emptyInspect).findByText("#2563eb")).toBeInTheDocument();
+  expect(within(emptyInspect).queryByText("Selection")).toBeNull();
+
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        source: "dezin",
+        type: "selected",
+        selector: "section.hero > h1",
+        tag: "h1",
+        text: "Enterprise pricing made simple",
+        rect: { x: 24, y: 40, w: 320, h: 48 },
+        styles: {
+          display: "block",
+          position: "static",
+          zIndex: "auto",
+          overflow: "visible",
+          flexDirection: "row",
+          justifyContent: "center",
+          alignItems: "baseline",
+          gap: "24px",
+          padding: "12px 16px",
+          margin: "0px",
+          gridTemplateColumns: "none",
+          gridTemplateRows: "none",
+          background: "rgb(255, 255, 255)",
+          backgroundImage: "linear-gradient(rgb(255, 255, 255), rgb(245, 245, 245))",
+          color: "rgb(17, 17, 17)",
+          fontFamily: "Inter, sans-serif",
+          fontSize: "64px",
+          fontWeight: "700",
+          lineHeight: "72px",
+          letterSpacing: "0px",
+          textAlign: "center",
+          textTransform: "none",
+          borderRadius: "0px",
+          opacity: "1",
+          borderTopColor: "rgb(17, 17, 17)",
+          borderTopWidth: "2px",
+          borderTopStyle: "solid",
+          borderRightColor: "rgb(17, 17, 17)",
+          borderRightWidth: "2px",
+          borderRightStyle: "solid",
+          borderBottomColor: "rgb(17, 17, 17)",
+          borderBottomWidth: "2px",
+          borderBottomStyle: "solid",
+          borderLeftColor: "rgb(17, 17, 17)",
+          borderLeftWidth: "2px",
+          borderLeftStyle: "solid",
+          outlineColor: "rgb(0, 0, 0)",
+          outlineWidth: "0px",
+          outlineStyle: "none",
+          boxShadow: "rgba(0, 0, 0, 0.2) 0px 10px 30px",
+          filter: "none",
+          backdropFilter: "blur(12px)",
+          transform: "matrix(1, 0, 0, 1, 0, 0)",
+          mixBlendMode: "normal",
+        },
+        attrs: {
+          id: "hero-title",
+          className: "hero title",
+          role: "heading",
+          ariaLabel: "Hero title",
+          screenLabel: "Hero headline",
+        },
+      },
+    }),
+  );
+
+  await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("Hero headline")).toBeInTheDocument());
+  await waitFor(() => {
+    const pickModeCalls = postMessage.mock.calls.filter(
+      ([message]) => (message as { type?: string; on?: boolean }).type === "select-mode" && (message as { on?: boolean }).on === true,
+    );
+    expect(pickModeCalls.length).toBeGreaterThan(1);
+  });
+  const inspect = screen.getByLabelText("Inspect panel");
+  expect(within(inspect).getAllByText("section.hero > h1").length).toBeGreaterThan(0);
+  expect(within(inspect).getByText("64px")).toBeInTheDocument();
+  expect(within(inspect).getByText("24px")).toBeInTheDocument();
+  expect(within(inspect).getByText("12px 16px")).toBeInTheDocument();
+  expect(within(inspect).getByText("Inter, sans-serif")).toBeInTheDocument();
+  expect(within(inspect).getByText("72px")).toBeInTheDocument();
+  expect(within(inspect).getByText("linear-gradient(rgb(255, 255, 255), rgb(245, 245, 245))")).toBeInTheDocument();
+  expect(within(inspect).getByText("rgb(255, 255, 255)")).toBeInTheDocument();
+  expect(within(inspect).getByText("2px")).toBeInTheDocument();
+  expect(within(inspect).getByText("solid")).toBeInTheDocument();
+  expect(within(inspect).getByText("rgba(0, 0, 0, 0.2) 0px 10px 30px")).toBeInTheDocument();
+  expect(within(inspect).getByText("blur(12px)")).toBeInTheDocument();
+  expect(within(inspect).getByText("matrix(1, 0, 0, 1, 0, 0)")).toBeInTheDocument();
+  expect(within(inspect).getByText("hero-title")).toBeInTheDocument();
+  expect(within(inspect).getByText("hero title")).toBeInTheDocument();
+  expect(within(inspect).queryByText("Auto layout")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
+
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        source: "dezin",
+        type: "selected",
+        selector: "button.cta",
+        tag: "button",
+        text: "Start",
+        rect: { x: 64, y: 112, w: 120, h: 40 },
+        styles: {
+          display: "inline-flex",
+          position: "relative",
+          background: "rgb(17, 17, 17)",
+          color: "rgb(255, 255, 255)",
+          fontSize: "16px",
+        },
+      },
+    }),
+  );
+
+  await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("BUTTON")).toBeInTheDocument());
+  expect(within(screen.getByLabelText("Inspect panel")).getAllByText("button.cta").length).toBeGreaterThan(0);
+  expect(within(screen.getByLabelText("Inspect panel")).queryByText("Hero headline")).toBeNull();
+
+  fireEvent.click(screen.getByLabelText("Select an element"));
+  expect(screen.queryByLabelText("Inspect panel")).toBeNull();
+  expect(screen.getByText("Click an element to attach it · Esc to cancel")).toBeInTheDocument();
+});
+
+test("inspect and selection modes keep the preview iframe mounted and use two-step Escape", async () => {
+  const fake = makeFakeApi({
+    listFiles: async () => [{ path: "index.html", size: 120 }],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
+  const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+
+  fireEvent.click(screen.getByLabelText("Inspect preview"));
+  expect(await screen.findByLabelText("Inspect panel")).toBeInTheDocument();
+  expect(screen.getByTitle("Artifact preview")).toBe(iframe);
+  expect(screen.getByLabelText("Inspect preview").className).toContain("!bg-primary");
+  await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "select-mode", on: true }, "*"));
+  expect(screen.queryByText("Click an element to inspect · Esc to cancel")).toBeNull();
+
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        source: "dezin",
+        type: "selected",
+        selector: "section.hero > h1",
+        tag: "h1",
+        text: "Title",
+        rect: { x: 24, y: 40, w: 320, h: 48 },
+        styles: { display: "block", position: "static" },
+      },
+    }),
+  );
+  expect(await within(screen.getByLabelText("Inspect panel")).findByText("H1")).toBeInTheDocument();
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("Project variables")).toBeInTheDocument());
+  expect(screen.queryByText("H1")).toBeNull();
+  expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "clear" }, "*");
+  expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "select-mode", on: true }, "*");
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByLabelText("Inspect panel")).toBeNull());
+  expect(screen.getByTitle("Artifact preview")).toBe(iframe);
+
+  fireEvent.click(screen.getByLabelText("Select an element"));
+  expect(screen.getByTitle("Artifact preview")).toBe(iframe);
+  expect(screen.getByLabelText("Select an element").className).toContain("!bg-primary");
+  expect(screen.getByText("Click an element to attach it · Esc to cancel")).toBeInTheDocument();
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByText("Click an element to attach it · Esc to cancel")).toBeNull());
+  expect(screen.getByTitle("Artifact preview")).toBe(iframe);
 });
 
 test("conversation opens at the bottom and shows an icon-only jump button when scrolled away", async () => {
@@ -1141,7 +1396,7 @@ test("the Quality tab shows final run-done findings even when no repair lint eve
   expect(screen.queryByText(/No quality issues\. Clean/)).toBeNull();
 });
 
-test("the Quality tab groups visual QA findings separately from anti-slop findings", async () => {
+test("the Quality tab separates static, geometry, and agent visual lanes", async () => {
   const fake = makeFakeApi({
     streamRun: async function* (): AsyncGenerator<RunEvent> {
       yield { type: "run-start", runId: "r-visual", conversationId: "c1" };
@@ -1154,6 +1409,7 @@ test("the Quality tab groups visual QA findings separately from anti-slop findin
         previewUrl: "/projects/p1/preview/",
         findings: [
           { severity: "P1", id: "visual-horizontal-overflow", message: "Desktop viewport has horizontal overflow.", fix: "Constrain wide sections." },
+          { severity: "P2", id: "visual-ai-review-1", message: "The button is visibly misaligned.", fix: "Align the button to the form baseline." },
           { severity: "P2", id: "raw-hex", message: "2 raw hex values outside :root.", fix: "Move colours into tokens." },
         ],
       };
@@ -1169,9 +1425,11 @@ test("the Quality tab groups visual QA findings separately from anti-slop findin
   await screen.findByText(/Done, quality 89\/100/);
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
 
-  expect(await screen.findByText("Visual QA")).toBeInTheDocument();
-  expect(screen.getByText("Anti-slop")).toBeInTheDocument();
+  expect(await screen.findByText("Static anti-slop")).toBeInTheDocument();
+  expect(screen.getByText("Geometry")).toBeInTheDocument();
+  expect(screen.getByText("Agent visual review")).toBeInTheDocument();
   expect(screen.getByText(/Desktop viewport has horizontal overflow/)).toBeInTheDocument();
+  expect(screen.getByText(/button is visibly misaligned/)).toBeInTheDocument();
   expect(screen.getByText(/raw hex values/)).toBeInTheDocument();
 });
 
@@ -1218,6 +1476,7 @@ test("a clean run shows the Quality pane's clean empty state", async () => {
   const fake = makeFakeApi({
     streamRun: async function* (): AsyncGenerator<RunEvent> {
       yield { type: "run-start", runId: "r2", conversationId: "c1" };
+      yield { type: "visual-qa", enabled: true, findings: [] };
       yield { type: "run-done", runId: "r2", passed: true, rounds: 0, score: 100 };
     },
   });
@@ -1230,8 +1489,40 @@ test("a clean run shows the Quality pane's clean empty state", async () => {
   fireEvent.click(screen.getByLabelText("Send"));
   await screen.findByTitle("Artifact preview");
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
-  expect(await screen.findByText(/No quality issues\. Clean/)).toBeInTheDocument();
+  expect(await screen.findByText(/No findings in recorded checks/)).toBeInTheDocument();
+  expect(screen.getByText("Static anti-slop")).toBeInTheDocument();
   expect(screen.getAllByText("100/100").length).toBeGreaterThan(0); // shown in the score header (and result card)
+});
+
+test("generated material sources render only in the run result card", async () => {
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-assets", conversationId: "c1" };
+      yield { type: "images", count: 2 };
+      yield { type: "run-done", runId: "r-assets", passed: true, rounds: 0, score: 100, findings: [] };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  expect(await screen.findByText("Material sources")).toBeInTheDocument();
+  expect(screen.getByText("Generated image assets (2)")).toBeInTheDocument();
+});
+
+test("parallel variant generation is not exposed in the composer yet", async () => {
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByLabelText("Message");
+  expect(screen.queryByLabelText("Generate variants")).toBeNull();
 });
 
 test("a non-perfect restored score without stored findings does not claim clean", async () => {

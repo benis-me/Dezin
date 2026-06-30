@@ -16,6 +16,7 @@ interface RunEntry {
   conversationId: string;
   logPath: string;
   buffer: unknown[];
+  nextSeq: number;
   emitter: EventEmitter;
   ctrl: AbortController;
   writeQueue: Promise<void>;
@@ -44,6 +45,7 @@ export function createRun(meta: { runId: string; conversationId: string; dataDir
     conversationId: meta.conversationId,
     logPath,
     buffer: [],
+    nextSeq: 1,
     emitter,
     ctrl: new AbortController(),
     writeQueue: Promise.resolve(),
@@ -54,19 +56,31 @@ export function createRun(meta: { runId: string; conversationId: string; dataDir
   return entry.ctrl;
 }
 
+function eventSeq(ev: unknown): number | null {
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return null;
+  const seq = (ev as { seq?: unknown }).seq;
+  return typeof seq === "number" && Number.isFinite(seq) ? seq : null;
+}
+
+function withSeq(ev: unknown, seq: number): unknown {
+  if (ev && typeof ev === "object" && !Array.isArray(ev)) return { ...ev, seq };
+  return { type: "event", value: ev, seq };
+}
+
 /** Buffer + persist + broadcast one event. */
 export function pushEvent(runId: string, ev: unknown): void {
   const e = runs.get(runId);
   if (!e) return;
-  e.buffer.push(ev);
+  const event = withSeq(ev, e.nextSeq++);
+  e.buffer.push(event);
   let line = "";
   try {
-    line = `${JSON.stringify(ev)}\n`;
+    line = `${JSON.stringify(event)}\n`;
   } catch {
     line = "";
   }
   if (line) e.writeQueue = e.writeQueue.catch(() => {}).then(() => appendFile(e.logPath, line)).catch(() => {});
-  e.emitter.emit("event", ev);
+  e.emitter.emit("event", event);
 }
 
 /** Mark the run finished; late subscribers fall back to the persisted log. */
@@ -104,22 +118,46 @@ export function isActive(runId: string): boolean {
  * If the run isn't in memory (already finished, or the daemon restarted), replays the
  * persisted log instead and ends — so a reconnecting client still sees the reached state.
  */
-export function subscribe(runId: string, dataDir: string, onEvent: (ev: unknown) => void, onEnd: () => void): () => void {
+function shouldReplay(ev: unknown, afterSeq: number, seen: Set<number>): boolean {
+  const seq = eventSeq(ev);
+  if (seq === null) return afterSeq <= 0;
+  if (seq <= afterSeq || seen.has(seq)) return false;
+  seen.add(seq);
+  return true;
+}
+
+export function subscribe(
+  runId: string,
+  dataDir: string,
+  onEvent: (ev: unknown) => void,
+  onEnd: () => void,
+  options: { afterSeq?: number } = {},
+): () => void {
+  const afterSeq = typeof options.afterSeq === "number" && Number.isFinite(options.afterSeq) ? options.afterSeq : 0;
+  const seen = new Set<number>();
   const e = runs.get(runId);
   if (!e) {
-    for (const ev of readRunLog(runLogPath(dataDir, runId))) onEvent(ev);
+    for (const ev of readRunLog(runLogPath(dataDir, runId))) {
+      if (shouldReplay(ev, afterSeq, seen)) onEvent(ev);
+    }
     onEnd();
     return () => {};
   }
-  for (const ev of e.buffer) onEvent(ev);
-  if (e.done) {
+  let ended = false;
+  const onEv = (ev: unknown): void => {
+    if (shouldReplay(ev, afterSeq, seen)) onEvent(ev);
+  };
+  const onDone = (): void => {
+    if (ended) return;
+    ended = true;
     onEnd();
-    return () => {};
+  };
+  if (!e.done) {
+    e.emitter.on("event", onEv);
+    e.emitter.once("done", onDone);
   }
-  const onEv = (ev: unknown): void => onEvent(ev);
-  const onDone = (): void => onEnd();
-  e.emitter.on("event", onEv);
-  e.emitter.once("done", onDone);
+  for (const ev of e.buffer.slice()) onEv(ev);
+  if (e.done) onDone();
   return () => {
     e.emitter.off("event", onEv);
     e.emitter.off("done", onDone);

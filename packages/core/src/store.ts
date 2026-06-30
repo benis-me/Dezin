@@ -252,6 +252,21 @@ export class Store {
     return this.getProject(id)!;
   }
 
+  createImportedProject(input: CreateProjectInput & { createdAt?: number; updatedAt?: number; archivedAt?: number | null }): Project {
+    const id = this.clock.id();
+    const now = this.clock.now();
+    const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : now;
+    const updatedAt = Number.isFinite(input.updatedAt) ? Number(input.updatedAt) : createdAt;
+    const archivedAt = input.archivedAt == null || !Number.isFinite(input.archivedAt) ? null : Number(input.archivedAt);
+    this.db
+      .prepare(
+        `INSERT INTO projects (id, name, skill_id, design_system_id, mode, created_at, updated_at, archived_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, input.name, input.skillId ?? null, input.designSystemId ?? null, input.mode ?? "prototype", createdAt, updatedAt, archivedAt);
+    return this.getProject(id)!;
+  }
+
   getProject(id: string): Project | null {
     const r = this.db.prepare(`SELECT * FROM projects WHERE id = ?`).get(id) as Row | undefined;
     return r ? asProject(r) : null;
@@ -334,6 +349,13 @@ export class Store {
     return asVariant(this.db.prepare(`SELECT * FROM variants WHERE id = ?`).get(id) as Row);
   }
 
+  createImportedVariant(projectId: string, input: { name: string; createdAt?: number }): Variant {
+    const id = this.clock.id();
+    const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : this.clock.now();
+    this.db.prepare(`INSERT INTO variants (id, project_id, name, created_at) VALUES (?, ?, ?, ?)`).run(id, projectId, input.name, createdAt);
+    return asVariant(this.db.prepare(`SELECT * FROM variants WHERE id = ?`).get(id) as Row);
+  }
+
   renameVariant(id: string, name: string): Variant | null {
     this.db.prepare(`UPDATE variants SET name = ? WHERE id = ?`).run(name, id);
     return this.getVariant(id);
@@ -354,6 +376,16 @@ export class Store {
     this.db
       .prepare(`INSERT INTO conversations (id, project_id, title, created_at) VALUES (?, ?, ?, ?)`)
       .run(id, projectId, title, this.clock.now());
+    const r = this.db.prepare(`SELECT * FROM conversations WHERE id = ?`).get(id) as Row;
+    return asConversation(r);
+  }
+
+  createImportedConversation(projectId: string, input: { title: string; createdAt?: number }): Conversation {
+    const id = this.clock.id();
+    const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : this.clock.now();
+    this.db
+      .prepare(`INSERT INTO conversations (id, project_id, title, created_at) VALUES (?, ?, ?, ?)`)
+      .run(id, projectId, input.title, createdAt);
     const r = this.db.prepare(`SELECT * FROM conversations WHERE id = ?`).get(id) as Row;
     return asConversation(r);
   }
@@ -390,6 +422,18 @@ export class Store {
         `INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)`,
       )
       .run(id, conversationId, role, content, this.clock.now());
+    const r = this.db.prepare(`SELECT * FROM messages WHERE id = ?`).get(id) as Row;
+    return asMessage(r);
+  }
+
+  addImportedMessage(conversationId: string, input: { role: MessageRole; content: string; createdAt?: number }): Message {
+    const id = this.clock.id();
+    const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : this.clock.now();
+    this.db
+      .prepare(
+        `INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, conversationId, input.role, input.content, createdAt);
     const r = this.db.prepare(`SELECT * FROM messages WHERE id = ?`).get(id) as Row;
     return asMessage(r);
   }
@@ -433,6 +477,53 @@ export class Store {
         `INSERT INTO runs (id, project_id, conversation_id, variant_id, user_message_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
       )
       .run(id, projectId, conversationId, vid, userMessageId ?? null, this.clock.now());
+    return this.getRun(id)!;
+  }
+
+  createImportedRun(
+    projectId: string,
+    conversationId: string,
+    input: {
+      variantId?: string | null;
+      userMessageId?: string | null;
+      assistantMessageId?: string | null;
+      commitHash?: string | null;
+      status?: RunStatus;
+      repairRounds?: number;
+      lintPassed?: boolean;
+      score?: number | null;
+      findings?: QualityFinding[];
+      createdAt?: number;
+      finishedAt?: number | null;
+    },
+  ): Run {
+    const id = this.clock.id();
+    const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : this.clock.now();
+    const finishedAt = input.finishedAt == null || !Number.isFinite(input.finishedAt) ? null : Number(input.finishedAt);
+    const status = input.status ?? "cancelled";
+    this.db
+      .prepare(
+        `INSERT INTO runs (
+           id, project_id, conversation_id, variant_id, user_message_id, assistant_message_id, commit_hash,
+           status, repair_rounds, lint_passed, score, final_findings, created_at, finished_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        projectId,
+        conversationId,
+        input.variantId ?? null,
+        input.userMessageId ?? null,
+        input.assistantMessageId ?? null,
+        input.commitHash ?? null,
+        status,
+        Math.max(0, Math.floor(input.repairRounds ?? 0)),
+        input.lintPassed ? 1 : 0,
+        input.score ?? null,
+        JSON.stringify(input.findings ?? []),
+        createdAt,
+        finishedAt,
+      );
     return this.getRun(id)!;
   }
 
@@ -524,6 +615,18 @@ export class Store {
         `INSERT INTO artifacts (id, project_id, path, lint_passed, created_at) VALUES (?, ?, ?, ?, ?)`,
       )
       .run(id, projectId, path, lintPassed ? 1 : 0, this.clock.now());
+    const r = this.db.prepare(`SELECT * FROM artifacts WHERE id = ?`).get(id) as Row;
+    return asArtifact(r);
+  }
+
+  importArtifact(projectId: string, input: { path: string; lintPassed: boolean; createdAt?: number }): Artifact {
+    const id = this.clock.id();
+    const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : this.clock.now();
+    this.db
+      .prepare(
+        `INSERT INTO artifacts (id, project_id, path, lint_passed, created_at) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, projectId, input.path, input.lintPassed ? 1 : 0, createdAt);
     const r = this.db.prepare(`SELECT * FROM artifacts WHERE id = ?`).get(id) as Row;
     return asArtifact(r);
   }
