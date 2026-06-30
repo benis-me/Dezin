@@ -225,6 +225,8 @@ test("picker bridge reports stable precise selectors", () => {
   assert.match(html, /data-dezin-id/);
   assert.match(html, /nth-of-type/);
   assert.match(html, /styles:styles\(el\)/);
+  assert.match(html, /attrs:attrs\(el\)/);
   assert.match(html, /borderWidth:s\.borderWidth/);
+  assert.match(html, /gridTemplateColumns:s\.gridTemplateColumns/);
   assert.match(html, /focus-target/);
 });

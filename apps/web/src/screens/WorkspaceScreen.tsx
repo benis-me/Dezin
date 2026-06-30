@@ -226,18 +226,77 @@ interface MarkupRect {
 interface MarkupStyles {
   display?: string;
   position?: string;
+  top?: string;
+  right?: string;
+  bottom?: string;
+  left?: string;
+  zIndex?: string;
+  width?: string;
+  height?: string;
+  minWidth?: string;
+  maxWidth?: string;
+  minHeight?: string;
+  maxHeight?: string;
+  overflow?: string;
+  overflowX?: string;
+  overflowY?: string;
+  flexDirection?: string;
+  flexWrap?: string;
+  justifyContent?: string;
+  alignItems?: string;
+  alignContent?: string;
+  gap?: string;
+  rowGap?: string;
+  columnGap?: string;
+  gridTemplateColumns?: string;
+  gridTemplateRows?: string;
+  padding?: string;
+  margin?: string;
   color?: string;
   background?: string;
+  backgroundImage?: string;
   fontFamily?: string;
   fontSize?: string;
   fontWeight?: string;
+  lineHeight?: string;
+  letterSpacing?: string;
+  textAlign?: string;
+  textTransform?: string;
   borderRadius?: string;
   opacity?: string;
   borderColor?: string;
   borderWidth?: string;
   borderStyle?: string;
+  borderTopColor?: string;
+  borderTopWidth?: string;
+  borderTopStyle?: string;
+  borderRightColor?: string;
+  borderRightWidth?: string;
+  borderRightStyle?: string;
+  borderBottomColor?: string;
+  borderBottomWidth?: string;
+  borderBottomStyle?: string;
+  borderLeftColor?: string;
+  borderLeftWidth?: string;
+  borderLeftStyle?: string;
+  outlineColor?: string;
+  outlineWidth?: string;
+  outlineStyle?: string;
   boxShadow?: string;
   filter?: string;
+  backdropFilter?: string;
+  transform?: string;
+  mixBlendMode?: string;
+}
+
+interface MarkupAttributes {
+  id?: string;
+  className?: string;
+  role?: string;
+  ariaLabel?: string;
+  screenLabel?: string;
+  href?: string;
+  src?: string;
 }
 
 interface MarkupTarget {
@@ -247,6 +306,7 @@ interface MarkupTarget {
   rect?: MarkupRect;
   note?: string;
   styles?: MarkupStyles;
+  attrs?: MarkupAttributes;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1226,6 +1286,22 @@ function inspectEffect(value?: string): string {
   return value;
 }
 
+function inspectValue(value?: string): string | undefined {
+  return value && value.trim() ? value : undefined;
+}
+
+function inspectBorderValue(styles: MarkupStyles, key: "Width" | "Style" | "Color"): string | undefined {
+  const values =
+    key === "Width"
+      ? [styles.borderTopWidth, styles.borderRightWidth, styles.borderBottomWidth, styles.borderLeftWidth]
+      : key === "Style"
+        ? [styles.borderTopStyle, styles.borderRightStyle, styles.borderBottomStyle, styles.borderLeftStyle]
+        : [styles.borderTopColor, styles.borderRightColor, styles.borderBottomColor, styles.borderLeftColor];
+  const present = values.filter((value): value is string => !!value && value.trim().length > 0);
+  if (present.length !== 4) return key === "Width" ? styles.borderWidth : key === "Style" ? styles.borderStyle : styles.borderColor;
+  return present.every((value) => value === present[0]) ? present[0] : `T ${present[0]} · R ${present[1]} · B ${present[2]} · L ${present[3]}`;
+}
+
 function InspectPanel({
   target,
   projectName,
@@ -1243,8 +1319,10 @@ function InspectPanel({
   const cssFiles = files.filter((file) => file.path.endsWith(".css")).length;
   const imageFiles = files.filter((file) => /\.(avif|gif|jpe?g|png|svg|webp)$/i.test(file.path)).length;
   const styles = target?.styles ?? {};
+  const attrs = target?.attrs ?? {};
   const swatch = designSystem?.swatch;
-  const title = target?.tag ? target.tag.toUpperCase() : target ? "Element" : "Project variables";
+  const title = target?.attrs?.screenLabel || target?.attrs?.ariaLabel || (target?.tag ? target.tag.toUpperCase() : target ? "Element" : "Project variables");
+  const hasStyleSnapshot = !!target?.styles;
   return (
     <aside className="flex h-full min-w-0 flex-col bg-card" aria-label="Inspect panel">
       <div className="flex min-h-12 shrink-0 items-center border-b border-border px-4 py-2">
@@ -1269,41 +1347,71 @@ function InspectPanel({
               <div className="grid grid-cols-2 gap-2">
                 <InspectField label="Display" value={styles.display} />
                 <InspectField label="Position" value={styles.position} />
+                <InspectField label="Z" value={styles.zIndex} />
+                <InspectField label="Overflow" value={styles.overflow} />
+                <InspectField label="Flex" value={styles.flexDirection} />
+                <InspectField label="Wrap" value={styles.flexWrap} />
+                <InspectField label="Justify" value={styles.justifyContent} />
+                <InspectField label="Align" value={styles.alignItems} />
+                <InspectField label="Gap" value={styles.gap} />
+                <InspectField label="Padding" value={styles.padding} />
+                <InspectField label="Margin" value={styles.margin} />
+                <InspectField label="Grid cols" value={inspectValue(styles.gridTemplateColumns)} wide />
+                <InspectField label="Grid rows" value={inspectValue(styles.gridTemplateRows)} wide />
               </div>
             </InspectSection>
             <InspectSection title="Appearance">
               <div className="grid grid-cols-2 gap-2">
-                <InspectField label="Opacity" value={inspectOpacity(styles.opacity)} />
+                <InspectField label="Opacity" value={hasStyleSnapshot ? inspectOpacity(styles.opacity) : undefined} />
                 <InspectField label="Radius" value={styles.borderRadius} />
                 <InspectField label="Font" value={styles.fontSize} />
                 <InspectField label="Weight" value={styles.fontWeight} />
+                <InspectField label="Line" value={styles.lineHeight} />
+                <InspectField label="Track" value={styles.letterSpacing} />
+                <InspectField label="Align" value={styles.textAlign} />
+                <InspectField label="Case" value={styles.textTransform} />
                 <InspectField label="Family" value={styles.fontFamily} wide />
+                <InspectField label="Transform" value={hasStyleSnapshot ? inspectEffect(styles.transform) : undefined} wide />
+                <InspectField label="Blend" value={styles.mixBlendMode} wide />
               </div>
             </InspectSection>
             <InspectSection title="Fill">
               <div className="grid grid-cols-2 gap-2">
-                <InspectField label="BG" value={<InspectSwatch value={styles.background} />} wide />
-                <InspectField label="Text" value={<InspectSwatch value={styles.color} />} wide />
+                <InspectField label="BG" value={hasStyleSnapshot ? <InspectSwatch value={styles.background} /> : undefined} wide />
+                <InspectField label="Image" value={hasStyleSnapshot ? inspectEffect(styles.backgroundImage) : undefined} wide />
+                <InspectField label="Text" value={hasStyleSnapshot ? <InspectSwatch value={styles.color} /> : undefined} wide />
               </div>
             </InspectSection>
             <InspectSection title="Stroke">
               <div className="grid grid-cols-2 gap-2">
-                <InspectField label="Width" value={styles.borderWidth ?? "0px"} />
-                <InspectField label="Style" value={styles.borderStyle ?? "none"} />
-                <InspectField label="Color" value={<InspectSwatch value={styles.borderColor} />} wide />
+                <InspectField label="Width" value={inspectBorderValue(styles, "Width")} />
+                <InspectField label="Style" value={inspectBorderValue(styles, "Style")} />
+                <InspectField label="Color" value={hasStyleSnapshot ? <InspectSwatch value={inspectBorderValue(styles, "Color")} /> : undefined} wide />
+                <InspectField label="Outline" value={[styles.outlineWidth, styles.outlineStyle].filter(Boolean).join(" ") || undefined} />
+                <InspectField label="O color" value={hasStyleSnapshot ? <InspectSwatch value={styles.outlineColor} /> : undefined} />
               </div>
             </InspectSection>
             <InspectSection title="Effects">
               <div className="grid grid-cols-2 gap-2">
-                <InspectField label="Shadow" value={inspectEffect(styles.boxShadow)} wide />
-                <InspectField label="Filter" value={inspectEffect(styles.filter)} wide />
+                <InspectField label="Shadow" value={hasStyleSnapshot ? inspectEffect(styles.boxShadow) : undefined} wide />
+                <InspectField label="Filter" value={hasStyleSnapshot ? inspectEffect(styles.filter) : undefined} wide />
+                <InspectField label="Backdrop" value={hasStyleSnapshot ? inspectEffect(styles.backdropFilter) : undefined} wide />
               </div>
             </InspectSection>
             <InspectSection title="Content">
               <div className="space-y-2">
                 <InspectField label="Selector" value={target.selector} wide />
+                <div className="grid grid-cols-2 gap-2">
+                  <InspectField label="ID" value={attrs.id} />
+                  <InspectField label="Role" value={attrs.role} />
+                  <InspectField label="Name" value={attrs.ariaLabel} wide />
+                  <InspectField label="Class" value={attrs.className} wide />
+                  <InspectField label="Href" value={attrs.href} wide />
+                  <InspectField label="Src" value={attrs.src} wide />
+                </div>
                 {target.text ? <p className="line-clamp-4 rounded-md bg-surface-2 px-2 py-1.5 text-xs leading-snug text-foreground-2">"{target.text}"</p> : null}
                 {target.note ? <p className="line-clamp-3 rounded-md bg-surface-2 px-2 py-1.5 text-xs leading-snug text-foreground">{target.note}</p> : null}
+                {!hasStyleSnapshot ? <p className="rounded-md border border-border bg-surface px-2 py-1.5 text-xs text-muted-foreground">Style snapshot was not captured for this target.</p> : null}
               </div>
             </InspectSection>
           </>
@@ -1475,6 +1583,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const activeRunIdRef = useRef<string | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
   const selectionModeRef = useRef<"markup" | "inspect" | null>(null);
+  const inspectedTargetRef = useRef<MarkupTarget | null>(null);
   const terminalEventRef = useRef(false);
   const liveQualityRef = useRef(false);
   const reattachedRunsRef = useRef<Set<string>>(new Set());
@@ -2274,6 +2383,21 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }, 70);
   };
 
+  const postPreviewBridge = useCallback((message: Record<string, unknown>): void => {
+    previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", ...message }, "*");
+  }, []);
+
+  const setPreviewPickMode = useCallback(
+    (on: boolean): void => {
+      postPreviewBridge({ type: "select-mode", on });
+    },
+    [postPreviewBridge],
+  );
+
+  const clearPreviewBridge = useCallback((): void => {
+    postPreviewBridge({ type: "clear" });
+  }, [postPreviewBridge]);
+
   // Element picker — receive the clicked element from the preview bridge.
   useEffect(() => {
     const onMessage = (e: MessageEvent): void => {
@@ -2286,16 +2410,19 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             text?: string;
             rect?: { x: number; y: number; w: number; h: number };
             styles?: MarkupStyles;
+            attrs?: MarkupAttributes;
           }
         | null;
       if (!d || d.source !== "dezin") return;
       if (d.type === "selected" && d.selector) {
-        const target = { selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: d.rect, styles: d.styles };
+        const target = { selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: d.rect, styles: d.styles, attrs: d.attrs };
         setInspectedTarget(target);
+        inspectedTargetRef.current = target;
         if (selectionModeRef.current === "inspect") {
           setPendingMark(null);
           setSelectMode(false);
           setInspectOpen(true);
+          setPreviewPickMode(true);
           return;
         }
         // Position a "Mark up" popover near the clicked element (iframe coords → page coords).
@@ -2306,14 +2433,29 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         setInspectOpen(false);
         setSelectMode(false);
       } else if (d.type === "cancel") {
-        setSelectMode(false);
-        if (selectionModeRef.current === "inspect") setInspectOpen(false);
         setPendingMark(null);
+        setSelectMode(false);
+        if (selectionModeRef.current === "inspect") {
+          clearPreviewBridge();
+          if (inspectedTargetRef.current) {
+            inspectedTargetRef.current = null;
+            setInspectedTarget(null);
+            setInspectOpen(true);
+            setPreviewPickMode(true);
+          } else {
+            setInspectOpen(false);
+          }
+          return;
+        }
       }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, []);
+  }, [clearPreviewBridge, setPreviewPickMode]);
+
+  useEffect(() => {
+    inspectedTargetRef.current = inspectedTarget;
+  }, [inspectedTarget]);
 
   useEffect(() => {
     selectionModeRef.current = selectMode ? "markup" : inspectOpen ? "inspect" : null;
@@ -2323,19 +2465,33 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== "Escape" || (!selectMode && !inspectOpen && !pendingMark)) return;
       event.preventDefault();
-      previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "clear" }, "*");
+      clearPreviewBridge();
+      if (pendingMark) {
+        setPendingMark(null);
+        setSelectMode(false);
+        return;
+      }
+      if (selectMode) {
+        setSelectMode(false);
+        return;
+      }
+      if (inspectOpen && inspectedTarget) {
+        inspectedTargetRef.current = null;
+        setInspectedTarget(null);
+        setPreviewPickMode(true);
+        return;
+      }
       setSelectMode(false);
       setInspectOpen(false);
-      setPendingMark(null);
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [inspectOpen, pendingMark, selectMode]);
+  }, [clearPreviewBridge, inspectOpen, inspectedTarget, pendingMark, selectMode, setPreviewPickMode]);
 
   // Tell the preview bridge to enter/exit pick mode whenever the toggle flips.
   useEffect(() => {
-    previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "select-mode", on: selectMode || inspectOpen }, "*");
-  }, [selectMode, inspectOpen, previewSrc]);
+    setPreviewPickMode(selectMode || inspectOpen);
+  }, [selectMode, inspectOpen, previewSrc, setPreviewPickMode]);
 
   // Track the floating composer's height so the message list can clear it.
   useEffect(() => {
@@ -2349,7 +2505,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   // Clear the pinned outline in the preview and close the popover.
   const dismissMark = (): void => {
-    previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "clear" }, "*");
+    clearPreviewBridge();
     setPendingMark(null);
   };
 
@@ -2360,13 +2516,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setSelectMode(false);
     setPendingMark(null);
     const message = {
-      source: "dezin-parent",
       type: "focus-target",
       selector: target.selector,
       rect: target.rect,
     };
     const post = (): void => {
-      previewIframeRef.current?.contentWindow?.postMessage(message, "*");
+      postPreviewBridge(message);
     };
     post();
     window.setTimeout(post, 60);
@@ -3138,6 +3293,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                           const next = !v;
                           if (next) {
                             setInspectOpen(false);
+                            setInspectedTarget(null);
                             setPendingMark(null);
                           }
                           return next;
@@ -3156,7 +3312,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                           const next = !v;
                           setSelectMode(false);
                           setPendingMark(null);
-                          if (!next) previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "clear" }, "*");
+                          setInspectedTarget(null);
+                          if (!next) clearPreviewBridge();
                           return next;
                         })
                       }
@@ -3230,11 +3387,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         </div>
 
         <div className="dz-canvas relative flex-1 overflow-hidden">
-          {(selectMode || inspectOpen) && tab === "Preview" && previewSrc ? (
+          {selectMode && tab === "Preview" && previewSrc ? (
             <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center p-2.5">
               <span className="flex items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-xs font-medium text-primary-foreground shadow-md">
                 <MousePointerClick size={12} strokeWidth={2} />
-                {inspectOpen ? "Click an element to inspect · Esc to cancel" : "Click an element to attach it · Esc to cancel"}
+                Click an element to attach it · Esc to cancel
               </span>
             </div>
           ) : null}

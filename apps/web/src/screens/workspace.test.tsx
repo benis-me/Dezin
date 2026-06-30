@@ -835,7 +835,7 @@ test("clicking a marked target asks the preview to focus that element", async ()
   expect(screen.getByRole("separator", { name: "Resize inspect panel" })).toBeInTheDocument();
 });
 
-test("inspect mode directly captures preview elements and stays mutually exclusive with markup selection", async () => {
+test("inspect mode continuously captures real preview element attributes", async () => {
   const fake = makeFakeApi({
     getProject: async () => ({
       id: "p1",
@@ -863,11 +863,12 @@ test("inspect mode directly captures preview elements and stays mutually exclusi
     </ApiProvider>,
   );
 
-  await screen.findByTitle("Artifact preview");
+  const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
+  const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
   fireEvent.click(screen.getByLabelText("Inspect preview"));
 
   expect(await screen.findByRole("separator", { name: "Resize inspect panel" })).toBeInTheDocument();
-  expect(await screen.findByText("Click an element to inspect · Esc to cancel")).toBeInTheDocument();
+  expect(screen.queryByText("Click an element to inspect · Esc to cancel")).toBeNull();
   const emptyInspect = screen.getByLabelText("Inspect panel");
   expect(within(emptyInspect).getByText("Project variables")).toBeInTheDocument();
   expect(await within(emptyInspect).findByText("#2563eb")).toBeInTheDocument();
@@ -885,39 +886,116 @@ test("inspect mode directly captures preview elements and stays mutually exclusi
         styles: {
           display: "block",
           position: "static",
+          zIndex: "auto",
+          overflow: "visible",
+          flexDirection: "row",
+          justifyContent: "center",
+          alignItems: "baseline",
+          gap: "24px",
+          padding: "12px 16px",
+          margin: "0px",
+          gridTemplateColumns: "none",
+          gridTemplateRows: "none",
           background: "rgb(255, 255, 255)",
+          backgroundImage: "linear-gradient(rgb(255, 255, 255), rgb(245, 245, 245))",
           color: "rgb(17, 17, 17)",
+          fontFamily: "Inter, sans-serif",
           fontSize: "64px",
           fontWeight: "700",
+          lineHeight: "72px",
+          letterSpacing: "0px",
+          textAlign: "center",
+          textTransform: "none",
           borderRadius: "0px",
           opacity: "1",
-          borderColor: "rgb(17, 17, 17)",
-          borderWidth: "2px",
-          borderStyle: "solid",
+          borderTopColor: "rgb(17, 17, 17)",
+          borderTopWidth: "2px",
+          borderTopStyle: "solid",
+          borderRightColor: "rgb(17, 17, 17)",
+          borderRightWidth: "2px",
+          borderRightStyle: "solid",
+          borderBottomColor: "rgb(17, 17, 17)",
+          borderBottomWidth: "2px",
+          borderBottomStyle: "solid",
+          borderLeftColor: "rgb(17, 17, 17)",
+          borderLeftWidth: "2px",
+          borderLeftStyle: "solid",
+          outlineColor: "rgb(0, 0, 0)",
+          outlineWidth: "0px",
+          outlineStyle: "none",
           boxShadow: "rgba(0, 0, 0, 0.2) 0px 10px 30px",
           filter: "none",
+          backdropFilter: "blur(12px)",
+          transform: "matrix(1, 0, 0, 1, 0, 0)",
+          mixBlendMode: "normal",
+        },
+        attrs: {
+          id: "hero-title",
+          className: "hero title",
+          role: "heading",
+          ariaLabel: "Hero title",
+          screenLabel: "Hero headline",
         },
       },
     }),
   );
 
-  await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("H1")).toBeInTheDocument());
+  await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("Hero headline")).toBeInTheDocument());
+  await waitFor(() => {
+    const pickModeCalls = postMessage.mock.calls.filter(
+      ([message]) => (message as { type?: string; on?: boolean }).type === "select-mode" && (message as { on?: boolean }).on === true,
+    );
+    expect(pickModeCalls.length).toBeGreaterThan(1);
+  });
   const inspect = screen.getByLabelText("Inspect panel");
   expect(within(inspect).getAllByText("section.hero > h1").length).toBeGreaterThan(0);
   expect(within(inspect).getByText("64px")).toBeInTheDocument();
+  expect(within(inspect).getByText("24px")).toBeInTheDocument();
+  expect(within(inspect).getByText("12px 16px")).toBeInTheDocument();
+  expect(within(inspect).getByText("Inter, sans-serif")).toBeInTheDocument();
+  expect(within(inspect).getByText("72px")).toBeInTheDocument();
+  expect(within(inspect).getByText("linear-gradient(rgb(255, 255, 255), rgb(245, 245, 245))")).toBeInTheDocument();
   expect(within(inspect).getByText("rgb(255, 255, 255)")).toBeInTheDocument();
   expect(within(inspect).getByText("2px")).toBeInTheDocument();
   expect(within(inspect).getByText("solid")).toBeInTheDocument();
   expect(within(inspect).getByText("rgba(0, 0, 0, 0.2) 0px 10px 30px")).toBeInTheDocument();
+  expect(within(inspect).getByText("blur(12px)")).toBeInTheDocument();
+  expect(within(inspect).getByText("matrix(1, 0, 0, 1, 0, 0)")).toBeInTheDocument();
+  expect(within(inspect).getByText("hero-title")).toBeInTheDocument();
+  expect(within(inspect).getByText("hero title")).toBeInTheDocument();
   expect(within(inspect).queryByText("Auto layout")).toBeNull();
   expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
+
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        source: "dezin",
+        type: "selected",
+        selector: "button.cta",
+        tag: "button",
+        text: "Start",
+        rect: { x: 64, y: 112, w: 120, h: 40 },
+        styles: {
+          display: "inline-flex",
+          position: "relative",
+          background: "rgb(17, 17, 17)",
+          color: "rgb(255, 255, 255)",
+          fontSize: "16px",
+        },
+      },
+    }),
+  );
+
+  await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("BUTTON")).toBeInTheDocument());
+  expect(within(screen.getByLabelText("Inspect panel")).getAllByText("button.cta").length).toBeGreaterThan(0);
+  expect(within(screen.getByLabelText("Inspect panel")).queryByText("Hero headline")).toBeNull();
 
   fireEvent.click(screen.getByLabelText("Select an element"));
   expect(screen.queryByLabelText("Inspect panel")).toBeNull();
   expect(screen.getByText("Click an element to attach it · Esc to cancel")).toBeInTheDocument();
 });
 
-test("inspect and selection modes keep the preview iframe mounted and cancel from parent Escape", async () => {
+test("inspect and selection modes keep the preview iframe mounted and use two-step Escape", async () => {
   const fake = makeFakeApi({
     listFiles: async () => [{ path: "index.html", size: 120 }],
   });
@@ -935,12 +1013,32 @@ test("inspect and selection modes keep the preview iframe mounted and cancel fro
   expect(screen.getByTitle("Artifact preview")).toBe(iframe);
   expect(screen.getByLabelText("Inspect preview").className).toContain("!bg-primary");
   await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "select-mode", on: true }, "*"));
+  expect(screen.queryByText("Click an element to inspect · Esc to cancel")).toBeNull();
+
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        source: "dezin",
+        type: "selected",
+        selector: "section.hero > h1",
+        tag: "h1",
+        text: "Title",
+        rect: { x: 24, y: 40, w: 320, h: 48 },
+        styles: { display: "block", position: "static" },
+      },
+    }),
+  );
+  expect(await within(screen.getByLabelText("Inspect panel")).findByText("H1")).toBeInTheDocument();
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("Project variables")).toBeInTheDocument());
+  expect(screen.queryByText("H1")).toBeNull();
+  expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "clear" }, "*");
+  expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "select-mode", on: true }, "*");
 
   fireEvent.keyDown(window, { key: "Escape" });
   await waitFor(() => expect(screen.queryByLabelText("Inspect panel")).toBeNull());
-  expect(screen.queryByText("Click an element to inspect · Esc to cancel")).toBeNull();
   expect(screen.getByTitle("Artifact preview")).toBe(iframe);
-  expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "clear" }, "*");
 
   fireEvent.click(screen.getByLabelText("Select an element"));
   expect(screen.getByTitle("Artifact preview")).toBe(iframe);

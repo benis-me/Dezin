@@ -4,7 +4,7 @@
  * (on demand) run a Vite dev server we can preview. This module owns that lifecycle.
  */
 
-import { cp, mkdir } from "node:fs/promises";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
@@ -32,6 +32,7 @@ interface Runtime {
 
 const runtimes = new Map<string, Runtime>();
 export const DEV_SERVER_IDLE_MS = 60_000;
+const PICKER_BRIDGE_BLOCK = /const PICKER_BRIDGE = `[\s\S]*?<\/script>`;/;
 
 function clearDevReleaseTimer(dev: Runtime["dev"]): void {
   if (!dev?.releaseTimer) return;
@@ -48,6 +49,19 @@ function stopDev(dev: Runtime["dev"]): void {
   if (!dev) return;
   clearDevReleaseTimer(dev);
   if (!dev.proc.killed) dev.proc.kill();
+}
+
+export async function ensureProjectPickerBridge(projectDir: string): Promise<boolean> {
+  const viteConfig = join(projectDir, "vite.config.js");
+  if (!existsSync(viteConfig)) return false;
+  const [current, template] = await Promise.all([readFile(viteConfig, "utf8"), readFile(join(templateDir(), "vite.config.js"), "utf8")]);
+  if (current.includes("attrs:attrs(el)") && current.includes("gridTemplateColumns:s.gridTemplateColumns") && current.includes("focus-target")) return false;
+  const templateBlock = template.match(PICKER_BRIDGE_BLOCK)?.[0];
+  if (!templateBlock) return false;
+  const currentBlock = current.match(PICKER_BRIDGE_BLOCK)?.[0];
+  if (!currentBlock || currentBlock === templateBlock) return false;
+  await writeFile(viteConfig, current.replace(PICKER_BRIDGE_BLOCK, templateBlock));
+  return true;
 }
 
 function appendLog(rt: Runtime, message: string, level: RuntimeLog["level"] = "info"): void {
@@ -184,6 +198,16 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
   if (!rt) {
     rt = { phase: existsSync(join(projectDir, "node_modules")) ? "ready" : "installing", logs: [] };
     runtimes.set(runtimeKey, rt);
+  }
+  const statusBeforeBridgeUpdate = existsSync(join(projectDir, ".git")) ? await workingTreeFingerprint(projectDir) : "";
+  const bridgeUpdated = await ensureProjectPickerBridge(projectDir).catch(() => false);
+  if (bridgeUpdated) {
+    appendLog(rt, "Updated preview inspect bridge");
+    if (!statusBeforeBridgeUpdate) await gitCommit(projectDir, "Dezin: update preview inspect bridge");
+    if (rt.dev && !rt.dev.proc.killed) {
+      stopDev(rt.dev);
+      rt.dev = undefined;
+    }
   }
   if (!existsSync(join(projectDir, "node_modules"))) throw new Error("dependencies not installed yet");
   if (rt.dev && !rt.dev.proc.killed) {
