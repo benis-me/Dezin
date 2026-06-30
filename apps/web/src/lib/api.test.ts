@@ -66,6 +66,16 @@ test("releaseDevServer DELETEs the project devserver lease", async () => {
   );
 });
 
+test("captureProjectCover POSTs the cover capture endpoint", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ captured: true }));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  await expect(api.captureProjectCover("p1")).resolves.toEqual({ captured: true });
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/p1/cover/capture",
+    expect.objectContaining({ method: "POST" }),
+  );
+});
+
 test("non-ok responses throw ApiError with the status", async () => {
   const fetchImpl = vi.fn<FetchLike>(async () => new Response("nope", { status: 404 }));
   const api = createApiClient({ fetchImpl });

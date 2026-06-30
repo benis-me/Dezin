@@ -154,6 +154,62 @@ test("devserver release endpoint targets the active standard variant runtime", a
   );
 });
 
+test("standard cover capture endpoint backfills a missing project cover", async () => {
+  let captured: { url: string; outPath: string } | null = null;
+  const released: string[] = [];
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const active = store.ensureMainVariant(project.id).id;
+      const root = join(dataDir, "projects", project.id);
+      mkdirSync(root, { recursive: true });
+
+      const res = await fetch(`${base}/api/projects/${project.id}/cover/capture?release=1`, { method: "POST" });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { captured: true });
+      assert.deepEqual(captured, {
+        url: "http://127.0.0.1:6001/",
+        outPath: join(root, ".cover.png"),
+      });
+      assert.deepEqual(released, [`${project.id}:${active}`]);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6001/" }),
+      captureCoverUrl: async (url, outPath) => {
+        captured = { url, outPath };
+        return true;
+      },
+      releaseDevServer: (runtimeKey) => {
+        released.push(runtimeKey);
+        return true;
+      },
+    },
+  );
+});
+
+test("standard cover capture endpoint skips projects that already have a cover", async () => {
+  let captureCalls = 0;
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const root = join(dataDir, "projects", project.id);
+      mkdirSync(root, { recursive: true });
+      writeFileSync(join(root, ".cover.png"), "png");
+
+      const res = await fetch(`${base}/api/projects/${project.id}/cover/capture`, { method: "POST" });
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { captured: false, reason: "exists" });
+      assert.equal(captureCalls, 0);
+    },
+    {
+      captureCoverUrl: async () => {
+        captureCalls++;
+        return true;
+      },
+    },
+  );
+});
+
 test("prototype variants keep root snapshot switching behavior", async () => {
   await withServer(async ({ base, dataDir, store }) => {
     const project = store.createProject({ name: "Proto" });

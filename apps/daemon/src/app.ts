@@ -34,6 +34,7 @@ import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./vari
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
+import { captureCoverUrl } from "./capture-cover.ts";
 import type { VisualQaRunner } from "./visual-qa.ts";
 
 export interface AppDeps {
@@ -476,6 +477,33 @@ const routes: Route[] = [
       const project = deps.store.getProject(id!);
       if (!project) return serveProjectFile(res, deps.dataDir, id!, rest ?? "");
       return serveFileFromBase(res, await activeArtifactDir(deps, project), rest ?? "");
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/cover/capture",
+    handler: async (req, res, { id }, deps) => {
+      const project = deps.store.getProject(id!);
+      if (!project) return sendError(res, 404, "project not found");
+      if (project.mode !== "standard") return sendJson(res, 200, { captured: false, reason: "unsupported" });
+
+      const root = projectDir(deps.dataDir, id!);
+      const coverPath = join(root, ".cover.png");
+      if (existsSync(coverPath)) return sendJson(res, 200, { captured: false, reason: "exists" });
+
+      const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
+      const runtimeKey = variantRuntimeKey(id!, active);
+      const releaseAfter = new URL(req.url ?? "", "http://localhost").searchParams.get("release") === "1";
+      try {
+        const dir = await activeArtifactDir(deps, project);
+        const { url } = await (deps.ensureDevServer ?? ensureDevServer)(id!, dir, runtimeKey);
+        const captured = await (deps.captureCoverUrl ?? captureCoverUrl)(url, coverPath);
+        sendJson(res, 200, { captured });
+      } catch (err) {
+        sendError(res, 409, err instanceof Error ? err.message : "cover capture failed");
+      } finally {
+        if (releaseAfter) (deps.releaseDevServer ?? releaseDevServer)(runtimeKey);
+      }
     },
   },
   {

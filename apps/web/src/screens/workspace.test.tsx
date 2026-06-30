@@ -79,6 +79,31 @@ test("leaving a standard workspace releases its dev server lease", async () => {
   await waitFor(() => expect(releaseDevServer).toHaveBeenCalledWith("p1"));
 });
 
+test("opening a standard workspace backfills a missing cover from the dev preview", async () => {
+  const captureProjectCover = vi.fn(async () => ({ captured: true }));
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Standard",
+          skillId: null,
+          designSystemId: "modern-minimal",
+          mode: "standard",
+          createdAt: 1,
+          updatedAt: 1,
+        }),
+        getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/p1" }),
+        captureProjectCover,
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(captureProjectCover).toHaveBeenCalledWith("p1"));
+});
+
 test("sending a brief streams events into the chat and shows the preview + export menu", async () => {
   const user = userEvent.setup();
   const fake = makeFakeApi({

@@ -921,6 +921,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       }
       const { url } = await api.getDevServerUrl(projectId);
       setPreviewSrc(url);
+      void api.captureProjectCover(projectId).catch(() => {});
     } catch {
       // setup not ready; the user can retry
     }
