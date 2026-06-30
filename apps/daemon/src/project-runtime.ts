@@ -70,6 +70,24 @@ export async function setupStandardProject(projectId: string, projectDir: string
   }
 }
 
+/** Prepare an imported Standard project without copying the template over its source. */
+export async function setupImportedStandardProject(projectId: string, projectDir: string): Promise<void> {
+  const rt: Runtime = { phase: "installing" };
+  runtimes.set(projectId, rt);
+  try {
+    await mkdir(projectDir, { recursive: true });
+    if (!existsSync(join(projectDir, ".git"))) await run("git", ["init", "-q"], projectDir);
+    await gitCommit(projectDir, "Dezin: import project");
+    const code = await run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error"], projectDir);
+    if (code === 0) await gitCommit(projectDir, "Dezin: install dependencies");
+    rt.phase = code === 0 ? "ready" : "error";
+    if (code !== 0) rt.error = "npm install failed";
+  } catch (err) {
+    rt.phase = "error";
+    rt.error = err instanceof Error ? err.message : "setup failed";
+  }
+}
+
 export function getSetup(projectId: string, projectDir: string): { phase: SetupPhase; error?: string } {
   const rt = runtimes.get(projectId);
   if (rt) return { phase: rt.phase, error: rt.error };

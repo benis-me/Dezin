@@ -2,7 +2,26 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { Button, Dialog, FadeIn, IconButton, Loading, PanelBar, Segmented, Spinner, Tabs, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, type TabItem } from "../components/ui/index.ts";
+import {
+  Button,
+  Dialog,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  FadeIn,
+  IconButton,
+  Loading,
+  PanelBar,
+  Segmented,
+  Spinner,
+  Tabs,
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+  TooltipProvider,
+  type TabItem,
+} from "../components/ui/index.ts";
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
 import { PreviewModal } from "../components/PreviewModal.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
@@ -783,6 +802,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [diff, setDiff] = useState<{ label: string; lines: DiffLine[] } | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
   const workspaceConversationPercent =
     readStoredPanelPercent(SPLIT_KEY, 24, 55) ??
     panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 33, 24, 55);
@@ -1988,34 +2008,52 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                       </motion.span>
                     </IconButton>
                   </ToolbarTooltip>
+                  <ToolbarTooltip label="Full screen preview">
+                    <IconButton
+                      aria-label="Full screen preview"
+                      onClick={() => setFullscreen(true)}
+                      className="app-no-drag"
+                    >
+                      <Maximize2 size={15} strokeWidth={1.75} />
+                    </IconButton>
+                  </ToolbarTooltip>
                 </>
               ) : null}
-              {canExport ? (
-                <ToolbarTooltip label="Export">
-                  <a
-                    href={api.exportUrl(projectId)}
-                    download
-                    aria-label="Export project"
-                    className="app-no-drag grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-                  >
-                    <Download size={15} strokeWidth={1.75} />
-                  </a>
-                </ToolbarTooltip>
+              {canExport || onOpenSettings ? (
+                <span className="mx-0.5 h-5 w-px bg-border" aria-hidden />
               ) : null}
-              <ToolbarTooltip label="Full screen preview">
-                <span className="app-no-drag inline-flex">
-                  <IconButton
-                    aria-label="Full screen preview"
-                    disabled={!previewSrc}
-                    onClick={() => setFullscreen(true)}
-                  >
-                    <Maximize2 size={15} strokeWidth={1.75} />
-                  </IconButton>
-                </span>
-              </ToolbarTooltip>
+              {canExport ? (
+                <DropdownMenu open={exportOpen} onOpenChange={setExportOpen}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="app-no-drag inline-flex">
+                        <DropdownMenuTrigger
+                          aria-label="Export project"
+                          onClick={() => setExportOpen(true)}
+                          className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-[transform,color,background-color] duration-150 ease-out hover:bg-surface-2 hover:text-foreground active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
+                        >
+                          <Download size={15} strokeWidth={1.75} />
+                        </DropdownMenuTrigger>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent sideOffset={2}>Export project</TooltipContent>
+                  </Tooltip>
+                  <DropdownMenuContent align="end" className="w-48">
+                    <DropdownMenuItem asChild>
+                      <a href={api.exportUrl(projectId)} download>
+                        Source ZIP
+                      </a>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem asChild>
+                      <a href={api.exportUrl(projectId, "full")} download>
+                        Full project ZIP
+                      </a>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
               {onOpenSettings ? (
                 <>
-                  <span className="mx-0.5 h-5 w-px bg-border" aria-hidden />
                   <ToolbarTooltip label="Settings">
                     <IconButton aria-label="Settings" onClick={() => onOpenSettings()} className="app-no-drag">
                       <Settings size={15} strokeWidth={1.75} />

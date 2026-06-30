@@ -51,7 +51,8 @@ test("workspace conversation panel keeps a saved user resize instead of the 400p
   expect(screen.getByTestId("conversation")).not.toHaveStyle({ flexBasis: "400px" });
 });
 
-test("sending a brief streams events into the chat and shows the preview + export", async () => {
+test("sending a brief streams events into the chat and shows the preview + export menu", async () => {
+  const user = userEvent.setup();
   const fake = makeFakeApi({
     streamRun: async function* (): AsyncGenerator<RunEvent> {
       yield { type: "run-start", runId: "r1", conversationId: "c1" };
@@ -86,10 +87,16 @@ test("sending a brief streams events into the chat and shows the preview + expor
   expect(iframe.getAttribute("src") ?? "").toMatch(/^\/projects\/p1\/preview\//);
   expect(iframe.getAttribute("sandbox")).toBe("allow-scripts allow-same-origin allow-downloads");
 
-  // export link points at the export endpoint
-  const exportLink = screen.getByRole("link", { name: "Export project" });
-  expect(exportLink).toHaveAttribute("href", "/api/projects/p1/export");
-  expect(screen.queryByText("Export")).toBeNull();
+  expect(screen.getByLabelText("Full screen preview")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: /Files/ }));
+  expect(screen.queryByLabelText("Full screen preview")).toBeNull();
+  expect(screen.getByRole("button", { name: "Export project" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Export project" }));
+  const source = await screen.findByRole("menuitem", { name: "Source ZIP" });
+  expect(source).toHaveAttribute("href", "/api/projects/p1/export");
+  const full = screen.getByRole("menuitem", { name: "Full project ZIP" });
+  expect(full).toHaveAttribute("href", "/api/projects/p1/export?scope=full");
 });
 
 test("mount reattaches the latest running run and replays its stream", async () => {

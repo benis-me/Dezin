@@ -15,6 +15,7 @@ import {
   Presentation,
   Sparkles,
   Trash2,
+  Upload,
   X,
   Zap,
 } from "lucide-react";
@@ -133,6 +134,8 @@ export function HomeScreen({
   const [images, setImages] = useState<{ name: string; base64: string; preview: string }[]>([]);
   const [refs, setRefs] = useState<{ id: string; name: string; base64: string }[]>([]);
   const imgInputRef = useRef<HTMLInputElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
 
   const refresh = useCallback(() => {
     if (projectsOverride) return;
@@ -296,6 +299,21 @@ export function HomeScreen({
       refresh();
     } catch {
       toast("Couldn't restore the project.", { variant: "error" });
+    }
+  };
+  const importProject = async (files: FileList | null): Promise<void> => {
+    const file = files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const project = await api.importProject(file);
+      refresh();
+      toast(`Imported ${project.name}.`);
+    } catch {
+      toast("Couldn't import that project.", { variant: "error" });
+    } finally {
+      setImporting(false);
+      if (importInputRef.current) importInputRef.current.value = "";
     }
   };
 
@@ -520,6 +538,14 @@ export function HomeScreen({
         {/* Project gallery */}
         <div className="mt-14">
         <div className="flex flex-wrap items-center gap-2">
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".zip,application/zip"
+            aria-label="Import project zip"
+            className="hidden"
+            onChange={(e) => void importProject(e.target.files)}
+          />
           <Tabs
             aria-label="Project view"
             value={view}
@@ -536,6 +562,14 @@ export function HomeScreen({
               },
             ]}
           />
+          <IconButton
+            aria-label="Import project"
+            title="Import project"
+            disabled={importing}
+            onClick={() => importInputRef.current?.click()}
+          >
+            <Upload size={14} strokeWidth={1.75} />
+          </IconButton>
           <div className="ml-auto flex items-center gap-1.5">
             <Picker
               ariaLabel="Sort projects"

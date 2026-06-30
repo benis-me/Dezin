@@ -262,7 +262,8 @@ export interface ApiClient {
   /** URL serving an uploaded reference file (e.g. an image), given its `.refs/<name>` path. */
   refUrl(id: string, refPath: string): string;
   variantPreviewUrl(id: string, vid: string): string;
-  exportUrl(id: string): string;
+  exportUrl(id: string, scope?: "source" | "full"): string;
+  importProject(file: Blob): Promise<Project>;
   streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent>;
   /** Reattach to an in-flight (or finished) run: replays its events, then streams live. */
   reattachRun(runId: string, signal?: AbortSignal): AsyncGenerator<RunEvent>;
@@ -435,7 +436,13 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     previewUrl: (id) => `${baseUrl}/projects/${enc(id)}/preview/`,
     refUrl: (id, refPath) => `${baseUrl}/api/projects/${enc(id)}/refs/${refPath.replace(/^\.refs\//, "").split("/").map(encodeURIComponent).join("/")}`,
     variantPreviewUrl: (id, vid) => `${baseUrl}/api/projects/${enc(id)}/variants/${enc(vid)}/preview/`,
-    exportUrl: (id) => `${baseUrl}/api/projects/${enc(id)}/export`,
+    exportUrl: (id, scope = "source") => `${baseUrl}/api/projects/${enc(id)}/export${scope === "full" ? "?scope=full" : ""}`,
+    importProject: (file) =>
+      json<Project>("/api/projects/import", {
+        method: "POST",
+        headers: { "content-type": "application/zip" },
+        body: file,
+      }),
     streamRun,
     reattachRun,
     cancelRun: (runId) => json<{ cancelled: boolean }>(`/api/runs/${enc(runId)}/cancel`, { method: "POST" }),

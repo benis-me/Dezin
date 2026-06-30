@@ -60,7 +60,8 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     previewUrl: (id: string) => `/projects/${id}/preview/`,
     refUrl: (id: string, refPath: string) => `/api/projects/${id}/refs/${refPath.replace(/^\.refs\//, "")}`,
     variantPreviewUrl: (id: string, vid: string) => `/api/projects/${id}/variants/${vid}/preview/`,
-    exportUrl: (id: string) => `/api/projects/${id}/export`,
+    exportUrl: (id: string, scope = "source") => `/api/projects/${id}/export${scope === "full" ? "?scope=full" : ""}`,
+    importProject: notImpl as ApiClient["importProject"],
     // eslint-disable-next-line require-yield
     streamRun: async function* () {},
     // eslint-disable-next-line require-yield
