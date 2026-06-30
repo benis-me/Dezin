@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureDevServer, ensureProjectPickerBridge, stopAllDevServers } from "../src/project-runtime.ts";
+import { ensureDevServer, ensureProjectPickerBridge, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
 
 async function waitForPortDown(url: string): Promise<void> {
   for (let i = 0; i < 20; i++) {
@@ -47,6 +47,28 @@ export default defineConfig({ server: { host: "127.0.0.1" } });
     assert.match(updated, /gridTemplateColumns:s\.gridTemplateColumns/);
     assert.match(updated, /focus-target/);
     assert.match(updated, /server: \{ host: "127\.0\.0\.1" \}/);
+    assert.doesNotMatch(updated, /old bridge without attrs/);
+    assert.doesNotMatch(updated, /\\\\const PICKER_BRIDGE/);
+    assert.equal(await ensureProjectPickerBridge(dir), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensureProjectPickerBridge repairs a bridge corrupted by replacement tokens", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-runtime-bridge-corrupt-"));
+  try {
+    const template = readFileSync(join(templateDir(), "vite.config.js"), "utf8");
+    const originalSnippet = "v.replace(/[^a-zA-Z0-9_-]/g,'\\\\\\\\$&');";
+    const corruptedSnippet =
+      "v.replace(/[^a-zA-Z0-9_-]/g,'\\\\\\\\const PICKER_BRIDGE = `<script data-dezin-bridge>old bridge without attrs</script>`;');";
+    assert.match(template, /attrs:attrs\(el\)/);
+    assert.ok(template.includes(originalSnippet));
+    writeFileSync(join(dir, "vite.config.js"), template.replace(originalSnippet, corruptedSnippet));
+
+    assert.equal(await ensureProjectPickerBridge(dir), true);
+    const updated = readFileSync(join(dir, "vite.config.js"), "utf8");
+    assert.equal(updated, template);
     assert.equal(await ensureProjectPickerBridge(dir), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });

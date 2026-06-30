@@ -33,6 +33,8 @@ interface Runtime {
 const runtimes = new Map<string, Runtime>();
 export const DEV_SERVER_IDLE_MS = 60_000;
 const PICKER_BRIDGE_BLOCK = /const PICKER_BRIDGE = `[\s\S]*?<\/script>`;/;
+const PICKER_BRIDGE_START = "const PICKER_BRIDGE = ";
+const PICKER_PLUGIN_START = "\nfunction dezinPicker";
 
 function clearDevReleaseTimer(dev: Runtime["dev"]): void {
   if (!dev?.releaseTimer) return;
@@ -55,12 +57,22 @@ export async function ensureProjectPickerBridge(projectDir: string): Promise<boo
   const viteConfig = join(projectDir, "vite.config.js");
   if (!existsSync(viteConfig)) return false;
   const [current, template] = await Promise.all([readFile(viteConfig, "utf8"), readFile(join(templateDir(), "vite.config.js"), "utf8")]);
-  if (current.includes("attrs:attrs(el)") && current.includes("gridTemplateColumns:s.gridTemplateColumns") && current.includes("focus-target")) return false;
   const templateBlock = template.match(PICKER_BRIDGE_BLOCK)?.[0];
   if (!templateBlock) return false;
-  const currentBlock = current.match(PICKER_BRIDGE_BLOCK)?.[0];
-  if (!currentBlock || currentBlock === templateBlock) return false;
-  await writeFile(viteConfig, current.replace(PICKER_BRIDGE_BLOCK, templateBlock));
+  const start = current.indexOf(PICKER_BRIDGE_START);
+  const pluginStart = start >= 0 ? current.indexOf(PICKER_PLUGIN_START, start) : -1;
+  const currentBlock = current.match(PICKER_BRIDGE_BLOCK);
+  const range =
+    start >= 0 && pluginStart > start
+      ? { start, end: pluginStart, separator: "\n" }
+      : currentBlock
+        ? { start: currentBlock.index ?? -1, end: (currentBlock.index ?? -1) + currentBlock[0].length, separator: "" }
+        : undefined;
+  if (!range || range.start < 0) return false;
+  const suffix = current.slice(range.end);
+  const updated = `${current.slice(0, range.start)}${templateBlock}${range.separator || (suffix.startsWith("\n") ? "" : "\n")}${suffix}`;
+  if (updated === current) return false;
+  await writeFile(viteConfig, updated);
   return true;
 }
 
