@@ -5,6 +5,10 @@
 **A local-first, tasteful design generator.**
 Describe what you want; Dezin drives the coding-agent CLI you already have to build it as a real, self-contained artifact — and holds the output to a strict anti-AI-slop standard.
 
+<br />
+
+<img src="./docs/assets/dezin-preview.png" alt="Dezin app preview" width="960" />
+
 </div>
 
 ---
