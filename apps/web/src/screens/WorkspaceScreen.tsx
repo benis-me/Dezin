@@ -56,11 +56,15 @@ const SEVERITY_STYLE: Record<string, string> = {
 
 const SPLIT_KEY = "dezin.workspace.split";
 const FILES_SPLIT_KEY = "dezin.workspace.files.split";
+const INSPECT_SPLIT_KEY = "dezin.workspace.inspect.split";
 const WORKSPACE_CONVERSATION_PANEL = "conversation";
 const WORKSPACE_ARTIFACT_PANEL = "artifact";
 const FILES_BROWSER_PANEL = "browser";
 const FILES_PREVIEW_PANEL = "preview";
+const PREVIEW_CANVAS_PANEL = "preview-canvas";
+const PREVIEW_INSPECT_PANEL = "inspect";
 const REPLAYABLE_RUN_STATUSES = new Set(["running", "pending", "cancelled", "failed"]);
+const SHOW_VARIANT_FANOUT_BUTTON: boolean = false;
 
 function queueKey(projectId: string): string {
   return `dezin.workspace.queue.${projectId}`;
@@ -218,12 +222,25 @@ interface MarkupRect {
   h: number;
 }
 
+interface MarkupStyles {
+  display?: string;
+  position?: string;
+  color?: string;
+  background?: string;
+  fontFamily?: string;
+  fontSize?: string;
+  fontWeight?: string;
+  borderRadius?: string;
+  opacity?: string;
+}
+
 interface MarkupTarget {
   selector: string;
   tag: string;
   text: string;
   rect?: MarkupRect;
   note?: string;
+  styles?: MarkupStyles;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1164,6 +1181,35 @@ function StandardDoctor({
   );
 }
 
+function InspectSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="border-b border-border px-4 py-3">
+      <div className="mb-2 text-xs font-semibold text-foreground">{title}</div>
+      {children}
+    </section>
+  );
+}
+
+function InspectField({ label, value, wide = false }: { label: string; value?: ReactNode; wide?: boolean }) {
+  const displayValue = value === undefined || value === null || value === "" ? "—" : value;
+  return (
+    <div className={cn("flex min-w-0 items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1.5 text-xs", wide && "col-span-2")}>
+      <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
+      <span className="min-w-0 flex-1 truncate font-mono text-foreground">{displayValue}</span>
+    </div>
+  );
+}
+
+function InspectSwatch({ value }: { value?: string }) {
+  const color = value && value !== "rgba(0, 0, 0, 0)" ? value : "transparent";
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1.5">
+      <span className="size-3 shrink-0 rounded-sm border border-border bg-card" style={{ background: color }} />
+      <span className="truncate">{value || "transparent"}</span>
+    </span>
+  );
+}
+
 function InspectPanel({
   target,
   projectName,
@@ -1180,75 +1226,85 @@ function InspectPanel({
   const htmlFiles = files.filter((file) => file.path.endsWith(".html")).length;
   const cssFiles = files.filter((file) => file.path.endsWith(".css")).length;
   const imageFiles = files.filter((file) => /\.(avif|gif|jpe?g|png|svg|webp)$/i.test(file.path)).length;
+  const styles = target?.styles ?? {};
+  const title = target?.tag ? target.tag.toUpperCase() : target ? "Element" : "Frame";
   return (
-    <aside className="flex h-full w-[280px] shrink-0 flex-col border-l border-border bg-card" aria-label="Inspect panel">
-      <PanelBar className="gap-1.5">
-        <Eye size={13} strokeWidth={1.75} />
-        Inspect
-      </PanelBar>
-      <div className="flex-1 overflow-auto p-3 text-sm">
+    <aside className="flex h-full min-w-0 flex-col bg-card" aria-label="Inspect panel">
+      <div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-4">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-sm font-medium text-foreground">{title}</span>
+          <ChevronRight size={12} strokeWidth={2} className="rotate-90 text-muted-foreground" />
+        </div>
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <FileCode2 size={13} strokeWidth={1.75} />
+          <PanelsTopLeft size={13} strokeWidth={1.75} />
+          <Eye size={13} strokeWidth={1.75} />
+        </div>
+      </div>
+      <div className="flex-1 overflow-auto text-sm">
         {target ? (
-          <div className="space-y-3">
-            <section className="rounded-lg border border-border bg-surface p-3">
-              <div className="mb-2 flex items-center gap-1.5">
-                <MousePointerClick size={13} strokeWidth={1.8} className="text-brand" />
-                <span className="text-xs font-semibold text-foreground">Selected element</span>
+          <>
+            <InspectSection title="Position">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="X" value={target.rect?.x} />
+                <InspectField label="Y" value={target.rect?.y} />
+                <InspectField label="W" value={target.rect?.w} />
+                <InspectField label="H" value={target.rect?.h} />
+                <InspectField label="↻" value="0°" />
+                <InspectField label="Tag" value={target.tag || "node"} />
               </div>
-              <code className="block break-all rounded-md bg-card px-2 py-1.5 font-mono text-[11px] text-foreground-2">{target.selector}</code>
-              <dl className="mt-2 grid grid-cols-[76px_1fr] gap-x-2 gap-y-1 text-xs">
-                {target.tag ? (
-                  <>
-                    <dt className="text-muted-foreground">Name</dt>
-                    <dd className="font-mono text-foreground">{target.tag}</dd>
-                  </>
-                ) : null}
-                {target.rect ? (
-                  <>
-                    <dt className="text-muted-foreground">Position</dt>
-                    <dd className="font-mono text-foreground">
-                      {target.rect.x}, {target.rect.y}
-                    </dd>
-                    <dt className="text-muted-foreground">Size</dt>
-                    <dd className="font-mono text-foreground">
-                      {target.rect.w} x {target.rect.h}
-                    </dd>
-                  </>
-                ) : null}
-              </dl>
-              {target.text ? <p className="mt-2 line-clamp-3 text-xs leading-snug text-muted-foreground">"{target.text}"</p> : null}
-              {target.note ? <p className="mt-2 rounded-md bg-card px-2 py-1.5 text-xs leading-snug text-foreground">{target.note}</p> : null}
-            </section>
-            <section className="rounded-lg border border-border bg-surface p-3">
-              <div className="text-xs font-semibold text-foreground">Layout</div>
-              <p className="mt-1 text-xs text-muted-foreground">Precise computed layout is captured from the selected preview rect.</p>
-            </section>
-          </div>
+            </InspectSection>
+            <InspectSection title="Auto layout">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="Display" value={styles.display} />
+                <InspectField label="Position" value={styles.position} />
+                <InspectField label="Width" value={target.rect?.w} />
+                <InspectField label="Height" value={target.rect?.h} />
+              </div>
+            </InspectSection>
+            <InspectSection title="Appearance">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="Opacity" value={styles.opacity ? `${Number(styles.opacity) * 100}%` : "100%"} />
+                <InspectField label="Radius" value={styles.borderRadius} />
+                <InspectField label="Size" value={styles.fontSize} />
+                <InspectField label="Weight" value={styles.fontWeight} />
+              </div>
+            </InspectSection>
+            <InspectSection title="Fill">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="BG" value={<InspectSwatch value={styles.background} />} wide />
+                <InspectField label="Text" value={<InspectSwatch value={styles.color} />} wide />
+              </div>
+            </InspectSection>
+            <InspectSection title="Content">
+              <div className="space-y-2">
+                <InspectField label="Selector" value={target.selector} wide />
+                {target.text ? <p className="line-clamp-4 rounded-md bg-surface-2 px-2 py-1.5 text-xs leading-snug text-foreground-2">"{target.text}"</p> : null}
+                {target.note ? <p className="line-clamp-3 rounded-md bg-surface-2 px-2 py-1.5 text-xs leading-snug text-foreground">{target.note}</p> : null}
+              </div>
+            </InspectSection>
+          </>
         ) : (
-          <div className="space-y-3">
-            <section className="rounded-lg border border-border bg-surface p-3">
-              <div className="text-xs font-semibold text-foreground">Project variables</div>
-              <dl className="mt-2 grid grid-cols-[88px_1fr] gap-x-2 gap-y-1 text-xs">
-                <dt className="text-muted-foreground">Project</dt>
-                <dd className="truncate text-foreground">{projectName || "Untitled"}</dd>
-                <dt className="text-muted-foreground">Mode</dt>
-                <dd className="capitalize text-foreground">{projectMode}</dd>
-                <dt className="text-muted-foreground">System</dt>
-                <dd className="truncate text-foreground">{designSystem?.name ?? "Clean"}</dd>
-              </dl>
-            </section>
-            <section className="rounded-lg border border-border bg-surface p-3">
-              <div className="text-xs font-semibold text-foreground">Assets</div>
-              <dl className="mt-2 grid grid-cols-[88px_1fr] gap-x-2 gap-y-1 font-mono text-xs">
-                <dt className="font-sans text-muted-foreground">HTML</dt>
-                <dd className="text-foreground">{htmlFiles}</dd>
-                <dt className="font-sans text-muted-foreground">CSS</dt>
-                <dd className="text-foreground">{cssFiles}</dd>
-                <dt className="font-sans text-muted-foreground">Images</dt>
-                <dd className="text-foreground">{imageFiles}</dd>
-              </dl>
-            </section>
-            <p className="px-1 text-xs leading-snug text-muted-foreground">Select an element in the preview or open a marked target to inspect it here.</p>
-          </div>
+          <>
+            <InspectSection title="Project">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="Name" value={projectName || "Untitled"} wide />
+                <InspectField label="Mode" value={projectMode} />
+                <InspectField label="System" value={designSystem?.name ?? "Clean"} />
+              </div>
+            </InspectSection>
+            <InspectSection title="Assets">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="Files" value={files.length} />
+                <InspectField label="Images" value={imageFiles} />
+                <InspectField label="HTML" value={htmlFiles} />
+                <InspectField label="CSS" value={cssFiles} />
+              </div>
+            </InspectSection>
+            <InspectSection title="Selection">
+              <InspectField label="Target" value="None" wide />
+            </InspectSection>
+          </>
         )}
       </div>
     </aside>
@@ -1364,6 +1420,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const workspaceConversationPercent =
     readStoredPanelPercent(SPLIT_KEY, 24, 55) ??
     panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 33, 24, 55);
+  const inspectPanelPercent =
+    readStoredPanelPercent(INSPECT_SPLIT_KEY, 18, 45) ??
+    panelPercentFromPixels(280, typeof window === "undefined" ? 0 : window.innerWidth, 24, 18, 45);
   const msgId = useRef(0);
   const activeConv = useRef<string | null>(null);
   const modeRef = useRef<ProjectMode>("prototype");
@@ -1379,6 +1438,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const queueRef = useRef<string[]>(queue);
   const activeRunIdRef = useRef<string | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
+  const selectionModeRef = useRef<"markup" | "inspect" | null>(null);
   const terminalEventRef = useRef(false);
   const liveQualityRef = useRef(false);
   const reattachedRunsRef = useRef<Set<string>>(new Set());
@@ -2182,20 +2242,36 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   useEffect(() => {
     const onMessage = (e: MessageEvent): void => {
       const d = e.data as
-        | { source?: string; type?: string; selector?: string; tag?: string; text?: string; rect?: { x: number; y: number; w: number; h: number } }
+        | {
+            source?: string;
+            type?: string;
+            selector?: string;
+            tag?: string;
+            text?: string;
+            rect?: { x: number; y: number; w: number; h: number };
+            styles?: MarkupStyles;
+          }
         | null;
       if (!d || d.source !== "dezin") return;
       if (d.type === "selected" && d.selector) {
+        const target = { selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: d.rect, styles: d.styles };
+        setInspectedTarget(target);
+        if (selectionModeRef.current === "inspect") {
+          setPendingMark(null);
+          setSelectMode(false);
+          setInspectOpen(true);
+          return;
+        }
         // Position a "Mark up" popover near the clicked element (iframe coords → page coords).
         const ir = previewIframeRef.current?.getBoundingClientRect();
         const r = d.rect;
         const pos = computeMarkupPosition(ir, r, { width: window.innerWidth, height: window.innerHeight });
-        setPendingMark({ selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: r, x: pos.x, y: pos.y });
-        setInspectedTarget({ selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: r });
-        setInspectOpen(true);
+        setPendingMark({ ...target, x: pos.x, y: pos.y });
+        setInspectOpen(false);
         setSelectMode(false);
       } else if (d.type === "cancel") {
         setSelectMode(false);
+        if (selectionModeRef.current === "inspect") setInspectOpen(false);
         setPendingMark(null);
       }
     };
@@ -2203,10 +2279,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
+  useEffect(() => {
+    selectionModeRef.current = selectMode ? "markup" : inspectOpen ? "inspect" : null;
+  }, [selectMode, inspectOpen]);
+
   // Tell the preview bridge to enter/exit pick mode whenever the toggle flips.
   useEffect(() => {
-    previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "select-mode", on: selectMode }, "*");
-  }, [selectMode, previewSrc]);
+    previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "select-mode", on: selectMode || inspectOpen }, "*");
+  }, [selectMode, inspectOpen, previewSrc]);
 
   // Track the floating composer's height so the message list can clear it.
   useEffect(() => {
@@ -2228,6 +2308,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setTab("Preview");
     setInspectedTarget(target);
     setInspectOpen(true);
+    setSelectMode(false);
+    setPendingMark(null);
     const message = {
       source: "dezin-parent",
       type: "focus-target",
@@ -2250,6 +2332,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         tag: pendingMark.tag,
         text: pendingMark.text,
         rect: pendingMark.rect,
+        styles: pendingMark.styles,
         note: note.trim() || undefined,
       },
     ]);
@@ -2500,12 +2583,24 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     ) : (
       <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} stackPosition={stackPosition} />
     );
-  const renderRunCardStack = (stack: Msg[]): ReactNode => (
-    <div data-testid="run-card-stack">
+  const renderRunCardStack = (stack: Msg[], separated = false): ReactNode => (
+    <div data-testid="run-card-stack" className={cn(separated && "mt-3")}>
       {stack.map((m, index) => (
         <Fragment key={m.id}>{renderTranscriptMessage(m, runCardStackPosition(index, stack.length))}</Fragment>
       ))}
     </div>
+  );
+  const renderPreviewFrame = (): ReactNode => (
+    <iframe
+      ref={previewIframeRef}
+      title="Artifact preview"
+      src={previewSrc ?? undefined}
+      // allow-same-origin keeps the preview in-process so the element-picker
+      // bridge receives pointer events (and dev-server modules load without CORS).
+      sandbox={previewSrc?.startsWith("http") ? "allow-scripts allow-same-origin allow-forms" : "allow-scripts allow-same-origin allow-downloads"}
+      style={{ width: DEVICE_WIDTH[device], maxWidth: "100%" }}
+      className={`h-full border-0 bg-white ${device === "desktop" ? "" : "my-3 rounded-lg border border-border"}`}
+    />
   );
 
   return (
@@ -2633,7 +2728,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                       {block.kind === "assistant-turn" ? (
                         <>
                           <AssistantMessage message={block.message} />
-                          {block.stack ? renderRunCardStack(block.stack) : null}
+                          {block.stack ? renderRunCardStack(block.stack, true) : null}
                           <MessageActions
                             message={block.message}
                             disabled={running}
@@ -2918,18 +3013,20 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     onModelChange={setRunModel}
                     onRescan={rescanAgents}
                   />
-                  <ToolbarTooltip label="Generate 3 variants">
-                    <Button
-                      aria-label="Generate variants"
-                      size="icon-sm"
-                      variant="outline"
-                      onClick={() => void runVariantFanout(3)}
-                      disabled={!isExisting || running || input.trim().length === 0}
-                      className="ml-0.5 rounded-lg"
-                    >
-                      <GitFork size={13} strokeWidth={1.8} />
-                    </Button>
-                  </ToolbarTooltip>
+                  {SHOW_VARIANT_FANOUT_BUTTON ? (
+                    <ToolbarTooltip label="Generate 3 variants">
+                      <Button
+                        aria-label="Generate variants"
+                        size="icon-sm"
+                        variant="outline"
+                        onClick={() => void runVariantFanout(3)}
+                        disabled={!isExisting || running || input.trim().length === 0}
+                        className="ml-0.5 rounded-lg"
+                      >
+                        <GitFork size={13} strokeWidth={1.8} />
+                      </Button>
+                    </ToolbarTooltip>
+                  ) : null}
                   {running && input.trim().length === 0 && selectedTargets.length === 0 ? (
                     <Button aria-label="Stop" size="icon-sm" variant="outline" onClick={stop} className="ml-0.5 rounded-lg" title="Stop generating">
                       <Square size={12} strokeWidth={2} className="fill-current" />
@@ -2987,7 +3084,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   <ToolbarTooltip label={selectMode ? "Click an element in the preview" : "Select an element to refine"}>
                     <IconButton
                       aria-label="Select an element"
-                      onClick={() => setSelectMode((v) => !v)}
+                      onClick={() =>
+                        setSelectMode((v) => {
+                          const next = !v;
+                          if (next) {
+                            setInspectOpen(false);
+                            setPendingMark(null);
+                          }
+                          return next;
+                        })
+                      }
                       className={`app-no-drag ${selectMode ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}`}
                     >
                       <MousePointerClick size={15} strokeWidth={1.75} />
@@ -2996,7 +3102,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   <ToolbarTooltip label={inspectOpen ? "Hide inspect panel" : "Inspect preview"}>
                     <IconButton
                       aria-label="Inspect preview"
-                      onClick={() => setInspectOpen((v) => !v)}
+                      onClick={() =>
+                        setInspectOpen((v) => {
+                          const next = !v;
+                          setSelectMode(false);
+                          setPendingMark(null);
+                          if (!next) previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "clear" }, "*");
+                          return next;
+                        })
+                      }
                       className={`app-no-drag ${inspectOpen ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}`}
                     >
                       <Eye size={15} strokeWidth={1.75} />
@@ -3067,33 +3181,35 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         </div>
 
         <div className="dz-canvas relative flex-1 overflow-hidden">
-          {selectMode && tab === "Preview" && previewSrc ? (
+          {(selectMode || inspectOpen) && tab === "Preview" && previewSrc ? (
             <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center p-2.5">
               <span className="flex items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-xs font-medium text-primary-foreground shadow-md">
                 <MousePointerClick size={12} strokeWidth={2} />
-                Click an element to attach it · Esc to cancel
+                {inspectOpen ? "Click an element to inspect · Esc to cancel" : "Click an element to attach it · Esc to cancel"}
               </span>
             </div>
           ) : null}
           {tab === "Preview" ? (
             previewSrc ? (
-              <div className="flex h-full min-w-0 bg-surface">
-                <div className="flex min-w-0 flex-1 justify-center overflow-auto">
-                  <iframe
-                    ref={previewIframeRef}
-                    title="Artifact preview"
-                    src={previewSrc}
-                    // allow-same-origin keeps the preview in-process so the element-picker
-                    // bridge receives pointer events (and dev-server modules load without CORS).
-                    sandbox={previewSrc.startsWith("http") ? "allow-scripts allow-same-origin allow-forms" : "allow-scripts allow-same-origin allow-downloads"}
-                    style={{ width: DEVICE_WIDTH[device], maxWidth: "100%" }}
-                    className={`h-full border-0 bg-white ${device === "desktop" ? "" : "my-3 rounded-lg border border-border"}`}
-                  />
-                </div>
-                {inspectOpen ? (
-                  <InspectPanel target={inspectedTarget} projectName={projectName} projectMode={projectMode} designSystem={activeDesignSystem} files={files} />
-                ) : null}
-              </div>
+              inspectOpen ? (
+                <Group
+                  id="dezin-preview-inspect-layout"
+                  className="h-full min-w-0 bg-surface"
+                  defaultLayout={twoPanelLayout(PREVIEW_CANVAS_PANEL, 100 - inspectPanelPercent, PREVIEW_INSPECT_PANEL)}
+                  onLayoutChanged={(layout) => savePanelFraction(INSPECT_SPLIT_KEY, layout, PREVIEW_INSPECT_PANEL)}
+                  resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
+                >
+                  <Panel id={PREVIEW_CANVAS_PANEL} minSize="300px">
+                    <div className="flex h-full min-w-0 justify-center overflow-auto">{renderPreviewFrame()}</div>
+                  </Panel>
+                  <Separator aria-label="Resize inspect panel" className={RESIZE_SEPARATOR_CLASS} />
+                  <Panel id={PREVIEW_INSPECT_PANEL} minSize="240px" maxSize="460px" groupResizeBehavior="preserve-pixel-size">
+                    <InspectPanel target={inspectedTarget} projectName={projectName} projectMode={projectMode} designSystem={activeDesignSystem} files={files} />
+                  </Panel>
+                </Group>
+              ) : (
+                <div className="flex h-full min-w-0 justify-center overflow-auto bg-surface">{renderPreviewFrame()}</div>
+              )
             ) : projectMode === "standard" && setupPhase && setupPhase !== "ready" ? (
               <div className="grid h-full place-items-center p-4">
                 <div className="flex w-full max-w-xl flex-col items-center gap-3 text-center text-muted-foreground">

@@ -224,4 +224,5 @@ test("picker bridge reports stable precise selectors", () => {
   const html = injectSelectBridge("<body><section data-dezin-id=\"hero\"><h1>Title</h1></section></body>");
   assert.match(html, /data-dezin-id/);
   assert.match(html, /nth-of-type/);
+  assert.match(html, /styles:styles\(el\)/);
 });

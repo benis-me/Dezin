@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
 import { computeMarkupPosition, WorkspaceScreen } from "./WorkspaceScreen.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
-import type { RunEvent, Variant } from "../lib/api.ts";
+import type { RunEvent } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { takePendingAgent, takePendingBrief, takePendingModel } from "../lib/pending-brief.ts";
@@ -16,6 +16,7 @@ beforeEach(() => {
   localStorage.removeItem("dezin.workspace.queue.p1");
   localStorage.removeItem("dezin.workspace.split");
   localStorage.removeItem("dezin.workspace.files.split");
+  localStorage.removeItem("dezin.workspace.inspect.split");
 });
 afterEach(cleanup);
 
@@ -827,9 +828,62 @@ test("clicking a marked target asks the preview to focus that element", async ()
     "*",
   );
   const inspect = screen.getByLabelText("Inspect panel");
-  expect(within(inspect).getByText("Selected element")).toBeInTheDocument();
+  expect(within(inspect).getByText("H1")).toBeInTheDocument();
   expect(within(inspect).getByText("section.hero > h1")).toBeInTheDocument();
-  expect(within(inspect).getByText("320 x 48")).toBeInTheDocument();
+  expect(within(inspect).getAllByText("320").length).toBeGreaterThan(0);
+  expect(within(inspect).getAllByText("48").length).toBeGreaterThan(0);
+  expect(screen.getByRole("separator", { name: "Resize inspect panel" })).toBeInTheDocument();
+});
+
+test("inspect mode directly captures preview elements and stays mutually exclusive with markup selection", async () => {
+  const fake = makeFakeApi({
+    listFiles: async () => [{ path: "index.html", size: 120 }],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Artifact preview");
+  fireEvent.click(screen.getByLabelText("Inspect preview"));
+
+  expect(await screen.findByRole("separator", { name: "Resize inspect panel" })).toBeInTheDocument();
+  expect(await screen.findByText("Click an element to inspect · Esc to cancel")).toBeInTheDocument();
+
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        source: "dezin",
+        type: "selected",
+        selector: "section.hero > h1",
+        tag: "h1",
+        text: "Enterprise pricing made simple",
+        rect: { x: 24, y: 40, w: 320, h: 48 },
+        styles: {
+          display: "block",
+          position: "static",
+          background: "rgb(255, 255, 255)",
+          color: "rgb(17, 17, 17)",
+          fontSize: "64px",
+          fontWeight: "700",
+          borderRadius: "0px",
+          opacity: "1",
+        },
+      },
+    }),
+  );
+
+  await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("H1")).toBeInTheDocument());
+  const inspect = screen.getByLabelText("Inspect panel");
+  expect(within(inspect).getByText("section.hero > h1")).toBeInTheDocument();
+  expect(within(inspect).getByText("64px")).toBeInTheDocument();
+  expect(within(inspect).getByText("rgb(255, 255, 255)")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
+
+  fireEvent.click(screen.getByLabelText("Select an element"));
+  expect(screen.queryByLabelText("Inspect panel")).toBeNull();
+  expect(screen.getByText("Click an element to attach it · Esc to cancel")).toBeInTheDocument();
 });
 
 test("conversation opens at the bottom and shows an icon-only jump button when scrolled away", async () => {
@@ -1296,40 +1350,15 @@ test("generated material sources render only in the run result card", async () =
   expect(screen.getByText("Generated image assets (2)")).toBeInTheDocument();
 });
 
-test("generate variants creates branches and starts parallel variant runs", async () => {
-  let variants: Variant[] = [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }];
-  const createConversation = vi.fn(async () => ({ id: "c-fanout", projectId: "p1", title: "Variants", createdAt: 1 }));
-  const createVariant = vi.fn(async (_projectId: string, name?: string) => {
-    variants = variants.map((variant) => ({ ...variant, active: false }));
-    const variant = { id: `v${variants.length}`, projectId: "p1", name: name ?? "Variant", createdAt: variants.length + 1, active: true };
-    variants = [...variants, variant];
-    return variants;
-  });
-  const streamRun = vi.fn(async function* (_input: { variantId?: string }): AsyncGenerator<RunEvent> {
-    yield { type: "run-done", passed: true, rounds: 0, score: 100, findings: [] };
-  });
-  const fake = makeFakeApi({
-    createConversation,
-    listVariants: async () => variants,
-    createVariant,
-    streamRun,
-    listMessages: async () => [],
-    listRuns: async () => [],
-    listFiles: async () => [],
-  });
+test("parallel variant generation is not exposed in the composer yet", async () => {
   render(
-    <ApiProvider client={fake}>
+    <ApiProvider client={makeFakeApi()}>
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "explore directions" } });
-  fireEvent.click(screen.getByLabelText("Generate variants"));
-
-  await waitFor(() => expect(streamRun).toHaveBeenCalledTimes(3));
-  expect(createConversation).toHaveBeenCalledTimes(1);
-  expect(createVariant).toHaveBeenCalledTimes(3);
-  expect(streamRun.mock.calls.map(([input]) => input.variantId)).toEqual(["v1", "v2", "v3"]);
+  await screen.findByLabelText("Message");
+  expect(screen.queryByLabelText("Generate variants")).toBeNull();
 });
 
 test("a non-perfect restored score without stored findings does not claim clean", async () => {
