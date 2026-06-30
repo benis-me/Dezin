@@ -214,8 +214,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const history = store
     .listMessages(conversation.id)
     .flatMap(messageToAgentTurn);
-  store.addMessage(conversation.id, "user", brief);
-  const run = store.createRun(project.id, conversation.id, targetVariantId);
+  const userMessage = store.addMessage(conversation.id, "user", brief);
+  const run = store.createRun(project.id, conversation.id, targetVariantId, userMessage.id);
   store.updateRun(run.id, { status: "running" });
 
   // Open the SSE stream + register the run with the broker. Events are buffered + persisted to
@@ -351,11 +351,20 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const score = settings.visualQaEnabled ? lintScore(visualFindings) : null;
       const passed = !visualFindings.some((f) => f.severity === "P0");
       persistProcess();
-      store.addMessage(conversation.id, "assistant", asked.text);
+      const assistantMessage = store.addMessage(conversation.id, "assistant", asked.text);
       const quality = score !== null ? `, quality ${score}/100` : "";
       const message = passed ? `Done${quality}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
       store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: 0 }));
-      store.updateRun(run.id, { status: "succeeded", repairRounds: 0, lintPassed: passed, score, findings: visualFindings, finishedAt: Date.now() });
+      store.updateRun(run.id, {
+        status: "succeeded",
+        repairRounds: 0,
+        lintPassed: passed,
+        score,
+        findings: visualFindings,
+        assistantMessageId: assistantMessage.id,
+        commitHash: commit.commitHash,
+        finishedAt: Date.now(),
+      });
       sse({ type: "run-done", runId: run.id, passed, rounds: 0, score, mode: "standard", findings: visualFindings });
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
@@ -456,7 +465,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const passed = result.passed && !finalFindings.some((f) => f.severity === "P0");
     store.recordArtifact(project.id, result.artifactPath, passed);
     persistProcess();
-    store.addMessage(conversation.id, "assistant", assistantText);
+    const assistantMessage = store.addMessage(conversation.id, "assistant", assistantText);
     const score = lintScore(finalFindings);
     const fixes = result.rounds ? ` after ${result.rounds} fix${result.rounds > 1 ? "es" : ""}` : "";
     const quality = `, quality ${score}/100`;
@@ -468,6 +477,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       lintPassed: passed,
       score,
       findings: finalFindings,
+      assistantMessageId: assistantMessage.id,
       finishedAt: Date.now(),
     });
 

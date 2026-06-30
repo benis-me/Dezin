@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
-import type { AgentRunner } from "../../../packages/agent/src/index.ts";
+import { FakeRunner } from "../../../packages/agent/src/index.ts";
+import type { AgentRunner, AgentTurnInput } from "../../../packages/agent/src/index.ts";
 import { createApp, type AppDeps } from "../src/index.ts";
 
 interface Ctx {
@@ -70,6 +71,88 @@ function parseSse(text: string): Array<Record<string, unknown>> {
     .filter(Boolean)
     .map((b) => JSON.parse(b.replace(/^data:\s?/, "")) as Record<string, unknown>);
 }
+
+async function runProject(base: string, body: Record<string, unknown>): Promise<Array<Record<string, unknown>>> {
+  const res = await fetch(`${base}/api/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  assert.equal(res.status, 200);
+  return parseSse(await res.text());
+}
+
+async function forkMessage(base: string, projectId: string, messageId: string, name = "Forked here"): Promise<{ conversationId: string; variantId: string }> {
+  const res = await fetch(`${base}/api/projects/${projectId}/messages/${messageId}/fork`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  assert.equal(res.status, 200);
+  return (await res.json()) as { conversationId: string; variantId: string };
+}
+
+test("prototype branch can fork from a specific assistant message snapshot", async () => {
+  const firstHtml = "<main><h1>First snapshot</h1><p>Keep this version.</p></main>";
+  const secondHtml = "<main><h1>Second snapshot</h1><p>Do not fork this one.</p></main>";
+  const runner = new FakeRunner({ artifacts: [firstHtml, secondHtml], texts: ["first answer", "second answer"] });
+
+  await withServer(
+    async ({ base, store }) => {
+      const project = store.createProject({ name: "Proto" });
+      const firstEvents = await runProject(base, { projectId: project.id, brief: "first" });
+      const conversationId = firstEvents.find((e) => e.type === "run-start")!.conversationId as string;
+      await runProject(base, { projectId: project.id, conversationId, brief: "second" });
+
+      const firstAssistant = store.listMessages(conversationId).filter((m) => m.role === "assistant")[0]!;
+      const fork = await forkMessage(base, project.id, firstAssistant.id, "Fork first");
+
+      const active = store.listVariants(project.id).find((v) => v.active);
+      assert.equal(active?.id, fork.variantId);
+      const preview = await fetch(`${base}/projects/${project.id}/preview/`);
+      assert.match(await preview.text(), /First snapshot/);
+
+      const forkedTranscript = store.listMessages(fork.conversationId).map((m) => m.content);
+      assert.ok(forkedTranscript.includes("first answer"));
+      assert.ok(!forkedTranscript.includes("second"));
+    },
+    { runner, visualQa: async () => [] },
+  );
+});
+
+test("standard branch can fork from a specific assistant message commit", async () => {
+  const seen: AgentTurnInput[] = [];
+  const runner: AgentRunner = {
+    id: "standard-message-fork",
+    async runTurn(input) {
+      seen.push(input);
+      const label = seen.length === 1 ? "first standard state" : "second standard state";
+      writeFileSync(join(input.projectDir, "src", "state.txt"), label);
+      return { text: `${label} answer`, artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      initStandardProject(dataDir, project.id);
+      const main = store.ensureMainVariant(project.id);
+
+      const firstEvents = await runProject(base, { projectId: project.id, variantId: main.id, brief: "first" });
+      const conversationId = firstEvents.find((e) => e.type === "run-start")!.conversationId as string;
+      await runProject(base, { projectId: project.id, conversationId, variantId: main.id, brief: "second" });
+
+      const firstAssistant = store.listMessages(conversationId).filter((m) => m.role === "assistant")[0]!;
+      const fork = await forkMessage(base, project.id, firstAssistant.id, "Fork first standard");
+      const worktree = join(dataDir, "worktrees", project.id, fork.variantId);
+
+      assert.equal(readFileSync(join(worktree, "src", "state.txt"), "utf8"), "first standard state");
+      assert.equal(store.listVariants(project.id).find((v) => v.active)?.id, fork.variantId);
+      assert.notEqual(fork.variantId, main.id);
+    },
+    { runner, visualQa: async () => [] },
+  );
+});
 
 test("standard variants use git worktrees for preview, files, and targeted runs", async () => {
   let runnerDir = "";

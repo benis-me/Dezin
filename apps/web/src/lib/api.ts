@@ -44,6 +44,12 @@ export interface Variant {
   active?: boolean;
 }
 
+export interface MessageForkResult {
+  conversationId: string;
+  variantId: string;
+  variants: Variant[];
+}
+
 export interface Message {
   id: string;
   conversationId: string;
@@ -236,6 +242,7 @@ export interface ApiClient {
   deleteConversation(projectId: string, cid: string): Promise<void>;
   listVariants(id: string): Promise<Variant[]>;
   createVariant(id: string, name?: string): Promise<Variant[]>;
+  forkMessage(id: string, messageId: string, name?: string): Promise<MessageForkResult>;
   activateVariant(id: string, vid: string): Promise<Variant[]>;
   renameVariant(id: string, vid: string, name: string): Promise<Variant[]>;
   deleteVariant(id: string, vid: string): Promise<Variant[]>;
@@ -396,6 +403,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       json<{ ok: boolean }>(`/api/projects/${enc(projectId)}/conversations/${enc(cid)}`, { method: "DELETE" }).then(() => {}),
     listVariants: (id) => json<Variant[]>(`/api/projects/${enc(id)}/variants`),
     createVariant: (id, name) => json<Variant[]>(`/api/projects/${enc(id)}/variants`, jsonInit("POST", { name })),
+    forkMessage: (id, messageId, name) =>
+      json<MessageForkResult>(`/api/projects/${enc(id)}/messages/${enc(messageId)}/fork`, jsonInit("POST", { name })),
     activateVariant: (id, vid) => json<Variant[]>(`/api/projects/${enc(id)}/variants/${enc(vid)}/activate`, { method: "POST" }),
     renameVariant: (id, vid, name) => json<Variant[]>(`/api/projects/${enc(id)}/variants/${enc(vid)}`, jsonInit("PATCH", { name })),
     deleteVariant: (id, vid) => json<Variant[]>(`/api/projects/${enc(id)}/variants/${enc(vid)}`, { method: "DELETE" }),

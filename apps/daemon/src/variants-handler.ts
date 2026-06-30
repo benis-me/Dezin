@@ -5,7 +5,7 @@
  * worktrees under <dataDir>/worktrees/<projectId>/<variantId>/.
  */
 
-import { cp, mkdir, readdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -14,6 +14,7 @@ import { projectDir } from "./serve-static.ts";
 import type { AppDeps } from "./app.ts";
 import {
   createStandardVariantWorktree,
+  createStandardVariantWorktreeFromCommit,
   isStandardRootVariant,
   removeStandardVariantWorktree,
   standardVariantArtifactDir,
@@ -77,6 +78,57 @@ export async function handleCreateVariant(req: IncomingMessage, res: ServerRespo
   if (project.mode === "standard") (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
   deps.store.setActiveVariant(id, v.id);
   sendJson(res, 200, deps.store.listVariants(id));
+}
+
+function versionSnapshotPath(dataDir: string, projectId: string, runId: string): string {
+  const safe = runId.replace(/[^a-zA-Z0-9-]/g, "");
+  return join(projectDir(dataDir, projectId), ".versions", `${safe}.html`);
+}
+
+export async function handleForkMessage(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+  const id = params.id!;
+  const messageId = params.messageId!;
+  const project = deps.store.getProject(id);
+  if (!project) return sendError(res, 404, "project not found");
+
+  const message = deps.store.getMessage(messageId);
+  const conversation = message ? deps.store.getConversation(message.conversationId) : null;
+  if (!message || !conversation || conversation.projectId !== id) return sendError(res, 404, "message not found");
+  if (message.role !== "assistant") return sendError(res, 400, "only assistant messages can be forked");
+
+  const run = deps.store.findSucceededRunForAssistantMessage(message.id);
+  if (!run || run.projectId !== id) return sendError(res, 409, "no completed design snapshot for this message");
+
+  const body = (await readJsonBody(req)) as { name?: string } | null;
+  const active = deps.store.ensureMainVariant(id);
+  const name = body?.name?.trim() || `Fork ${deps.store.listVariants(id).length + 1}`;
+  const variant = deps.store.createVariant(id, name);
+
+  try {
+    if (project.mode === "standard") {
+      if (!run.commitHash) throw new Error("this Standard run has no commit snapshot");
+      await createStandardVariantWorktreeFromCommit(deps, id, variant.id, run.commitHash);
+      (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
+    } else {
+      const versionFile = versionSnapshotPath(deps.dataDir, id, run.id);
+      if (!existsSync(versionFile)) throw new Error("this run has no version snapshot");
+      const root = projectDir(deps.dataDir, id);
+      await snapshot(root, snapDir(deps.dataDir, id, active.id));
+      await writeFile(join(root, "index.html"), await readFile(versionFile, "utf8"), "utf8");
+    }
+
+    const forkConversation = deps.store.createConversation(id, name);
+    for (const prior of deps.store.listMessagesThrough(conversation.id, message.id)) {
+      deps.store.addMessage(forkConversation.id, prior.role, prior.content);
+    }
+    deps.store.setActiveVariant(id, variant.id);
+    sendJson(res, 200, { conversationId: forkConversation.id, variantId: variant.id, variants: deps.store.listVariants(id) });
+  } catch (err) {
+    if (project.mode === "standard") await removeStandardVariantWorktree(deps, id, variant.id).catch(() => {});
+    else await rm(snapDir(deps.dataDir, id, variant.id), { recursive: true, force: true }).catch(() => {});
+    deps.store.deleteVariant(variant.id);
+    sendError(res, 409, err instanceof Error ? err.message : "could not fork from this message");
+  }
 }
 
 export async function handleActivateVariant(res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {

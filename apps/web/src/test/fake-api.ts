@@ -23,6 +23,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     deleteConversation: async () => {},
     listVariants: async () => [],
     createVariant: async () => [],
+    forkMessage: async () => ({ conversationId: "c1", variantId: "v1", variants: [] }),
     activateVariant: async () => [],
     renameVariant: async () => [],
     deleteVariant: async () => [],

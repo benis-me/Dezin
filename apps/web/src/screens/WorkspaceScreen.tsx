@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, CornerUpLeft, Download, Eye, FileCode2, Folder, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
@@ -93,6 +93,7 @@ interface ResultMeta {
 }
 interface Msg {
   id: number;
+  dbId?: string;
   kind: "user" | "assistant" | "result" | "process" | "question";
   text: string;
   meta?: ResultMeta;
@@ -175,11 +176,12 @@ function toMsg(m: Message, id: number): Msg {
     try {
       const parsed = JSON.parse(m.content) as unknown;
       if (isRecord(parsed) && isRecord(parsed.result) && typeof parsed.result.text === "string") {
-        return { id, kind: "result", text: parsed.result.text, meta: normalizeResultMeta(parsed.result.meta), at: m.createdAt };
+        return { id, dbId: m.id, kind: "result", text: parsed.result.text, meta: normalizeResultMeta(parsed.result.meta), at: m.createdAt };
       }
       if (isRecord(parsed) && isRecord(parsed.question) && typeof parsed.question.text === "string") {
         return {
           id,
+          dbId: m.id,
           kind: "question",
           text: parsed.question.text,
           runId: typeof parsed.question.runId === "string" ? parsed.question.runId : undefined,
@@ -189,15 +191,15 @@ function toMsg(m: Message, id: number): Msg {
       if (isRecord(parsed) && isRecord(parsed.process)) {
         const items = normalizeLiveItems(parsed.process.items);
         const elapsedMs = typeof parsed.process.elapsedMs === "number" ? parsed.process.elapsedMs : undefined;
-        return { id, kind: "process", text: "", items, elapsedMs, at: m.createdAt };
+        return { id, dbId: m.id, kind: "process", text: "", items, elapsedMs, at: m.createdAt };
       }
-      if (isRecord(parsed) && Array.isArray(parsed.steps)) return { id, kind: "process", text: "", steps: parsed.steps as string[], at: m.createdAt };
+      if (isRecord(parsed) && Array.isArray(parsed.steps)) return { id, dbId: m.id, kind: "process", text: "", steps: parsed.steps as string[], at: m.createdAt };
     } catch {
       /* fall through */
     }
-    return { id, kind: "process", text: "", steps: [], at: m.createdAt };
+    return { id, dbId: m.id, kind: "process", text: "", steps: [], at: m.createdAt };
   }
-  return { id, kind: m.role === "user" ? "user" : "assistant", text: m.content, at: m.createdAt };
+  return { id, dbId: m.id, kind: m.role === "user" ? "user" : "assistant", text: m.content, at: m.createdAt };
 }
 
 const IMG_REF_RE = /\.refs\/[^\s,"'`)]+\.(?:png|jpe?g|gif|webp|svg|avif)/gi;
@@ -856,6 +858,41 @@ function ToolbarTooltip({ label, children }: { label: string; children: ReactNod
   );
 }
 
+function AssistantMessage({
+  message,
+  actionsDisabled,
+  onCopy,
+  onFork,
+}: {
+  message: Msg;
+  actionsDisabled: boolean;
+  onCopy: (text: string) => void;
+  onFork: (message: Msg) => void;
+}) {
+  const canAct = !actionsDisabled && !!message.dbId;
+  return (
+    <div data-message-kind="assistant" className="group/assistant-message">
+      <Markdown>{message.text}</Markdown>
+      {canAct ? (
+        <TooltipProvider delayDuration={120}>
+          <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/assistant-message:opacity-100 focus-within:opacity-100">
+            <ToolbarTooltip label="Copy">
+              <IconButton aria-label="Copy message" className="h-7 w-7 rounded-md" onClick={() => onCopy(message.text)}>
+                <Copy size={13} strokeWidth={1.8} />
+              </IconButton>
+            </ToolbarTooltip>
+            <ToolbarTooltip label="Fork">
+              <IconButton aria-label="Fork from this message" className="h-7 w-7 rounded-md" onClick={() => onFork(message)}>
+                <GitFork size={13} strokeWidth={1.8} />
+              </IconButton>
+            </ToolbarTooltip>
+          </div>
+        </TooltipProvider>
+      ) : null}
+    </div>
+  );
+}
+
 export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: string; onOpenSettings?: (section?: string) => void }) {
   const api = useApi();
   const { toast } = useToast();
@@ -1086,6 +1123,29 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       });
     } catch {
       toast("Couldn't set that version as the cover.", { variant: "error" });
+    }
+  };
+
+  const copyAssistantMessage = async (text: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied.");
+    } catch {
+      toast("Couldn't copy that message.", { variant: "error" });
+    }
+  };
+
+  const forkAssistantMessage = async (message: Msg): Promise<void> => {
+    if (!message.dbId) return;
+    try {
+      const fork = await api.forkMessage(projectId, message.dbId);
+      setVariants(fork.variants);
+      setActive(fork.conversationId);
+      await loadMessages(fork.conversationId);
+      reloadArtifact(fork.variants);
+      toast("Forked from that message.");
+    } catch {
+      toast("Couldn't fork from that message.", { variant: "error" });
     }
   };
 
@@ -1914,7 +1974,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     {m.kind === "user" ? (
                       <UserMessage text={m.text} srcFor={(p) => api.refUrl(projectId, p)} onTargetClick={focusMarkupTarget} />
                     ) : m.kind === "assistant" ? (
-                      <Markdown>{m.text}</Markdown>
+                      <AssistantMessage message={m} actionsDisabled={running} onCopy={(text) => void copyAssistantMessage(text)} onFork={(msg) => void forkAssistantMessage(msg)} />
                     ) : m.kind === "process" ? (
                       <ProcessRecord steps={m.steps} items={m.items} elapsedMs={m.elapsedMs} />
                     ) : m.kind === "question" ? (

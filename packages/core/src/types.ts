@@ -68,8 +68,14 @@ export interface Run {
   id: string;
   projectId: string;
   conversationId: string;
+  /** User message that triggered this run, when known. */
+  userMessageId: string | null;
+  /** Assistant message produced by this run, when known. */
+  assistantMessageId: string | null;
   /** Design branch this run belongs to. */
   variantId: string | null;
+  /** Git commit that represents this Standard-mode run's filesystem snapshot. */
+  commitHash: string | null;
   status: RunStatus;
   /** Number of lint→repair rounds that ran for this generation. */
   repairRounds: number;

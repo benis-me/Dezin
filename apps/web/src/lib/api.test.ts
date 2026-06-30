@@ -86,6 +86,17 @@ test("setVersionCover POSTs the version cover endpoint", async () => {
   );
 });
 
+test("forkMessage POSTs the message fork endpoint", async () => {
+  const payload = { conversationId: "c2", variantId: "v2", variants: [] };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(payload));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  await expect(api.forkMessage("p1", "m1")).resolves.toEqual(payload);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/p1/messages/m1/fork",
+    expect.objectContaining({ method: "POST" }),
+  );
+});
+
 test("non-ok responses throw ApiError with the status", async () => {
   const fetchImpl = vi.fn<FetchLike>(async () => new Response("nope", { status: 404 }));
   const api = createApiClient({ fetchImpl });

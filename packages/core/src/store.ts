@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  user_message_id TEXT,
+  assistant_message_id TEXT,
+  commit_hash TEXT,
   status TEXT NOT NULL,
   repair_rounds INTEGER NOT NULL DEFAULT 0,
   lint_passed INTEGER NOT NULL DEFAULT 0,
@@ -166,7 +169,10 @@ function asRun(r: Row): Run {
     id: r.id as string,
     projectId: r.project_id as string,
     conversationId: r.conversation_id as string,
+    userMessageId: (r.user_message_id as string | null | undefined) ?? null,
+    assistantMessageId: (r.assistant_message_id as string | null | undefined) ?? null,
     variantId: (r.variant_id as string | null | undefined) ?? null,
+    commitHash: (r.commit_hash as string | null | undefined) ?? null,
     status: r.status as RunStatus,
     repairRounds: Number(r.repair_rounds),
     lintPassed: Number(r.lint_passed) === 1,
@@ -224,6 +230,9 @@ export class Store {
     ensureColumn("projects", "archived_at", "archived_at INTEGER");
     ensureColumn("projects", "active_variant_id", "active_variant_id TEXT");
     ensureColumn("runs", "variant_id", "variant_id TEXT");
+    ensureColumn("runs", "user_message_id", "user_message_id TEXT");
+    ensureColumn("runs", "assistant_message_id", "assistant_message_id TEXT");
+    ensureColumn("runs", "commit_hash", "commit_hash TEXT");
   }
 
   close(): void {
@@ -385,6 +394,11 @@ export class Store {
     return asMessage(r);
   }
 
+  getMessage(id: string): Message | null {
+    const r = this.db.prepare(`SELECT * FROM messages WHERE id = ?`).get(id) as Row | undefined;
+    return r ? asMessage(r) : null;
+  }
+
   listMessages(conversationId: string): Message[] {
     const rows = this.db
       .prepare(`SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC`)
@@ -392,15 +406,33 @@ export class Store {
     return rows.map(asMessage);
   }
 
+  listMessagesThrough(conversationId: string, messageId: string): Message[] {
+    const target = this.db
+      .prepare(`SELECT rowid, created_at FROM messages WHERE id = ? AND conversation_id = ?`)
+      .get(messageId, conversationId) as Row | undefined;
+    if (!target) return [];
+    const createdAt = Number(target.created_at);
+    const rowid = Number(target.rowid);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE conversation_id = ?
+           AND (created_at < ? OR (created_at = ? AND rowid <= ?))
+         ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(conversationId, createdAt, createdAt, rowid) as Row[];
+    return rows.map(asMessage);
+  }
+
   // ── runs ──────────────────────────────────────────────────────────────────
-  createRun(projectId: string, conversationId: string, variantId?: string): Run {
+  createRun(projectId: string, conversationId: string, variantId?: string, userMessageId?: string): Run {
     const id = this.clock.id();
     const vid = variantId ?? this.ensureMainVariant(projectId).id;
     this.db
       .prepare(
-        `INSERT INTO runs (id, project_id, conversation_id, variant_id, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO runs (id, project_id, conversation_id, variant_id, user_message_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
       )
-      .run(id, projectId, conversationId, vid, this.clock.now());
+      .run(id, projectId, conversationId, vid, userMessageId ?? null, this.clock.now());
     return this.getRun(id)!;
   }
 
@@ -411,7 +443,9 @@ export class Store {
 
   updateRun(
     id: string,
-    patch: Partial<Pick<Run, "status" | "repairRounds" | "lintPassed" | "score" | "findings" | "finishedAt">>,
+    patch: Partial<
+      Pick<Run, "status" | "repairRounds" | "lintPassed" | "score" | "findings" | "finishedAt" | "assistantMessageId" | "commitHash">
+    >,
   ): Run {
     const cur = this.getRun(id);
     if (!cur) throw new Error(`run not found: ${id}`);
@@ -422,13 +456,45 @@ export class Store {
       score: patch.score !== undefined ? patch.score : cur.score,
       findings: patch.findings !== undefined ? patch.findings : cur.findings,
       finishedAt: patch.finishedAt !== undefined ? patch.finishedAt : cur.finishedAt,
+      assistantMessageId: patch.assistantMessageId !== undefined ? patch.assistantMessageId : cur.assistantMessageId,
+      commitHash: patch.commitHash !== undefined ? patch.commitHash : cur.commitHash,
     };
     this.db
       .prepare(
-        `UPDATE runs SET status = ?, repair_rounds = ?, lint_passed = ?, score = ?, final_findings = ?, finished_at = ? WHERE id = ?`,
+        `UPDATE runs SET status = ?, repair_rounds = ?, lint_passed = ?, score = ?, final_findings = ?, finished_at = ?, assistant_message_id = ?, commit_hash = ? WHERE id = ?`,
       )
-      .run(next.status, next.repairRounds, next.lintPassed ? 1 : 0, next.score, JSON.stringify(next.findings), next.finishedAt, id);
+      .run(
+        next.status,
+        next.repairRounds,
+        next.lintPassed ? 1 : 0,
+        next.score,
+        JSON.stringify(next.findings),
+        next.finishedAt,
+        next.assistantMessageId,
+        next.commitHash,
+        id,
+      );
     return this.getRun(id)!;
+  }
+
+  findSucceededRunForAssistantMessage(messageId: string): Run | null {
+    const exact = this.db
+      .prepare(`SELECT * FROM runs WHERE assistant_message_id = ? AND status = 'succeeded' ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(messageId) as Row | undefined;
+    if (exact) return asRun(exact);
+
+    const fallback = this.db
+      .prepare(
+        `SELECT r.* FROM runs r
+         JOIN messages m ON m.id = ?
+         WHERE r.conversation_id = m.conversation_id
+           AND r.status = 'succeeded'
+           AND r.created_at <= m.created_at
+         ORDER BY r.created_at DESC, r.rowid DESC
+         LIMIT 1`,
+      )
+      .get(messageId) as Row | undefined;
+    return fallback ? asRun(fallback) : null;
   }
 
   /** Mark runs left "running"/"pending" (a previous process died mid-run) as cancelled. Run

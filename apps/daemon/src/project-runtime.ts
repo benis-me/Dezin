@@ -199,13 +199,15 @@ export async function workingTreeFingerprint(projectDir: string): Promise<string
 }
 
 /** Commit the project's current state as a version. */
-export async function gitCommit(projectDir: string, message: string): Promise<{ changed: boolean; committed: boolean }> {
-  if (!existsSync(join(projectDir, ".git"))) return { changed: false, committed: false };
+export async function gitCommit(projectDir: string, message: string): Promise<{ changed: boolean; committed: boolean; commitHash: string | null }> {
+  if (!existsSync(join(projectDir, ".git"))) return { changed: false, committed: false, commitHash: null };
   await run("git", ["add", "-A"], projectDir);
   const status = await workingTreeFingerprint(projectDir);
-  if (!status) return { changed: false, committed: false };
+  if (!status) return { changed: false, committed: false, commitHash: null };
   const code = await run("git", [...GIT_IDENTITY, "commit", "-q", "-m", message.replace(/\s+/g, " ").slice(0, 72) || "Dezin update"], projectDir);
-  return { changed: true, committed: code === 0 };
+  if (code !== 0) return { changed: true, committed: false, commitHash: null };
+  const head = await capture("git", ["rev-parse", "HEAD"], projectDir);
+  return { changed: true, committed: true, commitHash: head.code === 0 ? head.out.trim() : null };
 }
 
 /** Stop all dev servers (called on daemon shutdown). */

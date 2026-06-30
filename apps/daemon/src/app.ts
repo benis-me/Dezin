@@ -23,6 +23,7 @@ import { handleListFiles } from "./files-handler.ts";
 import {
   handleListVariants,
   handleCreateVariant,
+  handleForkMessage,
   handleActivateVariant,
   handleRenameVariant,
   handleDeleteVariant,
@@ -420,6 +421,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/projects/:id/variants",
     handler: (req, res, params, deps) => handleCreateVariant(req, res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/messages/:messageId/fork",
+    handler: (req, res, params, deps) => handleForkMessage(req, res, params, deps),
   },
   {
     method: "POST",

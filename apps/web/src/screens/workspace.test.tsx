@@ -424,6 +424,48 @@ test("rehydrates the prior transcript and reuses the conversation on the next ru
   expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "c1", brief: "tweak it" }), expect.anything());
 });
 
+test("idle assistant messages expose copy and fork actions on hover", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn(async () => {});
+  const originalClipboard = navigator.clipboard;
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const forkMessage = vi.fn(async () => ({
+    conversationId: "c2",
+    variantId: "v2",
+    variants: [
+      { id: "main", projectId: "p1", name: "Main", createdAt: 1, active: false },
+      { id: "v2", projectId: "p1", name: "Forked here", createdAt: 2, active: true },
+    ],
+  }));
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async (_pid: string, cid: string) =>
+      cid === "c2"
+        ? [{ id: "m3", conversationId: "c2", role: "assistant" as const, content: "Forked transcript", createdAt: 3 }]
+        : [{ id: "m2", conversationId: "c1", role: "assistant" as const, content: "Built it.", createdAt: 2 }],
+    forkMessage,
+  });
+
+  try {
+    render(
+      <ApiProvider client={fake}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    const assistant = await screen.findByText("Built it.");
+    await user.hover(assistant.closest("[data-message-kind='assistant']")!);
+    await user.click(await screen.findByRole("button", { name: "Copy message" }));
+    expect(writeText).toHaveBeenCalledWith("Built it.");
+
+    await user.click(screen.getByRole("button", { name: "Fork from this message" }));
+    await waitFor(() => expect(forkMessage).toHaveBeenCalledWith("p1", "m2"));
+    expect(await screen.findByText("Forked transcript")).toBeInTheDocument();
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+  }
+});
+
 test("user message shows attached images as thumbnails, not the .refs path text", async () => {
   const fake = makeFakeApi({
     listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
