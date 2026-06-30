@@ -149,8 +149,12 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
   }
   if (!existsSync(join(projectDir, "node_modules"))) throw new Error("dependencies not installed yet");
   if (rt.dev && !rt.dev.proc.killed) {
-    clearDevReleaseTimer(rt.dev);
-    return { url: rt.dev.url };
+    if (await portResponds(rt.dev.port)) {
+      clearDevReleaseTimer(rt.dev);
+      return { url: rt.dev.url };
+    }
+    stopDev(rt.dev);
+    rt.dev = undefined;
   }
 
   const port = await freePort();

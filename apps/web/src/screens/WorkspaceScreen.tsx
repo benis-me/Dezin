@@ -1868,8 +1868,21 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
+  const refreshDevPreview = async (): Promise<void> => {
+    try {
+      const { url } = await api.getDevServerUrl(projectId);
+      setPreviewSrc(`${url.split("?")[0]}?t=${Date.now()}`);
+    } catch {
+      toast("Couldn't refresh the dev preview.", { variant: "error" });
+    }
+  };
+
   const refreshPreview = () => {
     setRefreshSpin((n) => n + 1);
+    if (modeRef.current === "standard") {
+      void refreshDevPreview();
+      return;
+    }
     if (previewSrc) setPreviewSrc(previewSrc.startsWith("http") ? `${previewSrc.split("?")[0]}?t=${Date.now()}` : `${api.previewUrl(projectId)}?t=${Date.now()}`);
   };
 

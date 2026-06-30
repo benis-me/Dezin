@@ -104,6 +104,42 @@ test("opening a standard workspace backfills a missing cover from the dev previe
   await waitFor(() => expect(captureProjectCover).toHaveBeenCalledWith("p1"));
 });
 
+test("refreshing a standard preview revalidates the dev server lease", async () => {
+  const getDevServerUrl = vi
+    .fn()
+    .mockResolvedValueOnce({ url: "http://127.0.0.1:5300/p1" })
+    .mockResolvedValueOnce({ url: "http://127.0.0.1:5301/p1" });
+  const captureProjectCover = vi.fn(async () => ({ captured: true }));
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Standard",
+          skillId: null,
+          designSystemId: "modern-minimal",
+          mode: "standard",
+          createdAt: 1,
+          updatedAt: 1,
+        }),
+        getDevServerUrl,
+        captureProjectCover,
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const iframe = await screen.findByTitle("Artifact preview");
+  await waitFor(() => expect(iframe.getAttribute("src")).toBe("http://127.0.0.1:5300/p1"));
+
+  fireEvent.click(screen.getByLabelText("Refresh preview"));
+
+  await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
+  expect(iframe.getAttribute("src") ?? "").toMatch(/^http:\/\/127\.0\.0\.1:5301\/p1\?t=\d+/);
+  expect(captureProjectCover).toHaveBeenCalledTimes(1);
+});
+
 test("opening a project scrolls the restored conversation to the bottom", async () => {
   const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1200);
   const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(300);
