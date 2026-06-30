@@ -66,6 +66,7 @@ test("HomeScreen project toolbar orders sort, layout, then search", () => {
 });
 
 test("HomeScreen imports a full project zip from beside the project tabs", async () => {
+  const user = userEvent.setup();
   let projects = [] as ReturnType<typeof project>[];
   const imported = project("p2", "Imported project");
   const importProject = vi.fn(async () => {
@@ -79,8 +80,11 @@ test("HomeScreen imports a full project zip from beside the project tabs", async
   });
 
   const all = await screen.findByRole("tab", { name: /All/ });
-  const importButton = screen.getByLabelText("Import project");
+  const importButton = screen.getByRole("button", { name: "Import full project ZIP" });
   expect(all.compareDocumentPosition(importButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(importButton.querySelector(".lucide-folder-input")).not.toBeNull();
+  await user.hover(importButton);
+  expect(await screen.findByRole("tooltip")).toHaveTextContent("Import full project ZIP");
 
   const input = screen.getByLabelText("Import project zip");
   const file = new File(["zip"], "dezin-full-project.zip", { type: "application/zip" });

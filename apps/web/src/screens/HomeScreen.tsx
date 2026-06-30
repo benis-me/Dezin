@@ -5,6 +5,7 @@ import {
   ArrowRight,
   Boxes,
   FileText,
+  FolderInput,
   Layers,
   Image as ImageIcon,
   Palette,
@@ -15,7 +16,6 @@ import {
   Presentation,
   Sparkles,
   Trash2,
-  Upload,
   X,
   Zap,
 } from "lucide-react";
@@ -32,6 +32,10 @@ import {
   Stagger,
   StaggerItem,
   Tabs,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
   type PickerOption,
 } from "../components/ui/index.ts";
 import { AttachMenu } from "../components/AttachMenu.tsx";
@@ -562,14 +566,20 @@ export function HomeScreen({
               },
             ]}
           />
-          <IconButton
-            aria-label="Import project"
-            title="Import project"
-            disabled={importing}
-            onClick={() => importInputRef.current?.click()}
-          >
-            <Upload size={14} strokeWidth={1.75} />
-          </IconButton>
+          <TooltipProvider delayDuration={120}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <IconButton
+                  aria-label="Import full project ZIP"
+                  disabled={importing}
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  <FolderInput size={14} strokeWidth={1.75} />
+                </IconButton>
+              </TooltipTrigger>
+              <TooltipContent sideOffset={2}>Import full project ZIP</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
           <div className="ml-auto flex items-center gap-1.5">
             <Picker
               ariaLabel="Sort projects"
