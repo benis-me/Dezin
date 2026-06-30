@@ -1,4 +1,4 @@
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
 import { computeMarkupPosition, WorkspaceScreen } from "./WorkspaceScreen.tsx";
@@ -238,6 +238,15 @@ test("completed runs collapse the interleaved process above the final summary", 
   expect(await screen.findByRole("button", { name: /Processed/ })).toBeInTheDocument();
   expect(screen.getByText("Drafted the hero. Tightened the layout.")).toBeInTheDocument();
   expect(screen.queryByText("Editing App.tsx")).toBeNull();
+  const stack = await screen.findByTestId("run-card-stack");
+  expect(within(stack).getByRole("button", { name: "1 step" })).toBeInTheDocument();
+  expect(within(stack).getByText(/Done, quality 100\/100/)).toBeInTheDocument();
+  const stackedCards = within(stack).getAllByTestId("run-card-stack-item");
+  expect(stackedCards).toHaveLength(2);
+  expect(stackedCards[0].className).toContain("rounded-t-lg");
+  expect(stackedCards[0].className).not.toContain("rounded-b-lg");
+  expect(stackedCards[1].className).toContain("rounded-b-lg");
+  expect(stackedCards[1].className).not.toContain("rounded-t-lg");
 
   await user.click(screen.getByRole("button", { name: /Processed/ }));
   expect(await screen.findByText("Editing App.tsx")).toBeInTheDocument();
@@ -685,10 +694,51 @@ test("conversation opens at the bottom and shows an icon-only jump button when s
     const jump = await screen.findByRole("button", { name: "Scroll to bottom" });
     expect(jump.textContent).toBe("");
     expect(jump.className).not.toContain("shadow");
+    expect(jump.className).not.toContain("before:animate-spin");
 
     fireEvent.click(jump);
     expect(scroll.scrollTop).toBe(1200);
   } finally {
+    scrollHeight.mockRestore();
+    clientHeight.mockRestore();
+  }
+});
+
+test("scroll to bottom button shows a subtle loading ring while generation is running", async () => {
+  const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.dataset.testid === "conversation-scroll" ? 1200 : 0;
+  });
+  const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.dataset.testid === "conversation-scroll" ? 360 : 0;
+  });
+  let finishRun!: () => void;
+  const runDone = new Promise<void>((resolve) => {
+    finishRun = resolve;
+  });
+  const streamRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {
+    yield { type: "run-start", runId: "r-scroll", conversationId: "c1" };
+    yield { type: "activity", activity: { kind: "text", text: "Still generating." } };
+    await runDone;
+    yield { type: "run-done", runId: "r-scroll", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+  });
+  try {
+    render(
+      <ApiProvider client={makeFakeApi({ streamRun })}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make it" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+    await screen.findByText("Still generating.");
+
+    const scroll = screen.getByTestId("conversation-scroll");
+    scroll.scrollTop = 100;
+    fireEvent.scroll(scroll);
+    const jump = await screen.findByRole("button", { name: "Scroll to bottom" });
+    expect(jump.className).toContain("before:animate-spin");
+  } finally {
+    finishRun?.();
     scrollHeight.mockRestore();
     clientHeight.mockRestore();
   }

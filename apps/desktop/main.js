@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require("electron")
 const { spawn } = require("node:child_process");
 const { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } = require("node:fs");
 const { join, dirname } = require("node:path");
+const { readWindowState, writeWindowState } = require("./window-state.js");
 
 const ROOT = join(__dirname, "..", "..");
 const DATA_DIR = process.env.DEZIN_DATA_DIR || join(ROOT, ".dezin", "data");
@@ -118,9 +119,11 @@ async function waitForWebUrl(timeoutMs = 20000) {
 }
 
 async function createWindow() {
+  const windowStateFile = join(app.getPath("userData"), "window-state.json");
+  const windowState = readWindowState(windowStateFile);
   win = new BrowserWindow({
-    width: 1440,
-    height: 920,
+    width: windowState.width,
+    height: windowState.height,
     minWidth: 920,
     minHeight: 600,
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
@@ -131,6 +134,26 @@ async function createWindow() {
       contextIsolation: true,
       sandbox: false,
     },
+  });
+  let saveWindowStateTimer = null;
+  const saveWindowState = () => {
+    if (!win || win.isDestroyed() || win.isMinimized()) return;
+    writeWindowState(windowStateFile, win.getBounds());
+  };
+  const scheduleSaveWindowState = () => {
+    if (saveWindowStateTimer) clearTimeout(saveWindowStateTimer);
+    saveWindowStateTimer = setTimeout(() => {
+      saveWindowStateTimer = null;
+      saveWindowState();
+    }, 200);
+  };
+  win.on("resize", scheduleSaveWindowState);
+  win.on("close", () => {
+    if (saveWindowStateTimer) {
+      clearTimeout(saveWindowStateTimer);
+      saveWindowStateTimer = null;
+    }
+    saveWindowState();
   });
 
   let url = DEV_URL;

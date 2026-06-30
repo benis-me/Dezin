@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -40,6 +40,7 @@ import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, 
 import type { Conversation, Variant, DesignSystemCard, Message, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
+import { cn } from "../lib/utils.ts";
 
 const TABS = ["Preview", "Files", "Quality", "Versions"] as const;
 type Tab = (typeof TABS)[number];
@@ -105,9 +106,46 @@ interface Msg {
   at?: number;
 }
 
+type RunCardStackPosition = "single" | "first" | "middle" | "last";
+type TranscriptRow = { kind: "single"; message: Msg } | { kind: "stack"; messages: Msg[] };
+
 /** A live, ordered chunk of the agent's turn — assistant prose or a tool step — so the two
  *  render interleaved (chronologically) during generation, not split into separate blocks. */
 type LiveItem = { type: "text"; text: string } | { type: "tool"; summary: string };
+
+function isRunCardMessage(message: Msg): boolean {
+  return message.kind === "process" || message.kind === "result";
+}
+
+function groupRunCardMessages(messages: Msg[]): TranscriptRow[] {
+  const rows: TranscriptRow[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (!isRunCardMessage(message)) {
+      rows.push({ kind: "single", message });
+      continue;
+    }
+    const start = i;
+    while (i + 1 < messages.length && isRunCardMessage(messages[i + 1])) i++;
+    const group = messages.slice(start, i + 1);
+    rows.push(group.length > 1 ? { kind: "stack", messages: group } : { kind: "single", message });
+  }
+  return rows;
+}
+
+function runCardStackPosition(index: number, total: number): RunCardStackPosition {
+  if (total <= 1) return "single";
+  if (index === 0) return "first";
+  if (index === total - 1) return "last";
+  return "middle";
+}
+
+function runCardRadiusClass(position: RunCardStackPosition): string {
+  if (position === "first") return "rounded-t-lg";
+  if (position === "middle") return "rounded-none";
+  if (position === "last") return "rounded-b-lg";
+  return "rounded-lg";
+}
 
 interface MarkupRect {
   x: number;
@@ -702,13 +740,30 @@ function liveText(items: LiveItem[]): string {
 }
 
 /** A collapsed record of the agent's process or build steps, kept in the transcript. */
-function ProcessRecord({ steps = [], items = [], elapsedMs }: { steps?: string[]; items?: LiveItem[]; elapsedMs?: number }) {
+function ProcessRecord({
+  steps = [],
+  items = [],
+  elapsedMs,
+  stackPosition = "single",
+}: {
+  steps?: string[];
+  items?: LiveItem[];
+  elapsedMs?: number;
+  stackPosition?: RunCardStackPosition;
+}) {
   const [open, setOpen] = useState(false);
   const process = items.length > 0;
   const elapsed = formatElapsed(elapsedMs);
   const label = process ? `Processed${elapsed ? ` ${elapsed}` : ""}` : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card/60">
+    <div
+      data-testid={stackPosition === "single" ? undefined : "run-card-stack-item"}
+      className={cn(
+        "overflow-hidden border border-border bg-card/60",
+        runCardRadiusClass(stackPosition),
+        stackPosition !== "single" && stackPosition !== "first" && "-mt-px",
+      )}
+    >
       <button
         type="button"
         aria-expanded={open}
@@ -760,13 +815,31 @@ function ProcessRecord({ steps = [], items = [], elapsedMs }: { steps?: string[]
   );
 }
 
-function ResultCard({ text, meta, onView }: { text: string; meta?: ResultMeta; onView: () => void }) {
+function ResultCard({
+  text,
+  meta,
+  onView,
+  stackPosition = "single",
+}: {
+  text: string;
+  meta?: ResultMeta;
+  onView: () => void;
+  stackPosition?: RunCardStackPosition;
+}) {
   const error = meta?.error;
   const score = meta?.score;
   const stopped = meta?.status === "stopped" || text === "Stopped.";
   const label = stopped ? "Stopped" : text;
   return (
-    <div className={`rounded-lg border px-3 py-1.5 ${error ? "border-destructive/40 bg-destructive/5" : "border-border bg-card/70"}`}>
+    <div
+      data-testid={stackPosition === "single" ? undefined : "run-card-stack-item"}
+      className={cn(
+        "border px-3 py-1.5",
+        error ? "border-destructive/40 bg-destructive/5" : "border-border bg-card/70",
+        runCardRadiusClass(stackPosition),
+        stackPosition !== "single" && stackPosition !== "first" && "-mt-px",
+      )}
+    >
       <div className="flex items-center gap-2.5">
         <span
           className={`grid h-5 w-5 shrink-0 place-items-center rounded-md ${
@@ -1921,6 +1994,19 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     ),
   }));
 
+  const transcriptRows = useMemo(() => groupRunCardMessages(messages), [messages]);
+  const renderTranscriptMessage = (m: Msg, stackPosition: RunCardStackPosition = "single"): ReactNode =>
+    m.kind === "user" ? (
+      <UserMessage text={m.text} srcFor={(p) => api.refUrl(projectId, p)} onTargetClick={focusMarkupTarget} />
+    ) : m.kind === "assistant" ? (
+      <AssistantMessage message={m} actionsDisabled={running} onCopy={(text) => void copyAssistantMessage(text)} onFork={(msg) => void forkAssistantMessage(msg)} />
+    ) : m.kind === "process" ? (
+      <ProcessRecord steps={m.steps} items={m.items} elapsedMs={m.elapsedMs} stackPosition={stackPosition} />
+    ) : m.kind === "question" ? (
+      <QuestionCard question={m.text} onAnswer={(answer) => void runBrief(answer)} />
+    ) : (
+      <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} stackPosition={stackPosition} />
+    );
 
   return (
     <>
@@ -2009,28 +2095,31 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             </div>
           ) : (
             <>
-              {messages.map((m) => (
-                <FadeIn key={m.id}>
-                  <div
-                    data-at={m.at ?? undefined}
-                    className={`-mx-2 rounded-xl px-2 py-1 transition-colors duration-700 ${
-                      highlightAt != null && m.at === highlightAt ? "bg-surface-2 ring-1 ring-border" : ""
-                    }`}
-                  >
-                    {m.kind === "user" ? (
-                      <UserMessage text={m.text} srcFor={(p) => api.refUrl(projectId, p)} onTargetClick={focusMarkupTarget} />
-                    ) : m.kind === "assistant" ? (
-                      <AssistantMessage message={m} actionsDisabled={running} onCopy={(text) => void copyAssistantMessage(text)} onFork={(msg) => void forkAssistantMessage(msg)} />
-                    ) : m.kind === "process" ? (
-                      <ProcessRecord steps={m.steps} items={m.items} elapsedMs={m.elapsedMs} />
-                    ) : m.kind === "question" ? (
-                      <QuestionCard question={m.text} onAnswer={(answer) => void runBrief(answer)} />
-                    ) : (
-                      <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} />
-                    )}
-                  </div>
-                </FadeIn>
-              ))}
+              {transcriptRows.map((row) => {
+                const rowMessages = row.kind === "stack" ? row.messages : [row.message];
+                const firstMessage = rowMessages[0];
+                const highlighted = highlightAt != null && rowMessages.some((m) => m.at === highlightAt);
+                return (
+                  <FadeIn key={row.kind === "stack" ? `stack-${rowMessages.map((m) => m.id).join("-")}` : firstMessage.id}>
+                    <div
+                      data-at={firstMessage.at ?? undefined}
+                      className={`-mx-2 rounded-xl px-2 py-1 transition-colors duration-700 ${
+                        highlighted ? "bg-surface-2 ring-1 ring-border" : ""
+                      }`}
+                    >
+                      {row.kind === "stack" ? (
+                        <div data-testid="run-card-stack">
+                          {row.messages.map((m, index) => (
+                            <Fragment key={m.id}>{renderTranscriptMessage(m, runCardStackPosition(index, row.messages.length))}</Fragment>
+                          ))}
+                        </div>
+                      ) : (
+                        renderTranscriptMessage(firstMessage)
+                      )}
+                    </div>
+                  </FadeIn>
+                );
+              })}
               {running ? (
                 <div className="space-y-3">
                   {liveItems.map((it, i) =>
@@ -2062,7 +2151,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: 6, scale: 0.96 }}
               transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
-              className="app-no-drag absolute right-4 z-30 grid size-8 place-items-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              className={cn(
+                "app-no-drag absolute right-4 z-30 grid size-8 place-items-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                running &&
+                  "overflow-hidden before:absolute before:inset-[-1px] before:rounded-full before:border before:border-primary/20 before:border-t-primary/70 before:content-[''] before:animate-spin",
+              )}
               style={{ bottom: composerH + 16 }}
             >
               <ArrowDown size={15} strokeWidth={1.8} aria-hidden />
