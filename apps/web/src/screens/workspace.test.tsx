@@ -829,7 +829,7 @@ test("clicking a marked target asks the preview to focus that element", async ()
   );
   const inspect = screen.getByLabelText("Inspect panel");
   expect(within(inspect).getByText("H1")).toBeInTheDocument();
-  expect(within(inspect).getByText("section.hero > h1")).toBeInTheDocument();
+  expect(within(inspect).getAllByText("section.hero > h1").length).toBeGreaterThan(0);
   expect(within(inspect).getAllByText("320").length).toBeGreaterThan(0);
   expect(within(inspect).getAllByText("48").length).toBeGreaterThan(0);
   expect(screen.getByRole("separator", { name: "Resize inspect panel" })).toBeInTheDocument();
@@ -837,6 +837,24 @@ test("clicking a marked target asks the preview to focus that element", async ()
 
 test("inspect mode directly captures preview elements and stays mutually exclusive with markup selection", async () => {
   const fake = makeFakeApi({
+    getProject: async () => ({
+      id: "p1",
+      name: "Preview Project",
+      skillId: null,
+      designSystemId: "clean",
+      mode: "prototype",
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    listDesignSystems: async () => [
+      {
+        id: "clean",
+        name: "Clean",
+        category: "Default",
+        summary: "Neutral interface tokens",
+        swatch: { bg: "#ffffff", surface: "#f6f6f6", fg: "#111111", accent: "#2563eb" },
+      },
+    ],
     listFiles: async () => [{ path: "index.html", size: 120 }],
   });
   render(
@@ -850,6 +868,10 @@ test("inspect mode directly captures preview elements and stays mutually exclusi
 
   expect(await screen.findByRole("separator", { name: "Resize inspect panel" })).toBeInTheDocument();
   expect(await screen.findByText("Click an element to inspect · Esc to cancel")).toBeInTheDocument();
+  const emptyInspect = screen.getByLabelText("Inspect panel");
+  expect(within(emptyInspect).getByText("Project variables")).toBeInTheDocument();
+  expect(await within(emptyInspect).findByText("#2563eb")).toBeInTheDocument();
+  expect(within(emptyInspect).queryByText("Selection")).toBeNull();
 
   window.dispatchEvent(
     new MessageEvent("message", {
@@ -869,6 +891,11 @@ test("inspect mode directly captures preview elements and stays mutually exclusi
           fontWeight: "700",
           borderRadius: "0px",
           opacity: "1",
+          borderColor: "rgb(17, 17, 17)",
+          borderWidth: "2px",
+          borderStyle: "solid",
+          boxShadow: "rgba(0, 0, 0, 0.2) 0px 10px 30px",
+          filter: "none",
         },
       },
     }),
@@ -876,14 +903,53 @@ test("inspect mode directly captures preview elements and stays mutually exclusi
 
   await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("H1")).toBeInTheDocument());
   const inspect = screen.getByLabelText("Inspect panel");
-  expect(within(inspect).getByText("section.hero > h1")).toBeInTheDocument();
+  expect(within(inspect).getAllByText("section.hero > h1").length).toBeGreaterThan(0);
   expect(within(inspect).getByText("64px")).toBeInTheDocument();
   expect(within(inspect).getByText("rgb(255, 255, 255)")).toBeInTheDocument();
+  expect(within(inspect).getByText("2px")).toBeInTheDocument();
+  expect(within(inspect).getByText("solid")).toBeInTheDocument();
+  expect(within(inspect).getByText("rgba(0, 0, 0, 0.2) 0px 10px 30px")).toBeInTheDocument();
+  expect(within(inspect).queryByText("Auto layout")).toBeNull();
   expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
 
   fireEvent.click(screen.getByLabelText("Select an element"));
   expect(screen.queryByLabelText("Inspect panel")).toBeNull();
   expect(screen.getByText("Click an element to attach it · Esc to cancel")).toBeInTheDocument();
+});
+
+test("inspect and selection modes keep the preview iframe mounted and cancel from parent Escape", async () => {
+  const fake = makeFakeApi({
+    listFiles: async () => [{ path: "index.html", size: 120 }],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
+  const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+
+  fireEvent.click(screen.getByLabelText("Inspect preview"));
+  expect(await screen.findByLabelText("Inspect panel")).toBeInTheDocument();
+  expect(screen.getByTitle("Artifact preview")).toBe(iframe);
+  expect(screen.getByLabelText("Inspect preview").className).toContain("!bg-primary");
+  await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "select-mode", on: true }, "*"));
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByLabelText("Inspect panel")).toBeNull());
+  expect(screen.queryByText("Click an element to inspect · Esc to cancel")).toBeNull();
+  expect(screen.getByTitle("Artifact preview")).toBe(iframe);
+  expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "clear" }, "*");
+
+  fireEvent.click(screen.getByLabelText("Select an element"));
+  expect(screen.getByTitle("Artifact preview")).toBe(iframe);
+  expect(screen.getByLabelText("Select an element").className).toContain("!bg-primary");
+  expect(screen.getByText("Click an element to attach it · Esc to cancel")).toBeInTheDocument();
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByText("Click an element to attach it · Esc to cancel")).toBeNull());
+  expect(screen.getByTitle("Artifact preview")).toBe(iframe);
 });
 
 test("conversation opens at the bottom and shows an icon-only jump button when scrolled away", async () => {

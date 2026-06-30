@@ -65,6 +65,7 @@ const PREVIEW_CANVAS_PANEL = "preview-canvas";
 const PREVIEW_INSPECT_PANEL = "inspect";
 const REPLAYABLE_RUN_STATUSES = new Set(["running", "pending", "cancelled", "failed"]);
 const SHOW_VARIANT_FANOUT_BUTTON: boolean = false;
+const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg-primary hover:!text-primary-foreground";
 
 function queueKey(projectId: string): string {
   return `dezin.workspace.queue.${projectId}`;
@@ -232,6 +233,11 @@ interface MarkupStyles {
   fontWeight?: string;
   borderRadius?: string;
   opacity?: string;
+  borderColor?: string;
+  borderWidth?: string;
+  borderStyle?: string;
+  boxShadow?: string;
+  filter?: string;
 }
 
 interface MarkupTarget {
@@ -1210,6 +1216,16 @@ function InspectSwatch({ value }: { value?: string }) {
   );
 }
 
+function inspectOpacity(value?: string): string {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : "100%";
+}
+
+function inspectEffect(value?: string): string {
+  if (!value || value === "none") return "None";
+  return value;
+}
+
 function InspectPanel({
   target,
   projectName,
@@ -1227,18 +1243,14 @@ function InspectPanel({
   const cssFiles = files.filter((file) => file.path.endsWith(".css")).length;
   const imageFiles = files.filter((file) => /\.(avif|gif|jpe?g|png|svg|webp)$/i.test(file.path)).length;
   const styles = target?.styles ?? {};
-  const title = target?.tag ? target.tag.toUpperCase() : target ? "Element" : "Frame";
+  const swatch = designSystem?.swatch;
+  const title = target?.tag ? target.tag.toUpperCase() : target ? "Element" : "Project variables";
   return (
     <aside className="flex h-full min-w-0 flex-col bg-card" aria-label="Inspect panel">
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-4">
-        <div className="flex min-w-0 items-center gap-1.5">
+      <div className="flex min-h-12 shrink-0 items-center border-b border-border px-4 py-2">
+        <div className="min-w-0">
           <span className="truncate text-sm font-medium text-foreground">{title}</span>
-          <ChevronRight size={12} strokeWidth={2} className="rotate-90 text-muted-foreground" />
-        </div>
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <FileCode2 size={13} strokeWidth={1.75} />
-          <PanelsTopLeft size={13} strokeWidth={1.75} />
-          <Eye size={13} strokeWidth={1.75} />
+          <p className="truncate text-[11px] text-muted-foreground">{target ? target.selector : projectName || "Untitled"}</p>
         </div>
       </div>
       <div className="flex-1 overflow-auto text-sm">
@@ -1250,30 +1262,41 @@ function InspectPanel({
                 <InspectField label="Y" value={target.rect?.y} />
                 <InspectField label="W" value={target.rect?.w} />
                 <InspectField label="H" value={target.rect?.h} />
-                <InspectField label="↻" value="0°" />
                 <InspectField label="Tag" value={target.tag || "node"} />
               </div>
             </InspectSection>
-            <InspectSection title="Auto layout">
+            <InspectSection title="Layout">
               <div className="grid grid-cols-2 gap-2">
                 <InspectField label="Display" value={styles.display} />
                 <InspectField label="Position" value={styles.position} />
-                <InspectField label="Width" value={target.rect?.w} />
-                <InspectField label="Height" value={target.rect?.h} />
               </div>
             </InspectSection>
             <InspectSection title="Appearance">
               <div className="grid grid-cols-2 gap-2">
-                <InspectField label="Opacity" value={styles.opacity ? `${Number(styles.opacity) * 100}%` : "100%"} />
+                <InspectField label="Opacity" value={inspectOpacity(styles.opacity)} />
                 <InspectField label="Radius" value={styles.borderRadius} />
-                <InspectField label="Size" value={styles.fontSize} />
+                <InspectField label="Font" value={styles.fontSize} />
                 <InspectField label="Weight" value={styles.fontWeight} />
+                <InspectField label="Family" value={styles.fontFamily} wide />
               </div>
             </InspectSection>
             <InspectSection title="Fill">
               <div className="grid grid-cols-2 gap-2">
                 <InspectField label="BG" value={<InspectSwatch value={styles.background} />} wide />
                 <InspectField label="Text" value={<InspectSwatch value={styles.color} />} wide />
+              </div>
+            </InspectSection>
+            <InspectSection title="Stroke">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="Width" value={styles.borderWidth ?? "0px"} />
+                <InspectField label="Style" value={styles.borderStyle ?? "none"} />
+                <InspectField label="Color" value={<InspectSwatch value={styles.borderColor} />} wide />
+              </div>
+            </InspectSection>
+            <InspectSection title="Effects">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="Shadow" value={inspectEffect(styles.boxShadow)} wide />
+                <InspectField label="Filter" value={inspectEffect(styles.filter)} wide />
               </div>
             </InspectSection>
             <InspectSection title="Content">
@@ -1291,6 +1314,22 @@ function InspectPanel({
                 <InspectField label="Name" value={projectName || "Untitled"} wide />
                 <InspectField label="Mode" value={projectMode} />
                 <InspectField label="System" value={designSystem?.name ?? "Clean"} />
+                <InspectField label="Category" value={designSystem?.category} />
+              </div>
+            </InspectSection>
+            <InspectSection title="Colors">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="BG" value={<InspectSwatch value={swatch?.bg} />} wide />
+                <InspectField label="Surface" value={<InspectSwatch value={swatch?.surface} />} wide />
+                <InspectField label="Text" value={<InspectSwatch value={swatch?.fg} />} wide />
+                <InspectField label="Accent" value={<InspectSwatch value={swatch?.accent} />} wide />
+              </div>
+            </InspectSection>
+            <InspectSection title="Viewports">
+              <div className="grid grid-cols-2 gap-2">
+                <InspectField label="Desktop" value={DEVICE_WIDTH.desktop} />
+                <InspectField label="Tablet" value={DEVICE_WIDTH.tablet} />
+                <InspectField label="Mobile" value={DEVICE_WIDTH.mobile} />
               </div>
             </InspectSection>
             <InspectSection title="Assets">
@@ -1300,9 +1339,6 @@ function InspectPanel({
                 <InspectField label="HTML" value={htmlFiles} />
                 <InspectField label="CSS" value={cssFiles} />
               </div>
-            </InspectSection>
-            <InspectSection title="Selection">
-              <InspectField label="Target" value="None" wide />
             </InspectSection>
           </>
         )}
@@ -2283,6 +2319,19 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     selectionModeRef.current = selectMode ? "markup" : inspectOpen ? "inspect" : null;
   }, [selectMode, inspectOpen]);
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || (!selectMode && !inspectOpen && !pendingMark)) return;
+      event.preventDefault();
+      previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "clear" }, "*");
+      setSelectMode(false);
+      setInspectOpen(false);
+      setPendingMark(null);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [inspectOpen, pendingMark, selectMode]);
+
   // Tell the preview bridge to enter/exit pick mode whenever the toggle flips.
   useEffect(() => {
     previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", type: "select-mode", on: selectMode || inspectOpen }, "*");
@@ -3094,7 +3143,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                           return next;
                         })
                       }
-                      className={`app-no-drag ${selectMode ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}`}
+                      className={cn("app-no-drag", selectMode && ACTIVE_TOOL_BUTTON_CLASS)}
                     >
                       <MousePointerClick size={15} strokeWidth={1.75} />
                     </IconButton>
@@ -3111,7 +3160,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                           return next;
                         })
                       }
-                      className={`app-no-drag ${inspectOpen ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}`}
+                      className={cn("app-no-drag", inspectOpen && ACTIVE_TOOL_BUTTON_CLASS)}
                     >
                       <Eye size={15} strokeWidth={1.75} />
                     </IconButton>
@@ -3191,25 +3240,25 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           ) : null}
           {tab === "Preview" ? (
             previewSrc ? (
-              inspectOpen ? (
-                <Group
-                  id="dezin-preview-inspect-layout"
-                  className="h-full min-w-0 bg-surface"
-                  defaultLayout={twoPanelLayout(PREVIEW_CANVAS_PANEL, 100 - inspectPanelPercent, PREVIEW_INSPECT_PANEL)}
-                  onLayoutChanged={(layout) => savePanelFraction(INSPECT_SPLIT_KEY, layout, PREVIEW_INSPECT_PANEL)}
-                  resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
-                >
-                  <Panel id={PREVIEW_CANVAS_PANEL} minSize="300px">
-                    <div className="flex h-full min-w-0 justify-center overflow-auto">{renderPreviewFrame()}</div>
-                  </Panel>
+              <Group
+                id="dezin-preview-inspect-layout"
+                className="h-full min-w-0 bg-surface"
+                defaultLayout={twoPanelLayout(PREVIEW_CANVAS_PANEL, 100 - inspectPanelPercent, PREVIEW_INSPECT_PANEL)}
+                onLayoutChanged={(layout) => savePanelFraction(INSPECT_SPLIT_KEY, layout, PREVIEW_INSPECT_PANEL)}
+                resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
+              >
+                <Panel id={PREVIEW_CANVAS_PANEL} minSize="300px">
+                  <div className="flex h-full min-w-0 justify-center overflow-auto">{renderPreviewFrame()}</div>
+                </Panel>
+                {inspectOpen ? (
                   <Separator aria-label="Resize inspect panel" className={RESIZE_SEPARATOR_CLASS} />
+                ) : null}
+                {inspectOpen ? (
                   <Panel id={PREVIEW_INSPECT_PANEL} minSize="240px" maxSize="460px" groupResizeBehavior="preserve-pixel-size">
                     <InspectPanel target={inspectedTarget} projectName={projectName} projectMode={projectMode} designSystem={activeDesignSystem} files={files} />
                   </Panel>
-                </Group>
-              ) : (
-                <div className="flex h-full min-w-0 justify-center overflow-auto bg-surface">{renderPreviewFrame()}</div>
-              )
+                ) : null}
+              </Group>
             ) : projectMode === "standard" && setupPhase && setupPhase !== "ready" ? (
               <div className="grid h-full place-items-center p-4">
                 <div className="flex w-full max-w-xl flex-col items-center gap-3 text-center text-muted-foreground">
