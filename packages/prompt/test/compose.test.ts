@@ -31,6 +31,15 @@ test("generated artifacts use Dezin target anchors", () => {
   assert.match(standardPrompt, /data-dezin-id/);
 });
 
+test("asset guidance is flexible and forbids fake drawn media", () => {
+  const p = composeSystemPrompt({ mode: "standard" });
+  assert.match(p, /Material sourcing/);
+  assert.match(p, /paths, folders, URLs/);
+  assert.match(p, /search the web for\s+relevant free-to-use assets/);
+  assert.match(p, /Do not fake photographs, videos, product shots/);
+  assert.match(p, /minimal neutral placeholder/);
+});
+
 test("design system is injected as authoritative tokens, verbatim", () => {
   const p = composeSystemPrompt({ designSystem: modernMinimal });
   assert.ok(p.includes("AUTHORITATIVE"), "marks the brand authoritative");

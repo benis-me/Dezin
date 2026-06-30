@@ -23,7 +23,7 @@ import { loadSkills, findSkill, type SkillInfo } from "../../../packages/skills/
 import { loadCraftSections } from "../../../packages/craft/src/index.ts";
 import { lintScore } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
-import { captureCover } from "./capture-cover.ts";
+import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
 import { ensureDevServer, gitCommit, workingTreeFingerprint } from "./project-runtime.ts";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
@@ -239,6 +239,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // No closed lint loop on one file; run a turn, commit the diff to git as a version.
   if (project.mode === "standard") {
     try {
+      const ensureStandardDevServer = deps.ensureDevServer ?? ensureDevServer;
       const beforeTree = await workingTreeFingerprint(dir);
       sse({ type: "turn-start", round: 0, isRepair: false });
       const result = await runTurnWithRetry(
@@ -275,7 +276,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         let renderUrl: string | undefined;
         if (!deps.visualQa) {
           try {
-            renderUrl = (await ensureDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId))).url;
+            renderUrl = (await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId))).url;
           } catch (err) {
             visualFindings = [
               {
@@ -304,6 +305,17 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: 0 }));
       store.updateRun(run.id, { status: "succeeded", repairRounds: 0, lintPassed: passed, score, findings: visualFindings, finishedAt: Date.now() });
       sse({ type: "run-done", runId: run.id, passed, rounds: 0, score, mode: "standard", findings: visualFindings });
+      const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
+      if (targetVariantId === activeForCover) {
+        void (async () => {
+          try {
+            const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId));
+            await (deps.captureCoverUrl ?? captureCoverUrl)(url, join(projectDir(deps.dataDir, project.id), ".cover.png"));
+          } catch {
+            // Covers are best-effort; the successful run is already persisted.
+          }
+        })();
+      }
     } catch (err) {
       const cancelled = ctrl.signal.aborted || isAbortError(err);
       store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });

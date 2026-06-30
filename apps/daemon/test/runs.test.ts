@@ -445,6 +445,53 @@ test("standard run succeeds only after project files change", async () => {
   });
 });
 
+test("standard run captures the gallery cover from the dev server URL", async () => {
+  let captured: { url: string; outPath: string } | null = null;
+  const runner: AgentRunner = {
+    id: "standard-cover",
+    async runTurn(input) {
+      writeFileSync(join(input.projectDir, "src-App.jsx"), "export default function App(){ return <main>Cover</main> }");
+      return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+      });
+      const events = parseSse(await res.text());
+      assert.ok(events.some((e) => e.type === "run-done"));
+      for (let i = 0; i < 20 && !captured; i++) await new Promise((r) => setTimeout(r, 10));
+      assert.deepEqual(captured, {
+        url: "http://127.0.0.1:5999/",
+        outPath: join(dataDir, "projects", project.id, ".cover.png"),
+      });
+    },
+    {
+      ensureDevServer: async (_projectId, _dir, runtimeKey) => {
+        if (typeof runtimeKey !== "string") throw new Error("expected a variant runtime key");
+        assert.match(runtimeKey, /:/);
+        return { url: "http://127.0.0.1:5999/" };
+      },
+      captureCoverUrl: async (url, outPath) => {
+        captured = { url, outPath };
+        return true;
+      },
+    },
+  );
+});
+
 test("standard run persists visual QA findings and score when enabled", async () => {
   let expectedDir = "";
   const runner: AgentRunner = {

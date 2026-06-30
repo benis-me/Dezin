@@ -8,6 +8,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 
 const CHROME_PATHS = [
@@ -62,7 +63,7 @@ function captureViaElectron(htmlPath: string, outPath: string): Promise<boolean>
 }
 
 // ── Puppeteer fallback ────────────────────────────────────────────────────────
-async function captureViaPuppeteer(htmlPath: string, outPath: string): Promise<boolean> {
+async function captureTargetViaPuppeteer(targetUrl: string, outPath: string): Promise<boolean> {
   const executablePath = findChrome();
   if (!executablePath) return false;
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
@@ -70,7 +71,7 @@ async function captureViaPuppeteer(htmlPath: string, outPath: string): Promise<b
     browser = await puppeteer.launch({ executablePath, headless: true, args: ["--no-sandbox", "--hide-scrollbars"] });
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
-    await page.goto(`file://${htmlPath}`, { waitUntil: "networkidle2", timeout: 12000 });
+    await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 12000 });
     await new Promise((r) => setTimeout(r, 400)); // let fonts + first paint settle
     await page.screenshot({ path: outPath as `${string}.png`, type: "png", clip: { x: 0, y: 0, width: 1280, height: 800 } });
     return true;
@@ -81,6 +82,10 @@ async function captureViaPuppeteer(htmlPath: string, outPath: string): Promise<b
   }
 }
 
+function captureViaPuppeteer(htmlPath: string, outPath: string): Promise<boolean> {
+  return captureTargetViaPuppeteer(pathToFileURL(htmlPath).href, outPath);
+}
+
 export async function captureCover(htmlPath: string, outPath: string): Promise<boolean> {
   if (!existsSync(htmlPath)) return false;
   if (process.env.DEZIN_ELECTRON && typeof process.send === "function") {
@@ -88,4 +93,9 @@ export async function captureCover(htmlPath: string, outPath: string): Promise<b
     // fall through to puppeteer if the Electron capture failed
   }
   return captureViaPuppeteer(htmlPath, outPath);
+}
+
+export async function captureCoverUrl(url: string, outPath: string): Promise<boolean> {
+  if (!/^https?:\/\//i.test(url)) return false;
+  return captureTargetViaPuppeteer(url, outPath);
 }

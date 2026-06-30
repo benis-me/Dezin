@@ -131,6 +131,29 @@ test("standard variants use git worktrees for preview, files, and targeted runs"
   );
 });
 
+test("devserver release endpoint targets the active standard variant runtime", async () => {
+  const released: string[] = [];
+  await withServer(
+    async ({ base, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      store.ensureMainVariant(project.id);
+      const branch = store.createVariant(project.id, "Exploration");
+      store.setActiveVariant(project.id, branch.id);
+
+      const res = await fetch(`${base}/api/projects/${project.id}/devserver`, { method: "DELETE" });
+      assert.equal(res.status, 200);
+      assert.equal(((await res.json()) as { released: boolean }).released, true);
+      assert.deepEqual(released, [`${project.id}:${branch.id}`]);
+    },
+    {
+      releaseDevServer: (runtimeKey) => {
+        released.push(runtimeKey);
+        return true;
+      },
+    },
+  );
+});
+
 test("prototype variants keep root snapshot switching behavior", async () => {
   await withServer(async ({ base, dataDir, store }) => {
     const project = store.createProject({ name: "Proto" });

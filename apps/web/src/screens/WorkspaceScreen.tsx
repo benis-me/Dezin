@@ -926,6 +926,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
+  useEffect(() => {
+    return () => {
+      if (modeRef.current === "standard") void api.releaseDevServer(projectId).catch(() => {});
+    };
+  }, [api, projectId]);
+
   const viewVersion = (runId: string): void => {
     setPreviewSrc(api.versionPreviewUrl(projectId, runId));
     setTab("Preview");

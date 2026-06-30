@@ -221,6 +221,7 @@ export interface ApiClient {
   createProject(input: CreateProjectInput): Promise<Project>;
   getSetup(id: string): Promise<SetupStatus>;
   getDevServerUrl(id: string): Promise<{ url: string }>;
+  releaseDevServer(id: string): Promise<void>;
   getProject(id: string): Promise<Project>;
   patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean }): Promise<Project>;
   saveCover(id: string, dataUrl: string): Promise<void>;
@@ -373,6 +374,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     createProject: (input) => json<Project>("/api/projects", jsonInit("POST", input)),
     getSetup: (id) => json<SetupStatus>(`/api/projects/${enc(id)}/setup`),
     getDevServerUrl: (id) => json<{ url: string }>(`/api/projects/${enc(id)}/devserver`),
+    releaseDevServer: (id) => json<{ released: boolean }>(`/api/projects/${enc(id)}/devserver`, { method: "DELETE" }).then(() => {}),
     getProject: (id) => json<Project>(`/api/projects/${enc(id)}`),
     patchProject: (id, patch) => json<Project>(`/api/projects/${enc(id)}`, jsonInit("PATCH", patch)),
     saveCover: (id, dataUrl) => json<{ ok: boolean }>(`/api/projects/${enc(id)}/cover`, jsonInit("POST", { dataUrl })).then(() => {}),

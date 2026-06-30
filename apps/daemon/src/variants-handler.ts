@@ -17,7 +17,9 @@ import {
   isStandardRootVariant,
   removeStandardVariantWorktree,
   standardVariantArtifactDir,
+  variantRuntimeKey,
 } from "./variant-workspaces.ts";
+import { releaseDevServer } from "./project-runtime.ts";
 
 // Daemon-internal entries that are never part of a branch's artifact.
 const SKIP = new Set([".variants", ".refs", ".versions", ".cover.png", "node_modules", ".git", ".dev"]);
@@ -72,6 +74,7 @@ export async function handleCreateVariant(req: IncomingMessage, res: ServerRespo
     await snapshot(root, snapDir(deps.dataDir, id, active.id));
   }
 
+  if (project.mode === "standard") (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
   deps.store.setActiveVariant(id, v.id);
   sendJson(res, 200, deps.store.listVariants(id));
 }
@@ -95,6 +98,7 @@ export async function handleActivateVariant(res: ServerResponse, params: Record<
       await restore(snapDir(deps.dataDir, id, vid), root);
       await rm(snapDir(deps.dataDir, id, vid), { recursive: true, force: true });
     }
+    if (project.mode === "standard" && active) (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active));
     deps.store.setActiveVariant(id, vid);
   }
   sendJson(res, 200, deps.store.listVariants(id));

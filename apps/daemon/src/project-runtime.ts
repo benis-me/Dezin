@@ -21,10 +21,28 @@ export type SetupPhase = "scaffolding" | "installing" | "ready" | "error";
 interface Runtime {
   phase: SetupPhase;
   error?: string;
-  dev?: { proc: ChildProcess; port: number; url: string };
+  dev?: { proc: ChildProcess; port: number; url: string; releaseTimer?: ReturnType<typeof setTimeout> };
 }
 
 const runtimes = new Map<string, Runtime>();
+export const DEV_SERVER_IDLE_MS = 60_000;
+
+function clearDevReleaseTimer(dev: Runtime["dev"]): void {
+  if (!dev?.releaseTimer) return;
+  clearTimeout(dev.releaseTimer);
+  dev.releaseTimer = undefined;
+}
+
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  const maybeNodeTimer = timer as { unref?: () => void };
+  if (typeof maybeNodeTimer.unref === "function") maybeNodeTimer.unref();
+}
+
+function stopDev(dev: Runtime["dev"]): void {
+  if (!dev) return;
+  clearDevReleaseTimer(dev);
+  if (!dev.proc.killed) dev.proc.kill();
+}
 
 function run(command: string, args: string[], cwd: string): Promise<number> {
   return new Promise((resolve) => {
@@ -130,7 +148,10 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
     runtimes.set(runtimeKey, rt);
   }
   if (!existsSync(join(projectDir, "node_modules"))) throw new Error("dependencies not installed yet");
-  if (rt.dev && !rt.dev.proc.killed) return { url: rt.dev.url };
+  if (rt.dev && !rt.dev.proc.killed) {
+    clearDevReleaseTimer(rt.dev);
+    return { url: rt.dev.url };
+  }
 
   const port = await freePort();
   const proc = spawn("npm", ["run", "dev", "--", "--port", String(port), "--strictPort", "--host", "127.0.0.1"], {
@@ -140,7 +161,10 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
     detached: false,
   });
   proc.on("close", () => {
-    if (rt!.dev?.proc === proc) rt!.dev = undefined;
+    if (rt!.dev?.proc === proc) {
+      clearDevReleaseTimer(rt!.dev);
+      rt!.dev = undefined;
+    }
   });
   const url = `http://127.0.0.1:${port}/`;
   rt.dev = { proc, port, url };
@@ -151,6 +175,21 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
     await new Promise((r) => setTimeout(r, 500));
   }
   return { url }; // return anyway; the iframe will retry
+}
+
+/** Mark one dev server as no longer used; it is stopped after a short idle grace period. */
+export function releaseDevServer(runtimeKey: string, idleMs = DEV_SERVER_IDLE_MS): boolean {
+  const rt = runtimes.get(runtimeKey);
+  const dev = rt?.dev;
+  if (!rt || !dev || dev.proc.killed) return false;
+  clearDevReleaseTimer(dev);
+  dev.releaseTimer = setTimeout(() => {
+    if (rt.dev !== dev) return;
+    stopDev(dev);
+    if (rt.dev === dev) rt.dev = undefined;
+  }, idleMs);
+  unrefTimer(dev.releaseTimer);
+  return true;
 }
 
 export async function workingTreeFingerprint(projectDir: string): Promise<string> {
@@ -171,5 +210,8 @@ export async function gitCommit(projectDir: string, message: string): Promise<{ 
 
 /** Stop all dev servers (called on daemon shutdown). */
 export function stopAllDevServers(): void {
-  for (const rt of runtimes.values()) rt.dev?.proc.kill();
+  for (const rt of runtimes.values()) {
+    stopDev(rt.dev);
+    rt.dev = undefined;
+  }
 }

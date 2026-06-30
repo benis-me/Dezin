@@ -29,7 +29,7 @@ import {
 } from "./variants-handler.ts";
 import { handleGetVersion, handleRestoreVersion } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
-import { setupStandardProject, getSetup, ensureDevServer } from "./project-runtime.ts";
+import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } from "./project-runtime.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
@@ -53,6 +53,11 @@ export interface AppDeps {
   visualQa?: VisualQaRunner;
   /** Standard project setup hook; tests can replace the slow npm-installing default. */
   standardProjectSetup?: (projectId: string, projectDir: string) => void | Promise<void>;
+  /** Standard dev-server hooks; tests can avoid spawning npm. */
+  ensureDevServer?: typeof ensureDevServer;
+  releaseDevServer?: typeof releaseDevServer;
+  /** Cover capture hook for Standard dev-server URLs; tests can avoid launching Chrome. */
+  captureCoverUrl?: (url: string, outPath: string) => Promise<boolean>;
 }
 
 type Handler = (
@@ -266,11 +271,22 @@ const routes: Route[] = [
       if (!project) return sendError(res, 404, "project not found");
       try {
         const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
-        const { url } = await ensureDevServer(id!, await activeArtifactDir(deps, project), variantRuntimeKey(id!, active));
+        const { url } = await (deps.ensureDevServer ?? ensureDevServer)(id!, await activeArtifactDir(deps, project), variantRuntimeKey(id!, active));
         sendJson(res, 200, { url });
       } catch (err) {
         sendError(res, 409, err instanceof Error ? err.message : "dev server unavailable");
       }
+    },
+  },
+  {
+    method: "DELETE",
+    pattern: "/api/projects/:id/devserver",
+    handler: (_req, res, { id }, deps) => {
+      const project = deps.store.getProject(id!);
+      if (!project) return sendError(res, 404, "project not found");
+      const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
+      const released = (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id!, active));
+      sendJson(res, 200, { released });
     },
   },
   {

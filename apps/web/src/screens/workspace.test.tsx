@@ -51,6 +51,34 @@ test("workspace conversation panel keeps a saved user resize instead of the 400p
   expect(screen.getByTestId("conversation")).not.toHaveStyle({ flexBasis: "400px" });
 });
 
+test("leaving a standard workspace releases its dev server lease", async () => {
+  const getDevServerUrl = vi.fn(async () => ({ url: "http://127.0.0.1:5300/p1" }));
+  const releaseDevServer = vi.fn(async () => {});
+  const { unmount } = render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Standard",
+          skillId: null,
+          designSystemId: "modern-minimal",
+          mode: "standard",
+          createdAt: 1,
+          updatedAt: 1,
+        }),
+        getDevServerUrl,
+        releaseDevServer,
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledWith("p1"));
+  unmount();
+  await waitFor(() => expect(releaseDevServer).toHaveBeenCalledWith("p1"));
+});
+
 test("sending a brief streams events into the chat and shows the preview + export menu", async () => {
   const user = userEvent.setup();
   const fake = makeFakeApi({

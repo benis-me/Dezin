@@ -10,6 +10,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     createProject: notImpl as ApiClient["createProject"],
     getSetup: async () => ({ phase: "ready" as const }),
     getDevServerUrl: async (id: string) => ({ url: `http://127.0.0.1:5300/${id}` }),
+    releaseDevServer: async () => {},
     getProject: notImpl as ApiClient["getProject"],
     patchProject: notImpl as ApiClient["patchProject"],
     saveCover: async () => {},

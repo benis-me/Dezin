@@ -82,6 +82,22 @@ emit \`<img src="" data-gen-prompt="a precise description of the image" alt="...
 after you finish. Use sparingly and purposefully — never decorative filler, never
 more than the layout needs. For icons/logos prefer inline SVG, not generated images.`;
 
+const ASSET_SOURCING = `## Material sourcing
+
+User material can arrive through attachments, saved references, paths, folders, URLs,
+or ordinary brief text. Inspect and use any relevant material the user provides; do
+not assume there are only upload and generated-image paths.
+
+When the brief genuinely needs photos, video, product imagery, venue imagery, or
+other real-world media and no usable material is available, search the web for
+relevant free-to-use assets and save local copies into the project (for example
+\`assets/\`, \`public/assets/\`, or \`src/assets/\`). Keep source/license notes when an
+asset requires attribution.
+
+Do not fake photographs, videos, product shots, venue shots, or human imagery with
+SVG, DOM, CSS gradients, or vector doodles. If no suitable real media can be found
+or used, use a minimal neutral placeholder instead of pretending it is real media.`;
+
 function renderLibraryRouting(libraries: string[], mode: ComposeInput["mode"]): string | null {
   const available = Array.from(new Set(libraries.map((l) => l.trim()).filter(Boolean)));
   if (available.length === 0) return null;
@@ -140,6 +156,7 @@ export function composeSystemPrompt(input: ComposeInput = {}): string {
   }
 
   parts.push(FONTS);
+  parts.push(ASSET_SOURCING);
 
   if (input.craft && input.craft.trim()) {
     parts.push(

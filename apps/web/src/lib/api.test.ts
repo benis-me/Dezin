@@ -56,6 +56,16 @@ test("deleteProject handles 204 No Content", async () => {
   );
 });
 
+test("releaseDevServer DELETEs the project devserver lease", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ released: true }));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  await expect(api.releaseDevServer("p1")).resolves.toBeUndefined();
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects/p1/devserver",
+    expect.objectContaining({ method: "DELETE" }),
+  );
+});
+
 test("non-ok responses throw ApiError with the status", async () => {
   const fetchImpl = vi.fn<FetchLike>(async () => new Response("nope", { status: 404 }));
   const api = createApiClient({ fetchImpl });
