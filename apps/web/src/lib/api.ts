@@ -26,6 +26,7 @@ export type SetupPhase = "scaffolding" | "installing" | "ready" | "error";
 export interface SetupStatus {
   phase: SetupPhase;
   error?: string;
+  logs?: Array<{ at: number; level: "info" | "error"; message: string }>;
 }
 
 export interface Conversation {
@@ -282,7 +283,7 @@ export interface ApiClient {
   importProject(file: Blob): Promise<Project>;
   streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent>;
   /** Reattach to an in-flight (or finished) run: replays its events, then streams live. */
-  reattachRun(runId: string, signal?: AbortSignal): AsyncGenerator<RunEvent>;
+  reattachRun(runId: string, signal?: AbortSignal, options?: { afterSeq?: number }): AsyncGenerator<RunEvent>;
   /** Explicitly stop a run (the composer "Stop"); works across pages. */
   cancelRun(runId: string): Promise<{ cancelled: boolean }>;
 }
@@ -335,8 +336,9 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     yield* consumeSse(await f(baseUrl + "/api/runs", { ...jsonInit("POST", input), signal }));
   }
 
-  async function* reattachRun(runId: string, signal?: AbortSignal): AsyncGenerator<RunEvent> {
-    yield* consumeSse(await f(`${baseUrl}/api/runs/${enc(runId)}/stream`, { signal }));
+  async function* reattachRun(runId: string, signal?: AbortSignal, options: { afterSeq?: number } = {}): AsyncGenerator<RunEvent> {
+    const after = typeof options.afterSeq === "number" && Number.isFinite(options.afterSeq) ? `?after=${encodeURIComponent(String(options.afterSeq))}` : "";
+    yield* consumeSse(await f(`${baseUrl}/api/runs/${enc(runId)}/stream${after}`, { signal }));
   }
 
   async function* scanAgentsStream(): AsyncGenerator<ScanEvent> {

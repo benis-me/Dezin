@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
 import { computeMarkupPosition, WorkspaceScreen } from "./WorkspaceScreen.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
-import type { RunEvent } from "../lib/api.ts";
+import type { RunEvent, Variant } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { takePendingAgent, takePendingBrief, takePendingModel } from "../lib/pending-brief.ts";
@@ -138,6 +138,39 @@ test("refreshing a standard preview revalidates the dev server lease", async () 
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
   expect(iframe.getAttribute("src") ?? "").toMatch(/^http:\/\/127\.0\.0\.1:5301\/p1\?t=\d+/);
   expect(captureProjectCover).toHaveBeenCalledTimes(1);
+});
+
+test("standard workspace shows setup and dev-server logs in Standard Doctor", async () => {
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Standard",
+          skillId: null,
+          designSystemId: "modern-minimal",
+          mode: "standard",
+          createdAt: 1,
+          updatedAt: 1,
+        }),
+        getSetup: async () => ({
+          phase: "installing",
+          logs: [
+            { at: 1, level: "info", message: "Installing dependencies" },
+            { at: 2, level: "error", message: "npm install failed" },
+          ],
+          error: "npm install failed",
+        }),
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("tab", { name: /Quality/ }));
+  expect(await screen.findByText("Standard Doctor")).toBeInTheDocument();
+  expect(screen.getByText("installing")).toBeInTheDocument();
+  expect(screen.getAllByText("npm install failed").length).toBeGreaterThan(0);
 });
 
 test("opening a project scrolls the restored conversation to the bottom", async () => {
@@ -411,7 +444,7 @@ test("mount reattaches the latest running run and replays its stream", async () 
   );
 
   expect(await screen.findByText("Recovered streamed text.")).toBeInTheDocument();
-  expect(reattachRun).toHaveBeenCalledWith("r-live", expect.anything());
+  expect(reattachRun).toHaveBeenCalledWith("r-live", expect.anything(), { afterSeq: 0 });
   expect(await screen.findByText(/Done, quality 100\/100/)).toBeInTheDocument();
 });
 
@@ -466,7 +499,7 @@ test("mount replays an interrupted run log after daemon restart", async () => {
 
   expect(await screen.findByText("Partial text before quit.")).toBeInTheDocument();
   expect(await screen.findByText("Interrupted.")).toBeInTheDocument();
-  expect(reattachRun).toHaveBeenCalledWith("r-interrupted", expect.anything());
+  expect(reattachRun).toHaveBeenCalledWith("r-interrupted", expect.anything(), { afterSeq: 0 });
 });
 
 test("Stop explicitly cancels the active daemon run", async () => {
@@ -793,6 +826,10 @@ test("clicking a marked target asks the preview to focus that element", async ()
     },
     "*",
   );
+  const inspect = screen.getByLabelText("Inspect panel");
+  expect(within(inspect).getByText("Selected element")).toBeInTheDocument();
+  expect(within(inspect).getByText("section.hero > h1")).toBeInTheDocument();
+  expect(within(inspect).getByText("320 x 48")).toBeInTheDocument();
 });
 
 test("conversation opens at the bottom and shows an icon-only jump button when scrolled away", async () => {
@@ -1141,7 +1178,7 @@ test("the Quality tab shows final run-done findings even when no repair lint eve
   expect(screen.queryByText(/No quality issues\. Clean/)).toBeNull();
 });
 
-test("the Quality tab groups visual QA findings separately from anti-slop findings", async () => {
+test("the Quality tab separates static, geometry, and agent visual lanes", async () => {
   const fake = makeFakeApi({
     streamRun: async function* (): AsyncGenerator<RunEvent> {
       yield { type: "run-start", runId: "r-visual", conversationId: "c1" };
@@ -1154,6 +1191,7 @@ test("the Quality tab groups visual QA findings separately from anti-slop findin
         previewUrl: "/projects/p1/preview/",
         findings: [
           { severity: "P1", id: "visual-horizontal-overflow", message: "Desktop viewport has horizontal overflow.", fix: "Constrain wide sections." },
+          { severity: "P2", id: "visual-ai-review-1", message: "The button is visibly misaligned.", fix: "Align the button to the form baseline." },
           { severity: "P2", id: "raw-hex", message: "2 raw hex values outside :root.", fix: "Move colours into tokens." },
         ],
       };
@@ -1169,9 +1207,11 @@ test("the Quality tab groups visual QA findings separately from anti-slop findin
   await screen.findByText(/Done, quality 89\/100/);
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
 
-  expect(await screen.findByText("Visual QA")).toBeInTheDocument();
-  expect(screen.getByText("Anti-slop")).toBeInTheDocument();
+  expect(await screen.findByText("Static anti-slop")).toBeInTheDocument();
+  expect(screen.getByText("Geometry")).toBeInTheDocument();
+  expect(screen.getByText("Agent visual review")).toBeInTheDocument();
   expect(screen.getByText(/Desktop viewport has horizontal overflow/)).toBeInTheDocument();
+  expect(screen.getByText(/button is visibly misaligned/)).toBeInTheDocument();
   expect(screen.getByText(/raw hex values/)).toBeInTheDocument();
 });
 
@@ -1218,6 +1258,7 @@ test("a clean run shows the Quality pane's clean empty state", async () => {
   const fake = makeFakeApi({
     streamRun: async function* (): AsyncGenerator<RunEvent> {
       yield { type: "run-start", runId: "r2", conversationId: "c1" };
+      yield { type: "visual-qa", enabled: true, findings: [] };
       yield { type: "run-done", runId: "r2", passed: true, rounds: 0, score: 100 };
     },
   });
@@ -1230,8 +1271,65 @@ test("a clean run shows the Quality pane's clean empty state", async () => {
   fireEvent.click(screen.getByLabelText("Send"));
   await screen.findByTitle("Artifact preview");
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
-  expect(await screen.findByText(/No quality issues\. Clean/)).toBeInTheDocument();
+  expect(await screen.findByText(/No findings in recorded checks/)).toBeInTheDocument();
+  expect(screen.getByText("Static anti-slop")).toBeInTheDocument();
   expect(screen.getAllByText("100/100").length).toBeGreaterThan(0); // shown in the score header (and result card)
+});
+
+test("generated material sources render only in the run result card", async () => {
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-assets", conversationId: "c1" };
+      yield { type: "images", count: 2 };
+      yield { type: "run-done", runId: "r-assets", passed: true, rounds: 0, score: 100, findings: [] };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  expect(await screen.findByText("Material sources")).toBeInTheDocument();
+  expect(screen.getByText("Generated image assets (2)")).toBeInTheDocument();
+});
+
+test("generate variants creates branches and starts parallel variant runs", async () => {
+  let variants: Variant[] = [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }];
+  const createConversation = vi.fn(async () => ({ id: "c-fanout", projectId: "p1", title: "Variants", createdAt: 1 }));
+  const createVariant = vi.fn(async (_projectId: string, name?: string) => {
+    variants = variants.map((variant) => ({ ...variant, active: false }));
+    const variant = { id: `v${variants.length}`, projectId: "p1", name: name ?? "Variant", createdAt: variants.length + 1, active: true };
+    variants = [...variants, variant];
+    return variants;
+  });
+  const streamRun = vi.fn(async function* (_input: { variantId?: string }): AsyncGenerator<RunEvent> {
+    yield { type: "run-done", passed: true, rounds: 0, score: 100, findings: [] };
+  });
+  const fake = makeFakeApi({
+    createConversation,
+    listVariants: async () => variants,
+    createVariant,
+    streamRun,
+    listMessages: async () => [],
+    listRuns: async () => [],
+    listFiles: async () => [],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "explore directions" } });
+  fireEvent.click(screen.getByLabelText("Generate variants"));
+
+  await waitFor(() => expect(streamRun).toHaveBeenCalledTimes(3));
+  expect(createConversation).toHaveBeenCalledTimes(1);
+  expect(createVariant).toHaveBeenCalledTimes(3);
+  expect(streamRun.mock.calls.map(([input]) => input.variantId)).toEqual(["v1", "v2", "v3"]);
 });
 
 test("a non-perfect restored score without stored findings does not claim clean", async () => {

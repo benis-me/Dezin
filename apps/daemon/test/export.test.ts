@@ -113,12 +113,20 @@ test("full export includes project metadata, conversations, and source files", a
       conversations?: Array<{ title?: string; messages?: Array<{ role?: string; content?: string }> }>;
     };
     assert.equal(manifest.format, "dezin-project");
-    assert.deepEqual(manifest.project, {
-      name: "P",
-      skillId: "frontend-design",
-      designSystemId: "modern-minimal",
-      mode: "prototype",
-    });
+    assert.deepEqual(
+      {
+        name: manifest.project?.name,
+        skillId: manifest.project?.skillId,
+        designSystemId: manifest.project?.designSystemId,
+        mode: manifest.project?.mode,
+      },
+      {
+        name: "P",
+        skillId: "frontend-design",
+        designSystemId: "modern-minimal",
+        mode: "prototype",
+      },
+    );
     assert.equal(manifest.conversations?.[0]?.title, "Chat");
     assert.equal(manifest.conversations?.[0]?.messages?.[0]?.content, "make a hero");
     assert.equal(entries.find((e) => e.path === "source/index.html")?.data.toString("utf8"), "<h1>hello</h1>");
@@ -183,6 +191,99 @@ test("import restores a full project zip as a new project", async () => {
       ["user", "original ask"],
       ["assistant", "original answer"],
     ]);
+  });
+});
+
+test("full import/export v2 migrates variants, runs, artifacts, run logs, and version snapshots", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Stateful project", skillId: "frontend-design", designSystemId: "modern-minimal", mode: "prototype" });
+    const main = store.ensureMainVariant(project.id);
+    const alt = store.createVariant(project.id, "Alt direction");
+    store.setActiveVariant(project.id, alt.id);
+
+    const conv = store.createConversation(project.id, "Build log");
+    const user = store.addMessage(conv.id, "user", "make it precise");
+    const assistant = store.addMessage(conv.id, "assistant", "final summary");
+    const run = store.createRun(project.id, conv.id, alt.id, user.id);
+    store.updateRun(run.id, {
+      status: "succeeded",
+      repairRounds: 1,
+      lintPassed: true,
+      score: 87,
+      findings: [{ severity: "P1", id: "geometry-overflow", message: "Hero clips", fix: "Constrain the hero width" }],
+      assistantMessageId: assistant.id,
+      finishedAt: 2222,
+    });
+    store.recordArtifact(project.id, "index.html", true);
+
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, ".variants", main.id), { recursive: true });
+    mkdirSync(join(dir, ".versions"), { recursive: true });
+    mkdirSync(join(dataDir, ".runs"), { recursive: true });
+    writeFileSync(join(dir, "index.html"), "<main>active variant</main>");
+    writeFileSync(join(dir, ".variants", main.id, "index.html"), "<main>main variant</main>");
+    writeFileSync(join(dir, ".versions", `${run.id}.html`), "<main>version snapshot</main>");
+    writeFileSync(
+      join(dataDir, ".runs", `${run.id}.jsonl`),
+      `${JSON.stringify({ type: "run-start", runId: run.id, conversationId: conv.id, seq: 1 })}\n${JSON.stringify({ type: "run-done", runId: run.id, seq: 2 })}\n`,
+    );
+
+    const exported = await fetch(`${base}/api/projects/${project.id}/export?scope=full`);
+    assert.equal(exported.status, 200);
+    const exportedZip = Buffer.from(await exported.arrayBuffer());
+    const exportedEntries = readZip(exportedZip);
+    const manifest = JSON.parse(exportedEntries.find((e) => e.path === "dezin-project.json")?.data.toString("utf8") ?? "{}") as {
+      version?: number;
+      variants?: Array<{ id?: string; name?: string; active?: boolean }>;
+      runs?: Array<{ id?: string; status?: string; score?: number; variantId?: string; userMessageId?: string; assistantMessageId?: string }>;
+      artifacts?: Array<{ path?: string; lintPassed?: boolean; createdAt?: number }>;
+    };
+    assert.equal(manifest.version, 2);
+    assert.deepEqual(manifest.variants?.map((v) => [v.name, v.active]), [
+      ["Main", false],
+      ["Alt direction", true],
+    ]);
+    assert.equal(manifest.runs?.[0]?.status, "succeeded");
+    assert.equal(manifest.runs?.[0]?.score, 87);
+    assert.equal(manifest.runs?.[0]?.variantId, alt.id);
+    assert.equal(manifest.runs?.[0]?.userMessageId, user.id);
+    assert.equal(manifest.runs?.[0]?.assistantMessageId, assistant.id);
+    assert.deepEqual(manifest.artifacts, [{ path: "index.html", lintPassed: true, createdAt: manifest.artifacts?.[0]?.createdAt }]);
+    assert.equal(exportedEntries.find((e) => e.path === `variants/${main.id}/index.html`)?.data.toString("utf8"), "<main>main variant</main>");
+    assert.equal(exportedEntries.find((e) => e.path === `versions/${run.id}.html`)?.data.toString("utf8"), "<main>version snapshot</main>");
+    assert.match(exportedEntries.find((e) => e.path === `runs/${run.id}.jsonl`)?.data.toString("utf8") ?? "", /run-start/);
+
+    const imported = await fetch(`${base}/api/projects/import`, {
+      method: "POST",
+      headers: { "content-type": "application/zip" },
+      body: exportedZip,
+    });
+    assert.equal(imported.status, 201);
+    const importedProject = (await imported.json()) as { id: string };
+    const importedVariants = store.listVariants(importedProject.id);
+    assert.deepEqual(importedVariants.map((v) => [v.name, v.active]), [
+      ["Main", false],
+      ["Alt direction", true],
+    ]);
+    assert.equal(readFileSync(join(dataDir, "projects", importedProject.id, "index.html"), "utf8"), "<main>active variant</main>");
+    assert.equal(readFileSync(join(dataDir, "projects", importedProject.id, ".variants", importedVariants[0]!.id, "index.html"), "utf8"), "<main>main variant</main>");
+
+    const importedConversations = store.listConversations(importedProject.id);
+    const importedMessages = store.listMessages(importedConversations[0]!.id);
+    const importedRuns = store.listRuns(importedProject.id);
+    assert.equal(importedRuns.length, 1);
+    assert.equal(importedRuns[0]!.conversationId, importedConversations[0]!.id);
+    assert.equal(importedRuns[0]!.variantId, importedVariants[1]!.id);
+    assert.equal(importedRuns[0]!.userMessageId, importedMessages[0]!.id);
+    assert.equal(importedRuns[0]!.assistantMessageId, importedMessages[1]!.id);
+    assert.equal(importedRuns[0]!.score, 87);
+    assert.equal(importedRuns[0]!.findings[0]?.id, "geometry-overflow");
+    assert.deepEqual(store.listArtifacts(importedProject.id).map((a) => [a.path, a.lintPassed]), [["index.html", true]]);
+    const importedDir = join(dataDir, "projects", importedProject.id);
+    assert.equal(readFileSync(join(importedDir, ".versions", `${importedRuns[0]!.id}.html`), "utf8"), "<main>version snapshot</main>");
+    const importedLog = readFileSync(join(dataDir, ".runs", `${importedRuns[0]!.id}.jsonl`), "utf8");
+    assert.match(importedLog, new RegExp(importedRuns[0]!.id));
+    assert.doesNotMatch(importedLog, new RegExp(run.id));
   });
 });
 

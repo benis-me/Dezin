@@ -37,6 +37,14 @@ async function withServer(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   }
 }
 
+async function waitForFile(path: string, timeoutMs = 1500): Promise<void> {
+  const started = Date.now();
+  while (!existsSync(path)) {
+    if (Date.now() - started > timeoutMs) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 test("GET /api/projects/:id/files lists the project's files with sizes", async () => {
   await withServer(async ({ base, dataDir, store }) => {
     const project = store.createProject({ name: "P" });
@@ -86,15 +94,16 @@ test("standard mode: POST /api/projects scaffolds a Vite project + git, reports 
 
     // the template was copied into the project dir (scaffold runs synchronously up to install)
     const dir = join(dataDir, "projects", project.id);
-    await new Promise((r) => setTimeout(r, 300)); // let scaffold (copy + git) land
+    await waitForFile(join(dir, "src", "App.jsx"));
     assert.ok(existsSync(join(dir, "package.json")), "package.json scaffolded");
     assert.ok(existsSync(join(dir, "src", "App.jsx")), "App.jsx scaffolded");
     const viteConfig = readFileSync(join(dir, "vite.config.js"), "utf8");
     assert.match(viteConfig, /data-dezin-id/);
     assert.match(viteConfig, /nth-of-type/);
 
-    const setup = (await (await fetch(`${base}/api/projects/${project.id}/setup`)).json()) as { phase: string };
+    const setup = (await (await fetch(`${base}/api/projects/${project.id}/setup`)).json()) as { phase: string; logs?: Array<{ message: string }> };
     assert.ok(["scaffolding", "installing", "ready", "error"].includes(setup.phase));
+    assert.ok(Array.isArray(setup.logs));
   });
 });
 

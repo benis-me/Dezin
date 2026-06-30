@@ -91,6 +91,7 @@ interface ResultMeta {
   rounds?: number;
   error?: boolean;
   status?: "done" | "stopped" | "failed";
+  materialSources?: string[];
 }
 interface Msg {
   id: number;
@@ -241,6 +242,133 @@ function isVisualFinding(finding: QualityFinding): boolean {
   return finding.id.startsWith("visual-");
 }
 
+function isAgentVisualFinding(finding: QualityFinding): boolean {
+  return finding.id.startsWith("visual-ai-review-") || finding.id === "visual-agent-review-failed" || finding.id === "visual-screenshot-missing";
+}
+
+function isVisualFailureFinding(finding: QualityFinding): boolean {
+  return [
+    "visual-qa-failed",
+    "visual-devserver-unavailable",
+    "visual-chrome-unavailable",
+    "visual-render-failed",
+    "visual-screenshot-missing",
+    "visual-agent-review-failed",
+    "visual-artifact-missing",
+  ].includes(finding.id);
+}
+
+type QualityLaneStatus = "passed" | "issues" | "failed" | "running" | "not-run" | "not-recorded";
+
+interface QualityCheckState {
+  staticRan: boolean;
+  visualRan: boolean;
+  visualEnabled: boolean | null;
+  source: "none" | "live" | "persisted";
+}
+
+interface QualityLane {
+  key: "static" | "geometry" | "agent";
+  label: string;
+  desc: string;
+  status: QualityLaneStatus;
+  findings: QualityFinding[];
+}
+
+function qualityStatusText(status: QualityLaneStatus): string {
+  switch (status) {
+    case "passed":
+      return "Passed";
+    case "issues":
+      return "Issues";
+    case "failed":
+      return "Failed";
+    case "running":
+      return "Running";
+    case "not-run":
+      return "Not run";
+    case "not-recorded":
+      return "Not recorded";
+  }
+}
+
+function qualityStatusClass(status: QualityLaneStatus): string {
+  if (status === "passed") return "border-success/25 bg-success/10 text-success";
+  if (status === "issues") return "border-border-strong bg-surface-2 text-foreground";
+  if (status === "failed") return "border-destructive/35 bg-destructive/10 text-destructive";
+  if (status === "running") return "border-accent/25 bg-accent/10 text-accent-foreground";
+  return "border-border bg-surface-2 text-muted-foreground";
+}
+
+function laneStatus(input: {
+  findings: QualityFinding[];
+  ran: boolean;
+  running: boolean;
+  ranOnce: boolean;
+  disabled?: boolean;
+  failure?: boolean;
+}): QualityLaneStatus {
+  if (input.disabled) return "not-run";
+  if (input.findings.length > 0) return input.failure ? "failed" : "issues";
+  if (input.ran) return "passed";
+  if (input.running) return "running";
+  return input.ranOnce ? "not-recorded" : "not-run";
+}
+
+function buildQualityLanes(input: {
+  findings: QualityFinding[];
+  score: number | null;
+  ranOnce: boolean;
+  running: boolean;
+  checks: QualityCheckState;
+}): QualityLane[] {
+  const staticFindings = input.findings.filter((finding) => !isVisualFinding(finding));
+  const visualFindings = input.findings.filter(isVisualFinding);
+  const geometryFindings = visualFindings.filter((finding) => !isAgentVisualFinding(finding));
+  const agentFindings = visualFindings.filter(isAgentVisualFinding);
+  const staticRan = input.checks.staticRan || input.score !== null || staticFindings.length > 0;
+  const visualRan = input.checks.visualRan || visualFindings.length > 0;
+  const visualDisabled = input.checks.visualEnabled === false;
+
+  return [
+    {
+      key: "static",
+      label: "Static anti-slop",
+      desc: "Rules from the generated artifact and design lint.",
+      status: laneStatus({ findings: staticFindings, ran: staticRan, running: input.running, ranOnce: input.ranOnce }),
+      findings: staticFindings,
+    },
+    {
+      key: "geometry",
+      label: "Geometry",
+      desc: "Viewport overflow, clipping, blank renders, and fixed-position defects.",
+      status: laneStatus({
+        findings: geometryFindings,
+        ran: visualRan,
+        running: input.running && input.checks.visualEnabled !== false,
+        ranOnce: input.ranOnce,
+        disabled: visualDisabled,
+        failure: geometryFindings.some(isVisualFailureFinding),
+      }),
+      findings: geometryFindings,
+    },
+    {
+      key: "agent",
+      label: "Agent visual review",
+      desc: "Screenshot review by the selected Agent with the current conversation context.",
+      status: laneStatus({
+        findings: agentFindings,
+        ran: visualRan,
+        running: input.running && input.checks.visualEnabled !== false,
+        ranOnce: input.ranOnce,
+        disabled: visualDisabled,
+        failure: agentFindings.some(isVisualFailureFinding),
+      }),
+      findings: agentFindings,
+    },
+  ];
+}
+
 function normalizeResultMeta(value: unknown): ResultMeta | undefined {
   if (!isRecord(value)) return undefined;
   const meta: ResultMeta = {};
@@ -249,6 +377,7 @@ function normalizeResultMeta(value: unknown): ResultMeta | undefined {
   if (typeof value.rounds === "number") meta.rounds = value.rounds;
   if (typeof value.error === "boolean") meta.error = value.error;
   if (value.status === "done" || value.status === "stopped" || value.status === "failed") meta.status = value.status;
+  if (Array.isArray(value.materialSources)) meta.materialSources = value.materialSources.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
   return meta;
 }
 
@@ -891,6 +1020,7 @@ function ResultCard({
 }) {
   const error = meta?.error;
   const score = meta?.score;
+  const materialSources = meta?.materialSources ?? [];
   const stopped = meta?.status === "stopped" || text === "Stopped.";
   const label = stopped ? "Stopped" : text;
   return (
@@ -928,6 +1058,12 @@ function ResultCard({
           </div>
         ) : null}
       </div>
+      {materialSources.length > 0 ? (
+        <div className="mt-1.5 flex items-start gap-2 border-t border-border pt-1.5 text-[11px] text-muted-foreground">
+          <span className="shrink-0 font-medium text-foreground-2">Material sources</span>
+          <span className="min-w-0 flex-1 truncate">{materialSources.join(" · ")}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -982,6 +1118,140 @@ function emptyPane(label: string) {
         <p className={cn("text-sm text-muted-foreground", label.startsWith("Generating") && "shiny-text")}>{label}</p>
       </div>
     </div>
+  );
+}
+
+function StandardDoctor({
+  phase,
+  logs,
+  error,
+  onRefresh,
+}: {
+  phase: SetupPhase | null;
+  logs: Array<{ at: number; level: "info" | "error"; message: string }>;
+  error?: string | null;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="rounded-lg border border-border bg-card">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold text-foreground">Standard Doctor</div>
+          <div className="text-[11px] text-muted-foreground">Setup and dev-server runtime</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="rounded-md border border-border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+            {phase ?? "unknown"}
+          </span>
+          <IconButton aria-label="Refresh standard preview" className="h-7 w-7 rounded-md" onClick={onRefresh}>
+            <RotateCw size={13} strokeWidth={1.8} />
+          </IconButton>
+        </div>
+      </div>
+      {error ? <p className="border-b border-border px-3 py-2 text-xs text-destructive">{error}</p> : null}
+      {logs.length > 0 ? (
+        <ul className="max-h-44 space-y-1 overflow-auto px-3 py-2 font-mono text-[11px]">
+          {logs.slice(-8).map((log, index) => (
+            <li key={`${log.at}-${index}`} className={cn("truncate", log.level === "error" ? "text-destructive" : "text-muted-foreground")}>
+              {log.message}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="px-3 py-2 text-xs text-muted-foreground">No runtime logs recorded in this daemon session.</p>
+      )}
+    </section>
+  );
+}
+
+function InspectPanel({
+  target,
+  projectName,
+  projectMode,
+  designSystem,
+  files,
+}: {
+  target: MarkupTarget | null;
+  projectName: string;
+  projectMode: ProjectMode;
+  designSystem?: DesignSystemCard;
+  files: ProjectFile[];
+}) {
+  const htmlFiles = files.filter((file) => file.path.endsWith(".html")).length;
+  const cssFiles = files.filter((file) => file.path.endsWith(".css")).length;
+  const imageFiles = files.filter((file) => /\.(avif|gif|jpe?g|png|svg|webp)$/i.test(file.path)).length;
+  return (
+    <aside className="flex h-full w-[280px] shrink-0 flex-col border-l border-border bg-card" aria-label="Inspect panel">
+      <PanelBar className="gap-1.5">
+        <Eye size={13} strokeWidth={1.75} />
+        Inspect
+      </PanelBar>
+      <div className="flex-1 overflow-auto p-3 text-sm">
+        {target ? (
+          <div className="space-y-3">
+            <section className="rounded-lg border border-border bg-surface p-3">
+              <div className="mb-2 flex items-center gap-1.5">
+                <MousePointerClick size={13} strokeWidth={1.8} className="text-brand" />
+                <span className="text-xs font-semibold text-foreground">Selected element</span>
+              </div>
+              <code className="block break-all rounded-md bg-card px-2 py-1.5 font-mono text-[11px] text-foreground-2">{target.selector}</code>
+              <dl className="mt-2 grid grid-cols-[76px_1fr] gap-x-2 gap-y-1 text-xs">
+                {target.tag ? (
+                  <>
+                    <dt className="text-muted-foreground">Name</dt>
+                    <dd className="font-mono text-foreground">{target.tag}</dd>
+                  </>
+                ) : null}
+                {target.rect ? (
+                  <>
+                    <dt className="text-muted-foreground">Position</dt>
+                    <dd className="font-mono text-foreground">
+                      {target.rect.x}, {target.rect.y}
+                    </dd>
+                    <dt className="text-muted-foreground">Size</dt>
+                    <dd className="font-mono text-foreground">
+                      {target.rect.w} x {target.rect.h}
+                    </dd>
+                  </>
+                ) : null}
+              </dl>
+              {target.text ? <p className="mt-2 line-clamp-3 text-xs leading-snug text-muted-foreground">"{target.text}"</p> : null}
+              {target.note ? <p className="mt-2 rounded-md bg-card px-2 py-1.5 text-xs leading-snug text-foreground">{target.note}</p> : null}
+            </section>
+            <section className="rounded-lg border border-border bg-surface p-3">
+              <div className="text-xs font-semibold text-foreground">Layout</div>
+              <p className="mt-1 text-xs text-muted-foreground">Precise computed layout is captured from the selected preview rect.</p>
+            </section>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <section className="rounded-lg border border-border bg-surface p-3">
+              <div className="text-xs font-semibold text-foreground">Project variables</div>
+              <dl className="mt-2 grid grid-cols-[88px_1fr] gap-x-2 gap-y-1 text-xs">
+                <dt className="text-muted-foreground">Project</dt>
+                <dd className="truncate text-foreground">{projectName || "Untitled"}</dd>
+                <dt className="text-muted-foreground">Mode</dt>
+                <dd className="capitalize text-foreground">{projectMode}</dd>
+                <dt className="text-muted-foreground">System</dt>
+                <dd className="truncate text-foreground">{designSystem?.name ?? "Clean"}</dd>
+              </dl>
+            </section>
+            <section className="rounded-lg border border-border bg-surface p-3">
+              <div className="text-xs font-semibold text-foreground">Assets</div>
+              <dl className="mt-2 grid grid-cols-[88px_1fr] gap-x-2 gap-y-1 font-mono text-xs">
+                <dt className="font-sans text-muted-foreground">HTML</dt>
+                <dd className="text-foreground">{htmlFiles}</dd>
+                <dt className="font-sans text-muted-foreground">CSS</dt>
+                <dd className="text-foreground">{cssFiles}</dd>
+                <dt className="font-sans text-muted-foreground">Images</dt>
+                <dd className="text-foreground">{imageFiles}</dd>
+              </dl>
+            </section>
+            <p className="px-1 text-xs leading-snug text-muted-foreground">Select an element in the preview or open a marked target to inspect it here.</p>
+          </div>
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -1056,10 +1326,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [composerH, setComposerH] = useState(92);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
+  const [inspectOpen, setInspectOpen] = useState(false);
+  const [inspectedTarget, setInspectedTarget] = useState<MarkupTarget | null>(null);
   const [selectedTargets, setSelectedTargets] = useState<MarkupTarget[]>([]);
   const [pendingMark, setPendingMark] = useState<(MarkupTarget & { x: number; y: number }) | null>(null);
   const previewIframeRef = useRef<HTMLIFrameElement>(null);
   const [setupPhase, setSetupPhase] = useState<SetupPhase | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [setupLogs, setSetupLogs] = useState<Array<{ at: number; level: "info" | "error"; message: string }>>([]);
   const [running, setRunning] = useState(false);
   const [queue, setQueue] = useState<string[]>(() => readQueue(projectId));
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
@@ -1076,6 +1350,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [lintFindings, setLintFindings] = useState<QualityFinding[]>([]);
   const [ranOnce, setRanOnce] = useState(false);
   const [score, setScore] = useState<number | null>(null);
+  const [qualityChecks, setQualityChecks] = useState<QualityCheckState>({ staticRan: false, visualRan: false, visualEnabled: null, source: "none" });
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [variants, setVariants] = useState<Variant[]>([]);
   const [compare, setCompare] = useState<{ a: { url: string; label: string }; b: { url: string; label: string } } | null>(null);
@@ -1096,6 +1371,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const currentTurnTextRef = useRef("");
   const finalSummaryTextRef = useRef("");
   const summaryBoundaryRef = useRef(false);
+  const materialSourcesRef = useRef<string[]>([]);
   const gotTurnText = useRef(false);
   const stickBottom = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
@@ -1106,6 +1382,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const terminalEventRef = useRef(false);
   const liveQualityRef = useRef(false);
   const reattachedRunsRef = useRef<Set<string>>(new Set());
+  const lastSeqByRunRef = useRef<Map<string, number>>(new Map());
+  const qualityChecksRef = useRef<QualityCheckState>({ staticRan: false, visualRan: false, visualEnabled: null, source: "none" });
+
+  const updateQualityChecks = (next: QualityCheckState | ((current: QualityCheckState) => QualityCheckState)): void => {
+    const resolved = typeof next === "function" ? next(qualityChecksRef.current) : next;
+    qualityChecksRef.current = resolved;
+    setQualityChecks(resolved);
+  };
 
   const setActive = (id: string | null) => {
     activeConv.current = id;
@@ -1193,16 +1477,25 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       // Reflect the active branch's latest run in the Quality tab when reopening a project.
       const activeVariantId = activeVariantIdOf(scopeVariants);
       const latest = activeVariantId ? (rs.find((run) => (run.variantId ?? activeVariantId) === activeVariantId) ?? null) : (rs[0] ?? null);
-      if (latest && typeof latest.score === "number") {
+      const latestFindings = normalizeFindings(latest?.findings);
+      if (latest && (typeof latest.score === "number" || latestFindings.length > 0)) {
+        const restoredFindings = latestFindings;
         setScore(latest.score);
-        setLintFindings(normalizeFindings(latest.findings));
+        setLintFindings(restoredFindings);
         setRanOnce(true);
         liveQualityRef.current = false;
+        updateQualityChecks({
+          staticRan: latest.score !== null || restoredFindings.some((finding) => !isVisualFinding(finding)),
+          visualRan: restoredFindings.some(isVisualFinding),
+          visualEnabled: null,
+          source: "persisted",
+        });
       } else {
         if (!liveQualityRef.current) {
           setScore(null);
           setLintFindings([]);
           setRanOnce(Boolean(latest));
+          updateQualityChecks({ staticRan: false, visualRan: false, visualEnabled: null, source: latest ? "persisted" : "none" });
         }
       }
       if (latest && REPLAYABLE_RUN_STATUSES.has(latest.status) && !reattachedRunsRef.current.has(latest.id)) {
@@ -1223,12 +1516,19 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       for (let i = 0; i < 160; i++) {
         const s = await api.getSetup(projectId);
         setSetupPhase(s.phase);
+        setSetupError(s.error ?? null);
+        setSetupLogs(s.logs ?? []);
         if (s.phase === "ready") break;
         if (s.phase === "error") return;
         await new Promise((r) => setTimeout(r, 1500));
       }
       const { url } = await api.getDevServerUrl(projectId);
       setPreviewSrc(url);
+      void api.getSetup(projectId).then((s) => {
+        setSetupPhase(s.phase);
+        setSetupError(s.error ?? null);
+        setSetupLogs(s.logs ?? []);
+      }).catch(() => {});
       void api.captureProjectCover(projectId).catch(() => {});
     } catch {
       // setup not ready; the user can retry
@@ -1317,8 +1617,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
-  const pushResult = (text: string, meta: ResultMeta): void =>
-    setMessages((m) => [...m, { id: msgId.current++, kind: "result", text, meta }]);
+  const pushResult = (text: string, meta: ResultMeta): void => {
+    const materialSources = materialSourcesRef.current;
+    setMessages((m) => [...m, { id: msgId.current++, kind: "result", text, meta: materialSources.length ? { ...meta, materialSources } : meta }]);
+  };
 
   // Turn the live (interleaved) stream into the transcript: a collapsed process record,
   // then visible prose, then a compact steps summary. Used on completion and Stop.
@@ -1341,6 +1643,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   };
 
   const handleEvent = (ev: RunEvent, id: string): void => {
+    const seq = typeof ev.seq === "number" && Number.isFinite(ev.seq) ? ev.seq : null;
+    const eventRunId = typeof ev.runId === "string" ? ev.runId : activeRunIdRef.current;
+    if (seq !== null && eventRunId) {
+      const lastSeq = lastSeqByRunRef.current.get(eventRunId) ?? 0;
+      if (seq <= lastSeq) return;
+      lastSeqByRunRef.current.set(eventRunId, seq);
+    }
     switch (ev.type) {
       case "run-start":
         terminalEventRef.current = false;
@@ -1356,11 +1665,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         setLintFindings([]);
         setScore(null);
         liveQualityRef.current = false;
+        updateQualityChecks({ staticRan: false, visualRan: false, visualEnabled: null, source: "live" });
         setLiveItems([]);
         liveItemsRef.current = [];
         currentTurnTextRef.current = "";
         finalSummaryTextRef.current = "";
         summaryBoundaryRef.current = false;
+        materialSourcesRef.current = [];
         gotTurnText.current = false;
         stickBottom.current = true;
         setLiveStatus("Starting…");
@@ -1409,7 +1720,24 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "lint": {
         const findings = Array.isArray(ev.findings) ? (ev.findings as QualityFinding[]) : [];
         setLintFindings(findings);
+        updateQualityChecks((current) => ({ ...current, staticRan: true, source: "live" }));
         setLiveStatus(`Found ${findings.length} issue${findings.length === 1 ? "" : "s"}, repairing`);
+        break;
+      }
+      case "visual-qa": {
+        const findings = Array.isArray(ev.findings) ? normalizeFindings(ev.findings) : [];
+        setLintFindings((current) => [...current.filter((finding) => !isVisualFinding(finding)), ...findings]);
+        updateQualityChecks((current) => ({
+          ...current,
+          visualRan: ev.enabled === false ? false : true,
+          visualEnabled: typeof ev.enabled === "boolean" ? ev.enabled : current.visualEnabled,
+          source: "live",
+        }));
+        break;
+      }
+      case "images": {
+        const count = typeof ev.count === "number" ? ev.count : 0;
+        if (count > 0) materialSourcesRef.current = [`Generated image assets (${count})`];
         break;
       }
       case "run-done": {
@@ -1417,9 +1745,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         activeRunIdRef.current = null;
         const rounds = typeof ev.rounds === "number" ? ev.rounds : 0;
         const s = typeof ev.score === "number" ? ev.score : null;
-        if (Array.isArray(ev.findings)) setLintFindings(normalizeFindings(ev.findings));
+        const finalFindings = Array.isArray(ev.findings) ? normalizeFindings(ev.findings) : lintFindings;
+        if (Array.isArray(ev.findings)) setLintFindings(finalFindings);
         setScore(s);
         liveQualityRef.current = true;
+        updateQualityChecks((current) => ({
+          staticRan: s !== null || finalFindings.some((finding) => !isVisualFinding(finding)) || current.staticRan,
+          visualRan: current.visualRan || finalFindings.some(isVisualFinding),
+          visualEnabled: current.visualEnabled,
+          source: "live",
+        }));
         setLiveStatus(null);
         materializeLive();
         const fixes = rounds ? ` after ${rounds} fix${rounds > 1 ? "es" : ""}` : "";
@@ -1494,7 +1829,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     try {
-      for await (const ev of api.reattachRun(runId, ctrl.signal)) handleEvent(ev, projectId);
+      for await (const ev of api.reattachRun(runId, ctrl.signal, { afterSeq: lastSeqByRunRef.current.get(runId) ?? 0 })) handleEvent(ev, projectId);
       if (!terminalEventRef.current) {
         setLiveStatus(null);
         materializeLive();
@@ -1583,6 +1918,68 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       activeRunIdRef.current = null;
       abortRef.current = null;
       setRunning(false);
+    }
+  };
+
+  const runVariantFanout = async (count = 3): Promise<void> => {
+    const text = input.trim();
+    if (!isExisting || !text || runningRef.current) return;
+    runningRef.current = true;
+    terminalEventRef.current = false;
+    activeRunIdRef.current = null;
+    setRunning(true);
+    setInput("");
+    setLiveItems([]);
+    liveItemsRef.current = [];
+    setLiveStatus(`Generating ${count} variants…`);
+    push("user", `Generate ${count} variants:\n\n${text}`);
+    try {
+      let convId = activeConv.current;
+      if (!convId) {
+        const conv = await api.createConversation(projectId, "Variants");
+        setConversations((current) => [...current, conv]);
+        setActive(conv.id);
+        convId = conv.id;
+      }
+
+      let nextVariants = variants;
+      const targets: Variant[] = [];
+      for (let i = 0; i < count; i++) {
+        nextVariants = await api.createVariant(projectId, `Variant ${nextVariants.length + 1}`);
+        const active = nextVariants.find((variant) => variant.active);
+        if (active) targets.push(active);
+      }
+      setVariants(nextVariants);
+
+      await Promise.all(
+        targets.map(async (variant, index) => {
+          const stream = api.streamRun({
+            projectId,
+            conversationId: convId!,
+            variantId: variant.id,
+            brief: `${text}\n\nCreate variant ${index + 1} of ${count}. Make it a distinct visual direction while preserving the user's core request.`,
+            agentCommand: runAgent || undefined,
+            model: runModel || undefined,
+          });
+          for await (const ev of stream) {
+            if (ev.type === "run-error") throw new Error(typeof ev.message === "string" ? ev.message : "variant run failed");
+          }
+        }),
+      );
+
+      await loadMessages(convId);
+      await loadRuns(nextVariants);
+      await loadFiles();
+      reloadArtifact(nextVariants);
+      setTab("Versions");
+      toast(`Generated ${targets.length} variants.`);
+    } catch (err) {
+      toast(`Couldn't generate variants: ${err instanceof Error ? err.message : "run failed"}`, { variant: "error" });
+    } finally {
+      runningRef.current = false;
+      activeRunIdRef.current = null;
+      setRunning(false);
+      setLiveStatus(null);
     }
   };
 
@@ -1794,6 +2191,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         const r = d.rect;
         const pos = computeMarkupPosition(ir, r, { width: window.innerWidth, height: window.innerHeight });
         setPendingMark({ selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: r, x: pos.x, y: pos.y });
+        setInspectedTarget({ selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: r });
+        setInspectOpen(true);
         setSelectMode(false);
       } else if (d.type === "cancel") {
         setSelectMode(false);
@@ -1827,6 +2226,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const focusMarkupTarget = (target: MarkupTarget): void => {
     setTab("Preview");
+    setInspectedTarget(target);
+    setInspectOpen(true);
     const message = {
       source: "dezin-parent",
       type: "focus-target",
@@ -2034,6 +2435,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     try {
       const { url } = await api.getDevServerUrl(projectId);
       setPreviewSrc(`${url.split("?")[0]}?t=${Date.now()}`);
+      void api.getSetup(projectId)
+        .then((s) => {
+          setSetupPhase(s.phase);
+          setSetupError(s.error ?? null);
+          setSetupLogs(s.logs ?? []);
+        })
+        .catch(() => {});
     } catch {
       toast("Couldn't refresh the dev preview.", { variant: "error" });
     }
@@ -2050,15 +2458,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
-  const visualFindings = lintFindings.filter(isVisualFinding);
-  const antiSlopFindings = lintFindings.filter((finding) => !isVisualFinding(finding));
-  const findingGroups = [
-    { label: "Visual QA", desc: "Rendered screenshot and viewport geometry", findings: visualFindings },
-    { label: "Anti-slop", desc: "Static design and accessibility rules", findings: antiSlopFindings },
-  ].filter((group) => group.findings.length > 0);
+  const qualityLanes = buildQualityLanes({ findings: lintFindings, score, ranOnce, running, checks: qualityChecks });
+  const qualityHasFindings = qualityLanes.some((lane) => lane.findings.length > 0);
+  const qualityRecorded = qualityLanes.some((lane) => lane.status === "passed" || lane.status === "issues" || lane.status === "failed");
+  const qualityClean = ranOnce && qualityRecorded && !qualityHasFindings && qualityLanes.every((lane) => lane.status === "passed" || lane.status === "not-run");
   const versionGroups = buildVersionGroups(runs, variants);
   const activeVersionGroup = versionGroups.find((group) => group.active) ?? versionGroups[0] ?? null;
   const currentRun = activeVersionGroup?.runs[0] ?? null;
+  const activeDesignSystem = systems.find((system) => system.id === dsId);
 
   const TAB_ICON: Record<Tab, ReactNode> = {
     Preview: <Eye size={13} strokeWidth={1.75} />,
@@ -2497,36 +2904,50 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   onReference={isExisting ? (p) => void referenceProject(p) : undefined}
                 />
               </div>
-              <div className="flex min-w-0 items-center gap-1">
-                <AgentModelSelect
-                  agents={agents}
-                  agent={runAgent}
-                  model={runModel}
-                  dropUp
-                  onAgentChange={(v) => {
-                    setRunAgent(v);
-                    setRunModel("");
-                  }}
-                  onModelChange={setRunModel}
-                  onRescan={rescanAgents}
-                />
-                {running && input.trim().length === 0 && selectedTargets.length === 0 ? (
-                  <Button aria-label="Stop" size="icon-sm" variant="outline" onClick={stop} className="ml-0.5 rounded-lg" title="Stop generating">
-                    <Square size={12} strokeWidth={2} className="fill-current" />
-                  </Button>
-                ) : (
-                  <Button
-                    aria-label={running ? "Queue" : "Send"}
-                    size="icon-sm"
-                    onClick={send}
-                    disabled={!running && input.trim().length === 0 && selectedTargets.length === 0}
-                    title={running ? "Queue this prompt to run next" : undefined}
-                    className="ml-0.5 rounded-lg"
-                  >
-                    <ArrowUp size={15} strokeWidth={2} />
-                  </Button>
-                )}
-              </div>
+              <TooltipProvider delayDuration={120}>
+                <div className="flex min-w-0 items-center gap-1">
+                  <AgentModelSelect
+                    agents={agents}
+                    agent={runAgent}
+                    model={runModel}
+                    dropUp
+                    onAgentChange={(v) => {
+                      setRunAgent(v);
+                      setRunModel("");
+                    }}
+                    onModelChange={setRunModel}
+                    onRescan={rescanAgents}
+                  />
+                  <ToolbarTooltip label="Generate 3 variants">
+                    <Button
+                      aria-label="Generate variants"
+                      size="icon-sm"
+                      variant="outline"
+                      onClick={() => void runVariantFanout(3)}
+                      disabled={!isExisting || running || input.trim().length === 0}
+                      className="ml-0.5 rounded-lg"
+                    >
+                      <GitFork size={13} strokeWidth={1.8} />
+                    </Button>
+                  </ToolbarTooltip>
+                  {running && input.trim().length === 0 && selectedTargets.length === 0 ? (
+                    <Button aria-label="Stop" size="icon-sm" variant="outline" onClick={stop} className="ml-0.5 rounded-lg" title="Stop generating">
+                      <Square size={12} strokeWidth={2} className="fill-current" />
+                    </Button>
+                  ) : (
+                    <Button
+                      aria-label={running ? "Queue" : "Send"}
+                      size="icon-sm"
+                      onClick={send}
+                      disabled={!running && input.trim().length === 0 && selectedTargets.length === 0}
+                      title={running ? "Queue this prompt to run next" : undefined}
+                      className="ml-0.5 rounded-lg"
+                    >
+                      <ArrowUp size={15} strokeWidth={2} />
+                    </Button>
+                  )}
+                </div>
+              </TooltipProvider>
             </div>
           </div>
           </div>
@@ -2570,6 +2991,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                       className={`app-no-drag ${selectMode ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}`}
                     >
                       <MousePointerClick size={15} strokeWidth={1.75} />
+                    </IconButton>
+                  </ToolbarTooltip>
+                  <ToolbarTooltip label={inspectOpen ? "Hide inspect panel" : "Inspect preview"}>
+                    <IconButton
+                      aria-label="Inspect preview"
+                      onClick={() => setInspectOpen((v) => !v)}
+                      className={`app-no-drag ${inspectOpen ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground" : ""}`}
+                    >
+                      <Eye size={15} strokeWidth={1.75} />
                     </IconButton>
                   </ToolbarTooltip>
                   <ToolbarTooltip label="Refresh preview">
@@ -2647,29 +3077,37 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           ) : null}
           {tab === "Preview" ? (
             previewSrc ? (
-              <div className="flex h-full justify-center overflow-auto">
-                <iframe
-                  ref={previewIframeRef}
-                  title="Artifact preview"
-                  src={previewSrc}
-                  // allow-same-origin keeps the preview in-process so the element-picker
-                  // bridge receives pointer events (and dev-server modules load without CORS).
-                  sandbox={previewSrc.startsWith("http") ? "allow-scripts allow-same-origin allow-forms" : "allow-scripts allow-same-origin allow-downloads"}
-                  style={{ width: DEVICE_WIDTH[device], maxWidth: "100%" }}
-                  className={`h-full border-0 bg-white ${device === "desktop" ? "" : "my-3 rounded-lg border border-border"}`}
-                />
+              <div className="flex h-full min-w-0 bg-surface">
+                <div className="flex min-w-0 flex-1 justify-center overflow-auto">
+                  <iframe
+                    ref={previewIframeRef}
+                    title="Artifact preview"
+                    src={previewSrc}
+                    // allow-same-origin keeps the preview in-process so the element-picker
+                    // bridge receives pointer events (and dev-server modules load without CORS).
+                    sandbox={previewSrc.startsWith("http") ? "allow-scripts allow-same-origin allow-forms" : "allow-scripts allow-same-origin allow-downloads"}
+                    style={{ width: DEVICE_WIDTH[device], maxWidth: "100%" }}
+                    className={`h-full border-0 bg-white ${device === "desktop" ? "" : "my-3 rounded-lg border border-border"}`}
+                  />
+                </div>
+                {inspectOpen ? (
+                  <InspectPanel target={inspectedTarget} projectName={projectName} projectMode={projectMode} designSystem={activeDesignSystem} files={files} />
+                ) : null}
               </div>
             ) : projectMode === "standard" && setupPhase && setupPhase !== "ready" ? (
-              <div className="grid h-full place-items-center">
-                <div className="flex flex-col items-center gap-3 text-center text-muted-foreground">
+              <div className="grid h-full place-items-center p-4">
+                <div className="flex w-full max-w-xl flex-col items-center gap-3 text-center text-muted-foreground">
                   <Spinner size={18} />
                   <p className="text-sm">
                     {setupPhase === "scaffolding"
                       ? "Scaffolding the Vite + React + GSAP project…"
                       : setupPhase === "installing"
                         ? "Installing dependencies (first run only)…"
-                        : "Project setup failed. Check the daemon logs."}
+                        : "Project setup failed."}
                   </p>
+                  <div className="w-full text-left">
+                    <StandardDoctor phase={setupPhase} logs={setupLogs} error={setupError} onRefresh={refreshPreview} />
+                  </div>
                 </div>
               </div>
             ) : (
@@ -2685,50 +3123,60 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   <span className="tnum font-mono font-semibold text-foreground">{score}/100</span>
                 </PanelBar>
               ) : null}
-              {findingGroups.length > 0 ? (
-                <div className="flex-1 space-y-4 overflow-auto p-3 text-sm">
-                  {findingGroups.map((group) => (
-                    <section key={group.label} className="space-y-2">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="text-xs font-semibold text-foreground">{group.label}</div>
-                          <div className="text-[11px] text-muted-foreground">{group.desc}</div>
+              {ranOnce || running || projectMode === "standard" ? (
+                <div className="flex-1 overflow-auto p-3 text-sm">
+                  {projectMode === "standard" ? (
+                    <div className="mb-3">
+                      <StandardDoctor phase={setupPhase} logs={setupLogs} error={setupError} onRefresh={refreshPreview} />
+                    </div>
+                  ) : null}
+                  <div className="space-y-2">
+                    {qualityLanes.map((lane) => (
+                      <section key={lane.key} className="overflow-hidden rounded-lg border border-border bg-card">
+                        <div className="flex items-center justify-between gap-3 px-3 py-2">
+                          <div className="min-w-0">
+                            <div className="text-xs font-semibold text-foreground">{lane.label}</div>
+                            <div className="truncate text-[11px] text-muted-foreground">{lane.desc}</div>
+                          </div>
+                          <span className={cn("shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium", qualityStatusClass(lane.status))}>
+                            {qualityStatusText(lane.status)}
+                          </span>
                         </div>
-                        <span className="rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                          {group.findings.length}
-                        </span>
-                      </div>
-                      <ul className="space-y-2">
-                        {group.findings.map((f, idx) => (
-                          <li key={`${f.id}-${idx}`} className="rounded-lg border border-border bg-card p-3">
-                            <div className="flex items-center gap-2">
-                              <span
-                                className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] ${SEVERITY_STYLE[f.severity] ?? "border-border text-muted-foreground"}`}
-                              >
-                                {f.severity}
-                              </span>
-                              <span className="font-mono text-xs text-muted-foreground">{f.id}</span>
-                            </div>
-                            <p className="mt-1.5 text-sm leading-snug text-foreground">{f.message}</p>
-                            {f.fix ? <p className="mt-1 text-xs leading-snug text-muted-foreground">Fix: {f.fix}</p> : null}
-                          </li>
-                        ))}
-                      </ul>
-                    </section>
-                  ))}
+                        {lane.findings.length > 0 ? (
+                          <ul className="space-y-2 border-t border-border px-3 py-2.5">
+                            {lane.findings.map((f, idx) => (
+                              <li key={`${f.id}-${idx}`} className="rounded-md border border-border bg-surface p-2.5">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] ${SEVERITY_STYLE[f.severity] ?? "border-border text-muted-foreground"}`}
+                                  >
+                                    {f.severity}
+                                  </span>
+                                  <span className="font-mono text-xs text-muted-foreground">{f.id}</span>
+                                </div>
+                                <p className="mt-1.5 text-sm leading-snug text-foreground">{f.message}</p>
+                                {f.fix ? <p className="mt-1 text-xs leading-snug text-muted-foreground">Fix: {f.fix}</p> : null}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </section>
+                    ))}
+                  </div>
+                  {!qualityHasFindings ? (
+                    <p className="mt-3 px-1 text-xs text-muted-foreground">
+                      {running
+                        ? "Quality checks are still running."
+                        : qualityClean
+                          ? "No findings in recorded checks."
+                          : ranOnce
+                            ? "No stored quality details for this run."
+                            : "Run to check quality."}
+                    </p>
+                  ) : null}
                 </div>
               ) : (
-                <div className="flex-1">
-                  {emptyPane(
-                    running
-                      ? "Generating…"
-                      : ranOnce && typeof score === "number" && score < 100
-                        ? "No stored quality details for this run."
-                        : ranOnce
-                          ? "No quality issues. Clean."
-                          : "Run to check quality",
-                  )}
-                </div>
+                <div className="flex-1">{emptyPane("Run to check quality")}</div>
               )}
             </div>
           ) : tab === "Versions" ? (

@@ -17,10 +17,16 @@ export function templateDir(name = "react-vite-gsap"): string {
 }
 
 export type SetupPhase = "scaffolding" | "installing" | "ready" | "error";
+export interface RuntimeLog {
+  at: number;
+  level: "info" | "error";
+  message: string;
+}
 
 interface Runtime {
   phase: SetupPhase;
   error?: string;
+  logs: RuntimeLog[];
   dev?: { proc: ChildProcess; port: number; url: string; releaseTimer?: ReturnType<typeof setTimeout> };
 }
 
@@ -44,11 +50,31 @@ function stopDev(dev: Runtime["dev"]): void {
   if (!dev.proc.killed) dev.proc.kill();
 }
 
-function run(command: string, args: string[], cwd: string): Promise<number> {
+function appendLog(rt: Runtime, message: string, level: RuntimeLog["level"] = "info"): void {
+  const lines = message
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) rt.logs.push({ at: Date.now(), level, message: line });
+  if (rt.logs.length > 80) rt.logs.splice(0, rt.logs.length - 80);
+}
+
+function run(command: string, args: string[], cwd: string, rt?: Runtime, label = `${command} ${args.join(" ")}`): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, stdio: "ignore", env: agentSpawnEnv() });
-    child.on("error", () => resolve(1));
-    child.on("close", (code) => resolve(code ?? 1));
+    appendLog(rt ?? { phase: "ready", logs: [] }, `$ ${label}`);
+    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv() });
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (data: string) => rt && appendLog(rt, data, "info"));
+    child.stderr?.on("data", (data: string) => rt && appendLog(rt, data, "error"));
+    child.on("error", (err) => {
+      if (rt) appendLog(rt, err.message, "error");
+      resolve(1);
+    });
+    child.on("close", (code) => {
+      if (rt) appendLog(rt, `${label} exited ${code ?? 1}`, code === 0 ? "info" : "error");
+      resolve(code ?? 1);
+    });
   });
 }
 
@@ -69,50 +95,62 @@ const GIT_IDENTITY = ["-c", "user.name=Dezin", "-c", "user.email=dezin@local"];
 
 /** Copy the template, git init + initial commit, then npm install (the slow part). */
 export async function setupStandardProject(projectId: string, projectDir: string): Promise<void> {
-  const rt: Runtime = { phase: "scaffolding" };
+  const rt: Runtime = { phase: "scaffolding", logs: [] };
   runtimes.set(projectId, rt);
   try {
+    appendLog(rt, "Scaffolding standard project");
     await mkdir(projectDir, { recursive: true });
     await cp(templateDir(), projectDir, { recursive: true });
-    await run("git", ["init", "-q"], projectDir);
+    await run("git", ["init", "-q"], projectDir, rt, "git init");
     await gitCommit(projectDir, "Dezin: scaffold Vite + React + GSAP");
 
     rt.phase = "installing";
-    const code = await run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error"], projectDir);
+    appendLog(rt, "Installing dependencies");
+    const code = await run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install");
     if (code === 0) await gitCommit(projectDir, "Dezin: install dependencies");
     rt.phase = code === 0 ? "ready" : "error";
+    appendLog(rt, rt.phase === "ready" ? "Standard project is ready" : "Standard project setup failed", rt.phase === "ready" ? "info" : "error");
     if (code !== 0) rt.error = "npm install failed";
   } catch (err) {
     rt.phase = "error";
     rt.error = err instanceof Error ? err.message : "setup failed";
+    appendLog(rt, rt.error, "error");
   }
 }
 
 /** Prepare an imported Standard project without copying the template over its source. */
 export async function setupImportedStandardProject(projectId: string, projectDir: string): Promise<void> {
-  const rt: Runtime = { phase: "installing" };
+  const rt: Runtime = { phase: "installing", logs: [] };
   runtimes.set(projectId, rt);
   try {
+    appendLog(rt, "Preparing imported standard project");
     await mkdir(projectDir, { recursive: true });
-    if (!existsSync(join(projectDir, ".git"))) await run("git", ["init", "-q"], projectDir);
+    if (!existsSync(join(projectDir, ".git"))) await run("git", ["init", "-q"], projectDir, rt, "git init");
     await gitCommit(projectDir, "Dezin: import project");
-    const code = await run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error"], projectDir);
+    const code = await run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install");
     if (code === 0) await gitCommit(projectDir, "Dezin: install dependencies");
     rt.phase = code === 0 ? "ready" : "error";
+    appendLog(rt, rt.phase === "ready" ? "Imported standard project is ready" : "Imported standard project setup failed", rt.phase === "ready" ? "info" : "error");
     if (code !== 0) rt.error = "npm install failed";
   } catch (err) {
     rt.phase = "error";
     rt.error = err instanceof Error ? err.message : "setup failed";
+    appendLog(rt, rt.error, "error");
   }
 }
 
-export function getSetup(projectId: string, projectDir: string): { phase: SetupPhase; error?: string } {
+export function getSetup(projectId: string, projectDir: string): { phase: SetupPhase; error?: string; logs: RuntimeLog[] } {
   const rt = runtimes.get(projectId);
-  if (rt) return { phase: rt.phase, error: rt.error };
+  const relatedLogs = [...runtimes.entries()]
+    .filter(([key]) => key === projectId || key.startsWith(`${projectId}:`))
+    .flatMap(([, runtime]) => runtime.logs)
+    .sort((a, b) => a.at - b.at)
+    .slice(-30);
+  if (rt) return { phase: rt.phase, error: rt.error, logs: relatedLogs };
   // Not tracked this process: infer from disk (e.g. after a daemon restart).
-  if (existsSync(join(projectDir, "node_modules"))) return { phase: "ready" };
-  if (existsSync(join(projectDir, "package.json"))) return { phase: "installing" };
-  return { phase: "scaffolding" };
+  if (existsSync(join(projectDir, "node_modules"))) return { phase: "ready", logs: relatedLogs };
+  if (existsSync(join(projectDir, "package.json"))) return { phase: "installing", logs: relatedLogs };
+  return { phase: "scaffolding", logs: relatedLogs };
 }
 
 async function portResponds(port: number): Promise<boolean> {
@@ -144,7 +182,7 @@ function freePort(): Promise<number> {
 export async function ensureDevServer(projectId: string, projectDir: string, runtimeKey = projectId): Promise<{ url: string }> {
   let rt = runtimes.get(runtimeKey);
   if (!rt) {
-    rt = { phase: existsSync(join(projectDir, "node_modules")) ? "ready" : "installing" };
+    rt = { phase: existsSync(join(projectDir, "node_modules")) ? "ready" : "installing", logs: [] };
     runtimes.set(runtimeKey, rt);
   }
   if (!existsSync(join(projectDir, "node_modules"))) throw new Error("dependencies not installed yet");
@@ -158,13 +196,19 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
   }
 
   const port = await freePort();
+  appendLog(rt, `Starting dev server on ${port}`);
   const proc = spawn("npm", ["run", "dev", "--", "--port", String(port), "--strictPort", "--host", "127.0.0.1"], {
     cwd: projectDir,
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "pipe"],
     env: agentSpawnEnv(),
     detached: false,
   });
+  proc.stdout?.setEncoding("utf8");
+  proc.stderr?.setEncoding("utf8");
+  proc.stdout?.on("data", (data: string) => appendLog(rt!, data, "info"));
+  proc.stderr?.on("data", (data: string) => appendLog(rt!, data, "error"));
   proc.on("close", () => {
+    appendLog(rt!, "Dev server stopped");
     if (rt!.dev?.proc === proc) {
       clearDevReleaseTimer(rt!.dev);
       rt!.dev = undefined;
