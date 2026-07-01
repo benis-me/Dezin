@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -18,9 +18,11 @@ import { assetUrl, isNodeLocked, isNodeVisible, layerLabel, nodeFill, nodeStroke
 export function MoodboardLayerPanel({
   items,
   selectedId,
+  selectedIds,
   collapsedIds,
   onToggleCollapsed,
   onSelect,
+  onSelectIds,
   onHover,
   onRename,
   onToggleVisible,
@@ -28,10 +30,12 @@ export function MoodboardLayerPanel({
   onReorder,
 }: {
   items: LayerTreeItem[];
-  selectedId: string | null;
+  selectedId?: string | null;
+  selectedIds?: string[];
   collapsedIds: Set<string>;
   onToggleCollapsed: (id: string) => void;
-  onSelect: (id: string) => void;
+  onSelect?: (id: string) => void;
+  onSelectIds?: (ids: string[]) => void;
   onHover: (id: string | null) => void;
   onRename: (id: string, name: string) => void;
   onToggleVisible: (id: string) => void;
@@ -39,14 +43,50 @@ export function MoodboardLayerPanel({
   onReorder: (sourceId: string, targetId: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const effectiveSelectedIds = useMemo(() => selectedIds ?? (selectedId ? [selectedId] : []), [selectedId, selectedIds]);
+  const visibleIds = useMemo(() => flattenVisibleLayerIds(items, collapsedIds), [collapsedIds, items]);
+  const lastSelectedIdRef = useRef<string | null>(effectiveSelectedIds.at(-1) ?? null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!selectedId) return;
-    const escaped = typeof CSS !== "undefined" && "escape" in CSS ? CSS.escape(selectedId) : selectedId.replace(/["\\]/g, "\\$&");
+    if (effectiveSelectedIds.length !== 1) return;
+    const [selected] = effectiveSelectedIds;
+    const escaped = typeof CSS !== "undefined" && "escape" in CSS ? CSS.escape(selected) : selected.replace(/["\\]/g, "\\$&");
     const row = scrollRef.current?.querySelector(`[data-moodboard-layer-id="${escaped}"]`);
     row?.scrollIntoView({ block: "nearest" });
-  }, [selectedId, items]);
+  }, [effectiveSelectedIds, items]);
+
+  useEffect(() => {
+    if (effectiveSelectedIds.length === 1) lastSelectedIdRef.current = effectiveSelectedIds[0];
+  }, [effectiveSelectedIds]);
+
+  const selectRows = useCallback(
+    (ids: string[]) => {
+      if (onSelectIds) {
+        onSelectIds(ids);
+        return;
+      }
+      if (ids[0] && onSelect) onSelect(ids[0]);
+    },
+    [onSelect, onSelectIds],
+  );
+
+  const handleLayerSelect = useCallback(
+    (id: string, event?: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey">) => {
+      let nextIds: string[];
+      if (event?.shiftKey && lastSelectedIdRef.current) {
+        nextIds = visibleRangeIds(visibleIds, lastSelectedIdRef.current, id);
+      } else if (event?.metaKey || event?.ctrlKey) {
+        nextIds = effectiveSelectedIds.includes(id) ? effectiveSelectedIds.filter((item) => item !== id) : [...effectiveSelectedIds, id];
+        lastSelectedIdRef.current = id;
+      } else {
+        nextIds = [id];
+        lastSelectedIdRef.current = id;
+      }
+      selectRows(nextIds);
+    },
+    [effectiveSelectedIds, selectRows, visibleIds],
+  );
 
   return (
     <aside
@@ -66,10 +106,10 @@ export function MoodboardLayerPanel({
               key={item.node.id}
               item={item}
               depth={0}
-              selectedId={selectedId}
+              selectedIds={effectiveSelectedIds}
               collapsedIds={collapsedIds}
               onToggleCollapsed={onToggleCollapsed}
-              onSelect={onSelect}
+              onSelect={handleLayerSelect}
               onHover={onHover}
               onRename={onRename}
               onToggleVisible={onToggleVisible}
@@ -92,7 +132,7 @@ export function MoodboardLayerPanel({
 function LayerItem({
   item,
   depth,
-  selectedId,
+  selectedIds,
   collapsedIds,
   onToggleCollapsed,
   onSelect,
@@ -107,10 +147,10 @@ function LayerItem({
 }: {
   item: LayerTreeItem;
   depth: number;
-  selectedId: string | null;
+  selectedIds: string[];
   collapsedIds: Set<string>;
   onToggleCollapsed: (id: string) => void;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, event?: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey">) => void;
   onHover: (id: string | null) => void;
   onRename: (id: string, name: string) => void;
   onToggleVisible: (id: string) => void;
@@ -123,7 +163,7 @@ function LayerItem({
   const { node, children } = item;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(layerLabel(node));
-  const selected = selectedId === node.id;
+  const selected = selectedIds.includes(node.id);
   const collapsed = collapsedIds.has(node.id);
   const hasChildren = children.length > 0;
 
@@ -143,7 +183,7 @@ function LayerItem({
         tabIndex={0}
         draggable={!editing}
         data-moodboard-layer-id={node.id}
-        onClick={() => onSelect(node.id)}
+        onClick={(event) => onSelect(node.id, event)}
         onDoubleClick={() => setEditing(true)}
         onDragStart={(event) => {
           event.dataTransfer.effectAllowed = "move";
@@ -244,7 +284,7 @@ function LayerItem({
               key={child.node.id}
               item={child}
               depth={depth + 1}
-              selectedId={selectedId}
+              selectedIds={selectedIds}
               collapsedIds={collapsedIds}
               onToggleCollapsed={onToggleCollapsed}
               onSelect={onSelect}
@@ -261,6 +301,26 @@ function LayerItem({
         : null}
     </div>
   );
+}
+
+function flattenVisibleLayerIds(items: LayerTreeItem[], collapsedIds: Set<string>): string[] {
+  const ids: string[] = [];
+  const visit = (item: LayerTreeItem) => {
+    ids.push(item.node.id);
+    if (collapsedIds.has(item.node.id)) return;
+    for (const child of item.children) visit(child);
+  };
+  for (const item of items) visit(item);
+  return ids;
+}
+
+function visibleRangeIds(ids: string[], anchorId: string, targetId: string): string[] {
+  const anchorIndex = ids.indexOf(anchorId);
+  const targetIndex = ids.indexOf(targetId);
+  if (anchorIndex < 0 || targetIndex < 0) return [targetId];
+  const start = Math.min(anchorIndex, targetIndex);
+  const end = Math.max(anchorIndex, targetIndex);
+  return ids.slice(start, end + 1);
 }
 
 function LayerIcon({ node }: { node: MoodboardNode }) {

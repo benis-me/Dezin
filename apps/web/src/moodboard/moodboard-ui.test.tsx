@@ -17,6 +17,7 @@ import {
   moveContainedNodesWithSections,
   normalizeCanvasRect,
   nodeIdFromTarget,
+  nodeIdsFromTarget,
   reorderLayerInputs,
   rectFromBounds,
   resolveFloatingChromeRect,
@@ -146,6 +147,10 @@ test("eventClientPoint maps canvas page points to viewport coordinates when nati
 test("nodeIdFromTarget reads reconciler node ids from parent data", () => {
   expect(nodeIdFromTarget({ data: { id: "n1" } })).toBe("n1");
   expect(nodeIdFromTarget({ parent: { data: { nodeId: "n2" } } })).toBe("n2");
+});
+
+test("nodeIdsFromTarget reads multi-selection editor targets in order", () => {
+  expect(nodeIdsFromTarget([{ data: { nodeId: "a" } }, { parent: { data: { nodeId: "b" } } }, { data: { nodeId: "a" } }])).toEqual(["a", "b"]);
 });
 
 test("contextTargetIdFromEvent only uses the right-clicked target", () => {
@@ -362,6 +367,69 @@ test("MoodboardLayerPanel selects rows without letting inline actions bubble", (
   fireEvent.click(screen.getByLabelText("Hide layer"));
   expect(onToggleVisible).toHaveBeenCalledWith("n1");
   expect(onSelect).not.toHaveBeenCalled();
+});
+
+test("MoodboardLayerPanel supports command toggle and shift range selection", () => {
+  const onSelectIds = vi.fn();
+  const first: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 40,
+    y: 50,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 3,
+    data: { content: "First" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const second: MoodboardNode = { ...first, id: "n2", zIndex: 2, data: { content: "Second" } };
+  const third: MoodboardNode = { ...first, id: "n3", zIndex: 1, data: { content: "Third" } };
+  const { rerender } = render(
+    <MoodboardLayerPanel
+      items={[
+        { node: first, children: [] },
+        { node: second, children: [] },
+        { node: third, children: [] },
+      ]}
+      selectedIds={["n1"]}
+      collapsedIds={new Set()}
+      onToggleCollapsed={() => {}}
+      onSelectIds={onSelectIds}
+      onHover={() => {}}
+      onRename={() => {}}
+      onToggleVisible={() => {}}
+      onToggleLocked={() => {}}
+      onReorder={() => {}}
+    />,
+  );
+
+  fireEvent.click(screen.getByText("Second"), { metaKey: true });
+  expect(onSelectIds).toHaveBeenLastCalledWith(["n1", "n2"]);
+
+  rerender(
+    <MoodboardLayerPanel
+      items={[
+        { node: first, children: [] },
+        { node: second, children: [] },
+        { node: third, children: [] },
+      ]}
+      selectedIds={["n1"]}
+      collapsedIds={new Set()}
+      onToggleCollapsed={() => {}}
+      onSelectIds={onSelectIds}
+      onHover={() => {}}
+      onRename={() => {}}
+      onToggleVisible={() => {}}
+      onToggleLocked={() => {}}
+      onReorder={() => {}}
+    />,
+  );
+
+  fireEvent.click(screen.getByText("Third"), { shiftKey: true });
+  expect(onSelectIds).toHaveBeenLastCalledWith(["n1", "n2", "n3"]);
 });
 
 test("MoodboardLayerPanel supports drag reordering rows", () => {

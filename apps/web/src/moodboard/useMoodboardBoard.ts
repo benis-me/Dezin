@@ -20,7 +20,7 @@ export function useMoodboardBoard(boardId: string) {
   const [detail, setDetail] = useState<MoodboardDetail | null>(null);
   const [nodes, setNodes] = useState<MoodboardNode[]>([]);
   const [messages, setMessages] = useState<MoodboardMessage[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
@@ -140,7 +140,7 @@ export function useMoodboardBoard(boardId: string) {
     (point?: { x: number; y: number }) => {
       const node = createImageGeneratorNode(nodes.length, point);
       appendNodes([node]);
-      setSelectedId(node.id ?? null);
+      setSelectedIds(node.id ? [node.id] : []);
     },
     [appendNodes, nodes.length],
   );
@@ -226,11 +226,15 @@ export function useMoodboardBoard(boardId: string) {
     setRunAgent((current) => current || available[0]?.command || "");
   }, [api]);
 
+  const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
+  const setSelectedId = useCallback((id: string | null) => setSelectedIds(id ? [id] : []), []);
+
   return {
     detail,
     nodes,
     messages,
     selectedId,
+    selectedIds,
     agents,
     runAgent,
     runModel,
@@ -239,6 +243,7 @@ export function useMoodboardBoard(boardId: string) {
     loading,
     busy,
     setSelectedId,
+    setSelectedIds,
     setRunAgent,
     setRunModel,
     setImageModel,

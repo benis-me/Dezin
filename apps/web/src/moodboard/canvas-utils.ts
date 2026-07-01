@@ -393,6 +393,19 @@ export function nodeIdFromTarget(target: any): string | null {
   return null;
 }
 
+export function nodeIdsFromTarget(target: any): string[] {
+  const targets = Array.isArray(target) ? target : [target];
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const item of targets) {
+    const id = nodeIdFromTarget(item);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
 export function contextTargetIdFromEvent(eventTarget: unknown, _editorTarget: unknown): string | null {
   return nodeIdFromTarget(eventTarget);
 }

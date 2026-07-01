@@ -134,11 +134,11 @@ export function MoodboardScreen({
             </div>
             <MoodboardCanvas
               nodes={board.nodes}
-              selectedId={board.selectedId}
+              selectedIds={board.selectedIds}
               imageModels={board.imageModels}
               imageModel={board.imageModel}
               onImageModelChange={board.setImageModel}
-              onSelect={board.setSelectedId}
+              onSelectIds={board.setSelectedIds}
               onNodesChange={board.updateNodes}
               onAddNote={board.addNote}
               onAddSection={board.addSection}

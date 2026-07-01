@@ -13,6 +13,7 @@ import {
   moveContainedNodesWithSections,
   normalizeCanvasRect,
   nodeIdFromTarget,
+  nodeIdsFromTarget,
   rectFromBounds,
   resolveFloatingRect,
   rounded,
@@ -28,9 +29,9 @@ import {
 
 interface UseLeaferMoodboardRuntimeOptions {
   nodes: MoodboardNode[];
-  selectedId: string | null;
+  selectedIds: string[];
   tool: MoodboardCanvasTool;
-  onSelect: (id: string | null) => void;
+  onSelectIds: (ids: string[]) => void;
   onBlankTap: (point: { x: number; y: number }) => void;
   onSectionDraw: (rect: CanvasDrawRect) => void;
   onDoubleTap: (point: { x: number; y: number }) => void;
@@ -40,9 +41,9 @@ interface UseLeaferMoodboardRuntimeOptions {
 
 export function useLeaferMoodboardRuntime({
   nodes,
-  selectedId,
+  selectedIds,
   tool,
-  onSelect,
+  onSelectIds,
   onBlankTap,
   onSectionDraw,
   onDoubleTap,
@@ -61,30 +62,31 @@ export function useLeaferMoodboardRuntime({
   const scrollBarRef = useRef<ScrollBar | null>(null);
   const snapRef = useRef<CanvasSnap | null>(null);
   const nodesRef = useRef(nodes);
-  const selectedIdRef = useRef(selectedId);
+  const selectedIdsRef = useRef(selectedIds);
   const toolRef = useRef(tool);
   const sectionDragStartRef = useRef<CanvasPoint | null>(null);
   const sectionDragHandledRef = useRef(false);
+  const pointerSelectionHandledRef = useRef(false);
   const transformingRef = useRef(false);
   const floatingRectRef = useRef<FloatingRect | null>(null);
   const floatingRafRef = useRef<number | null>(null);
-  const callbacksRef = useRef({ onSelect, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange });
+  const callbacksRef = useRef({ onSelectIds, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange });
 
   useEffect(() => {
     nodesRef.current = nodes;
   }, [nodes]);
 
   useEffect(() => {
-    selectedIdRef.current = selectedId;
-  }, [selectedId]);
+    selectedIdsRef.current = selectedIds;
+  }, [selectedIds]);
 
   useEffect(() => {
     toolRef.current = tool;
   }, [tool]);
 
   useEffect(() => {
-    callbacksRef.current = { onSelect, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange };
-  }, [onBlankTap, onContextMenu, onDoubleTap, onFrameStateChange, onSectionDraw, onSelect]);
+    callbacksRef.current = { onSelectIds, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange };
+  }, [onBlankTap, onContextMenu, onDoubleTap, onFrameStateChange, onSectionDraw, onSelectIds]);
 
   const commitSelectionRect = useCallback((next: FloatingRect | null) => {
     const prev = floatingRectRef.current;
@@ -100,7 +102,7 @@ export function useLeaferMoodboardRuntime({
   }, []);
 
   const updateFloatingSelection = useCallback(() => {
-    const id = selectedIdRef.current;
+    const id = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
     const frame = findFrame(id);
     const container = hostRef.current;
     const app: any = appRef.current;
@@ -153,12 +155,12 @@ export function useLeaferMoodboardRuntime({
     return rectFromBounds(left, top, left + rect.width * scaleX, top + rect.height * scaleY);
   }, []);
 
-  const selectInRuntime = useCallback(
-    (id: string | null) => {
+  const selectIdsInRuntime = useCallback(
+    (ids: string[]) => {
       const editor = (appRef.current as any)?.editor;
       if (!editor) return;
       try {
-        selectAppNodesByIds(appRef.current, id ? [id] : []);
+        selectAppNodesByIds(appRef.current, ids);
         scheduleFloatingSelection();
       } catch {
         /* Leafer editor may not be ready during first paint. */
@@ -166,6 +168,8 @@ export function useLeaferMoodboardRuntime({
     },
     [scheduleFloatingSelection],
   );
+
+  const selectInRuntime = useCallback((id: string | null) => selectIdsInRuntime(id ? [id] : []), [selectIdsInRuntime]);
 
   const hoverInRuntime = useCallback(
     (id: string | null) => {
@@ -235,10 +239,10 @@ export function useLeaferMoodboardRuntime({
         }
       }
       setRuntimeReady(true);
-      selectInRuntime(selectedIdRef.current);
+      selectIdsInRuntime(selectedIdsRef.current);
       scheduleFloatingSelection();
     },
-    [scheduleFloatingSelection, selectInRuntime],
+    [scheduleFloatingSelection, selectIdsInRuntime],
   );
 
   useEffect(() => {
@@ -268,9 +272,9 @@ export function useLeaferMoodboardRuntime({
     if (!runtimeReady || !app || !editor) return;
 
     const syncSelectedFromEditor = (event?: any) => {
-      const id = nodeIdFromTarget(event?.value ?? editor.target);
-      selectedIdRef.current = id;
-      callbacksRef.current.onSelect(id);
+      const ids = nodeIdsFromTarget(event?.value ?? editor.target);
+      selectedIdsRef.current = ids;
+      callbacksRef.current.onSelectIds(ids);
       scheduleFloatingSelection();
     };
     const syncFloatingOnly = () => scheduleFloatingSelection();
@@ -287,33 +291,43 @@ export function useLeaferMoodboardRuntime({
       if (Number.isFinite(scale)) setZoom(scale);
       scheduleFloatingSelection();
     };
-    const selectFromTarget = (target: unknown) => {
+    const selectFromTarget = (target: unknown, event?: any) => {
       const targetId = nodeIdFromTarget(target);
       if (!targetId) return false;
-      selectedIdRef.current = targetId;
-      callbacksRef.current.onSelect(targetId);
-      selectInRuntime(targetId);
+      const current = selectedIdsRef.current;
+      const source = event?.origin ?? event?.nativeEvent ?? event;
+      const additive = Boolean(source?.metaKey || source?.ctrlKey || source?.shiftKey);
+      const nextIds = additive ? toggleSelectionId(current, targetId) : [targetId];
+      selectedIdsRef.current = nextIds;
+      callbacksRef.current.onSelectIds(nextIds);
+      selectIdsInRuntime(nextIds);
       scheduleFloatingSelection();
       return true;
     };
     const handlePointerDown = (event: any) => {
+      pointerSelectionHandledRef.current = false;
       if (toolRef.current === "section" && !nodeIdFromTarget(event?.target)) {
         sectionDragStartRef.current = eventCanvasPoint(event);
         setSectionDraftRect(null);
-        selectInRuntime(null);
+        selectIdsInRuntime([]);
         return;
       }
-      selectFromTarget(event?.target);
+      pointerSelectionHandledRef.current = selectFromTarget(event?.target, event);
     };
     const handleTap = (event: any) => {
-      if (selectFromTarget(event?.target)) return;
+      if (pointerSelectionHandledRef.current && nodeIdFromTarget(event?.target)) {
+        pointerSelectionHandledRef.current = false;
+        return;
+      }
+      pointerSelectionHandledRef.current = false;
+      if (selectFromTarget(event?.target, event)) return;
       if (sectionDragHandledRef.current) {
         sectionDragHandledRef.current = false;
         return;
       }
       sectionDragStartRef.current = null;
       setSectionDraftRect(null);
-      selectInRuntime(null);
+      selectIdsInRuntime([]);
       callbacksRef.current.onBlankTap(eventCanvasPoint(event));
     };
     const handleDoubleTap = (event: any) => {
@@ -331,9 +345,10 @@ export function useLeaferMoodboardRuntime({
       const point = eventCanvasPoint(event);
       const targetId = contextTargetIdFromEvent(event?.target, editor.target);
       if (targetId) {
-        selectedIdRef.current = targetId;
-        callbacksRef.current.onSelect(targetId);
-        selectInRuntime(targetId);
+        const nextIds = selectedIdsRef.current.includes(targetId) ? selectedIdsRef.current : [targetId];
+        selectedIdsRef.current = nextIds;
+        callbacksRef.current.onSelectIds(nextIds);
+        selectIdsInRuntime(nextIds);
       }
       callbacksRef.current.onContextMenu({ x: client.x, y: client.y, canvasX: point.x, canvasY: point.y, targetId });
     };
@@ -405,11 +420,11 @@ export function useLeaferMoodboardRuntime({
       editor.off(EditorScaleEvent.SCALE, handleEditorTransform);
       editor.off(EditorRotateEvent.ROTATE, handleEditorTransform);
     };
-  }, [finishTransforming, flushFrameState, runtimeReady, scheduleFloatingSelection, selectInRuntime, startTransforming, toViewportDraftRect]);
+  }, [finishTransforming, flushFrameState, runtimeReady, scheduleFloatingSelection, selectIdsInRuntime, startTransforming, toViewportDraftRect]);
 
   useEffect(() => {
-    selectInRuntime(selectedId);
-  }, [selectedId, selectInRuntime]);
+    selectIdsInRuntime(selectedIds);
+  }, [selectedIds, selectIdsInRuntime]);
 
   useEffect(() => {
     const app: any = appRef.current;
@@ -423,13 +438,13 @@ export function useLeaferMoodboardRuntime({
         editor.config.moveable = !drawing;
         if (drawing) {
           editor.target = undefined;
-          selectedIdRef.current = null;
+          selectedIdsRef.current = [];
           if (tool !== "section") {
             sectionDragStartRef.current = null;
             sectionDragHandledRef.current = false;
             setSectionDraftRect(null);
           }
-          callbacksRef.current.onSelect(null);
+          callbacksRef.current.onSelectIds([]);
           scheduleFloatingSelection();
         } else {
           sectionDragStartRef.current = null;
@@ -502,6 +517,11 @@ export function useLeaferMoodboardRuntime({
     handleAppReady,
     handleLayerCreated,
     selectInRuntime,
+    selectIdsInRuntime,
     hoverInRuntime,
   };
+}
+
+function toggleSelectionId(ids: string[], id: string): string[] {
+  return ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id];
 }
