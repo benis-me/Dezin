@@ -606,6 +606,23 @@ test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
   expect(onUploadFiles).toHaveBeenCalledWith(files);
 });
 
+test("MoodboardScreen loading state keeps the board split layout", async () => {
+  vi.doMock("./MoodboardCanvas.tsx", () => ({ MoodboardCanvas: () => <div data-testid="mock-moodboard-canvas" /> }));
+  const { MoodboardScreen } = await import("../screens/MoodboardScreen.tsx");
+
+  render(
+    <ApiProvider client={makeFakeApi({ getMoodboard: async () => new Promise(() => {}) })}>
+      <MoodboardScreen boardId="b1" onBack={() => {}} onOpenSettings={() => {}} />
+    </ApiProvider>,
+  );
+
+  expect(screen.getByText("Loading moodboard")).toBeInTheDocument();
+  expect(screen.getByRole("separator", { name: "Resize moodboard agent panel" })).toHaveAttribute("data-separator");
+  expect(screen.getByRole("region", { name: "Moodboard canvas" })).toBeInTheDocument();
+
+  vi.doUnmock("./MoodboardCanvas.tsx");
+});
+
 test("MoodboardPropertiesPanel shows concrete layout values", () => {
   const node: MoodboardNode = {
     id: "n1",

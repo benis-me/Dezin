@@ -26,41 +26,58 @@ export function MoodboardScreen({
 
   if (board.loading) {
     return (
-      <div className="flex h-full w-full bg-background">
-        <aside className="flex h-full w-[400px] shrink-0 flex-col border-r border-border bg-sidebar">
-          <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center border-b border-border px-3">
-            <div className="h-4 w-32 rounded bg-surface-2" />
-          </div>
-          <div className="min-h-0 flex-1 px-3 py-4">
-            <div className="h-16 w-4/5 rounded-lg bg-surface-2" />
-            <div className="mt-3 ml-auto h-10 w-2/3 rounded-lg bg-surface-2" />
-          </div>
-          <div className="shrink-0 px-3 pb-3">
-            <div className="rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 shadow-none">
-              <div className="h-10 rounded-md bg-surface-2" />
-              <div className="mt-2 flex items-center justify-between gap-2">
-                <div className="h-8 w-28 rounded-md bg-surface-2" />
+      <div className="flex h-full w-full flex-col bg-background">
+        <Group
+          id="dezin-moodboard-layout-loading"
+          className="min-h-0 flex-1"
+          defaultLayout={twoPanelLayout(MOODBOARD_AGENT_PANEL, agentPercent, MOODBOARD_CANVAS_PANEL)}
+          onLayoutChanged={(layout) => savePanelFraction(MOODBOARD_AGENT_WIDTH_KEY, layout, MOODBOARD_AGENT_PANEL)}
+          resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
+        >
+          <Panel id={MOODBOARD_AGENT_PANEL} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
+            <aside className="relative flex h-full min-w-0 flex-col bg-background">
+              <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center border-b border-border px-2.5">
+                <div className="h-4 w-36 rounded bg-surface-2" />
+              </div>
+              <div className="min-h-0 flex-1 space-y-3 px-4 pt-5">
+                <div className="h-16 w-4/5 rounded-2xl rounded-bl-md bg-surface-2" />
+                <div className="ml-auto h-10 w-2/3 rounded-2xl rounded-br-md bg-surface-2" />
+                <div className="h-24 w-[88%] rounded-xl bg-surface-2" />
+              </div>
+              <div className="pointer-events-none absolute inset-x-0 bottom-0">
+                <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
+                <div className="bg-background px-3 pb-3">
+                  <div className="rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5">
+                    <div className="h-10 rounded-md bg-surface-2" />
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <div className="h-8 w-28 rounded-md bg-surface-2" />
+                      <div className="h-8 w-8 rounded-lg bg-surface-2" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </aside>
+          </Panel>
+          <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
+          <Panel id={MOODBOARD_CANVAS_PANEL} minSize="480px">
+            <section aria-label="Moodboard canvas" className="flex h-full min-w-0 flex-col">
+              <div className="app-drag flex h-10 shrink-0 items-center justify-end gap-2 border-b border-border px-1">
                 <div className="h-8 w-8 rounded-lg bg-surface-2" />
               </div>
-            </div>
-          </div>
-        </aside>
-        <section className="flex min-w-0 flex-1 flex-col">
-          <div className="app-drag flex h-10 shrink-0 items-center justify-end border-b border-border px-1">
-            <div className="h-8 w-8 rounded-lg bg-surface-2" />
-          </div>
-          <div className="relative min-h-0 flex-1 overflow-hidden bg-surface">
-            <div className="absolute left-3 top-3 h-80 w-60 rounded-md border border-border bg-card/90" />
-            <div className="absolute bottom-3 left-1/2 h-10 w-72 -translate-x-1/2 rounded-lg border border-border bg-card/90" />
-            <div className="absolute bottom-3 right-3 h-10 w-36 rounded-lg border border-border bg-card/90" />
-            <div className="grid h-full place-items-center">
-              <div className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
-                <Loader2 size={13} className="animate-spin" />
-                Loading moodboard
+              <div className="relative min-h-0 flex-1 overflow-hidden bg-surface">
+                <div className="absolute left-3 top-3 h-80 w-60 rounded-md border border-border bg-card/90" />
+                <div className="absolute bottom-3 left-1/2 h-10 w-72 -translate-x-1/2 rounded-lg border border-border bg-card/90" />
+                <div className="absolute bottom-3 right-3 h-10 w-36 rounded-lg border border-border bg-card/90" />
+                <div className="grid h-full place-items-center">
+                  <div className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
+                    <Loader2 size={13} className="animate-spin" />
+                    Loading moodboard
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
-        </section>
+            </section>
+          </Panel>
+        </Group>
       </div>
     );
   }
