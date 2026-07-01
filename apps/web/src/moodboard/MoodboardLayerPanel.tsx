@@ -118,9 +118,19 @@ function LayerItem({
   return (
     <div onMouseEnter={() => onHover(node.id)} onMouseLeave={() => onHover(null)}>
       <div
+        role="button"
+        tabIndex={0}
         data-moodboard-layer-id={node.id}
+        onClick={() => onSelect(node.id)}
+        onDoubleClick={() => setEditing(true)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect(node.id);
+          }
+        }}
         className={cn(
-          "group flex h-8 min-w-0 items-center gap-1 px-1.5 text-xs transition-colors",
+          "group flex h-8 min-w-0 items-center gap-1 px-1.5 text-left text-xs transition-colors",
           selected ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
         )}
         style={{ paddingLeft: 6 + depth * 14 }}
@@ -137,12 +147,7 @@ function LayerItem({
         >
           {collapsed ? <ChevronRight size={13} strokeWidth={1.75} /> : <ChevronDown size={13} strokeWidth={1.75} />}
         </button>
-        <button
-          type="button"
-          onClick={() => onSelect(node.id)}
-          onDoubleClick={() => setEditing(true)}
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-sm py-1 text-left"
-        >
+        <span className="flex min-w-0 flex-1 items-center gap-2 rounded-sm py-1 text-left">
           <span className="grid size-5 shrink-0 place-items-center rounded border border-border bg-card">
             <LayerIcon node={node} />
           </span>
@@ -161,11 +166,12 @@ function LayerItem({
               }}
               className="h-6 min-w-0 flex-1 rounded border border-ring/40 bg-background px-1 text-xs text-foreground outline-none"
               onClick={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
             />
           ) : (
             <span className={cn("truncate", !isNodeVisible(node) && "opacity-45")}>{layerLabel(node)}</span>
           )}
-        </button>
+        </span>
         <button
           type="button"
           aria-label={isNodeVisible(node) ? "Hide layer" : "Show layer"}

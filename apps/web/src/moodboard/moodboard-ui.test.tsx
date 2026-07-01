@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MoodboardNode } from "../lib/api.ts";
 import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
+import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import { eventClientPoint, resolveFloatingRect, sameFloatingRect } from "./canvas-utils.ts";
 
@@ -152,6 +153,47 @@ test("MoodboardPropertiesPanel can be resized from its left edge", () => {
 
   expect(screen.getByText("Properties").closest("aside")).toHaveStyle({ width: "360px" });
   expect(localStorage.getItem("dezin:moodboard:properties-width")).toBe("360");
+});
+
+test("MoodboardLayerPanel selects rows without letting inline actions bubble", () => {
+  const onSelect = vi.fn();
+  const onToggleVisible = vi.fn();
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 40,
+    y: 50,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "Direction note" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <MoodboardLayerPanel
+      items={[{ node, children: [] }]}
+      selectedId={null}
+      collapsedIds={new Set()}
+      onToggleCollapsed={() => {}}
+      onSelect={onSelect}
+      onHover={() => {}}
+      onRename={() => {}}
+      onToggleVisible={onToggleVisible}
+      onToggleLocked={() => {}}
+    />,
+  );
+
+  fireEvent.click(screen.getByText("Direction note"));
+  expect(onSelect).toHaveBeenCalledWith("n1");
+
+  onSelect.mockClear();
+  fireEvent.click(screen.getByLabelText("Hide layer"));
+  expect(onToggleVisible).toHaveBeenCalledWith("n1");
+  expect(onSelect).not.toHaveBeenCalled();
 });
 
 test("MoodboardPropertiesPanel edits node appearance data", () => {

@@ -24,7 +24,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             collapsedIds={canvas.collapsedLayerIds}
             onToggleCollapsed={canvas.toggleLayerCollapsed}
             onSelect={canvas.selectLayer}
-            onHover={canvas.setHoveredId}
+            onHover={canvas.hoverLayer}
             onRename={canvas.renameNode}
             onToggleVisible={canvas.toggleNodeVisible}
             onToggleLocked={canvas.toggleNodeLocked}

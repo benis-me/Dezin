@@ -120,6 +120,16 @@ export function useLeaferMoodboardRuntime({
     [scheduleFloatingSelection],
   );
 
+  const hoverInRuntime = useCallback((id: string | null) => {
+    const editor = runtimeRef.current?.app?.editor;
+    if (!editor) return;
+    try {
+      editor.hoverTarget = id ? framesRef.current.get(id) : undefined;
+    } catch {
+      /* Leafer editor hover state may be unavailable during first paint. */
+    }
+  }, []);
+
   const flushFrameState = useCallback(() => {
     const frames = framesRef.current;
     const next = nodesRef.current.map((node) => {
@@ -403,5 +413,6 @@ export function useLeaferMoodboardRuntime({
     changeZoom,
     fitView,
     selectInRuntime,
+    hoverInRuntime,
   };
 }

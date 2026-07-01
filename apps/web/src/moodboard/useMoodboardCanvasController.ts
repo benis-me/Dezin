@@ -39,7 +39,6 @@ export function useMoodboardCanvasController({
   const [tool, setTool] = useState<MoodboardCanvasTool>("select");
   const [layersOpen, setLayersOpen] = useState(() => localStorage.getItem(LAYERS_OPEN_KEY) !== "0");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [collapsedLayerIds, setCollapsedLayerIds] = useState<Set<string>>(() => new Set());
   const inputRef = useRef<HTMLInputElement>(null);
   const nodesRef = useRef(nodes);
@@ -222,7 +221,7 @@ export function useMoodboardCanvasController({
     onContextMenu: setContextMenu,
     onFrameStateChange: saveInputs,
   });
-  const { changeZoom, fitView, selectInRuntime, zoom } = runtime;
+  const { changeZoom, fitView, hoverInRuntime, selectInRuntime, zoom } = runtime;
 
   const upload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     onUploadFilesRef.current(event.target.files);
@@ -235,6 +234,13 @@ export function useMoodboardCanvasController({
       selectInRuntime(id);
     },
     [handleSelect, selectInRuntime],
+  );
+
+  const hoverLayer = useCallback(
+    (id: string | null) => {
+      hoverInRuntime(id);
+    },
+    [hoverInRuntime],
   );
 
   useEffect(() => {
@@ -297,7 +303,6 @@ export function useMoodboardCanvasController({
   return {
     ...runtime,
     tool,
-    hoveredId,
     layersOpen,
     contextMenu,
     contextTargetId,
@@ -306,7 +311,7 @@ export function useMoodboardCanvasController({
     inputRef,
     collapsedLayerIds,
     setTool,
-    setHoveredId,
+    hoverLayer,
     setContextMenu,
     setLayersOpen,
     upload,
