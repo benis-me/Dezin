@@ -72,6 +72,14 @@ export interface ClientPointFallback {
   tree?: { x?: number; y?: number; scale?: number; scaleX?: number; scaleY?: number };
 }
 
+export interface CanvasPointInput {
+  clientX: number;
+  clientY: number;
+  containerLeft: number;
+  containerTop: number;
+  tree?: { x?: number; y?: number; scale?: number; scaleX?: number; scaleY?: number };
+}
+
 export interface LeaferRuntime {
   app: any;
   layer: any;
@@ -505,6 +513,17 @@ export function eventCanvasPoint(event: any): { x: number; y: number } {
     return { x: rounded(point?.x), y: rounded(point?.y) };
   }
   return { x: 0, y: 0 };
+}
+
+export function clientPointToCanvasPoint({ clientX, clientY, containerLeft, containerTop, tree }: CanvasPointInput): CanvasPoint {
+  const scaleX = Number(tree?.scaleX ?? tree?.scale ?? 1) || 1;
+  const scaleY = Number(tree?.scaleY ?? tree?.scale ?? 1) || 1;
+  const treeX = Number(tree?.x ?? 0) || 0;
+  const treeY = Number(tree?.y ?? 0) || 0;
+  return {
+    x: rounded((clientX - containerLeft - treeX) / scaleX),
+    y: rounded((clientY - containerTop - treeY) / scaleY),
+  };
 }
 
 export function clampMenu(point: { x: number; y: number }): { x: number; y: number } {

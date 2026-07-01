@@ -598,7 +598,7 @@ export function useMoodboardCanvasController({
   });
   syncNodeInputsInRuntimeRef.current = runtime.syncNodeInputsInRuntime;
   refreshSelectionInRuntimeRef.current = runtime.refreshSelectionInRuntime;
-  const { changeZoom, fitView, hoverInRuntime, selectIdsInRuntime, selectInRuntime, zoom } = runtime;
+  const { changeZoom, fitView, getLastCanvasPoint, hoverInRuntime, selectIdsInRuntime, selectInRuntime, zoom } = runtime;
 
   const upload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     uploadFiles(event.target.files);
@@ -681,7 +681,7 @@ export function useMoodboardCanvasController({
         if (key === "v") {
           if (clipboardRef.current.length === 0) return;
           event.preventDefault();
-          pasteCopiedNodes();
+          pasteCopiedNodes(getLastCanvasPoint() ?? undefined);
           return;
         }
         if (key === "d") {
@@ -768,7 +768,7 @@ export function useMoodboardCanvasController({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, moveNodesLayerStep, nudgeNodes, pasteCopiedNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
+  }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, getLastCanvasPoint, moveNodesLayerStep, nudgeNodes, pasteCopiedNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
 
   const contextTargetId = contextMenu?.targetId ?? null;
 

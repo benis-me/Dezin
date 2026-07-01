@@ -7,6 +7,7 @@ import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { selectAppNodesByIds } from "./leafer-adapter/editor-selection.ts";
 import { CanvasSnap } from "./leafer-adapter/snap.ts";
 import {
+  clientPointToCanvasPoint,
   contextTargetIdFromEvent,
   eventCanvasPoint,
   eventClientPoint,
@@ -68,6 +69,7 @@ export function useLeaferMoodboardRuntime({
   const sectionDragStartRef = useRef<CanvasPoint | null>(null);
   const sectionDragHandledRef = useRef(false);
   const pointerSelectionHandledRef = useRef(false);
+  const lastCanvasPointRef = useRef<CanvasPoint | null>(null);
   const transformingRef = useRef(false);
   const floatingRectRef = useRef<FloatingRect | null>(null);
   const floatingRafRef = useRef<number | null>(null);
@@ -163,6 +165,36 @@ export function useLeaferMoodboardRuntime({
     const top = Number(tree?.y ?? 0) + rect.y * scaleY;
     return rectFromBounds(left, top, left + rect.width * scaleX, top + rect.height * scaleY);
   }, []);
+
+  const setLastCanvasPoint = useCallback((point: CanvasPoint) => {
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
+    lastCanvasPointRef.current = point;
+  }, []);
+
+  const getLastCanvasPoint = useCallback(() => lastCanvasPointRef.current, []);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const updateFromPointer = (event: globalThis.PointerEvent) => {
+      const rect = host.getBoundingClientRect();
+      setLastCanvasPoint(
+        clientPointToCanvasPoint({
+          clientX: event.clientX,
+          clientY: event.clientY,
+          containerLeft: rect.left,
+          containerTop: rect.top,
+          tree: (appRef.current as any)?.tree,
+        }),
+      );
+    };
+    host.addEventListener("pointermove", updateFromPointer);
+    host.addEventListener("pointerdown", updateFromPointer);
+    return () => {
+      host.removeEventListener("pointermove", updateFromPointer);
+      host.removeEventListener("pointerdown", updateFromPointer);
+    };
+  }, [runtimeReady, setLastCanvasPoint]);
 
   const selectIdsInRuntime = useCallback(
     (ids: string[]) => {
@@ -394,9 +426,11 @@ export function useLeaferMoodboardRuntime({
       return true;
     };
     const handlePointerDown = (event: any) => {
+      const point = eventCanvasPoint(event);
+      setLastCanvasPoint(point);
       pointerSelectionHandledRef.current = false;
       if (toolRef.current === "section" && !nodeIdFromTarget(event?.target)) {
-        sectionDragStartRef.current = eventCanvasPoint(event);
+        sectionDragStartRef.current = point;
         setSectionDraftRect(null);
         selectIdsInRuntime([]);
         return;
@@ -404,6 +438,8 @@ export function useLeaferMoodboardRuntime({
       pointerSelectionHandledRef.current = selectFromTarget(event?.target, event);
     };
     const handleTap = (event: any) => {
+      const point = eventCanvasPoint(event);
+      setLastCanvasPoint(point);
       if (pointerSelectionHandledRef.current && nodeIdFromTarget(event?.target)) {
         pointerSelectionHandledRef.current = false;
         return;
@@ -417,11 +453,12 @@ export function useLeaferMoodboardRuntime({
       sectionDragStartRef.current = null;
       setSectionDraftRect(null);
       selectIdsInRuntime([]);
-      callbacksRef.current.onBlankTap(eventCanvasPoint(event));
+      callbacksRef.current.onBlankTap(point);
     };
     const handleDoubleTap = (event: any) => {
-      if (nodeIdFromTarget(event?.target)) return;
       const point = eventCanvasPoint(event);
+      setLastCanvasPoint(point);
+      if (nodeIdFromTarget(event?.target)) return;
       if (Number.isFinite(point.x) && Number.isFinite(point.y)) callbacksRef.current.onDoubleTap(point);
     };
     const handleMenu = (event: any) => {
@@ -432,6 +469,7 @@ export function useLeaferMoodboardRuntime({
         containerRect ? { containerLeft: containerRect.left, containerTop: containerRect.top, tree: app?.tree } : undefined,
       );
       const point = eventCanvasPoint(event);
+      setLastCanvasPoint(point);
       const targetId = contextTargetIdFromEvent(event?.target, editor.target);
       if (targetId) {
         const nextIds = selectedIdsRef.current.includes(targetId) ? selectedIdsRef.current : [targetId];
@@ -441,8 +479,10 @@ export function useLeaferMoodboardRuntime({
       callbacksRef.current.onContextMenu({ x: client.x, y: client.y, canvasX: point.x, canvasY: point.y, targetId });
     };
     const syncDuringDrag = (event: any) => {
+      const point = eventCanvasPoint(event);
+      setLastCanvasPoint(point);
       if (toolRef.current === "section" && sectionDragStartRef.current) {
-        const rect = normalizeCanvasRect(sectionDragStartRef.current, eventCanvasPoint(event));
+        const rect = normalizeCanvasRect(sectionDragStartRef.current, point);
         setSectionDraftRect(rect.width >= 4 && rect.height >= 4 ? toViewportDraftRect(rect) : null);
         return;
       }
@@ -450,8 +490,10 @@ export function useLeaferMoodboardRuntime({
       scheduleFloatingSelection();
     };
     const handleDragEnd = (event: any) => {
+      const point = eventCanvasPoint(event);
+      setLastCanvasPoint(point);
       if (toolRef.current === "section" && sectionDragStartRef.current) {
-        const rect = normalizeCanvasRect(sectionDragStartRef.current, eventCanvasPoint(event));
+        const rect = normalizeCanvasRect(sectionDragStartRef.current, point);
         sectionDragStartRef.current = null;
         setSectionDraftRect(null);
         finishTransforming();
@@ -617,6 +659,7 @@ export function useLeaferMoodboardRuntime({
     refreshSelectionInRuntime,
     syncNodeInputsInRuntime,
     hoverInRuntime,
+    getLastCanvasPoint,
   };
 }
 

@@ -10,6 +10,7 @@ import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import {
   allMoodboardNodeIds,
+  clientPointToCanvasPoint,
   contextTargetIdFromEvent,
   eventClientPoint,
   generatorModel,
@@ -273,6 +274,18 @@ test("eventClientPoint maps canvas page points to viewport coordinates when nati
       { containerLeft: 10, containerTop: 20, tree: { x: 5, y: 7, scaleX: 2, scaleY: 3 } },
     ),
   ).toEqual({ x: 215, y: 177 });
+});
+
+test("clientPointToCanvasPoint maps host pointer coordinates into canvas space", () => {
+  expect(
+    clientPointToCanvasPoint({
+      clientX: 250,
+      clientY: 180,
+      containerLeft: 100,
+      containerTop: 80,
+      tree: { x: 10, y: 20, scaleX: 2, scaleY: 4 },
+    }),
+  ).toEqual({ x: 70, y: 20 });
 });
 
 test("nodeIdFromTarget reads reconciler node ids from parent data", () => {
