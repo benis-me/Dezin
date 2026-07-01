@@ -10,7 +10,7 @@ import { CanvasActionBar, CanvasZoomBar, GeneratorPromptToolbar, SelectionToolba
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { generatorPrompt, resolveFloatingChromeRect, type FloatingRect } from "./canvas-utils.ts";
+import { generatorPrompt, rectFromBounds, resolveFloatingChromeRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
 export function MoodboardCanvas(props: MoodboardCanvasProps) {
@@ -206,6 +206,7 @@ function FloatingCanvasSurface({
         surfaceWidth: element.offsetWidth,
         surfaceHeight: element.offsetHeight,
         placement,
+        occluders: getFloatingOccluders(container, element),
       });
       setRect(next);
     };
@@ -222,6 +223,16 @@ function FloatingCanvasSurface({
       {children}
     </div>
   );
+}
+
+function getFloatingOccluders(container: HTMLElement, current: HTMLElement): CanvasRect[] {
+  const containerRect = container.getBoundingClientRect();
+  return Array.from(container.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]"))
+    .filter((element) => element !== current && !current.contains(element) && !element.contains(current))
+    .map((element) => {
+      const rect = element.getBoundingClientRect();
+      return rectFromBounds(rect.left - containerRect.left, rect.top - containerRect.top, rect.right - containerRect.left, rect.bottom - containerRect.top);
+    });
 }
 
 const MoodboardNodeLayer = memo(function MoodboardNodeLayer({

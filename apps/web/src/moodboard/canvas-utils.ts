@@ -16,6 +16,15 @@ export interface FloatingRect {
   bottom: number;
 }
 
+export interface CanvasRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
 export interface FloatingChromeInput {
   anchor: FloatingRect;
   containerWidth: number;
@@ -23,6 +32,7 @@ export interface FloatingChromeInput {
   surfaceWidth: number;
   surfaceHeight: number;
   placement: "top" | "bottom";
+  occluders?: CanvasRect[];
   padding?: number;
 }
 
@@ -197,22 +207,106 @@ export function resolveFloatingChromeRect({
   surfaceWidth,
   surfaceHeight,
   placement,
+  occluders = [],
   padding = 8,
 }: FloatingChromeInput): { left: number; top: number } {
-  const availableWidth = Math.max(0, containerWidth - padding * 2);
-  const availableHeight = Math.max(0, containerHeight - padding * 2);
+  const containerRect = rectFromBounds(0, 0, containerWidth, containerHeight);
+  const safeRect = getFloatingChromeSafeRect(containerRect, occluders, padding);
+  const availableWidth = Math.max(0, safeRect.width);
+  const availableHeight = Math.max(0, safeRect.height);
   const width = Math.min(Math.max(0, surfaceWidth), availableWidth);
   const height = Math.min(Math.max(0, surfaceHeight), availableHeight);
-  const minLeft = padding;
-  const maxLeft = Math.max(minLeft, containerWidth - width - padding);
-  const minTop = padding;
-  const maxTop = Math.max(minTop, containerHeight - height - padding);
-  const rawTop = placement === "top" ? anchor.top : anchor.bottom;
+  const targetRect = rectFromBounds(anchor.left, anchor.top, anchor.left, anchor.bottom);
+  const anchorRect = intersectRects(targetRect, safeRect) ?? targetRect;
+  const placements = placement === "top" ? ["top", "bottom"] : ["bottom", "top"];
 
+  for (const nextPlacement of placements) {
+    const top = nextPlacement === "top" ? anchorRect.top - height : anchorRect.bottom;
+    if (top >= safeRect.top && top + height <= safeRect.bottom) {
+      return {
+        left: clamp(anchorRect.left - width / 2, safeRect.left, Math.max(safeRect.left, safeRect.right - width)),
+        top,
+      };
+    }
+  }
+
+  const fallbackTop = placement === "top" ? anchorRect.top - height : anchorRect.bottom;
   return {
-    left: Math.max(minLeft, Math.min(maxLeft, anchor.left - width / 2)),
-    top: Math.max(minTop, Math.min(maxTop, rawTop)),
+    left: clamp(anchorRect.left - width / 2, safeRect.left, Math.max(safeRect.left, safeRect.right - width)),
+    top: clamp(fallbackTop, safeRect.top, Math.max(safeRect.top, safeRect.bottom - height)),
   };
+}
+
+export function rectFromBounds(left: number, top: number, right: number, bottom: number): CanvasRect {
+  return {
+    left,
+    top,
+    right,
+    bottom,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+export function getFloatingChromeSafeRect(containerRect: CanvasRect, occluders: CanvasRect[], padding = 8): CanvasRect {
+  const edgeThreshold = 24;
+  const sideMinHeight = 120;
+  const edgeMinWidth = 48;
+  let left = containerRect.left + padding;
+  let top = containerRect.top + padding;
+  let right = containerRect.right - padding;
+  let bottom = containerRect.bottom - padding;
+
+  for (const raw of occluders) {
+    const rect = intersectRects(containerRect, raw);
+    if (!rect) continue;
+
+    const touchesLeft = rect.left <= containerRect.left + edgeThreshold;
+    const touchesRight = rect.right >= containerRect.right - edgeThreshold;
+    const touchesTop = rect.top <= containerRect.top + edgeThreshold;
+    const touchesBottom = rect.bottom >= containerRect.bottom - edgeThreshold;
+    const sidePanel = rect.height >= sideMinHeight;
+
+    if (touchesLeft && sidePanel) {
+      left = Math.max(left, rect.right + padding);
+      continue;
+    }
+    if (touchesRight && sidePanel) {
+      right = Math.min(right, rect.left - padding);
+      continue;
+    }
+    if (touchesTop && rect.width >= edgeMinWidth) {
+      top = Math.max(top, rect.bottom + padding);
+      continue;
+    }
+    if (touchesBottom && rect.width >= edgeMinWidth) {
+      bottom = Math.min(bottom, rect.top - padding);
+    }
+  }
+
+  if (right <= left) {
+    left = containerRect.left + padding;
+    right = containerRect.right - padding;
+  }
+  if (bottom <= top) {
+    top = containerRect.top + padding;
+    bottom = containerRect.bottom - padding;
+  }
+
+  return rectFromBounds(left, top, right, bottom);
+}
+
+function intersectRects(a: CanvasRect, b: CanvasRect): CanvasRect | null {
+  const left = Math.max(a.left, b.left);
+  const top = Math.max(a.top, b.top);
+  const right = Math.min(a.right, b.right);
+  const bottom = Math.min(a.bottom, b.bottom);
+  if (right <= left || bottom <= top) return null;
+  return rectFromBounds(left, top, right, bottom);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 export function numberFromEvent(value: string, fallback: number): number {

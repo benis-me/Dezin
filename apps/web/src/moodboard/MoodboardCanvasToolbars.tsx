@@ -125,7 +125,10 @@ export function CanvasActionBar({
 }) {
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-none backdrop-blur-xl">
+      <div
+        data-moodboard-floating-occluder
+        className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-none backdrop-blur-xl"
+      >
         <ToolButton label="Select" active={tool === "select"} onClick={() => onToolChange("select")}>
           <MousePointer2 size={15} strokeWidth={1.75} />
         </ToolButton>
@@ -167,7 +170,10 @@ export function CanvasZoomBar({
 }) {
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="app-no-drag absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-none backdrop-blur-xl">
+      <div
+        data-moodboard-floating-occluder
+        className="app-no-drag absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-none backdrop-blur-xl"
+      >
         <ToolButton label="Zoom out" onClick={() => onChangeZoom(zoom * 0.88)}>
           <Minus size={15} strokeWidth={1.75} />
         </ToolButton>

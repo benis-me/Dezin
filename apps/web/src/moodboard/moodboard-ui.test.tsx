@@ -8,8 +8,10 @@ import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import {
   eventClientPoint,
+  getFloatingChromeSafeRect,
   nodeIdFromTarget,
   reorderLayerInputs,
+  rectFromBounds,
   resolveFloatingChromeRect,
   resolveFloatingRect,
   sameFloatingRect,
@@ -158,6 +160,31 @@ test("resolveFloatingChromeRect keeps measured toolbars inside the canvas", () =
       placement: "bottom",
     }),
   ).toEqual({ left: 132, top: 256 });
+});
+
+test("resolveFloatingChromeRect avoids floating canvas panels", () => {
+  const safe = getFloatingChromeSafeRect(rectFromBounds(0, 0, 900, 600), [
+    rectFromBounds(12, 12, 252, 540),
+    rectFromBounds(608, 12, 888, 540),
+    rectFromBounds(330, 548, 570, 588),
+  ]);
+
+  expect(safe).toEqual({ left: 260, top: 8, right: 600, bottom: 540, width: 340, height: 532 });
+  expect(
+    resolveFloatingChromeRect({
+      anchor: { left: 80, top: 60, bottom: 220 },
+      containerWidth: 900,
+      containerHeight: 600,
+      surfaceWidth: 180,
+      surfaceHeight: 36,
+      placement: "top",
+      occluders: [
+        rectFromBounds(12, 12, 252, 540),
+        rectFromBounds(608, 12, 888, 540),
+        rectFromBounds(330, 548, 570, 588),
+      ],
+    }),
+  ).toEqual({ left: 260, top: 24 });
 });
 
 test("sameFloatingRect ignores subpixel jitter during drag", () => {
