@@ -111,9 +111,65 @@ test("MoodboardContextMenu clamps to the visible viewport after measuring itself
   expect(screen.getByText("Cmd 0")).toBeInTheDocument();
 });
 
+test("MoodboardContextMenu clamps inside the canvas host bounds", async () => {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1000 });
+  Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 200,
+    bottom: 120,
+    width: 200,
+    height: 120,
+    toJSON: () => ({}),
+  });
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+    callback(0);
+    return 1;
+  });
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+  const boundary = document.createElement("div");
+  boundary.getBoundingClientRect = () => ({
+    x: 100,
+    y: 80,
+    left: 100,
+    top: 80,
+    right: 500,
+    bottom: 360,
+    width: 400,
+    height: 280,
+    toJSON: () => ({}),
+  });
+
+  await act(async () => {
+    render(
+      <MoodboardContextMenu
+        menu={{ x: 490, y: 350, canvasX: 240, canvasY: 260, targetId: null }}
+        targetId={null}
+        targetNode={null}
+        boundaryElement={boundary}
+        onClose={() => {}}
+        onAddNote={() => {}}
+        onAddSection={() => {}}
+        onGenerate={() => {}}
+        onZoomIn={() => {}}
+        onZoomOut={() => {}}
+        onFitView={() => {}}
+        onResetZoom={() => {}}
+      />,
+    );
+  });
+
+  expect(screen.getByRole("menu")).toHaveStyle({ left: "290px", top: "230px" });
+});
+
 test("MoodboardContextMenu separates selection actions from blank-canvas creation actions", () => {
   const onCopy = vi.fn();
   const onPaste = vi.fn();
+  const onMoveForward = vi.fn();
+  const onMoveBackward = vi.fn();
   const node: MoodboardNode = {
     id: "n1",
     boardId: "b1",
@@ -141,6 +197,8 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
         onCopy={onCopy}
         onPaste={onPaste}
         onDuplicate={() => {}}
+        onMoveForward={onMoveForward}
+        onMoveBackward={onMoveBackward}
       onBringToFront={() => {}}
       onSendToBack={() => {}}
       onToggleVisible={() => {}}
@@ -162,6 +220,12 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
   expect(screen.getByText("Cmd C")).toBeInTheDocument();
   expect(screen.getByText("Cmd V")).toBeInTheDocument();
   expect(screen.getByText("Cmd D")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Move forward"));
+  fireEvent.click(screen.getByText("Move backward"));
+  expect(onMoveForward).toHaveBeenCalledOnce();
+  expect(onMoveBackward).toHaveBeenCalledOnce();
+  expect(screen.getByText("Cmd ↑")).toBeInTheDocument();
+  expect(screen.getByText("Cmd ↓")).toBeInTheDocument();
   expect(screen.getByText("]")).toBeInTheDocument();
   expect(screen.getByText("[")).toBeInTheDocument();
   expect(screen.getByText("Del")).toBeInTheDocument();

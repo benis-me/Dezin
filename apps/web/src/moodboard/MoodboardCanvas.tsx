@@ -328,12 +328,14 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               canvas.pasteCopiedNodes({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
               canvas.setContextMenu(null);
             }}
-            onDuplicate={canvas.contextTargetId ? () => canvas.duplicateNode(canvas.contextTargetId!) : undefined}
-            onBringToFront={canvas.contextTargetId ? () => canvas.bringToFront(canvas.contextTargetId!) : undefined}
-            onSendToBack={canvas.contextTargetId ? () => canvas.sendToBack(canvas.contextTargetId!) : undefined}
+            onDuplicate={canvas.contextTargetId ? () => canvas.duplicateNodes(contextActionIds(canvas.contextTargetId, canvas.selectedIds)) : undefined}
+            onMoveForward={canvas.contextTargetId ? () => canvas.moveNodesLayerStep(contextActionIds(canvas.contextTargetId, canvas.selectedIds), "up") : undefined}
+            onMoveBackward={canvas.contextTargetId ? () => canvas.moveNodesLayerStep(contextActionIds(canvas.contextTargetId, canvas.selectedIds), "down") : undefined}
+            onBringToFront={canvas.contextTargetId ? () => canvas.bringNodesToFront(contextActionIds(canvas.contextTargetId, canvas.selectedIds)) : undefined}
+            onSendToBack={canvas.contextTargetId ? () => canvas.sendNodesToBack(contextActionIds(canvas.contextTargetId, canvas.selectedIds)) : undefined}
             onToggleVisible={canvas.contextTargetId ? () => canvas.toggleNodeVisible(canvas.contextTargetId!) : undefined}
             onToggleLocked={canvas.contextTargetId ? () => canvas.toggleNodeLocked(canvas.contextTargetId!) : undefined}
-            onDelete={canvas.contextTargetId ? () => canvas.deleteNode(canvas.contextTargetId!) : undefined}
+            onDelete={canvas.contextTargetId ? () => canvas.deleteNodes(contextActionIds(canvas.contextTargetId, canvas.selectedIds)) : undefined}
             onZoomIn={() => {
               canvas.changeZoom(canvas.zoom * 1.14);
               canvas.setContextMenu(null);
@@ -351,6 +353,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               canvas.setContextMenu(null);
             }}
             targetNode={canvas.contextTargetId ? nodes.find((node) => node.id === canvas.contextTargetId) ?? null : null}
+            boundaryElement={canvas.hostRef.current}
           />
         ) : null}
 
@@ -708,6 +711,11 @@ function hasUsableFloatingFrameBounds(bounds: FloatingFrame): boolean {
 
 function hasDraggedFiles(event: ReactDragEvent<HTMLDivElement>): boolean {
   return Array.from(event.dataTransfer.types ?? []).includes("Files");
+}
+
+function contextActionIds(targetId: string | null, selectedIds: string[]): string[] {
+  if (!targetId) return [];
+  return selectedIds.includes(targetId) ? selectedIds : [targetId];
 }
 
 const MoodboardNodeLayer = memo(function MoodboardNodeLayer({

@@ -1,6 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
+  ArrowDown,
   ArrowDownToLine,
+  ArrowUp,
   ArrowUpToLine,
   ClipboardCopy,
   ClipboardPaste,
@@ -33,6 +35,8 @@ export function MoodboardContextMenu({
   onCopy,
   onPaste,
   onDuplicate,
+  onMoveForward,
+  onMoveBackward,
   onBringToFront,
   onSendToBack,
   onToggleVisible,
@@ -42,6 +46,7 @@ export function MoodboardContextMenu({
   onZoomOut,
   onFitView,
   onResetZoom,
+  boundaryElement,
 }: {
   menu: ContextMenuState;
   targetId: string | null;
@@ -53,6 +58,8 @@ export function MoodboardContextMenu({
   onCopy?: () => void;
   onPaste?: () => void;
   onDuplicate?: () => void;
+  onMoveForward?: () => void;
+  onMoveBackward?: () => void;
   onBringToFront?: () => void;
   onSendToBack?: () => void;
   onToggleVisible?: () => void;
@@ -62,6 +69,7 @@ export function MoodboardContextMenu({
   onZoomOut?: () => void;
   onFitView?: () => void;
   onResetZoom?: () => void;
+  boundaryElement?: HTMLElement | null;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState(() => ({ x: menu.x, y: menu.y }));
@@ -74,24 +82,21 @@ export function MoodboardContextMenu({
     }
 
     const rect = element.getBoundingClientRect();
-    const padding = 8;
-    const maxX = Math.max(padding, window.innerWidth - rect.width - padding);
-    const maxY = Math.max(padding, window.innerHeight - rect.height - padding);
-    setPosition({
-      x: Math.min(maxX, Math.max(padding, menu.x)),
-      y: Math.min(maxY, Math.max(padding, menu.y)),
-    });
-  }, [menu.x, menu.y]);
+    setPosition(resolveMenuPosition(menu.x, menu.y, rect, boundaryElement?.getBoundingClientRect()));
+  }, [boundaryElement, menu.x, menu.y]);
 
   useLayoutEffect(() => {
     setPosition({ x: menu.x, y: menu.y });
     const frame = window.requestAnimationFrame(updatePosition);
     window.addEventListener("resize", updatePosition);
+    const observer = boundaryElement && typeof ResizeObserver === "function" ? new ResizeObserver(updatePosition) : null;
+    if (boundaryElement) observer?.observe(boundaryElement);
     return () => {
       window.cancelAnimationFrame(frame);
       window.removeEventListener("resize", updatePosition);
+      observer?.disconnect();
     };
-  }, [menu.x, menu.y, updatePosition]);
+  }, [boundaryElement, menu.x, menu.y, updatePosition]);
 
   return (
     <>
@@ -114,6 +119,9 @@ export function MoodboardContextMenu({
         {targetId && onCopy ? <MenuButton icon={<ClipboardCopy size={14} strokeWidth={1.75} />} label="Copy" shortcut="Cmd C" onClick={onCopy} /> : null}
         {targetId && onPaste ? <MenuButton icon={<ClipboardPaste size={14} strokeWidth={1.75} />} label="Paste" shortcut="Cmd V" onClick={onPaste} /> : null}
         {targetId && onDuplicate ? <MenuButton icon={<Copy size={14} strokeWidth={1.75} />} label="Duplicate" shortcut="Cmd D" onClick={onDuplicate} /> : null}
+        {targetId && (onMoveForward || onMoveBackward || onBringToFront || onSendToBack) ? <div className="my-1 h-px bg-border" /> : null}
+        {targetId && onMoveForward ? <MenuButton icon={<ArrowUp size={14} strokeWidth={1.75} />} label="Move forward" shortcut="Cmd ↑" onClick={onMoveForward} /> : null}
+        {targetId && onMoveBackward ? <MenuButton icon={<ArrowDown size={14} strokeWidth={1.75} />} label="Move backward" shortcut="Cmd ↓" onClick={onMoveBackward} /> : null}
         {targetId && onBringToFront ? <MenuButton icon={<ArrowUpToLine size={14} strokeWidth={1.75} />} label="Bring to front" shortcut="]" onClick={onBringToFront} /> : null}
         {targetId && onSendToBack ? <MenuButton icon={<ArrowDownToLine size={14} strokeWidth={1.75} />} label="Send to back" shortcut="[" onClick={onSendToBack} /> : null}
         {targetNode && onToggleVisible ? (
@@ -149,6 +157,33 @@ export function MoodboardContextMenu({
       </div>
     </>
   );
+}
+
+function resolveMenuPosition(x: number, y: number, menuRect: Pick<DOMRect, "width" | "height">, boundaryRect?: Pick<DOMRect, "left" | "top" | "right" | "bottom"> | null) {
+  const padding = 8;
+  const bounds = boundaryRect ?? { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+  const minX = bounds.left + padding;
+  const minY = bounds.top + padding;
+  const maxX = Math.max(minX, bounds.right - menuRect.width - padding);
+  const maxY = Math.max(minY, bounds.bottom - menuRect.height - padding);
+  let nextX = x;
+  let nextY = y;
+  let flippedX = false;
+  let flippedY = false;
+  if (nextX + menuRect.width > bounds.right - padding) {
+    nextX = x - menuRect.width;
+    flippedX = true;
+  }
+  if (nextX < minX) nextX = flippedX ? maxX : minX;
+  if (nextY + menuRect.height > bounds.bottom - padding) {
+    nextY = y - menuRect.height;
+    flippedY = true;
+  }
+  if (nextY < minY) nextY = flippedY ? maxY : minY;
+  return {
+    x: Math.min(maxX, Math.max(minX, nextX)),
+    y: Math.min(maxY, Math.max(minY, nextY)),
+  };
 }
 
 function MenuLabel({ children }: { children: ReactNode }) {
