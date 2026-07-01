@@ -1,9 +1,9 @@
-import { Settings } from "lucide-react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { Button, IconButton, Spinner } from "../components/ui/index.ts";
+import { Button, Spinner } from "../components/ui/index.ts";
 import { panelPercentFromPixels, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { MoodboardAgentPanel } from "../moodboard/MoodboardAgentPanel.tsx";
 import { MoodboardCanvas } from "../moodboard/MoodboardCanvas.tsx";
+import { MoodboardCanvasTopbar } from "../moodboard/MoodboardCanvasTopbar.tsx";
 import { useMoodboardBoard } from "../moodboard/useMoodboardBoard.ts";
 
 const MOODBOARD_AGENT_PANEL = "agent";
@@ -66,9 +66,7 @@ export function MoodboardScreen({
           <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
           <Panel id={MOODBOARD_CANVAS_PANEL} minSize="480px">
             <section aria-label="Moodboard canvas" className="flex h-full min-w-0 flex-col">
-              <div className="app-drag flex h-10 shrink-0 items-center justify-end gap-2 border-b border-border px-1">
-                <div className="h-8 w-8 rounded-lg bg-surface-2" />
-              </div>
+              <MoodboardCanvasTopbar loading />
               <div className="relative min-h-0 flex-1 overflow-hidden bg-surface">
                 <div className="absolute left-4 top-4 h-7 w-24 rounded-lg bg-surface-2/70" />
                 <div className="absolute bottom-3 left-1/2 h-10 w-56 -translate-x-1/2 rounded-lg border border-border bg-card/80" />
@@ -130,13 +128,11 @@ export function MoodboardScreen({
         <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
         <Panel id={MOODBOARD_CANVAS_PANEL} minSize="480px">
           <section aria-label="Moodboard canvas" className="flex h-full min-w-0 flex-col">
-            <div className="app-drag flex h-10 shrink-0 items-center justify-end gap-2 border-b border-border px-1">
-              <div className="app-no-drag flex items-center gap-1">
-                <IconButton aria-label="Open model settings" onClick={() => onOpenSettings("models")}>
-                  <Settings size={15} strokeWidth={1.75} />
-                </IconButton>
-              </div>
-            </div>
+            <MoodboardCanvasTopbar
+              nodeCount={board.nodes.length}
+              selectedCount={board.selectedIds.length}
+              onOpenModelSettings={() => onOpenSettings("models")}
+            />
             <MoodboardCanvas
               nodes={board.nodes}
               selectedIds={board.selectedIds}
