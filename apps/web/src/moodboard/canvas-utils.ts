@@ -221,11 +221,18 @@ export function resolveFloatingRect({
   const fallbackLeft = Number(tree?.x ?? 0) + (Number(frame.x ?? 0) + frameWidth / 2) * scale;
   const fallbackTop = Number(tree?.y ?? 0) + Number(frame.y ?? 0) * scale - 8;
   const fallbackBottom = Number(tree?.y ?? 0) + (Number(frame.y ?? 0) + frameHeight) * scale + 12;
+  const hasLiveTreeTransform =
+    tree != null &&
+    (tree.x != null || tree.y != null || tree.scale != null || tree.scaleX != null) &&
+    frame.x != null &&
+    frame.y != null &&
+    frame.width != null &&
+    frame.height != null;
   let rawLeft = fallbackLeft;
   let rawTop = fallbackTop;
   let rawBottom = fallbackBottom;
 
-  if (world) {
+  if (!hasLiveTreeTransform && world) {
     const worldWidth = Number(world.width ?? frameWidth);
     const worldHeight = Number(world.height ?? frameHeight);
     const localCandidate = {

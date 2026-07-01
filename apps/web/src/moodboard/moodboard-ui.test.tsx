@@ -193,6 +193,20 @@ test("resolveFloatingRect accepts Leafer-local world bounds without subtracting 
   ).toEqual({ left: 200, top: 82, bottom: 222 });
 });
 
+test("resolveFloatingRect follows live tree transforms over stale world bounds", () => {
+  expect(
+    resolveFloatingRect({
+      containerWidth: 800,
+      containerHeight: 600,
+      containerLeft: 400,
+      containerTop: 80,
+      frame: { x: 100, y: 90, width: 200, height: 120 },
+      tree: { x: 10, y: 20, scaleX: 2 },
+      world: { x: 100, y: 90, width: 200, height: 120 },
+    }),
+  ).toEqual({ left: 410, top: 192, bottom: 452 });
+});
+
 test("generatorModel reads the image model stored on a generator node", () => {
   const node: MoodboardNode = {
     id: "gen1",
