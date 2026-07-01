@@ -195,7 +195,7 @@ export function MultiSelectionToolbar({
         <ToolButton label="Duplicate selected" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
         </ToolButton>
-        <Popover open={alignOpen} onOpenChange={setAlignOpen} modal>
+        <Popover open={alignOpen} onOpenChange={setAlignOpen} modal={false}>
           <PopoverTrigger asChild>
             <IconButton aria-label="Align selected" title="Align selected">
               <AlignStartVertical size={14} strokeWidth={1.75} />
@@ -519,7 +519,7 @@ function ImageModelPicker({ model, options, onModelChange }: { model: string; op
   const [open, setOpen] = useState(false);
   const selected = model || options[0] || "";
   return (
-    <Popover open={open} onOpenChange={setOpen} modal>
+    <Popover open={open} onOpenChange={setOpen} modal={false}>
       <PopoverTrigger
         aria-label="Image generation model"
         className="flex h-7 min-w-0 max-w-[21rem] items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
