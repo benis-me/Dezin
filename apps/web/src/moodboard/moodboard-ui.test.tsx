@@ -56,6 +56,50 @@ test("MoodboardContextMenu clamps to the visible viewport after measuring itself
   expect(screen.getByText("Reset zoom")).toBeInTheDocument();
 });
 
+test("MoodboardContextMenu separates selection actions from blank-canvas creation actions", () => {
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 40,
+    y: 50,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "Direction note" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <MoodboardContextMenu
+      menu={{ x: 24, y: 32, canvasX: 240, canvasY: 260, targetId: node.id }}
+      targetId={node.id}
+      targetNode={node}
+      onClose={() => {}}
+      onAddNote={() => {}}
+      onAddSection={() => {}}
+      onGenerate={() => {}}
+      onDuplicate={() => {}}
+      onBringToFront={() => {}}
+      onSendToBack={() => {}}
+      onToggleVisible={() => {}}
+      onToggleLocked={() => {}}
+      onDelete={() => {}}
+      onZoomIn={() => {}}
+      onZoomOut={() => {}}
+      onResetZoom={() => {}}
+    />,
+  );
+
+  expect(screen.getByText("Selection")).toBeInTheDocument();
+  expect(screen.getByText("Duplicate")).toBeInTheDocument();
+  expect(screen.queryByText("Add note here")).toBeNull();
+  expect(screen.queryByText("Add image generator here")).toBeNull();
+  expect(screen.getByText("View")).toBeInTheDocument();
+});
+
 test("MoodboardPropertiesPanel can be resized from its left edge", () => {
   localStorage.removeItem("dezin:moodboard:properties-width");
   const node: MoodboardNode = {

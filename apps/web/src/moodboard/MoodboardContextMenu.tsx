@@ -120,11 +120,14 @@ export function MoodboardContextMenu({
           />
         ) : null}
         {targetId && onDelete ? <MenuButton icon={<Trash2 size={14} strokeWidth={1.75} />} label="Delete" onClick={onDelete} destructive /> : null}
-        {targetId ? <div className="my-1 h-px bg-border" /> : null}
-        <MenuLabel>Canvas</MenuLabel>
-        <MenuButton icon={<StickyNote size={14} strokeWidth={1.75} />} label="Add note here" onClick={onAddNote} />
-        <MenuButton icon={<SquareDashedMousePointer size={14} strokeWidth={1.75} />} label="Add section here" onClick={onAddSection} />
-        <MenuButton icon={<WandSparkles size={14} strokeWidth={1.75} />} label="Add image generator here" onClick={onGenerate} />
+        {!targetId ? (
+          <>
+            <MenuLabel>Canvas</MenuLabel>
+            <MenuButton icon={<StickyNote size={14} strokeWidth={1.75} />} label="Add note here" onClick={onAddNote} />
+            <MenuButton icon={<SquareDashedMousePointer size={14} strokeWidth={1.75} />} label="Add section here" onClick={onAddSection} />
+            <MenuButton icon={<WandSparkles size={14} strokeWidth={1.75} />} label="Add image generator here" onClick={onGenerate} />
+          </>
+        ) : null}
         {onZoomIn || onZoomOut || onResetZoom ? <div className="my-1 h-px bg-border" /> : null}
         {onZoomIn || onZoomOut || onResetZoom ? <MenuLabel>View</MenuLabel> : null}
         {onZoomIn ? <MenuButton icon={<Plus size={14} strokeWidth={1.75} />} label="Zoom in" onClick={onZoomIn} /> : null}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowUpToLine,
@@ -42,13 +42,22 @@ export function MoodboardLayerPanel({
   onBringToFront: (id: string) => void;
   onSendToBack: (id: string) => void;
 }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const escaped = typeof CSS !== "undefined" && "escape" in CSS ? CSS.escape(selectedId) : selectedId.replace(/["\\]/g, "\\$&");
+    const row = scrollRef.current?.querySelector(`[data-moodboard-layer-id="${escaped}"]`);
+    row?.scrollIntoView({ block: "nearest" });
+  }, [selectedId, items]);
+
   return (
-    <aside className="app-no-drag absolute left-3 top-3 z-20 hidden max-h-[calc(100%-5rem)] w-60 select-none flex-col overflow-hidden rounded-md border border-border bg-popover/95 text-popover-foreground shadow-pop backdrop-blur-xl md:flex">
+    <aside className="app-no-drag absolute left-3 top-3 z-20 flex max-h-[calc(100%-5rem)] w-60 select-none flex-col overflow-hidden rounded-md border border-border bg-popover/95 text-popover-foreground shadow-pop backdrop-blur-xl">
       <div className="flex h-9 items-center gap-2 border-b border-border px-3 text-xs font-medium">
         <Layers size={14} strokeWidth={1.75} />
         Layers
       </div>
-      <div className="min-h-0 flex-1 overflow-auto py-1">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto py-1">
         {items.length === 0 ? (
           <p className="px-3 py-5 text-xs text-muted-foreground">No canvas items yet.</p>
         ) : (
@@ -121,6 +130,7 @@ function LayerItem({
   return (
     <div onMouseEnter={() => onHover(node.id)} onMouseLeave={() => onHover(null)}>
       <div
+        data-moodboard-layer-id={node.id}
         className={cn(
           "group flex h-8 min-w-0 items-center gap-1 px-1.5 text-xs transition-colors",
           selected ? "bg-surface-2 text-foreground" : "text-muted-foreground hover:bg-surface-2/70 hover:text-foreground",
