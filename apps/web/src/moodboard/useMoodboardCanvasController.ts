@@ -57,6 +57,7 @@ export function useMoodboardCanvasController({
   const onAddImageGeneratorRef = useRef(onAddImageGenerator);
   const onUploadFilesRef = useRef(onUploadFiles);
   const clipboardRef = useRef<SaveMoodboardNodeInput[]>([]);
+  const syncNodeInputsInRuntimeRef = useRef<(inputs: SaveMoodboardNodeInput[], idsToReselect?: string[]) => void>(() => {});
 
   useEffect(() => {
     nodesRef.current = nodes;
@@ -327,7 +328,9 @@ export function useMoodboardCanvasController({
         const position = positionById.get(node.id);
         return position ? { ...toInput(node), x: Math.round(position.x), y: Math.round(position.y) } : toInput(node);
       });
-      saveInputs(moveContainedNodesWithSections(current, next));
+      const moved = moveContainedNodesWithSections(current, next);
+      syncNodeInputsInRuntimeRef.current(moved, targets.map((node) => node.id));
+      saveInputs(moved);
       setContextMenu(null);
     },
     [saveInputs],
@@ -365,7 +368,9 @@ export function useMoodboardCanvasController({
         const position = positionById.get(node.id);
         return position ? { ...toInput(node), x: Math.round(position.x), y: Math.round(position.y) } : toInput(node);
       });
-      saveInputs(moveContainedNodesWithSections(current, next));
+      const moved = moveContainedNodesWithSections(current, next);
+      syncNodeInputsInRuntimeRef.current(moved, targets.map((node) => node.id));
+      saveInputs(moved);
       setContextMenu(null);
     },
     [saveInputs],
@@ -448,6 +453,7 @@ export function useMoodboardCanvasController({
     onContextMenu: setContextMenu,
     onFrameStateChange: saveInputs,
   });
+  syncNodeInputsInRuntimeRef.current = runtime.syncNodeInputsInRuntime;
   const { changeZoom, fitView, hoverInRuntime, selectIdsInRuntime, selectInRuntime, zoom } = runtime;
 
   const upload = useCallback((event: ChangeEvent<HTMLInputElement>) => {

@@ -19,12 +19,12 @@ import {
   Maximize2,
   Minus,
   MousePointer2,
+  Presentation,
   Plus,
   Scissors,
   SquareDashedMousePointer,
   StickyNote,
   Trash2,
-  WandSparkles,
 } from "lucide-react";
 import type { MoodboardNode } from "../lib/api.ts";
 import {
@@ -44,7 +44,7 @@ import {
   TooltipTrigger,
 } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
-import { generatorPrompt, generatorStatus, type MoodboardAlignType, type MoodboardCanvasTool } from "./canvas-utils.ts";
+import { generatorPrompt, type MoodboardAlignType, type MoodboardCanvasTool } from "./canvas-utils.ts";
 
 export function ToolButton({
   label,
@@ -76,23 +76,54 @@ export function ToolButton({
   );
 }
 
+function stopToolbarEvent(event: { stopPropagation: () => void }) {
+  event.stopPropagation();
+}
+
+function ToolbarChrome({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <div
+      className={cn("pointer-events-auto app-no-drag rounded-lg border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl", className)}
+      onPointerDownCapture={stopToolbarEvent}
+      onMouseDownCapture={stopToolbarEvent}
+    >
+      {children}
+    </div>
+  );
+}
+
+function TabHint() {
+  return <span className="ml-1 rounded border border-border/80 bg-surface px-1 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">Tab</span>;
+}
+
 export function SelectionToolbar({
   node,
   onDuplicate,
   onDelete,
   onImageAction,
+  onQuickEdit,
 }: {
   node: MoodboardNode;
   onDuplicate: () => void;
   onDelete: () => void;
   onImageAction?: (action: string) => void;
+  onQuickEdit?: () => void;
 }) {
   const imageLike = node.type === "image";
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+      <ToolbarChrome className="flex items-center gap-1 p-1">
         {imageLike ? (
           <>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" variant="ghost" onClick={onQuickEdit} className="h-7 gap-1.5 px-2 text-xs font-medium">
+                  Quick edit
+                  <TabHint />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent sideOffset={2}>Quick edit</TooltipContent>
+            </Tooltip>
             <ToolButton label="Remove background" onClick={() => onImageAction?.("Remove background")}>
               <Eraser size={14} strokeWidth={1.75} />
             </ToolButton>
@@ -111,7 +142,7 @@ export function SelectionToolbar({
         <ToolButton label="Delete" onClick={onDelete}>
           <Trash2 size={14} strokeWidth={1.75} />
         </ToolButton>
-      </div>
+      </ToolbarChrome>
     </TooltipProvider>
   );
 }
@@ -123,6 +154,7 @@ export function MultiSelectionToolbar({
   onArrange,
   onDelete,
   onImageAction,
+  onQuickEdit,
 }: {
   nodes: MoodboardNode[];
   onDuplicate: () => void;
@@ -130,17 +162,27 @@ export function MultiSelectionToolbar({
   onArrange: () => void;
   onDelete: () => void;
   onImageAction?: (action: string) => void;
+  onQuickEdit?: () => void;
 }) {
   const [alignOpen, setAlignOpen] = useState(false);
   const imageOnly = nodes.length > 0 && nodes.every((node) => node.type === "image");
 
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+      <ToolbarChrome className="flex items-center gap-1 p-1">
         <span className="px-2 text-xs font-medium text-muted-foreground">{nodes.length} selected</span>
         <span className="mx-0.5 h-5 w-px bg-border" />
         {imageOnly ? (
           <>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" variant="ghost" onClick={onQuickEdit} className="h-7 gap-1.5 px-2 text-xs font-medium">
+                  Quick edit
+                  <TabHint />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent sideOffset={2}>Quick edit</TooltipContent>
+            </Tooltip>
             <ToolButton label="Remove backgrounds" onClick={() => onImageAction?.("Remove backgrounds")}>
               <Eraser size={14} strokeWidth={1.75} />
             </ToolButton>
@@ -153,39 +195,69 @@ export function MultiSelectionToolbar({
         <ToolButton label="Duplicate selected" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
         </ToolButton>
-        <DropdownMenu open={alignOpen} onOpenChange={setAlignOpen}>
+        <DropdownMenu modal={false} open={alignOpen} onOpenChange={setAlignOpen}>
           <Tooltip>
             <TooltipTrigger asChild>
               <DropdownMenuTrigger asChild>
-                <IconButton aria-label="Align selected" onClick={() => setAlignOpen((open) => !open)}>
+                <IconButton aria-label="Align selected" onClick={() => setAlignOpen(true)}>
                   <AlignStartVertical size={14} strokeWidth={1.75} />
                 </IconButton>
               </DropdownMenuTrigger>
             </TooltipTrigger>
             <TooltipContent sideOffset={2}>Align selected</TooltipContent>
           </Tooltip>
-          <DropdownMenuContent side="top" align="center" className="w-44">
-            <DropdownMenuItem onClick={() => onAlign("left")}>
+          <DropdownMenuContent side="top" align="center" className="w-44" onPointerDownCapture={stopToolbarEvent} onMouseDownCapture={stopToolbarEvent}>
+            <DropdownMenuItem
+              onClick={() => {
+                onAlign("left");
+                setAlignOpen(false);
+              }}
+            >
               <AlignStartVertical size={14} strokeWidth={1.75} />
               Align left
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onAlign("center-v")}>
+            <DropdownMenuItem
+              onClick={() => {
+                onAlign("center-v");
+                setAlignOpen(false);
+              }}
+            >
               <AlignCenterVertical size={14} strokeWidth={1.75} />
               Align center
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onAlign("right")}>
+            <DropdownMenuItem
+              onClick={() => {
+                onAlign("right");
+                setAlignOpen(false);
+              }}
+            >
               <AlignEndVertical size={14} strokeWidth={1.75} />
               Align right
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onAlign("top")}>
+            <DropdownMenuItem
+              onClick={() => {
+                onAlign("top");
+                setAlignOpen(false);
+              }}
+            >
               <AlignStartHorizontal size={14} strokeWidth={1.75} />
               Align top
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onAlign("center-h")}>
+            <DropdownMenuItem
+              onClick={() => {
+                onAlign("center-h");
+                setAlignOpen(false);
+              }}
+            >
               <AlignCenterHorizontal size={14} strokeWidth={1.75} />
               Align middle
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onAlign("bottom")}>
+            <DropdownMenuItem
+              onClick={() => {
+                onAlign("bottom");
+                setAlignOpen(false);
+              }}
+            >
               <AlignEndHorizontal size={14} strokeWidth={1.75} />
               Align bottom
             </DropdownMenuItem>
@@ -197,23 +269,19 @@ export function MultiSelectionToolbar({
         <ToolButton label="Delete selected" onClick={onDelete}>
           <Trash2 size={14} strokeWidth={1.75} />
         </ToolButton>
-      </div>
+      </ToolbarChrome>
     </TooltipProvider>
   );
 }
 
 export function CanvasActionBar({
   tool,
-  layersOpen,
   onToolChange,
   onAddImageGenerator,
-  onToggleLayers,
 }: {
   tool: MoodboardCanvasTool;
-  layersOpen: boolean;
   onToolChange: (tool: MoodboardCanvasTool) => void;
   onAddImageGenerator: () => void;
-  onToggleLayers: () => void;
 }) {
   return (
     <TooltipProvider delayDuration={120}>
@@ -236,11 +304,35 @@ export function CanvasActionBar({
         </ToolButton>
         <span className="mx-1 h-5 w-px bg-border" />
         <ToolButton label="Image generator" onClick={onAddImageGenerator}>
-          <WandSparkles size={15} strokeWidth={1.75} />
+          <ImagePlus size={15} strokeWidth={1.75} />
         </ToolButton>
-        <span className="mx-1 h-5 w-px bg-border" />
+      </div>
+    </TooltipProvider>
+  );
+}
+
+export function CanvasViewBar({
+  layersOpen,
+  presentationMode,
+  onToggleLayers,
+  onTogglePresentation,
+}: {
+  layersOpen: boolean;
+  presentationMode: boolean;
+  onToggleLayers: () => void;
+  onTogglePresentation: () => void;
+}) {
+  return (
+    <TooltipProvider delayDuration={120}>
+      <div
+        data-moodboard-floating-occluder
+        className="app-no-drag absolute bottom-3 left-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
+      >
         <ToolButton label="Layers" active={layersOpen} onClick={onToggleLayers}>
           <Layers size={15} strokeWidth={1.75} />
+        </ToolButton>
+        <ToolButton label="Presentation mode" active={presentationMode} onClick={onTogglePresentation}>
+          <Presentation size={15} strokeWidth={1.75} />
         </ToolButton>
       </div>
     </TooltipProvider>
@@ -312,7 +404,6 @@ export function GeneratorPromptToolbar({
   onGenerate: (prompt: string) => Promise<void>;
 }) {
   const [prompt, setPrompt] = useState(generatorPrompt(node));
-  const status = generatorStatus(node);
 
   useEffect(() => {
     setPrompt(generatorPrompt(node));
@@ -328,13 +419,6 @@ export function GeneratorPromptToolbar({
 
   return (
     <div className="pointer-events-auto app-no-drag w-[min(600px,calc(100vw-3rem))] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
-      <div className="flex h-10 items-center justify-between gap-2 border-b border-border/70 px-2">
-        <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
-        <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 gap-1.5 px-2.5 text-xs">
-          {busy ? <Loader2 size={13} className="animate-spin" /> : <WandSparkles size={13} strokeWidth={1.75} />}
-          Generate
-        </Button>
-      </div>
       <div className="px-2.5 pb-2.5 pt-2">
         <Textarea
           aria-label="Image generator prompt"
@@ -355,9 +439,67 @@ export function GeneratorPromptToolbar({
           className="min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
         />
       </div>
-      <p className="border-t border-border/60 px-2.5 py-1.5 text-[11px] text-muted-foreground">
-        {busy ? "Generating..." : status === "done" ? "Generated" : prompt.trim() ? "Ready" : "Prompt required"}
-      </p>
+      <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
+        <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
+        <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 gap-1.5 px-2.5 text-xs">
+          {busy ? <Loader2 size={13} className="animate-spin" /> : null}
+          Generate
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+export function QuickEditPromptToolbar({
+  busy,
+  models,
+  model,
+  onModelChange,
+  onGenerate,
+}: {
+  busy: boolean;
+  models: string[];
+  model: string;
+  onModelChange: (model: string) => void;
+  onGenerate: (prompt: string) => Promise<void>;
+}) {
+  const [prompt, setPrompt] = useState("");
+  const modelOptions = models.length ? models : [model].filter(Boolean);
+  const submit = async () => {
+    const next = prompt.trim();
+    if (!next || busy) return;
+    await onGenerate(next);
+    setPrompt("");
+  };
+  return (
+    <div className="pointer-events-auto app-no-drag w-[min(520px,calc(100vw-3rem))] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+      <div className="px-2.5 pb-2.5 pt-2">
+        <Textarea
+          aria-label="Quick edit prompt"
+          rows={2}
+          value={prompt}
+          autoFocus
+          placeholder="Describe the variation or edit..."
+          onChange={(event) => setPrompt(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              void submit();
+            }
+            if (event.key === "Escape") {
+              event.currentTarget.blur();
+            }
+          }}
+          className="min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
+        />
+      </div>
+      <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
+        <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
+        <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
+          {busy ? <Loader2 size={13} className="mr-1.5 animate-spin" /> : null}
+          Generate
+        </Button>
+      </div>
     </div>
   );
 }

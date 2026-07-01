@@ -4,7 +4,7 @@ import type { MoodboardNode } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
-import { GeneratorPromptToolbar, MultiSelectionToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
+import { CanvasViewBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
@@ -946,6 +946,49 @@ test("GeneratorPromptToolbar exposes a compact image model selector", () => {
 
   expect(screen.getByLabelText("Image generator prompt")).toHaveValue("soft light");
   expect(screen.getByLabelText("Image generation model")).toHaveTextContent("gpt-image-1");
+  expect(screen.queryByText("Prompt required")).toBeNull();
+  expect(screen.getByRole("button", { name: "Generate" }).querySelector("svg")).toBeNull();
+});
+
+test("QuickEditPromptToolbar submits image variations with the selected model", async () => {
+  const onModelChange = vi.fn();
+  const onGenerate = vi.fn().mockResolvedValue(undefined);
+
+  render(
+    <QuickEditPromptToolbar
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      onModelChange={onModelChange}
+      onGenerate={onGenerate}
+    />,
+  );
+
+  fireEvent.change(screen.getByLabelText("Quick edit prompt"), { target: { value: "make it warmer" } });
+  fireEvent.click(screen.getByRole("button", { name: "Generate" }));
+
+  expect(onGenerate).toHaveBeenCalledWith("make it warmer");
+  expect(screen.getByLabelText("Image generation model")).toHaveTextContent("gpt-image-1");
+});
+
+test("CanvasViewBar groups layers and presentation controls at the canvas edge", () => {
+  const onToggleLayers = vi.fn();
+  const onTogglePresentation = vi.fn();
+
+  render(
+    <CanvasViewBar
+      layersOpen={false}
+      presentationMode={false}
+      onToggleLayers={onToggleLayers}
+      onTogglePresentation={onTogglePresentation}
+    />,
+  );
+
+  fireEvent.click(screen.getByLabelText("Layers"));
+  fireEvent.click(screen.getByLabelText("Presentation mode"));
+
+  expect(onToggleLayers).toHaveBeenCalledOnce();
+  expect(onTogglePresentation).toHaveBeenCalledOnce();
 });
 
 test("Moodboard layers default closed until the user opens them", () => {

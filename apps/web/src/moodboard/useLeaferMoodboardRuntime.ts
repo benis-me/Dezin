@@ -185,6 +185,61 @@ export function useLeaferMoodboardRuntime({
 
   const selectInRuntime = useCallback((id: string | null) => selectIdsInRuntime(id ? [id] : []), [selectIdsInRuntime]);
 
+  const refreshSelectionInRuntime = useCallback(
+    (ids = selectedIdsRef.current) => {
+      const app: any = appRef.current;
+      const editor = app?.editor;
+      if (!editor) return;
+      const nextIds = ids.filter((id) => findFrame(id));
+      try {
+        editor.cancel?.();
+        editor.target = undefined;
+      } catch {
+        /* Some editor versions expose selection as readonly during teardown. */
+      }
+      const refresh = () => {
+        selectAppNodesByIds(appRef.current, nextIds);
+        scheduleFloatingSelection();
+      };
+      window.requestAnimationFrame(() => {
+        refresh();
+        window.setTimeout(refresh, 80);
+      });
+    },
+    [findFrame, scheduleFloatingSelection],
+  );
+
+  const syncNodeInputsInRuntime = useCallback(
+    (inputs: SaveMoodboardNodeInput[], idsToReselect = selectedIdsRef.current) => {
+      const app: any = appRef.current;
+      if (!app) return;
+      inputs.forEach((input) => {
+        const frame = findFrame(input.id);
+        if (!frame) return;
+        const patch = {
+          x: input.x,
+          y: input.y,
+          width: input.width,
+          height: input.height,
+          rotation: input.rotation ?? 0,
+          zIndex: input.zIndex ?? 0,
+        };
+        try {
+          if (typeof frame.set === "function") {
+            frame.set(patch);
+          } else {
+            Object.assign(frame, patch);
+          }
+        } catch {
+          Object.assign(frame, patch);
+        }
+      });
+      app.tree?.forceUpdate?.();
+      refreshSelectionInRuntime(idsToReselect);
+    },
+    [findFrame, refreshSelectionInRuntime],
+  );
+
   const hoverInRuntime = useCallback(
     (id: string | null) => {
       const editor = (appRef.current as any)?.editor;
@@ -530,6 +585,8 @@ export function useLeaferMoodboardRuntime({
     handleLayerCreated,
     selectInRuntime,
     selectIdsInRuntime,
+    refreshSelectionInRuntime,
+    syncNodeInputsInRuntime,
     hoverInRuntime,
   };
 }

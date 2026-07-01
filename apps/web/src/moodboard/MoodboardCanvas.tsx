@@ -1,13 +1,13 @@
 import { ImagePlus, Loader2 } from "lucide-react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { memo, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode, type RefObject } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode, type RefObject } from "react";
 import { Frame as LeaferFrame, Leafer } from "@dezin/leafer-react";
 import type { Frame } from "leafer-editor";
 import { useToast } from "../components/Toast.tsx";
 import type { MoodboardNode } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
 import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
-import { CanvasActionBar, CanvasZoomBar, GeneratorPromptToolbar, MultiSelectionToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
+import { CanvasActionBar, CanvasViewBar, CanvasZoomBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
@@ -32,7 +32,26 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   const selectedGeneratorModel = canvas.selected ? generatorModel(canvas.selected) : "";
   const cursor = canvas.tool === "hand" ? "grab" : canvas.tool === "note" || canvas.tool === "section" ? "crosshair" : "default";
   const [dragDepth, setDragDepth] = useState(0);
+  const [presentationMode, setPresentationMode] = useState(false);
+  const [quickEditOpen, setQuickEditOpen] = useState(false);
   const dragActive = dragDepth > 0;
+  const quickEditNode = canvas.selectedNodes.find((node) => node.type === "image") ?? null;
+  const quickEditModel = quickEditNode ? generatorModel(quickEditNode) || imageModel : imageModel;
+
+  useEffect(() => {
+    if (!quickEditNode) setQuickEditOpen(false);
+  }, [quickEditNode]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || event.metaKey || event.ctrlKey || event.altKey || presentationMode || !quickEditNode || !canvas.runtimeReady) return;
+      if (isEditableEventTarget(event.target)) return;
+      event.preventDefault();
+      setQuickEditOpen(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canvas.runtimeReady, presentationMode, quickEditNode]);
 
   const handleExternalDragEnter = (event: ReactDragEvent<HTMLDivElement>): void => {
     if (!hasDraggedFiles(event)) return;
@@ -73,7 +92,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         onDrop={handleExternalDrop}
       >
         <AnimatePresence initial={false}>
-          {canvas.layersOpen ? (
+          {canvas.layersOpen && !presentationMode ? (
             <MoodboardLayerPanel
               items={canvas.layerTree}
               selectedIds={canvas.selectedIds}
@@ -175,20 +194,21 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady ? (
+          {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady && !presentationMode ? (
             <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top">
               <SelectionToolbar
                 node={canvas.selected}
                 onDuplicate={() => canvas.duplicateNode(canvas.selected!.id)}
                 onDelete={() => canvas.deleteNode(canvas.selected!.id)}
                 onImageAction={unavailableImageAction}
+                onQuickEdit={() => setQuickEditOpen(true)}
               />
             </FloatingCanvasSurface>
           ) : null}
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selectedNodes.length > 1 && canvas.runtimeReady ? (
+          {canvas.selectedNodes.length > 1 && canvas.runtimeReady && !presentationMode ? (
             <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top">
               <MultiSelectionToolbar
                 nodes={canvas.selectedNodes}
@@ -197,13 +217,14 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 onArrange={() => canvas.arrangeNodes(canvas.selectedIds)}
                 onDelete={() => canvas.deleteNodes(canvas.selectedIds)}
                 onImageAction={unavailableImageAction}
+                onQuickEdit={() => setQuickEditOpen(true)}
               />
             </FloatingCanvasSurface>
           ) : null}
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selected?.type === "image-generator" && canvas.runtimeReady ? (
+          {canvas.selected?.type === "image-generator" && canvas.runtimeReady && !presentationMode ? (
             <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="bottom">
               <GeneratorPromptToolbar
                 node={canvas.selected}
@@ -221,16 +242,48 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           ) : null}
         </AnimatePresence>
 
-        <CanvasActionBar
-          tool={canvas.tool}
-          layersOpen={canvas.layersOpen}
-          onToolChange={canvas.setTool}
-          onAddImageGenerator={() => onAddImageGenerator()}
-          onToggleLayers={() => canvas.setLayersOpen((value) => !value)}
+        <AnimatePresence initial={false}>
+          {quickEditOpen && quickEditNode && canvas.runtimeReady && !presentationMode ? (
+            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="bottom">
+              <QuickEditPromptToolbar
+                busy={busy}
+                models={imageModels}
+                model={quickEditModel}
+                onModelChange={(model) => {
+                  canvas.patchNodeData(quickEditNode.id, { generatorModel: model });
+                  onImageModelChange(model);
+                }}
+                onGenerate={async (prompt) => {
+                  await onGenerateImage(quickEditNode, prompt);
+                  setQuickEditOpen(false);
+                }}
+              />
+            </FloatingCanvasSurface>
+          ) : null}
+        </AnimatePresence>
+
+        {!presentationMode ? (
+          <CanvasActionBar tool={canvas.tool} onToolChange={canvas.setTool} onAddImageGenerator={() => onAddImageGenerator()} />
+        ) : null}
+        <CanvasViewBar
+          layersOpen={canvas.layersOpen && !presentationMode}
+          presentationMode={presentationMode}
+          onToggleLayers={() => {
+            if (presentationMode) {
+              setPresentationMode(false);
+              canvas.setLayersOpen(true);
+              return;
+            }
+            canvas.setLayersOpen((value) => !value);
+          }}
+          onTogglePresentation={() => {
+            setQuickEditOpen(false);
+            setPresentationMode((value) => !value);
+          }}
         />
         <CanvasZoomBar zoom={canvas.zoom} onChangeZoom={canvas.changeZoom} onFitView={canvas.fitView} />
 
-        {canvas.contextMenu ? (
+        {canvas.contextMenu && !presentationMode ? (
           <MoodboardContextMenu
             menu={canvas.contextMenu}
             targetId={canvas.contextTargetId}
@@ -274,7 +327,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         ) : null}
 
         <AnimatePresence initial={false}>
-          {canvas.selected ? (
+          {canvas.selected && !presentationMode ? (
             <MoodboardPropertiesPanel
               node={canvas.selected}
               onPatch={(patch) => canvas.selected && canvas.patchNode(canvas.selected.id, patch)}
@@ -303,10 +356,11 @@ function FloatingCanvasSurface({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const selectedIdsRef = useRef(selectedIds);
   const readyRef = useRef(false);
   const [ready, setReady] = useState(false);
-  const reducedMotion = useReducedMotion();
   const selectedKey = selectedIds.join("\u0000");
+  selectedIdsRef.current = selectedIds;
 
   useLayoutEffect(() => {
     const element = ref.current;
@@ -317,7 +371,7 @@ function FloatingCanvasSurface({
     setReady(false);
 
     const update = () => {
-      const anchor = resolveSelectedFloatingAnchor(app, container, selectedIds);
+      const anchor = resolveSelectedFloatingAnchor(app, container, selectedIdsRef.current);
       if (!anchor) {
         element.style.display = "none";
         return;
@@ -345,7 +399,7 @@ function FloatingCanvasSurface({
     return () => {
       cleanup();
     };
-  }, [appRef, hostRef, placement, selectedIds, selectedKey]);
+  }, [appRef, hostRef, placement, selectedKey]);
 
   return (
     <div
@@ -355,9 +409,9 @@ function FloatingCanvasSurface({
     >
       <motion.div
         ref={contentRef}
-        initial={reducedMotion ? { opacity: 0 } : { opacity: 0, y: placement === "top" ? 2 : -2 }}
-        animate={reducedMotion ? { opacity: 1 } : { opacity: 1, y: 0 }}
-        exit={reducedMotion ? { opacity: 0 } : { opacity: 0, y: placement === "top" ? 2 : -2 }}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
         transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
       >
         {children}
@@ -413,6 +467,7 @@ function bindFloatingCanvasSurfaceEvents(
     });
   };
   const cleanups = [
+    bindFloatingEvents(app, FLOATING_TREE_VIEWPORT_EVENTS, schedule),
     bindFloatingEvents(app.tree, FLOATING_TREE_VIEWPORT_EVENTS, schedule),
     bindFloatingEvents(app.tree, FLOATING_VIEWPORT_END_EVENTS, schedule),
     bindFloatingEvents(app, FLOATING_VIEWPORT_END_EVENTS, schedule),
@@ -505,6 +560,12 @@ function normalizeFloatingFrameBounds(bounds: FloatingFrame): { x: number; y: nu
 
 function hasDraggedFiles(event: ReactDragEvent<HTMLDivElement>): boolean {
   return Array.from(event.dataTransfer.types ?? []).includes("Files");
+}
+
+function isEditableEventTarget(target: EventTarget | null): boolean {
+  const element = target instanceof HTMLElement ? target : null;
+  const tag = element?.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || Boolean(element?.isContentEditable);
 }
 
 const MoodboardNodeLayer = memo(function MoodboardNodeLayer({
