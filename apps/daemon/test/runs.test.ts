@@ -102,6 +102,71 @@ test("clean run: streams SSE, persists, serves the artifact back", async () => {
   });
 });
 
+test("run injects referenced moodboard context into the agent message", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = await createProject(base);
+    const board = store.createMoodboard({ name: "Warm references" });
+    const asset = store.createMoodboardAsset(board.id, {
+      kind: "image",
+      fileName: "lobby.png",
+      mimeType: "image/png",
+      width: 1200,
+      height: 900,
+      source: "upload",
+    });
+    const assetDir = join(dataDir, "moodboards", board.id, "assets");
+    mkdirSync(assetDir, { recursive: true });
+    writeFileSync(join(assetDir, `${asset.id}.png`), "png");
+    store.replaceMoodboardNodes(board.id, [
+      {
+        type: "note",
+        x: 20,
+        y: 30,
+        width: 260,
+        height: 120,
+        data: { content: "Warm editorial lighting with quiet hospitality materials", name: "Tone note" },
+      },
+      {
+        type: "image",
+        x: 320,
+        y: 30,
+        width: 320,
+        height: 240,
+        data: { assetId: asset.id, name: "Lobby reference" },
+      },
+    ]);
+    store.addMoodboardMessage(board.id, "user", "Prefer warm wood, low contrast, and editorial restraint.");
+
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        brief: "Use this visual direction for the landing page",
+        moodboardRefs: [{ id: board.id, name: board.name }],
+      }),
+    });
+
+    const events = parseSse(await res.text());
+    assert.equal(res.status, 200);
+    assert.ok(events.some((event) => event.type === "run-done"));
+    const message = runner.calls[0]?.message ?? "";
+    assert.match(message, /Use this visual direction/);
+    assert.match(message, /Referenced Moodboards/);
+    assert.match(message, /Warm references/);
+    assert.match(message, /note/);
+    assert.match(message, /Warm editorial lighting/);
+    assert.match(message, /Asset files/);
+    assert.match(message, new RegExp(`${asset.id}\\.png`));
+
+    const convId = events.find((event) => event.type === "run-start")!.conversationId as string;
+    const userMessage = store.listMessages(convId).find((message) => message.role === "user")!;
+    assert.match(userMessage.content, /Moodboard references/);
+    assert.match(userMessage.content, /Warm references/);
+  });
+});
+
 test("prototype run folds visual QA findings into score, result, and persisted run", async () => {
   await withRunServer(
     new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }),

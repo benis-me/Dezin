@@ -33,6 +33,7 @@ import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
+import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
 import type { AppDeps } from "./app.ts";
 
 // Skills are scanned once and cached for the daemon process.
@@ -92,6 +93,7 @@ interface RunBody {
   agentCommand?: string;
   model?: string;
   variantId?: string;
+  moodboardRefs?: unknown;
 }
 
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
@@ -214,12 +216,20 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   });
 
   const brief = body.brief.trim();
+  const moodboardContext = buildProjectMoodboardContext({
+    store,
+    dataDir: deps.dataDir,
+    refs: normalizeProjectMoodboardRefs(body.moodboardRefs),
+    request: brief,
+  });
+  const visibleBrief = appendMoodboardReferenceLine(brief, moodboardContext.labels);
+  const agentBrief = moodboardContext.promptBlock ? `${visibleBrief}\n\n${moodboardContext.promptBlock}` : visibleBrief;
   // Prior turns in this conversation become the agent's chat context (captured before we add
   // the new user message). System/process records are excluded.
   const history = store
     .listMessages(conversation.id)
     .flatMap(messageToAgentTurn);
-  const userMessage = store.addMessage(conversation.id, "user", brief);
+  const userMessage = store.addMessage(conversation.id, "user", visibleBrief);
   const run = store.createRun(project.id, conversation.id, targetVariantId, userMessage.id);
   store.updateRun(run.id, { status: "running" });
 
@@ -305,7 +315,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         runner,
         {
           systemPrompt,
-          message: brief,
+          message: agentBrief,
           projectDir: dir,
           history,
           onActivity: (activity) => {
@@ -335,12 +345,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       }
       const afterTree = await workingTreeFingerprint(dir);
       if (afterTree === beforeTree) throw new Error("The selected Agent finished without changing project files.");
-      const commit = await gitCommit(dir, brief);
+      const commit = await gitCommit(dir, visibleBrief);
       if (!commit.changed) throw new Error("The selected Agent did not leave any project changes to save.");
       if (!commit.committed) throw new Error("Project files changed, but Dezin could not commit a version snapshot.");
       const visualConversation = [
         ...history,
-        { role: "user" as const, content: brief },
+        { role: "user" as const, content: visibleBrief },
         ...(final.summaryText ? [{ role: "assistant" as const, content: final.summaryText }] : []),
       ];
       let visualFindings: QualityFinding[] = [];
@@ -361,7 +371,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           }
         }
         if (!visualFindings.length) {
-          visualFindings = await runVisualQa(deps, join(dir, "index.html"), settings, runAgentCommand, runModel, brief, visualConversation, {
+          visualFindings = await runVisualQa(deps, join(dir, "index.html"), settings, runAgentCommand, runModel, visibleBrief, visualConversation, {
             projectRoot: dir,
             renderUrl,
           });
@@ -424,7 +434,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const result = await generateArtifact({
       runner,
       systemPrompt,
-      brief,
+      brief: agentBrief,
       projectDir: dir,
       history,
       lint: { maxRounds: body.maxRounds ?? 2 },
@@ -478,7 +488,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     await writeFile(join(dir, ".versions", `${run.id}.html`), finalHtml, "utf8");
     const visualConversation = [
       ...history,
-      { role: "user" as const, content: brief },
+      { role: "user" as const, content: visibleBrief },
       ...(assistantText ? [{ role: "assistant" as const, content: assistantText }] : []),
     ];
     const visualFindings = await runVisualQa(
@@ -487,7 +497,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       settings,
       runAgentCommand,
       runModel,
-      brief,
+      visibleBrief,
       visualConversation,
       { projectRoot: dir, renderUrl: origin ? `${origin}/projects/${project.id}/preview/` : undefined },
     );

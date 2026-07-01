@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Images, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
@@ -36,7 +36,7 @@ import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
-import type { Conversation, Variant, DesignSystemCard, Message, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
+import type { Conversation, Variant, DesignSystemCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { cn } from "../lib/utils.ts";
@@ -46,6 +46,8 @@ type Tab = (typeof TABS)[number];
 
 type Device = "desktop" | "tablet" | "mobile";
 const DEVICE_WIDTH: Record<Device, string> = { desktop: "100%", tablet: "768px", mobile: "390px" };
+type MoodboardRunRef = { id: string; name?: string };
+type QueuedPrompt = { text: string; moodboardRefs?: MoodboardRunRef[] };
 
 const SEVERITY_STYLE: Record<string, string> = {
   P0: "border-destructive text-destructive",
@@ -70,17 +72,48 @@ function queueKey(projectId: string): string {
   return `dezin.workspace.queue.${projectId}`;
 }
 
-function readQueue(projectId: string): string[] {
+function readQueue(projectId: string): QueuedPrompt[] {
   if (projectId === "new") return [];
   try {
     const parsed = JSON.parse(localStorage.getItem(queueKey(projectId)) ?? "[]") as unknown;
-    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string" && x.trim().length > 0) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item): QueuedPrompt | null => {
+        if (typeof item === "string") {
+          const text = item.trim();
+          return text ? { text } : null;
+        }
+        if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+        const record = item as Record<string, unknown>;
+        const text = typeof record.text === "string" ? record.text.trim() : "";
+        if (!text) return null;
+        const refs = Array.isArray(record.moodboardRefs)
+          ? record.moodboardRefs
+              .map((ref): MoodboardRunRef | null => {
+                if (!ref || typeof ref !== "object" || Array.isArray(ref)) return null;
+                const refRecord = ref as Record<string, unknown>;
+                const id = typeof refRecord.id === "string" ? refRecord.id.trim() : "";
+                if (!id) return null;
+                const name = typeof refRecord.name === "string" && refRecord.name.trim() ? refRecord.name.trim() : undefined;
+                return { id, name };
+              })
+              .filter((ref): ref is MoodboardRunRef => ref !== null)
+          : [];
+        return refs.length ? { text, moodboardRefs: refs } : { text };
+      })
+      .filter((item): item is QueuedPrompt => item !== null);
   } catch {
     return [];
   }
 }
 
-function writeQueue(projectId: string, queue: string[]): void {
+function moodboardReferenceLine(refs: MoodboardRunRef[]): string {
+  if (!refs.length) return "";
+  const names = refs.map((ref) => `${ref.name?.trim() || "Untitled moodboard"} (${ref.id})`).join(", ");
+  return `\n\nMoodboard references (available to the Agent at run time): ${names}`;
+}
+
+function writeQueue(projectId: string, queue: QueuedPrompt[]): void {
   if (projectId === "new") return;
   try {
     localStorage.setItem(queueKey(projectId), JSON.stringify(queue));
@@ -1604,11 +1637,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [setupError, setSetupError] = useState<string | null>(null);
   const [setupLogs, setSetupLogs] = useState<Array<{ at: number; level: "info" | "error"; message: string }>>([]);
   const [running, setRunning] = useState(false);
-  const [queue, setQueue] = useState<string[]>(() => readQueue(projectId));
+  const [queue, setQueue] = useState<QueuedPrompt[]>(() => readQueue(projectId));
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
   const [liveItems, setLiveItems] = useState<LiveItem[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([]);
+  const [moodboardRefs, setMoodboardRefs] = useState<MoodboardRunRef[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
@@ -1648,7 +1682,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const stickBottom = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
   const runningRef = useRef(false);
-  const queueRef = useRef<string[]>(queue);
+  const queueRef = useRef<QueuedPrompt[]>(queue);
   const activeRunIdRef = useRef<string | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
   const selectionModeRef = useRef<"markup" | "inspect" | null>(null);
@@ -1674,7 +1708,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setMessages((m) => [...m, { id: msgId.current++, kind, text, at: Date.now() }]);
 
   const updateQueue = useCallback(
-    (next: string[] | ((current: string[]) => string[])): void => {
+    (next: QueuedPrompt[] | ((current: QueuedPrompt[]) => QueuedPrompt[])): void => {
       const resolved = typeof next === "function" ? next(queueRef.current) : next;
       queueRef.current = resolved;
       setQueue(resolved);
@@ -2129,7 +2163,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
-  const runBrief = async (brief: string, agentOverride?: string, modelOverride?: string): Promise<void> => {
+  const runBrief = async (brief: string, agentOverride?: string, modelOverride?: string, refs: MoodboardRunRef[] = []): Promise<void> => {
     const text = brief.trim();
     if (!text || runningRef.current) return;
 
@@ -2162,6 +2196,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           conversationId: activeConv.current ?? undefined,
           agentCommand: agentOverride || runAgent || undefined,
           model: modelOverride || runModel || undefined,
+          moodboardRefs: refs.length ? refs : undefined,
         },
         ctrl.signal,
       );
@@ -2275,7 +2310,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (loading || runningRef.current || queueRef.current.length === 0) return;
     const [next, ...rest] = queueRef.current;
     updateQueue(rest);
-    if (next?.trim()) void runBrief(next);
+    if (next?.text.trim()) void runBrief(next.text, undefined, undefined, next.moodboardRefs ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, running, queue, updateQueue]);
 
@@ -2706,27 +2741,30 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const send = () => {
     const scoped = selectedTargets.length > 0;
-    const refs = attachments.length
+    const fileRefs = attachments.length
       ? `\n\nReference files (read them from disk): ${attachments.map((a) => a.path).join(", ")}`
       : "";
+    const selectedMoodboardRefs = moodboardRefs;
+    const boardRefs = moodboardReferenceLine(selectedMoodboardRefs);
     const targets = scoped
       ? `\n\nScoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n${selectedTargets
           .map(formatMarkupTarget)
           .join("\n")}`
       : "";
     const base = input.trim() || (scoped ? "Refine the marked element(s) per the notes." : "");
-    const text = base + targets + refs;
+    const text = base + targets + fileRefs + boardRefs;
     if (!text.trim()) return;
     setInput("");
     setAttachments([]);
+    setMoodboardRefs([]);
     setSelectedTargets([]);
     // While a run is in flight, queue the prompt to run when it finishes.
-    if (runningRef.current) updateQueue((q) => [...q, text]);
-    else void runBrief(text);
+    if (runningRef.current) updateQueue((q) => [...q, selectedMoodboardRefs.length ? { text, moodboardRefs: selectedMoodboardRefs } : { text }]);
+    else void runBrief(text, undefined, undefined, selectedMoodboardRefs);
   };
 
   const updateQueuedPrompt = (index: number, value: string): void => {
-    updateQueue((items) => items.map((item, i) => (i === index ? value : item)));
+    updateQueue((items) => items.map((item, i) => (i === index ? { ...item, text: value } : item)));
   };
 
   const deleteQueuedPrompt = (index: number): void => {
@@ -2758,6 +2796,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     } catch {
       toast("Couldn't reference that project.", { variant: "error" });
     }
+  };
+
+  const referenceMoodboard = (board: Moodboard): void => {
+    setMoodboardRefs((current) =>
+      current.some((ref) => ref.id === board.id) ? current : [...current, { id: board.id, name: board.name }],
+    );
+    toast(`Referencing ${board.name}.`);
   };
 
   const [dragging, setDragging] = useState(false);
@@ -3157,6 +3202,27 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 ))}
               </div>
             ) : null}
+            {moodboardRefs.length ? (
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {moodboardRefs.map((ref) => (
+                  <span
+                    key={ref.id}
+                    className="flex max-w-full items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 py-1 text-xs text-foreground-2"
+                  >
+                    <Images size={11} strokeWidth={1.75} className="shrink-0 text-brand" />
+                    <span className="truncate">{ref.name || "Untitled moodboard"}</span>
+                    <button
+                      type="button"
+                      aria-label={`Remove moodboard ${ref.name || "Untitled moodboard"}`}
+                      onClick={() => setMoodboardRefs((current) => current.filter((item) => item.id !== ref.id))}
+                      className="shrink-0 text-muted-foreground hover:text-foreground"
+                    >
+                      <X size={11} strokeWidth={2} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
             {queue.length ? (
               <TooltipProvider delayDuration={120}>
                 <div className="mb-2 rounded-lg border border-border bg-surface-2/60 p-1.5">
@@ -3212,7 +3278,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                         <textarea
                           aria-label={`Queued prompt ${i + 1}`}
                           rows={1}
-                          value={prompt}
+                          value={prompt.text}
                           onChange={(e) => updateQueuedPrompt(i, e.target.value)}
                           className="field-sizing-content max-h-20 min-h-[28px] flex-1 resize-none bg-transparent px-1 py-1 text-xs leading-snug text-foreground outline-none placeholder:text-muted-foreground"
                         />
@@ -3272,6 +3338,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   onPickPaths={(paths) => setInput((i) => `${i}${i.trim() ? "\n" : ""}Reference local paths: ${paths.join(", ")}`)}
                   onContext={(text) => setInput((i) => `${i}${i.trim() ? "\n\n" : ""}${text}`)}
                   onReference={isExisting ? (p) => void referenceProject(p) : undefined}
+                  onReferenceMoodboard={isExisting ? referenceMoodboard : undefined}
                 />
               </div>
               <TooltipProvider delayDuration={120}>

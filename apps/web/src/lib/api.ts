@@ -138,6 +138,7 @@ export interface RunInput {
   conversationId?: string;
   variantId?: string;
   maxRounds?: number;
+  moodboardRefs?: Array<{ id: string; name?: string }>;
   /** Per-run overrides (fall back to Settings). */
   agentCommand?: string;
   model?: string;
