@@ -1,13 +1,14 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Check, Eye, Info, Palette, Puzzle, RotateCw, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
-import { Button, Input, Picker, Textarea, Loading, Spinner, Badge, ScrollArea } from "../components/ui/index.ts";
+import { useEffect, useState } from "react";
+import { Eye, Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
+import { Button, Picker, Textarea, Loading, Badge, ScrollArea } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
-import { AgentLogo, agentLabel } from "../components/agent-logos.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import type { DesignSystemCard, Settings } from "../lib/api.ts";
+import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
 import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
+import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
 
 type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
@@ -109,117 +110,35 @@ export function SettingsScreen({
         ) : (
           <div className={cn(section === "models" ? "h-full" : "mx-auto max-w-2xl p-8")}>
             {section === "appearance" && (
-              <Panel title="Appearance" desc="How Dezin looks. Monochrome surfaces, borders over shadows, one near-black accent.">
-                <Rows>
+              <SettingsPanel title="Appearance" desc="How Dezin looks. Monochrome surfaces, borders over shadows, one near-black accent.">
+                <SettingsRows>
                   <SettingRow label="Theme" desc="Switch between light and dark.">
                     <Button variant="outline" size="sm" onClick={onToggleDark} className="gap-2">
                       <Sun size={14} strokeWidth={1.75} />
                       {dark ? "Dark" : "Light"}
                     </Button>
                   </SettingRow>
-                </Rows>
-              </Panel>
+                </SettingsRows>
+              </SettingsPanel>
             )}
 
             {section === "provider" && (
-              <Panel title="Provider" desc="Bring your own key. Dezin drives your local coding-agent CLI.">
-                <div className="space-y-6">
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium">Agent</p>
-                        <p className="mt-0.5 text-xs text-muted-foreground">The CLI Dezin spawns. Pick one you have installed.</p>
-                      </div>
-                      {agentsLoading ? (
-                        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                          <Spinner size={13} />
-                          {scanStatus || "Scanning…"}
-                        </span>
-                      ) : (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void rescan().catch(() => toast("Couldn't rescan agents.", { variant: "error" }))}
-                        >
-                          <RotateCw size={13} strokeWidth={1.75} />
-                          Rescan
-                        </Button>
-                      )}
-                    </div>
-                    <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      {agentsLoading
-                        ? Array.from({ length: 6 }).map((_, i) => (
-                            <div key={i} className="h-[78px] animate-pulse rounded-xl border border-border bg-surface-2/50" />
-                          ))
-                        : (agents.length
-                            ? agents
-                            : [{ id: settings.agentCommand, command: settings.agentCommand, available: false, version: undefined, models: [] }]
-                          ).map((a) => {
-                            const selected = a.command === settings.agentCommand;
-                            return (
-                              <button
-                                key={a.id}
-                                type="button"
-                                aria-pressed={selected}
-                                disabled={!a.available}
-                                title={a.available ? undefined : `${agentLabel(a.id)} isn't installed`}
-                                onClick={() => save("agentCommand", a.command)}
-                                className={cn(
-                                  "relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-all",
-                                  a.available && "active:scale-[0.99]",
-                                  selected
-                                    ? "border-ring bg-surface ring-2 ring-ring/25"
-                                    : a.available
-                                      ? "border-border hover:border-border-strong hover:bg-surface-2/50"
-                                      : "cursor-not-allowed border-border opacity-50",
-                                )}
-                              >
-                                {selected ? <Check size={14} strokeWidth={2.5} className="absolute right-2.5 top-2.5 text-foreground" /> : null}
-                                <span className="grid size-9 place-items-center rounded-lg bg-surface-2 text-foreground">
-                                  <AgentLogo id={a.id} />
-                                </span>
-                                <span className="min-w-0">
-                                  <span className="block truncate text-sm font-medium">{agentLabel(a.id)}</span>
-                                  <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                                    <span
-                                      className={cn("size-1.5 shrink-0 rounded-full", a.available ? "bg-[var(--success)]" : "bg-border-strong")}
-                                    />
-                                    <span className="truncate">{a.available ? (a.version?.slice(0, 16) ?? "Detected") : "Not found"}</span>
-                                  </span>
-                                </span>
-                              </button>
-                            );
-                          })}
-                    </div>
-                  </div>
-                  <SettingRow label="Model" desc="Optional. Blank uses the agent default.">
-                    {activeAgent && activeAgent.models.length > 0 ? (
-                      <Picker
-                        ariaLabel="Model"
-                        className="w-44"
-                        value={settings.model}
-                        onChange={(v) => save("model", v)}
-                        options={[{ value: "", label: "Default" }, ...activeAgent.models.map((m) => ({ value: m, label: m }))]}
-                      />
-                    ) : (
-                      <Input
-                        aria-label="Model"
-                        className="w-44"
-                        value={settings.model}
-                        placeholder="default"
-                        onChange={(e) => setLocal("model", e.target.value)}
-                        onBlur={(e) => save("model", e.target.value)}
-                      />
-                    )}
-                  </SettingRow>
-                </div>
-              </Panel>
+              <AgentProviderSettings
+                settings={settings}
+                agents={agents}
+                activeAgent={activeAgent}
+                agentsLoading={agentsLoading}
+                scanStatus={scanStatus}
+                onLocal={setLocal}
+                onSave={save}
+                onRescan={() => void rescan().catch(() => toast("Couldn't rescan agents.", { variant: "error" }))}
+              />
             )}
             {section === "models" && <ModelProviderSettings settings={settings} onLocalPatch={setLocalPatch} onSavePatch={savePatch} />}
 
             {section === "quality" && (
-              <Panel title="Quality" desc="Checks the finished prototype against visible layout problems.">
-                <Rows>
+              <SettingsPanel title="Quality" desc="Checks the finished prototype against visible layout problems.">
+                <SettingsRows>
                   <SettingRow
                     label="Agent visual review"
                     desc="After generation, the selected Agent/model reviews the screenshot with the full current conversation context."
@@ -244,13 +163,13 @@ export function SettingsScreen({
                       />
                     </button>
                   </SettingRow>
-                </Rows>
-              </Panel>
+                </SettingsRows>
+              </SettingsPanel>
             )}
 
             {section === "defaults" && (
-              <Panel title="Defaults" desc="Applied when a project pins no design system.">
-                <Rows>
+              <SettingsPanel title="Defaults" desc="Applied when a project pins no design system.">
+                <SettingsRows>
                   <SettingRow label="Design system" desc="The brand new projects start from.">
                     <Picker
                       ariaLabel="Default design system"
@@ -263,12 +182,12 @@ export function SettingsScreen({
                       ).map((s) => ({ value: s.id, label: s.name }))}
                     />
                   </SettingRow>
-                </Rows>
-              </Panel>
+                </SettingsRows>
+              </SettingsPanel>
             )}
 
             {section === "instructions" && (
-              <Panel title="Custom instructions" desc="Project-agnostic guidance injected into every generation.">
+              <SettingsPanel title="Custom instructions" desc="Project-agnostic guidance injected into every generation.">
                 <Textarea
                   aria-label="Custom instructions"
                   rows={6}
@@ -277,11 +196,11 @@ export function SettingsScreen({
                   onChange={(e) => setLocal("customInstructions", e.target.value)}
                   onBlur={(e) => save("customInstructions", e.target.value)}
                 />
-              </Panel>
+              </SettingsPanel>
             )}
 
             {section === "extension" && (
-              <Panel title="Browser extension" desc="Capture cover art and shots from Pinterest, Behance & Dribbble straight into Dezin.">
+              <SettingsPanel title="Browser extension" desc="Capture cover art and shots from Pinterest, Behance & Dribbble straight into Dezin.">
                 <div className="space-y-4 text-sm leading-relaxed text-foreground-2">
                   <ol className="space-y-2.5">
                     {[
@@ -315,11 +234,11 @@ export function SettingsScreen({
                     <span className="text-xs text-muted-foreground">Pinterest · Behance · Dribbble</span>
                   </div>
                 </div>
-              </Panel>
+              </SettingsPanel>
             )}
 
             {section === "about" && (
-              <Panel title="About" desc="A tasteful, local-first design generator.">
+              <SettingsPanel title="About" desc="A tasteful, local-first design generator.">
                 <div className="space-y-3 text-sm leading-relaxed text-muted-foreground">
                   <p>
                     Dezin runs entirely on your machine — no telemetry, no analytics. It drives your own coding-agent CLI and
@@ -330,39 +249,11 @@ export function SettingsScreen({
                     <Badge variant="outline">Local-first</Badge>
                   </div>
                 </div>
-              </Panel>
+              </SettingsPanel>
             )}
           </div>
         )}
       </ScrollArea>
-    </div>
-  );
-}
-
-function Panel({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
-  return (
-    <div>
-      <div className="border-b border-border pb-5">
-        <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-        {desc ? <p className="mt-1 text-sm text-muted-foreground">{desc}</p> : null}
-      </div>
-      <div className="pt-5">{children}</div>
-    </div>
-  );
-}
-
-function Rows({ children }: { children: ReactNode }) {
-  return <div className="divide-y divide-border">{children}</div>;
-}
-
-function SettingRow({ label, desc, children }: { label: string; desc?: string; children: ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-6 py-4 first:pt-0 last:pb-0">
-      <div className="min-w-0">
-        <div className="text-sm font-medium">{label}</div>
-        {desc ? <div className="mt-0.5 text-xs text-muted-foreground">{desc}</div> : null}
-      </div>
-      <div className="shrink-0">{children}</div>
     </div>
   );
 }
