@@ -160,6 +160,13 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     toast(`${action} needs image-edit provider support.`, { variant: "error" });
   };
 
+  const uploadFilesNearNode = useCallback(
+    (files: FileList, node: MoodboardNode) => {
+      canvas.uploadFiles(files, { x: node.x + node.width + 32, y: node.y });
+    },
+    [canvas.uploadFiles],
+  );
+
   return (
     <div className="relative min-h-0 flex-1 bg-surface">
       <div
@@ -318,6 +325,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                   canvas.recordHistory();
                   return onGenerateImage(canvas.selected!, prompt);
                 }}
+                onUploadFiles={(files) => uploadFilesNearNode(files, canvas.selected!)}
               />
             </FloatingCanvasSurface>
           ) : null}
@@ -345,6 +353,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                   await onGenerateImage(quickEditNode, prompt);
                   setQuickEditOpen(false);
                 }}
+                onUploadFiles={(files) => uploadFilesNearNode(files, quickEditNode)}
               />
             </FloatingCanvasSurface>
           ) : null}

@@ -25,6 +25,14 @@ function renderWithApi(ui: React.ReactElement, over = {}) {
   return render(<ApiProvider client={makeFakeApi(over)}>{ui}</ApiProvider>);
 }
 
+function renderWithApiAndAgents(ui: React.ReactElement, over = {}) {
+  return render(
+    <ApiProvider client={makeFakeApi(over)}>
+      <AgentsProvider>{ui}</AgentsProvider>
+    </ApiProvider>,
+  );
+}
+
 test("HomeScreen shows an empty state with no projects", () => {
   renderWithApi(<HomeScreen projects={[]} />, { listSkills: async () => SKILLS });
   expect(screen.getByText(/No projects yet/i)).toBeInTheDocument();
@@ -43,6 +51,8 @@ test("Shell sidebar can be resized outside project pages", () => {
   expect(resize.className).not.toContain("primary");
   expect(resize.className).not.toContain("focus-visible");
   expect(resize.className).not.toContain("w-1");
+  expect(screen.getByRole("button", { name: "Design" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Home" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Browser extension" })).toBeNull();
 });
 
@@ -158,20 +168,93 @@ test("MoodboardsScreen uses a Home-like prompt to start a board with initial dir
   const board = moodboard("b1", "Warm editorial references");
   const createMoodboard = vi.fn(async () => board);
   const postMoodboardMessage = vi.fn(async () => ({ messages: [] }));
-  renderWithApi(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
+  renderWithApiAndAgents(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
     listMoodboards: async () => [],
+    listAgents: async () => [{ id: "claude", command: "claude", available: true, models: ["sonnet"] }],
     createMoodboard,
     postMoodboardMessage,
   });
 
   const prompt = await screen.findByLabelText("Describe moodboard direction");
+  expect(screen.getByRole("group", { name: "Moodboard start mode" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Agent" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByRole("button", { name: "Agent and model" })).toBeInTheDocument();
   fireEvent.change(prompt, { target: { value: "Warm editorial references for a boutique hotel" } });
   fireEvent.click(screen.getByRole("button", { name: "Start board" }));
 
   await waitFor(() => expect(createMoodboard).toHaveBeenCalledWith({ name: "Warm editorial references" }));
-  expect(postMoodboardMessage).toHaveBeenCalledWith("b1", "Warm editorial references for a boutique hotel");
+  expect(postMoodboardMessage).toHaveBeenCalledWith(
+    "b1",
+    "Warm editorial references for a boutique hotel",
+    expect.objectContaining({ agentCommand: "claude" }),
+  );
   expect(onOpenBoard).toHaveBeenCalledWith("b1");
   expect(screen.getByRole("button", { name: "New board" })).toBeInTheDocument();
+});
+
+test("MoodboardsScreen generate mode starts a board with an image model instead of an agent message", async () => {
+  const onOpenBoard = vi.fn();
+  const board = moodboard("b1", "Brutalist campaign board");
+  const createMoodboard = vi.fn(async () => board);
+  const postMoodboardMessage = vi.fn(async () => ({ messages: [] }));
+  const generateMoodboardImage = vi.fn(async () => ({
+    asset: {
+      id: "asset-1",
+      boardId: "b1",
+      kind: "image" as const,
+      fileName: "generated.png",
+      mimeType: "image/png",
+      width: 1024,
+      height: 1024,
+      source: "generated" as const,
+      createdAt: 1,
+      url: "/api/moodboards/b1/assets/asset-1",
+    },
+    nodes: [],
+    messages: [],
+  }));
+  renderWithApiAndAgents(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
+    listMoodboards: async () => [],
+    listAgents: async () => [{ id: "claude", command: "claude", available: true, models: ["sonnet"] }],
+    getSettings: async () => ({
+      agentCommand: "claude",
+      model: "",
+      apiBaseUrl: "",
+      apiKey: "",
+      defaultDesignSystemId: "modern-minimal",
+      customInstructions: "",
+      imageApiBaseUrl: "",
+      imageApiKey: "",
+      imageModel: "gpt-image-1",
+      videoApiBaseUrl: "",
+      videoApiKey: "",
+      videoModel: "",
+      aiProviderId: "openai",
+      aiProviderEnabled: true,
+      aiProviderModels: "gpt-image-1",
+      aiProviderOrganization: "",
+      visualQaEnabled: false,
+    }),
+    createMoodboard,
+    postMoodboardMessage,
+    generateMoodboardImage,
+  });
+
+  await userEvent.click(await screen.findByRole("button", { name: "Generate" }));
+  expect(screen.queryByRole("button", { name: "Agent and model" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Image generation model" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Describe moodboard direction"), { target: { value: "Brutalist campaign board with product images" } });
+  fireEvent.click(screen.getByRole("button", { name: "Generate board" }));
+
+  await waitFor(() =>
+    expect(generateMoodboardImage).toHaveBeenCalledWith(
+      "b1",
+      "Brutalist campaign board with product images",
+      expect.objectContaining({ model: "gpt-image-1" }),
+    ),
+  );
+  expect(postMoodboardMessage).not.toHaveBeenCalled();
+  expect(onOpenBoard).toHaveBeenCalledWith("b1");
 });
 
 test("MoodboardsScreen prompt creates image nodes from dropped references", async () => {

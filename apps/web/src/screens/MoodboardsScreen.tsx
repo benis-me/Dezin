@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as Re
 import { Archive, ArchiveRestore, ArrowRight, ImagePlus, Images, LayoutGrid, List, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import type { Moodboard, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
+import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import {
   Button,
   Card,
@@ -17,7 +19,9 @@ import {
   StaggerItem,
   Tabs,
 } from "../components/ui/index.ts";
+import { ImageModelPicker } from "../moodboard/ImageModelPicker.tsx";
 import { createImageNode, fileToBase64, imageSize } from "../moodboard/moodboard-board-utils.ts";
+import { imageModelOptions } from "../moodboard/useMoodboardBoard.ts";
 
 interface PromptImage {
   file: File;
@@ -25,6 +29,8 @@ interface PromptImage {
   base64: string;
   preview: string;
 }
+
+type StartMode = "agent" | "generate";
 
 function formatUpdatedAt(ts: number): string {
   const d = new Date(ts);
@@ -50,6 +56,7 @@ function BoardThumb({ coverUrl }: { coverUrl?: string | null }) {
 export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) => void }) {
   const api = useApi();
   const { toast } = useToast();
+  const { agents, rescan: rescanAgents } = useAgents();
   const [boards, setBoards] = useState<Moodboard[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<"active" | "archived">("active");
@@ -62,6 +69,13 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
   const [prompt, setPrompt] = useState("");
   const [promptImages, setPromptImages] = useState<PromptImage[]>([]);
   const [starting, setStarting] = useState(false);
+  const [startMode, setStartMode] = useState<StartMode>("agent");
+  const [settingsAgent, setSettingsAgent] = useState<string | null>(null);
+  const [settingsModel, setSettingsModel] = useState("");
+  const [runAgent, setRunAgent] = useState("");
+  const [runModel, setRunModel] = useState("");
+  const [imageModels, setImageModels] = useState<string[]>([]);
+  const [imageModel, setImageModel] = useState("");
   const promptImageInputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(() => {
@@ -74,6 +88,38 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
   }, [api, toast]);
 
   useEffect(() => refresh(), [refresh]);
+
+  useEffect(() => {
+    let alive = true;
+    void api
+      .getSettings()
+      .then((settings) => {
+        if (!alive) return;
+        setSettingsAgent(settings.agentCommand ?? "");
+        setSettingsModel(settings.model ?? "");
+        const models = imageModelOptions(settings);
+        const configuredImageModel = settings.imageModel.trim();
+        setImageModels(models);
+        setImageModel((current) => (current && models.includes(current) ? current : models.includes(configuredImageModel) ? configuredImageModel : models[0] || ""));
+      })
+      .catch(() => {
+        if (!alive) return;
+        setSettingsAgent("");
+        setImageModels([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    if (settingsAgent === null) return;
+    const available = agents.filter((agent) => agent.available);
+    if (!available.length) return;
+    const useSaved = settingsAgent !== "" && available.some((agent) => agent.command === settingsAgent);
+    setRunAgent((current) => current || (useSaved ? settingsAgent : available[0]!.command));
+    if (useSaved && settingsModel) setRunModel((current) => current || settingsModel);
+  }, [agents, settingsAgent, settingsModel]);
 
   const activeCount = boards.filter((b) => !b.archivedAt).length;
   const archivedCount = boards.length - activeCount;
@@ -88,6 +134,8 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
     else sorted.sort((a, b) => b.updatedAt - a.updatedAt);
     return sorted;
   }, [boards, q, sort, view]);
+  const promptText = prompt.trim();
+  const generateNeedsModel = startMode === "generate" && promptText.length > 0 && !imageModel;
 
   const create = async () => {
     const name = draft.trim() || "Untitled moodboard";
@@ -134,7 +182,6 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
     setStarting(true);
     try {
       const board = await api.createMoodboard({ name: titleFromPrompt(text) || (promptImages.length ? "Visual references" : "Untitled moodboard") });
-      if (text) await api.postMoodboardMessage(board.id, text);
       if (promptImages.length) {
         const nodes: SaveMoodboardNodeInput[] = [];
         for (const [index, image] of promptImages.entries()) {
@@ -149,6 +196,14 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
           nodes.push(createImageNode(asset, index, index, size));
         }
         if (nodes.length) await api.saveMoodboardNodes(board.id, nodes);
+      }
+      if (text) {
+        if (startMode === "generate") {
+          await api.generateMoodboardImage(board.id, text, imageModel ? { model: imageModel } : undefined);
+        } else {
+          const options = runAgent || runModel ? { agentCommand: runAgent || undefined, model: runModel || undefined } : undefined;
+          await api.postMoodboardMessage(board.id, text, options);
+        }
       }
       setPrompt("");
       setPromptImages([]);
@@ -294,16 +349,40 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
                 <IconButton aria-label="Attach images" onClick={() => promptImageInputRef.current?.click()}>
                   <ImagePlus size={15} strokeWidth={1.75} />
                 </IconButton>
-                <span className="label-mono">Images, references, and direction</span>
+                <Segmented
+                  ariaLabel="Moodboard start mode"
+                  size="sm"
+                  value={startMode}
+                  onChange={(value) => setStartMode(value as StartMode)}
+                  options={[
+                    { value: "agent", title: "Agent" },
+                    { value: "generate", title: "Generate" },
+                  ]}
+                />
+                {startMode === "agent" ? (
+                  <AgentModelSelect
+                    agents={agents}
+                    agent={runAgent}
+                    model={runModel}
+                    onAgentChange={(value) => {
+                      setRunAgent(value);
+                      setRunModel("");
+                    }}
+                    onModelChange={setRunModel}
+                    onRescan={rescanAgents}
+                  />
+                ) : (
+                  <ImageModelPicker model={imageModel} options={imageModels} onModelChange={setImageModel} />
+                )}
               </div>
               <Button
                 size="lg"
-                aria-label="Start board"
+                aria-label={startMode === "generate" ? "Generate board" : "Start board"}
                 onClick={() => void startBoard()}
-                disabled={starting || (!prompt.trim() && promptImages.length === 0)}
+                disabled={starting || generateNeedsModel || (!promptText && promptImages.length === 0)}
                 className="rounded-xl px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_48%,transparent)]"
               >
-                Start board
+                {startMode === "generate" ? "Generate" : "Start board"}
                 <ArrowRight size={16} strokeWidth={2} />
               </Button>
             </div>

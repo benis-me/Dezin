@@ -1961,6 +1961,44 @@ test("GeneratorPromptToolbar keeps prompt interactions out of the canvas event l
   expect(onCanvasClick).not.toHaveBeenCalled();
 });
 
+test("GeneratorPromptToolbar accepts dropped image files through the upload path", () => {
+  const onUploadFiles = vi.fn();
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const files = [new File(["image"], "material.png", { type: "image/png" })] as unknown as FileList;
+
+  render(
+    <GeneratorPromptToolbar
+      node={node}
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      onModelChange={() => {}}
+      onPromptChange={() => {}}
+      onGenerate={async () => {}}
+      onUploadFiles={onUploadFiles}
+    />,
+  );
+
+  const toolbar = screen.getByLabelText("Image generator prompt").closest("[data-moodboard-toolbar]")!;
+  fireEvent.dragOver(toolbar, { dataTransfer: { files } });
+  fireEvent.drop(toolbar, { dataTransfer: { files } });
+
+  expect(onUploadFiles).toHaveBeenCalledWith(files);
+});
+
 test("QuickEditPromptToolbar submits image variations with the selected model", async () => {
   const onModelChange = vi.fn();
   const onGenerate = vi.fn().mockResolvedValue(undefined);

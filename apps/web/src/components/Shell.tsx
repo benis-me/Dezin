@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { Images, LayoutGrid, Moon, Shapes, Settings, Sun, type LucideIcon } from "lucide-react";
+import { Images, Moon, Palette, Shapes, Settings, Sun, type LucideIcon } from "lucide-react";
 import { useRoute, navigate, type Route } from "../router.tsx";
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
@@ -15,7 +15,7 @@ interface NavLink {
 }
 
 const NAV: NavLink[] = [
-  { label: "Home", path: "/", icon: LayoutGrid, match: (r) => r.name === "home" },
+  { label: "Design", path: "/", icon: Palette, match: (r) => r.name === "home" },
   { label: "Moodboard", path: "/moodboards", icon: Images, match: (r) => r.name === "moodboards" || r.name === "moodboard" },
   { label: "Design systems", path: "/design-systems", icon: Shapes, match: (r) => r.name === "design-systems" },
 ];

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   CornerDownLeft,
-  LayoutGrid,
   Moon,
+  Palette,
   PanelsTopLeft,
   Plus,
   Search,
@@ -84,7 +84,7 @@ export function CommandPalette({
         : []),
     ];
     const nav: Item[] = [
-      { id: "nav-home", label: "Home", group: "Go to", icon: <LayoutGrid size={15} strokeWidth={1.75} />, run: () => navigate("/") },
+      { id: "nav-home", label: "Design", group: "Go to", icon: <Palette size={15} strokeWidth={1.75} />, run: () => navigate("/") },
       { id: "nav-ds", label: "Design systems", group: "Go to", icon: <Shapes size={15} strokeWidth={1.75} />, run: () => navigate("/design-systems") },
     ];
     const proj: Item[] = projects.map((p) => ({
