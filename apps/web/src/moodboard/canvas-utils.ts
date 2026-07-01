@@ -506,6 +506,13 @@ export function moveContainedNodesWithSections(previous: MoodboardNode[], inputs
   });
 }
 
+export function nudgeNodeInputs(nodes: MoodboardNode[], ids: string[], delta: CanvasPoint): SaveMoodboardNodeInput[] {
+  const targetIds = new Set(ids);
+  if (targetIds.size === 0) return nodes.map(toInput);
+  const inputs = nodes.map((node) => (targetIds.has(node.id) ? { ...toInput(node), x: node.x + delta.x, y: node.y + delta.y } : toInput(node)));
+  return moveContainedNodesWithSections(nodes, inputs);
+}
+
 function sortByLayer(a: MoodboardNode, b: MoodboardNode): number {
   return (b.zIndex ?? 0) - (a.zIndex ?? 0);
 }

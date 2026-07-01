@@ -7,6 +7,7 @@ import {
   localId,
   MOODBOARD_LAYERS_OPEN_KEY,
   moveContainedNodesWithSections,
+  nudgeNodeInputs,
   readInitialLayersOpen,
   reorderLayerInputs,
   toInput,
@@ -185,6 +186,22 @@ export function useMoodboardCanvasController({
       duplicateNodes([id]);
     },
     [duplicateNodes],
+  );
+
+  const nudgeNodes = useCallback(
+    (ids: string[], delta: { x: number; y: number }) => {
+      const current = nodesRef.current;
+      const targetIds = new Set(ids);
+      if (targetIds.size === 0) return;
+      const targets = current.filter((node) => targetIds.has(node.id));
+      if (targets.length === 0) return;
+
+      const moved = nudgeNodeInputs(current, ids, delta);
+      syncNodeInputsInRuntimeRef.current(moved, targets.map((node) => node.id));
+      saveInputs(moved);
+      setContextMenu(null);
+    },
+    [saveInputs],
   );
 
   const bringNodesToFront = useCallback(
@@ -516,6 +533,12 @@ export function useMoodboardCanvasController({
           pasteCopiedNodes();
           return;
         }
+        if (event.key.toLowerCase() === "d") {
+          if (selectedIdsRef.current.length === 0) return;
+          event.preventDefault();
+          duplicateNodes(selectedIdsRef.current);
+          return;
+        }
         if (event.key === "0") {
           event.preventDefault();
           changeZoom(1);
@@ -556,6 +579,20 @@ export function useMoodboardCanvasController({
         event.preventDefault();
         deleteNodes(selectedIdsRef.current);
       }
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.startsWith("Arrow") && selectedIdsRef.current.length > 0) {
+        const step = event.shiftKey ? 10 : 1;
+        const delta =
+          event.key === "ArrowLeft"
+            ? { x: -step, y: 0 }
+            : event.key === "ArrowRight"
+              ? { x: step, y: 0 }
+              : event.key === "ArrowUp"
+                ? { x: 0, y: -step }
+                : { x: 0, y: step };
+        event.preventDefault();
+        nudgeNodes(selectedIdsRef.current, delta);
+        return;
+      }
       if (!event.metaKey && !event.ctrlKey && !event.altKey) {
         const key = event.key.toLowerCase();
         if (key === "v") setTool("select");
@@ -569,7 +606,7 @@ export function useMoodboardCanvasController({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, fitView, moveNodesLayerStep, pasteCopiedNodes, selectLayers, sendNodesToBack, zoom]);
+  }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, moveNodesLayerStep, nudgeNodes, pasteCopiedNodes, selectLayers, sendNodesToBack, zoom]);
 
   const contextTargetId = contextMenu?.targetId ?? null;
 
@@ -597,6 +634,7 @@ export function useMoodboardCanvasController({
     deleteNodes,
     duplicateNode,
     duplicateNodes,
+    nudgeNodes,
     bringToFront,
     bringNodesToFront,
     moveNodesLayerStep,

@@ -105,9 +105,9 @@ export function MoodboardContextMenu({
         onContextMenu={(event) => event.preventDefault()}
       >
         {targetId ? <MenuLabel>Selection</MenuLabel> : null}
-        {targetId && onDuplicate ? <MenuButton icon={<Copy size={14} strokeWidth={1.75} />} label="Duplicate" onClick={onDuplicate} /> : null}
-        {targetId && onBringToFront ? <MenuButton icon={<ArrowUpToLine size={14} strokeWidth={1.75} />} label="Bring to front" onClick={onBringToFront} /> : null}
-        {targetId && onSendToBack ? <MenuButton icon={<ArrowDownToLine size={14} strokeWidth={1.75} />} label="Send to back" onClick={onSendToBack} /> : null}
+        {targetId && onDuplicate ? <MenuButton icon={<Copy size={14} strokeWidth={1.75} />} label="Duplicate" shortcut="Cmd D" onClick={onDuplicate} /> : null}
+        {targetId && onBringToFront ? <MenuButton icon={<ArrowUpToLine size={14} strokeWidth={1.75} />} label="Bring to front" shortcut="]" onClick={onBringToFront} /> : null}
+        {targetId && onSendToBack ? <MenuButton icon={<ArrowDownToLine size={14} strokeWidth={1.75} />} label="Send to back" shortcut="[" onClick={onSendToBack} /> : null}
         {targetNode && onToggleVisible ? (
           <MenuButton
             icon={isNodeVisible(targetNode) ? <EyeOff size={14} strokeWidth={1.75} /> : <Eye size={14} strokeWidth={1.75} />}
@@ -122,21 +122,21 @@ export function MoodboardContextMenu({
             onClick={onToggleLocked}
           />
         ) : null}
-        {targetId && onDelete ? <MenuButton icon={<Trash2 size={14} strokeWidth={1.75} />} label="Delete" onClick={onDelete} destructive /> : null}
+        {targetId && onDelete ? <MenuButton icon={<Trash2 size={14} strokeWidth={1.75} />} label="Delete" shortcut="Del" onClick={onDelete} destructive /> : null}
         {!targetId ? (
           <>
             <MenuLabel>Canvas</MenuLabel>
-            <MenuButton icon={<StickyNote size={14} strokeWidth={1.75} />} label="Add note here" onClick={onAddNote} />
+            <MenuButton icon={<StickyNote size={14} strokeWidth={1.75} />} label="Add note here" shortcut="S" onClick={onAddNote} />
             <MenuButton icon={<SquareDashedMousePointer size={14} strokeWidth={1.75} />} label="Add section here" onClick={onAddSection} />
             <MenuButton icon={<WandSparkles size={14} strokeWidth={1.75} />} label="Add image generator here" onClick={onGenerate} />
           </>
         ) : null}
         {onZoomIn || onZoomOut || onFitView || onResetZoom ? <div className="my-1 h-px bg-border" /> : null}
         {onZoomIn || onZoomOut || onFitView || onResetZoom ? <MenuLabel>View</MenuLabel> : null}
-        {onFitView ? <MenuButton icon={<Maximize2 size={14} strokeWidth={1.75} />} label="Fit view" onClick={onFitView} /> : null}
-        {onZoomIn ? <MenuButton icon={<Plus size={14} strokeWidth={1.75} />} label="Zoom in" onClick={onZoomIn} /> : null}
-        {onZoomOut ? <MenuButton icon={<Minus size={14} strokeWidth={1.75} />} label="Zoom out" onClick={onZoomOut} /> : null}
-        {onResetZoom ? <MenuButton icon={<RotateCcw size={14} strokeWidth={1.75} />} label="Reset zoom" onClick={onResetZoom} /> : null}
+        {onFitView ? <MenuButton icon={<Maximize2 size={14} strokeWidth={1.75} />} label="Fit view" shortcut="Shift 1" onClick={onFitView} /> : null}
+        {onZoomIn ? <MenuButton icon={<Plus size={14} strokeWidth={1.75} />} label="Zoom in" shortcut="Cmd +" onClick={onZoomIn} /> : null}
+        {onZoomOut ? <MenuButton icon={<Minus size={14} strokeWidth={1.75} />} label="Zoom out" shortcut="Cmd -" onClick={onZoomOut} /> : null}
+        {onResetZoom ? <MenuButton icon={<RotateCcw size={14} strokeWidth={1.75} />} label="Reset zoom" shortcut="Cmd 0" onClick={onResetZoom} /> : null}
       </div>
     </>
   );
@@ -146,7 +146,19 @@ function MenuLabel({ children }: { children: ReactNode }) {
   return <div className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{children}</div>;
 }
 
-function MenuButton({ icon, label, destructive = false, onClick }: { icon: ReactNode; label: string; destructive?: boolean; onClick: () => void }) {
+function MenuButton({
+  icon,
+  label,
+  shortcut,
+  destructive = false,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  shortcut?: string;
+  destructive?: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"
@@ -156,8 +168,9 @@ function MenuButton({ icon, label, destructive = false, onClick }: { icon: React
         destructive && "text-destructive hover:bg-destructive/10 hover:text-destructive",
       )}
     >
-      {icon}
-      {label}
+      <span className="shrink-0">{icon}</span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {shortcut ? <span className="ml-3 shrink-0 text-[10px] font-medium text-muted-foreground">{shortcut}</span> : null}
     </button>
   );
 }

@@ -18,6 +18,7 @@ import {
   normalizeCanvasRect,
   nodeIdFromTarget,
   nodeIdsFromTarget,
+  nudgeNodeInputs,
   reorderLayerInputs,
   rectFromBounds,
   resolveFloatingChromeRect,
@@ -80,7 +81,9 @@ test("MoodboardContextMenu clamps to the visible viewport after measuring itself
   expect(menu).toHaveStyle({ left: "268px", top: "112px" });
   expect(screen.getByText("View")).toBeInTheDocument();
   expect(screen.getByText("Fit view")).toBeInTheDocument();
+  expect(screen.getByText("Shift 1")).toBeInTheDocument();
   expect(screen.getByText("Reset zoom")).toBeInTheDocument();
+  expect(screen.getByText("Cmd 0")).toBeInTheDocument();
 });
 
 test("MoodboardContextMenu separates selection actions from blank-canvas creation actions", () => {
@@ -123,6 +126,10 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
 
   expect(screen.getByText("Selection")).toBeInTheDocument();
   expect(screen.getByText("Duplicate")).toBeInTheDocument();
+  expect(screen.getByText("Cmd D")).toBeInTheDocument();
+  expect(screen.getByText("]")).toBeInTheDocument();
+  expect(screen.getByText("[")).toBeInTheDocument();
+  expect(screen.getByText("Del")).toBeInTheDocument();
   expect(screen.queryByText("Add note here")).toBeNull();
   expect(screen.queryByText("Add image generator here")).toBeNull();
   expect(screen.getByText("View")).toBeInTheDocument();
@@ -619,6 +626,46 @@ test("moveContainedNodesWithSections does not double-move independently dragged 
   ]);
 
   expect(result.find((node) => node.id === "n1")).toMatchObject({ x: 90, y: 75 });
+});
+
+test("nudgeNodeInputs moves selected nodes and carries section children", () => {
+  const section: MoodboardNode = {
+    id: "s1",
+    boardId: "b1",
+    type: "section",
+    x: 40,
+    y: 40,
+    width: 300,
+    height: 220,
+    rotation: 0,
+    zIndex: 0,
+    data: { title: "Group" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const inside: MoodboardNode = {
+    ...section,
+    id: "n1",
+    type: "note",
+    x: 80,
+    y: 70,
+    width: 80,
+    height: 60,
+    zIndex: 1,
+    data: { content: "Inside" },
+  };
+  const outside: MoodboardNode = {
+    ...inside,
+    id: "n2",
+    x: 420,
+    data: { content: "Outside" },
+  };
+
+  const result = nudgeNodeInputs([section, inside, outside], ["s1"], { x: 10, y: -5 });
+
+  expect(result.find((node) => node.id === "s1")).toMatchObject({ x: 50, y: 35 });
+  expect(result.find((node) => node.id === "n1")).toMatchObject({ x: 90, y: 65 });
+  expect(result.find((node) => node.id === "n2")).toMatchObject({ x: 420, y: 70 });
 });
 
 test("MoodboardPropertiesPanel edits node appearance data", () => {
