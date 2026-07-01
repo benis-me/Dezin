@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import type { MoodboardNode } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
-import { isNodeLocked, isNodeVisible, layerLabel, type LayerTreeItem } from "./canvas-utils.ts";
+import { assetUrl, isNodeLocked, isNodeVisible, layerLabel, nodeFill, nodeStroke, type LayerTreeItem } from "./canvas-utils.ts";
 
 export function MoodboardLayerPanel({
   items,
@@ -190,17 +190,7 @@ function LayerItem({
           {collapsed ? <ChevronRight size={13} strokeWidth={1.75} /> : <ChevronDown size={13} strokeWidth={1.75} />}
         </button>
         <span className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left">
-          <span
-            className="grid size-5 shrink-0 place-items-center overflow-hidden rounded border border-border bg-card"
-            style={{
-              backgroundImage:
-                "linear-gradient(45deg, var(--checker, rgba(0,0,0,0.04)) 25%, transparent 25%), linear-gradient(-45deg, var(--checker, rgba(0,0,0,0.04)) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--checker, rgba(0,0,0,0.04)) 75%), linear-gradient(-45deg, transparent 75%, var(--checker, rgba(0,0,0,0.04)) 75%)",
-              backgroundSize: "8px 8px",
-              backgroundPosition: "0 0, 0 -4px, -4px 4px, 4px 0px",
-            }}
-          >
-            <LayerIcon node={node} />
-          </span>
+          <LayerThumbnail node={node} />
           {editing ? (
             <input
               autoFocus
@@ -277,4 +267,38 @@ function LayerIcon({ node }: { node: MoodboardNode }) {
   if (node.type === "image" || node.type === "image-generator") return <ImagePlus size={12} strokeWidth={1.75} />;
   if (node.type === "section") return <SquareDashedMousePointer size={12} strokeWidth={1.75} />;
   return <StickyNote size={12} strokeWidth={1.75} />;
+}
+
+function LayerThumbnail({ node }: { node: MoodboardNode }) {
+  const url = assetUrl(node);
+  const checker =
+    "linear-gradient(45deg, var(--checker, rgba(0,0,0,0.04)) 25%, transparent 25%), linear-gradient(-45deg, var(--checker, rgba(0,0,0,0.04)) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--checker, rgba(0,0,0,0.04)) 75%), linear-gradient(-45deg, transparent 75%, var(--checker, rgba(0,0,0,0.04)) 75%)";
+
+  return (
+    <span
+      data-testid={`moodboard-layer-thumbnail-${node.id}`}
+      className="relative grid size-5 shrink-0 place-items-center overflow-hidden rounded border border-border bg-card"
+      style={{ backgroundImage: checker, backgroundSize: "8px 8px", backgroundPosition: "0 0, 0 -4px, -4px 4px, 4px 0px" }}
+    >
+      {url ? <img src={url} alt="" className="h-full w-full object-cover" draggable={false} /> : <LayerPreviewSwatch node={node} />}
+    </span>
+  );
+}
+
+function LayerPreviewSwatch({ node }: { node: MoodboardNode }) {
+  if (node.type === "image-generator") {
+    return (
+      <span className="grid h-full w-full place-items-center bg-surface-2 text-muted-foreground">
+        <ImagePlus size={12} strokeWidth={1.75} />
+      </span>
+    );
+  }
+  return (
+    <span
+      className={cn("grid h-full w-full place-items-center text-muted-foreground", node.type === "section" && "border border-dashed")}
+      style={{ background: nodeFill(node), borderColor: nodeStroke(node) }}
+    >
+      <LayerIcon node={node} />
+    </span>
+  );
 }

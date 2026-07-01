@@ -1,4 +1,5 @@
 import "@leafer-in/resize";
+import { ScrollBar } from "@leafer-in/scroll";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DragEvent, EditorEvent, EditorMoveEvent, EditorRotateEvent, EditorScaleEvent, PointerEvent, PropertyEvent, ZoomEvent, type App } from "leafer-editor";
 import { ViewportLighter } from "@dezin/leafer-react";
@@ -46,6 +47,7 @@ export function useLeaferMoodboardRuntime({
   const appRef = useRef<App | null>(null);
   const layerRef = useRef<any>(null);
   const viewportLighterRef = useRef<ViewportLighter | null>(null);
+  const scrollBarRef = useRef<ScrollBar | null>(null);
   const nodesRef = useRef(nodes);
   const selectedIdRef = useRef(selectedId);
   const toolRef = useRef(tool);
@@ -161,6 +163,16 @@ export function useLeaferMoodboardRuntime({
   const handleAppReady = useCallback((app: App) => {
     appRef.current = app;
     try {
+      scrollBarRef.current?.destroy();
+      scrollBarRef.current = new ScrollBar(app as any, {
+        theme: { fill: "rgba(35,35,32,0.32)", stroke: "rgba(255,255,255,0.78)" },
+        padding: 8,
+        minSize: 18,
+      });
+    } catch {
+      scrollBarRef.current = null;
+    }
+    try {
       viewportLighterRef.current = new ViewportLighter((app as any).tree, { sliceRender: 10_000 });
     } catch {
       viewportLighterRef.current = null;
@@ -181,6 +193,8 @@ export function useLeaferMoodboardRuntime({
     return () => {
       viewportLighterRef.current?.destroy();
       viewportLighterRef.current = null;
+      scrollBarRef.current?.destroy();
+      scrollBarRef.current = null;
       appRef.current = null;
       layerRef.current = null;
       setRuntimeReady(false);

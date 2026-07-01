@@ -319,6 +319,40 @@ test("MoodboardLayerPanel supports drag reordering rows", () => {
   expect(onReorder).toHaveBeenCalledWith("n1", "n2");
 });
 
+test("MoodboardLayerPanel shows actual image thumbnails when a node has media", () => {
+  const node: MoodboardNode = {
+    id: "img1",
+    boardId: "b1",
+    type: "image",
+    x: 40,
+    y: 50,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { fileName: "Reference", url: "dezin://assets/reference.png" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <MoodboardLayerPanel
+      items={[{ node, children: [] }]}
+      selectedId={null}
+      collapsedIds={new Set()}
+      onToggleCollapsed={() => {}}
+      onSelect={() => {}}
+      onHover={() => {}}
+      onRename={() => {}}
+      onToggleVisible={() => {}}
+      onToggleLocked={() => {}}
+      onReorder={() => {}}
+    />,
+  );
+
+  expect(screen.getByTestId("moodboard-layer-thumbnail-img1").querySelector("img")).toHaveAttribute("src", "dezin://assets/reference.png");
+});
+
 test("reorderLayerInputs normalizes z-index after a layer drop", () => {
   const a: MoodboardNode = {
     id: "a",
