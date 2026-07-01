@@ -6,6 +6,7 @@ import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
+import { cn } from "../lib/utils.ts";
 
 export function MoodboardAgentPanel({
   boardName,
@@ -104,7 +105,11 @@ export function MoodboardAgentPanel({
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-auto px-4 pt-5" style={{ paddingBottom: composerH + 36 }}>
+      <div
+        data-testid="moodboard-agent-messages"
+        className={cn("min-h-0 flex-1 px-4 pt-5", messages.length > 0 ? "space-y-4 overflow-auto" : "overflow-hidden")}
+        style={messages.length > 0 ? { paddingBottom: composerH + 36 } : undefined}
+      >
         {messages.length === 0 ? (
           <div className="grid h-full place-items-center">
             <div className="flex max-w-[16rem] flex-col items-center gap-3 text-center">

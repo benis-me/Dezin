@@ -56,6 +56,7 @@ export function useMoodboardCanvasController({
   const onAddSectionRef = useRef(onAddSection);
   const onAddImageGeneratorRef = useRef(onAddImageGenerator);
   const onUploadFilesRef = useRef(onUploadFiles);
+  const clipboardRef = useRef<SaveMoodboardNodeInput[]>([]);
 
   useEffect(() => {
     nodesRef.current = nodes;
@@ -214,6 +215,51 @@ export function useMoodboardCanvasController({
     },
     [saveInputs],
   );
+
+  const moveNodesLayerStep = useCallback(
+    (ids: string[], direction: "up" | "down") => {
+      const targetIds = new Set(ids);
+      if (targetIds.size === 0) return;
+      const ordered = [...nodesRef.current].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0) || a.createdAt - b.createdAt);
+      if (direction === "up") {
+        for (let index = ordered.length - 2; index >= 0; index--) {
+          if (!targetIds.has(ordered[index]!.id) || targetIds.has(ordered[index + 1]!.id)) continue;
+          [ordered[index], ordered[index + 1]] = [ordered[index + 1]!, ordered[index]!];
+        }
+      } else {
+        for (let index = 1; index < ordered.length; index++) {
+          if (!targetIds.has(ordered[index]!.id) || targetIds.has(ordered[index - 1]!.id)) continue;
+          [ordered[index - 1], ordered[index]] = [ordered[index]!, ordered[index - 1]!];
+        }
+      }
+      const zIndexById = new Map(ordered.map((node, index) => [node.id, index + 1]));
+      saveInputs(nodesRef.current.map((node) => ({ ...toInput(node), zIndex: zIndexById.get(node.id) ?? node.zIndex })));
+      setContextMenu(null);
+    },
+    [saveInputs],
+  );
+
+  const copySelectedNodes = useCallback(() => {
+    const targetIds = new Set(selectedIdsRef.current);
+    clipboardRef.current = nodesRef.current.filter((node) => targetIds.has(node.id)).map(toInput);
+  }, []);
+
+  const pasteCopiedNodes = useCallback(() => {
+    if (clipboardRef.current.length === 0) return;
+    const current = nodesRef.current;
+    let nextZIndex = Math.max(0, ...current.map((node) => node.zIndex ?? 0)) + 1;
+    const copies: Array<SaveMoodboardNodeInput & { id: string }> = clipboardRef.current.map((node) => ({
+      ...node,
+      id: localId(),
+      x: node.x + 32,
+      y: node.y + 32,
+      zIndex: nextZIndex++,
+      data: { ...node.data },
+    }));
+    saveInputs([...current.map(toInput), ...copies]);
+    handleSelectIds(copies.map((node) => node.id));
+    setContextMenu(null);
+  }, [handleSelectIds, saveInputs]);
 
   const patchNodesData = useCallback(
     (ids: string[], patch: Record<string, unknown>) => {
@@ -452,6 +498,18 @@ export function useMoodboardCanvasController({
         return;
       }
       if (event.metaKey || event.ctrlKey) {
+        if (event.key.toLowerCase() === "c") {
+          if (selectedIdsRef.current.length === 0) return;
+          event.preventDefault();
+          copySelectedNodes();
+          return;
+        }
+        if (event.key.toLowerCase() === "v") {
+          if (clipboardRef.current.length === 0) return;
+          event.preventDefault();
+          pasteCopiedNodes();
+          return;
+        }
         if (event.key === "0") {
           event.preventDefault();
           changeZoom(1);
@@ -465,6 +523,16 @@ export function useMoodboardCanvasController({
         if (event.key === "-") {
           event.preventDefault();
           changeZoom(zoom * 0.88);
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          moveNodesLayerStep(selectedIdsRef.current, "up");
+          return;
+        }
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          moveNodesLayerStep(selectedIdsRef.current, "down");
           return;
         }
       }
@@ -486,14 +554,16 @@ export function useMoodboardCanvasController({
         const key = event.key.toLowerCase();
         if (key === "v") setTool("select");
         if (key === "h") setTool("hand");
-        if (key === "n") setTool("note");
+        if (key === "n" || key === "s") setTool("note");
         if (key === "f") setTool("section");
         if (key === "l") setLayersOpen((value) => !value);
+        if (key === "]") bringNodesToFront(selectedIdsRef.current);
+        if (key === "[") sendNodesToBack(selectedIdsRef.current);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [changeZoom, contextMenu, deleteNodes, fitView, selectLayers, zoom]);
+  }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, fitView, moveNodesLayerStep, pasteCopiedNodes, selectLayers, sendNodesToBack, zoom]);
 
   const contextTargetId = contextMenu?.targetId ?? null;
 
@@ -523,6 +593,7 @@ export function useMoodboardCanvasController({
     duplicateNodes,
     bringToFront,
     bringNodesToFront,
+    moveNodesLayerStep,
     sendToBack,
     sendNodesToBack,
     setNodesVisible,

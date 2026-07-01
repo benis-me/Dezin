@@ -1,6 +1,6 @@
-import { Loader2, Settings } from "lucide-react";
+import { Settings } from "lucide-react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { Button, IconButton } from "../components/ui/index.ts";
+import { Button, IconButton, Spinner } from "../components/ui/index.ts";
 import { panelPercentFromPixels, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { MoodboardAgentPanel } from "../moodboard/MoodboardAgentPanel.tsx";
 import { MoodboardCanvas } from "../moodboard/MoodboardCanvas.tsx";
@@ -26,7 +26,7 @@ export function MoodboardScreen({
 
   if (board.loading) {
     return (
-      <div className="flex h-full w-full flex-col bg-background">
+      <div className="flex h-full w-full min-w-0 bg-background">
         <Group
           id="dezin-moodboard-layout-loading"
           className="min-h-0 flex-1"
@@ -38,10 +38,10 @@ export function MoodboardScreen({
             <aside className="relative flex h-full min-w-0 flex-col bg-background">
               <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
                 <div className="flex min-w-0 items-center gap-2">
-                  <div className="h-7 w-7 rounded-lg bg-surface-2" />
-                  <div className="h-4 w-32 rounded bg-surface-2" />
+                  <div className="h-5 w-5 rounded-md bg-surface-2" />
+                  <div className="h-4 w-36 rounded bg-surface-2" />
                 </div>
-                <div className="h-7 w-24 rounded-md bg-surface-2" />
+                <div className="h-8 w-8 rounded-lg bg-surface-2" />
               </div>
               <div className="min-h-0 flex-1 space-y-4 overflow-hidden px-4 pt-5">
                 <div className="h-16 w-4/5 rounded-2xl rounded-bl-md bg-surface-2" />
@@ -70,12 +70,12 @@ export function MoodboardScreen({
                 <div className="h-8 w-8 rounded-lg bg-surface-2" />
               </div>
               <div className="relative min-h-0 flex-1 overflow-hidden bg-surface">
-                <div className="absolute left-[14%] top-[18%] h-24 w-44 rounded-lg border border-border/70 bg-card/70" />
-                <div className="absolute right-[20%] top-[36%] h-32 w-52 rounded-lg border border-border/70 bg-card/70" />
-                <div className="absolute bottom-[22%] left-[36%] h-16 w-60 rounded-lg border border-border/70 bg-card/70" />
+                <div className="absolute left-4 top-4 h-7 w-24 rounded-lg bg-surface-2/70" />
+                <div className="absolute bottom-3 left-1/2 h-10 w-56 -translate-x-1/2 rounded-lg border border-border bg-card/80" />
+                <div className="absolute bottom-3 right-3 h-10 w-32 rounded-lg border border-border bg-card/80" />
                 <div className="grid h-full place-items-center">
                   <div className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
-                    <Loader2 size={13} className="animate-spin" />
+                    <Spinner size={13} />
                     Loading moodboard
                   </div>
                 </div>

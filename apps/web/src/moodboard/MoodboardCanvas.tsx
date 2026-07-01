@@ -1,6 +1,6 @@
 import { ImagePlus, Loader2 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { memo, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
+import { memo, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode, type RefObject } from "react";
 import { Frame as LeaferFrame, Leafer } from "@dezin/leafer-react";
 import type { Frame } from "leafer-editor";
 import { useToast } from "../components/Toast.tsx";
@@ -11,7 +11,7 @@ import { CanvasActionBar, CanvasZoomBar, GeneratorPromptToolbar, MultiSelectionT
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { generatorModel, generatorPrompt, rectFromBounds, resolveFloatingChromeRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
+import { generatorModel, generatorPrompt, rectFromBounds, resolveFloatingChromeRect, resolveFloatingRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
 export function MoodboardCanvas(props: MoodboardCanvasProps) {
@@ -175,8 +175,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selected && canvas.selectionRect ? (
-            <FloatingCanvasSurface anchor={canvas.selectionRect} placement="top">
+          {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady ? (
+            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top">
               <SelectionToolbar
                 node={canvas.selected}
                 onDuplicate={() => canvas.duplicateNode(canvas.selected!.id)}
@@ -188,8 +188,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selectedNodes.length > 1 && canvas.selectionRect ? (
-            <FloatingCanvasSurface anchor={canvas.selectionRect} placement="top">
+          {canvas.selectedNodes.length > 1 && canvas.runtimeReady ? (
+            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top">
               <MultiSelectionToolbar
                 nodes={canvas.selectedNodes}
                 onDuplicate={() => canvas.duplicateNodes(canvas.selectedIds)}
@@ -203,8 +203,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selected?.type === "image-generator" && canvas.selectionRect ? (
-            <FloatingCanvasSurface anchor={canvas.selectionRect} placement="bottom">
+          {canvas.selected?.type === "image-generator" && canvas.runtimeReady ? (
+            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="bottom">
               <GeneratorPromptToolbar
                 node={canvas.selected}
                 busy={busy}
@@ -289,11 +289,15 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
 }
 
 function FloatingCanvasSurface({
-  anchor,
+  appRef,
+  hostRef,
+  selectedIds,
   placement,
   children,
 }: {
-  anchor: FloatingRect;
+  appRef: RefObject<any>;
+  hostRef: RefObject<HTMLDivElement | null>;
+  selectedIds: string[];
   placement: "top" | "bottom";
   children: ReactNode;
 }) {
@@ -302,13 +306,23 @@ function FloatingCanvasSurface({
   const readyRef = useRef(false);
   const [ready, setReady] = useState(false);
   const reducedMotion = useReducedMotion();
+  const selectedKey = selectedIds.join("\u0000");
 
   useLayoutEffect(() => {
     const element = ref.current;
-    const container = element?.parentElement;
-    if (!element || !container) return;
+    const container = hostRef.current;
+    const app = appRef.current;
+    if (!element || !container || !app) return;
+    readyRef.current = false;
+    setReady(false);
 
     const update = () => {
+      const anchor = resolveSelectedFloatingAnchor(app, container, selectedIds);
+      if (!anchor) {
+        element.style.display = "none";
+        return;
+      }
+      element.style.display = "";
       const next = resolveFloatingChromeRect({
         anchor,
         containerWidth: container.clientWidth,
@@ -326,24 +340,12 @@ function FloatingCanvasSurface({
       }
     };
 
-    const observer = new ResizeObserver(update);
-    const observeTargets = () => {
-      observer.disconnect();
-      observer.observe(element);
-      observer.observe(container);
-      for (const occluder of container.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]")) {
-        if (occluder !== element && !element.contains(occluder) && !occluder.contains(element)) observer.observe(occluder);
-      }
-      update();
-    };
-    const mutationObserver = typeof MutationObserver !== "undefined" ? new MutationObserver(observeTargets) : null;
-    observeTargets();
-    mutationObserver?.observe(container, { childList: true, subtree: true });
+    const cleanup = bindFloatingCanvasSurfaceEvents(app, update, { container, toolbar: element });
+    update();
     return () => {
-      observer.disconnect();
-      mutationObserver?.disconnect();
+      cleanup();
     };
-  }, [anchor, placement]);
+  }, [appRef, hostRef, placement, selectedIds, selectedKey]);
 
   return (
     <div
@@ -372,6 +374,133 @@ function getFloatingOccluders(container: HTMLElement, current: HTMLElement): Can
       const rect = element.getBoundingClientRect();
       return rectFromBounds(rect.left - containerRect.left, rect.top - containerRect.top, rect.right - containerRect.left, rect.bottom - containerRect.top);
     });
+}
+
+type FloatingEventTarget = {
+  on?: (event: string, handler: () => void) => void;
+  off?: (event: string, handler: () => void) => void;
+};
+
+type FloatingEventApp = FloatingEventTarget & {
+  tree?: FloatingEventTarget;
+  editor?: FloatingEventTarget;
+};
+
+type FloatingFrame = {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  boxBounds?: { x?: number; y?: number; width?: number; height?: number };
+  worldBoxBounds?: { x?: number; y?: number; width?: number; height?: number };
+};
+
+const FLOATING_TREE_VIEWPORT_EVENTS = ["move", "property.leafer_change", "zoom", "transform"] as const;
+const FLOATING_VIEWPORT_END_EVENTS = ["move.end", "zoom.end"] as const;
+const FLOATING_EDITOR_EVENTS = ["editor.select", "editor.move", "editor.scale", "editor.rotate"] as const;
+
+function bindFloatingCanvasSurfaceEvents(
+  app: FloatingEventApp,
+  updatePosition: () => void,
+  options: { container: HTMLElement; toolbar: HTMLElement },
+): () => void {
+  let frame: number | null = null;
+  const schedule = () => {
+    if (frame != null) return;
+    frame = window.requestAnimationFrame(() => {
+      frame = null;
+      updatePosition();
+    });
+  };
+  const cleanups = [
+    bindFloatingEvents(app.tree, FLOATING_TREE_VIEWPORT_EVENTS, schedule),
+    bindFloatingEvents(app.tree, FLOATING_VIEWPORT_END_EVENTS, schedule),
+    bindFloatingEvents(app, FLOATING_VIEWPORT_END_EVENTS, schedule),
+    bindFloatingEvents(app.editor, FLOATING_EDITOR_EVENTS, schedule),
+    bindFloatingDomEvents(options.container, options.toolbar, schedule),
+  ];
+  return () => {
+    cleanups.forEach((cleanup) => cleanup());
+    if (frame != null) window.cancelAnimationFrame(frame);
+  };
+}
+
+function bindFloatingEvents(target: FloatingEventTarget | undefined, events: readonly string[], handler: () => void): () => void {
+  if (!target?.on || !target.off) return () => {};
+  events.forEach((event) => target.on?.(event, handler));
+  return () => events.forEach((event) => target.off?.(event, handler));
+}
+
+function bindFloatingDomEvents(container: HTMLElement, toolbar: HTMLElement, schedule: () => void): () => void {
+  const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : null;
+  const mutationObserver =
+    typeof MutationObserver === "function"
+      ? new MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            if (containsFloatingOccluder(mutation.addedNodes) || containsFloatingOccluder(mutation.removedNodes)) {
+              refreshTargets();
+              schedule();
+              return;
+            }
+          }
+        })
+      : null;
+
+  const refreshTargets = () => {
+    resizeObserver?.disconnect();
+    resizeObserver?.observe(container);
+    resizeObserver?.observe(toolbar);
+    container.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]").forEach((element) => resizeObserver?.observe(element));
+  };
+  refreshTargets();
+  mutationObserver?.observe(container, { childList: true, subtree: true });
+  return () => {
+    resizeObserver?.disconnect();
+    mutationObserver?.disconnect();
+  };
+}
+
+function containsFloatingOccluder(nodes: NodeList): boolean {
+  return Array.from(nodes).some((node) => node instanceof HTMLElement && (node.matches("[data-moodboard-floating-occluder]") || Boolean(node.querySelector("[data-moodboard-floating-occluder]"))));
+}
+
+function resolveSelectedFloatingAnchor(app: any, container: HTMLElement, selectedIds: string[]): FloatingRect | null {
+  const frames = selectedIds.map((id) => findMoodboardFrame(app, id)).filter((frame): frame is FloatingFrame => Boolean(frame));
+  if (frames.length === 0) return null;
+  const world = unionFloatingFrameBounds(frames, "worldBoxBounds");
+  const frame = frames.length === 1 ? frames[0] : world;
+  const containerRect = container.getBoundingClientRect();
+  return resolveFloatingRect({
+    containerWidth: container.clientWidth,
+    containerHeight: container.clientHeight,
+    containerLeft: containerRect.left,
+    containerTop: containerRect.top,
+    frame,
+    tree: app?.tree,
+    world,
+  });
+}
+
+function findMoodboardFrame(app: any, id: string): FloatingFrame | null {
+  return app?.findId?.(id) ?? app?.tree?.findOne?.(`#${id}`) ?? null;
+}
+
+function unionFloatingFrameBounds(frames: FloatingFrame[], key: "boxBounds" | "worldBoxBounds"): { x: number; y: number; width: number; height: number } {
+  const bounds = frames.map((frame) => normalizeFloatingFrameBounds(frame[key] ?? frame));
+  const left = Math.min(...bounds.map((bound) => bound.x));
+  const top = Math.min(...bounds.map((bound) => bound.y));
+  const right = Math.max(...bounds.map((bound) => bound.x + bound.width));
+  const bottom = Math.max(...bounds.map((bound) => bound.y + bound.height));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function normalizeFloatingFrameBounds(bounds: FloatingFrame): { x: number; y: number; width: number; height: number } {
+  return {
+    x: Number(bounds.x ?? 0),
+    y: Number(bounds.y ?? 0),
+    width: Math.max(1, Number(bounds.width ?? 0) || 1),
+    height: Math.max(1, Number(bounds.height ?? 0) || 1),
+  };
 }
 
 function hasDraggedFiles(event: ReactDragEvent<HTMLDivElement>): boolean {

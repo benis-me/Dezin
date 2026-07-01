@@ -517,6 +517,7 @@ export function useLeaferMoodboardRuntime({
   }, [changeZoom, scheduleFloatingSelection]);
 
   return {
+    appRef,
     hostRef,
     runtimeReady,
     selectionRect,

@@ -738,6 +738,29 @@ test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
   expect(onUploadFiles).toHaveBeenCalledWith(files);
 });
 
+test("MoodboardAgentPanel empty state does not force a scroll container", () => {
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <MoodboardAgentPanel
+        boardName="Material board"
+        messages={[]}
+        busy={false}
+        agents={[]}
+        agent=""
+        model=""
+        onBack={() => {}}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => {}}
+        onSend={async () => {}}
+      />
+    </ApiProvider>,
+  );
+
+  expect(screen.getByTestId("moodboard-agent-messages")).toHaveClass("overflow-hidden");
+  expect(screen.getByTestId("moodboard-agent-messages")).not.toHaveClass("overflow-auto");
+});
+
 test("MoodboardScreen loading state keeps the board split layout", async () => {
   vi.doMock("./MoodboardCanvas.tsx", () => ({ MoodboardCanvas: () => <div data-testid="mock-moodboard-canvas" /> }));
   const { MoodboardScreen } = await import("../screens/MoodboardScreen.tsx");
