@@ -37,6 +37,7 @@ import {
 } from "./canvas-history.ts";
 import { createSnapLines, createSnapPointsFromBounds, resolveSnapDeltas } from "./leafer-adapter/snap-geometry.ts";
 import { selectAppNodesByIds } from "./leafer-adapter/editor-selection.ts";
+import { MOODBOARD_LEAFER_EDITOR_CONFIG } from "./moodboard-canvas-config.ts";
 import { createSectionNode } from "./moodboard-board-utils.ts";
 
 beforeEach(() => {
@@ -387,6 +388,12 @@ test("sameIdList treats identical selection ids as stable", () => {
   expect(sameIdList(["a", "b"], ["a", "b"])).toBe(true);
   expect(sameIdList(["a", "b"], ["b", "a"])).toBe(false);
   expect(sameIdList(["a"], ["a", "b"])).toBe(false);
+});
+
+test("Moodboard Leafer editor keeps the selection chrome visible while dragging", () => {
+  expect(MOODBOARD_LEAFER_EDITOR_CONFIG.hideOnMove).toBe(false);
+  expect(MOODBOARD_LEAFER_EDITOR_CONFIG.skewable).toBe(false);
+  expect(MOODBOARD_LEAFER_EDITOR_CONFIG.flipable).toBe(false);
 });
 
 test("canvas shortcuts ignore editable targets", () => {

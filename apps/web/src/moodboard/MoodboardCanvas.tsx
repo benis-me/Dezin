@@ -12,6 +12,7 @@ import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import { generatorModel, generatorPrompt, isEditableShortcutTarget, rectFromBounds, resolveFloatingChromeRect, resolveFloatingRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
+import { MOODBOARD_LEAFER_EDITOR_CONFIG } from "./moodboard-canvas-config.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
 export function MoodboardCanvas(props: MoodboardCanvasProps) {
@@ -108,17 +109,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         <div ref={canvas.hostRef} data-testid="moodboard-leafer-canvas" className="h-full w-full overflow-hidden">
           <Leafer
             fill="#f7f7f5"
-            editor={{
-              hideOnMove: true,
-              skewable: false,
-              flipable: false,
-              bright: true,
-              stroke: "#0d99ff",
-              strokeWidth: 1,
-              pointFill: "#ffffff",
-              pointRadius: 2,
-              pointSize: 8,
-            }}
+            editor={MOODBOARD_LEAFER_EDITOR_CONFIG}
             wheel={{ preventDefault: true }}
             move={{ dragEmpty: false }}
             zoom={{ min: 0.1, max: 4 }}
