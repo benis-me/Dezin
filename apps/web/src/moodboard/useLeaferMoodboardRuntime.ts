@@ -118,8 +118,8 @@ export function useLeaferMoodboardRuntime({
       commitSelectionRect(null);
       return;
     }
-    const frame = frames.length === 1 ? frames[0] : unionFrameBounds(frames);
-    const world = frames.length === 1 ? frames[0].worldBoxBounds ?? frames[0].boxBounds : frame;
+    const frame = frames.length === 1 ? frames[0] : unionFrameBounds(frames, "boxBounds");
+    const world = frames.length === 1 ? frames[0].worldBoxBounds ?? frames[0].boxBounds : unionFrameBounds(frames, "worldBoxBounds");
 
     const containerRect = container.getBoundingClientRect();
     commitSelectionRect(
@@ -191,19 +191,21 @@ export function useLeaferMoodboardRuntime({
       const editor = app?.editor;
       if (!editor) return;
       const nextIds = ids.filter((id) => findFrame(id));
-      try {
-        editor.cancel?.();
-        editor.target = undefined;
-      } catch {
-        /* Some editor versions expose selection as readonly during teardown. */
-      }
+      const frames = nextIds.map((id) => findFrame(id)).filter((frame): frame is NonNullable<typeof frame> => Boolean(frame));
       const refresh = () => {
-        selectAppNodesByIds(appRef.current, nextIds);
+        try {
+          editor.cancel?.();
+          if (typeof editor.select === "function") editor.select(frames);
+          else selectAppNodesByIds(appRef.current, nextIds);
+        } catch {
+          selectAppNodesByIds(appRef.current, nextIds);
+        }
         scheduleFloatingSelection();
       };
       window.requestAnimationFrame(() => {
         refresh();
         window.setTimeout(refresh, 80);
+        window.setTimeout(refresh, 200);
       });
     },
     [findFrame, scheduleFloatingSelection],
@@ -595,9 +597,9 @@ function toggleSelectionId(ids: string[], id: string): string[] {
   return ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id];
 }
 
-function unionFrameBounds(frames: any[]): { x: number; y: number; width: number; height: number } {
+function unionFrameBounds(frames: any[], key: "boxBounds" | "worldBoxBounds" = "worldBoxBounds"): { x: number; y: number; width: number; height: number } {
   const bounds = frames
-    .map((frame) => frame.worldBoxBounds ?? frame.boxBounds ?? frame)
+    .map((frame) => frame[key] ?? frame)
     .map((bound) => ({
       x: Number(bound?.x ?? 0),
       y: Number(bound?.y ?? 0),

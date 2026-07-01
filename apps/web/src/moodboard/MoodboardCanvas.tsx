@@ -10,7 +10,7 @@ import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
 import { CanvasActionBar, CanvasViewBar, CanvasZoomBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
-import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
+import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import { generatorModel, generatorPrompt, rectFromBounds, resolveFloatingChromeRect, resolveFloatingRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
@@ -334,6 +334,13 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               onPatchData={canvas.patchSelectedData}
               onGenerate={() => canvas.selected?.type === "image-generator" && onGenerateImage(canvas.selected, selectedGeneratorPrompt)}
             />
+          ) : canvas.selectedNodes.length > 1 && !presentationMode ? (
+            <MoodboardMultiPropertiesPanel
+              nodes={canvas.selectedNodes}
+              onSetVisible={(visible) => canvas.setNodesVisible(canvas.selectedIds, visible)}
+              onSetLocked={(locked) => canvas.setNodesLocked(canvas.selectedIds, locked)}
+              onArrange={() => canvas.arrangeNodes(canvas.selectedIds)}
+            />
           ) : null}
         </AnimatePresence>
       </div>
@@ -358,6 +365,7 @@ function FloatingCanvasSurface({
   const contentRef = useRef<HTMLDivElement>(null);
   const selectedIdsRef = useRef(selectedIds);
   const readyRef = useRef(false);
+  const layoutRef = useRef<FloatingLayoutSnapshot | null>(null);
   const [ready, setReady] = useState(false);
   const selectedKey = selectedIds.join("\u0000");
   selectedIdsRef.current = selectedIds;
@@ -368,23 +376,38 @@ function FloatingCanvasSurface({
     const app = appRef.current;
     if (!element || !container || !app) return;
     readyRef.current = false;
+    layoutRef.current = null;
     setReady(false);
 
-    const update = () => {
+    const readLayout = (reason: FloatingPositionReason): FloatingLayoutSnapshot => {
+      if (reason === "layout" || layoutRef.current == null) {
+        layoutRef.current = {
+          containerWidth: container.clientWidth,
+          containerHeight: container.clientHeight,
+          surfaceWidth: element.offsetWidth,
+          surfaceHeight: element.offsetHeight,
+          occluders: getFloatingOccluders(container, element),
+        };
+      }
+      return layoutRef.current;
+    };
+
+    const update = (reason: FloatingPositionReason = "viewport") => {
       const anchor = resolveSelectedFloatingAnchor(app, container, selectedIdsRef.current);
       if (!anchor) {
         element.style.display = "none";
         return;
       }
       element.style.display = "";
+      const layout = readLayout(reason);
       const next = resolveFloatingChromeRect({
         anchor,
-        containerWidth: container.clientWidth,
-        containerHeight: container.clientHeight,
-        surfaceWidth: element.offsetWidth,
-        surfaceHeight: element.offsetHeight,
+        containerWidth: layout.containerWidth,
+        containerHeight: layout.containerHeight,
+        surfaceWidth: layout.surfaceWidth,
+        surfaceHeight: layout.surfaceHeight,
         placement,
-        occluders: getFloatingOccluders(container, element),
+        occluders: layout.occluders,
       });
       const transform = `translate3d(${Math.round(next.left)}px, ${Math.round(next.top)}px, 0)`;
       if (element.style.transform !== transform) element.style.transform = transform;
@@ -395,7 +418,7 @@ function FloatingCanvasSurface({
     };
 
     const cleanup = bindFloatingCanvasSurfaceEvents(app, update, { container, toolbar: element });
-    update();
+    update("layout");
     return () => {
       cleanup();
     };
@@ -440,6 +463,16 @@ type FloatingEventApp = FloatingEventTarget & {
   editor?: FloatingEventTarget;
 };
 
+type FloatingPositionReason = "viewport" | "layout";
+
+type FloatingLayoutSnapshot = {
+  containerWidth: number;
+  containerHeight: number;
+  surfaceWidth: number;
+  surfaceHeight: number;
+  occluders: CanvasRect[];
+};
+
 type FloatingFrame = {
   x?: number;
   y?: number;
@@ -455,24 +488,30 @@ const FLOATING_EDITOR_EVENTS = ["editor.select", "editor.move", "editor.scale", 
 
 function bindFloatingCanvasSurfaceEvents(
   app: FloatingEventApp,
-  updatePosition: () => void,
+  updatePosition: (reason: FloatingPositionReason) => void,
   options: { container: HTMLElement; toolbar: HTMLElement },
 ): () => void {
   let frame: number | null = null;
-  const schedule = () => {
+  let pendingReason: FloatingPositionReason = "viewport";
+  const schedule = (reason: FloatingPositionReason = "viewport") => {
+    pendingReason = reason === "layout" || pendingReason === "layout" ? "layout" : "viewport";
     if (frame != null) return;
     frame = window.requestAnimationFrame(() => {
       frame = null;
-      updatePosition();
+      const nextReason = pendingReason;
+      pendingReason = "viewport";
+      updatePosition(nextReason);
     });
   };
+  const scheduleViewport = () => schedule("viewport");
+  const scheduleLayout = () => schedule("layout");
   const cleanups = [
-    bindFloatingEvents(app, FLOATING_TREE_VIEWPORT_EVENTS, schedule),
-    bindFloatingEvents(app.tree, FLOATING_TREE_VIEWPORT_EVENTS, schedule),
-    bindFloatingEvents(app.tree, FLOATING_VIEWPORT_END_EVENTS, schedule),
-    bindFloatingEvents(app, FLOATING_VIEWPORT_END_EVENTS, schedule),
-    bindFloatingEvents(app.editor, FLOATING_EDITOR_EVENTS, schedule),
-    bindFloatingDomEvents(options.container, options.toolbar, schedule),
+    bindFloatingEvents(app, FLOATING_TREE_VIEWPORT_EVENTS, scheduleViewport),
+    bindFloatingEvents(app.tree, FLOATING_TREE_VIEWPORT_EVENTS, scheduleViewport),
+    bindFloatingEvents(app.tree, FLOATING_VIEWPORT_END_EVENTS, scheduleViewport),
+    bindFloatingEvents(app, FLOATING_VIEWPORT_END_EVENTS, scheduleViewport),
+    bindFloatingEvents(app.editor, FLOATING_EDITOR_EVENTS, scheduleViewport),
+    bindFloatingDomEvents(options.container, options.toolbar, scheduleLayout),
   ];
   return () => {
     cleanups.forEach((cleanup) => cleanup());
@@ -522,8 +561,9 @@ function containsFloatingOccluder(nodes: NodeList): boolean {
 function resolveSelectedFloatingAnchor(app: any, container: HTMLElement, selectedIds: string[]): FloatingRect | null {
   const frames = selectedIds.map((id) => findMoodboardFrame(app, id)).filter((frame): frame is FloatingFrame => Boolean(frame));
   if (frames.length === 0) return null;
+  const local = unionFloatingFrameBounds(frames, "boxBounds");
   const world = unionFloatingFrameBounds(frames, "worldBoxBounds");
-  const frame = frames.length === 1 ? frames[0] : world;
+  const frame = frames.length === 1 ? frames[0] : local;
   const containerRect = container.getBoundingClientRect();
   return resolveFloatingRect({
     containerWidth: container.clientWidth,

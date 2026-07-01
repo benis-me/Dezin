@@ -7,7 +7,7 @@ import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
 import { CanvasViewBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
-import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
+import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import {
   contextTargetIdFromEvent,
   eventClientPoint,
@@ -291,6 +291,24 @@ test("Awen editor selection adapter maps node ids onto the Leafer editor target"
 
   selectAppNodesByIds(app as any, []);
   expect(app.editor.target).toBeUndefined();
+});
+
+test("Awen editor selection adapter prefers editor.select when Leafer exposes it", () => {
+  const nodes = new Map([
+    ["a", { id: "a" }],
+    ["b", { id: "b" }],
+  ]);
+  const select = vi.fn();
+  const app = {
+    editor: { select },
+    findId: (id: string) => nodes.get(id),
+  };
+
+  selectAppNodesByIds(app as any, ["a", "b"]);
+  expect(select).toHaveBeenCalledWith([nodes.get("a"), nodes.get("b")]);
+
+  selectAppNodesByIds(app as any, []);
+  expect(select).toHaveBeenCalledWith([]);
 });
 
 test("sameFloatingRect ignores subpixel jitter during drag", () => {
@@ -720,6 +738,54 @@ test("MoodboardPropertiesPanel exposes object identity and state controls", () =
   expect(onPatchData).toHaveBeenCalledWith({ locked: true });
 });
 
+test("MoodboardMultiPropertiesPanel exposes selected layer summary and batch actions", () => {
+  const onSetVisible = vi.fn();
+  const onSetLocked = vi.fn();
+  const onArrange = vi.fn();
+  const note: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 100,
+    y: 50,
+    width: 80,
+    height: 60,
+    rotation: 0,
+    zIndex: 1,
+    data: { content: "Tone" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const image: MoodboardNode = {
+    ...note,
+    id: "n2",
+    type: "image",
+    x: 220,
+    y: 90,
+    width: 120,
+    height: 100,
+    zIndex: 2,
+    data: { url: "dezin://assets/reference.png", visible: false, locked: true },
+  };
+
+  render(<MoodboardMultiPropertiesPanel nodes={[note, image]} onSetVisible={onSetVisible} onSetLocked={onSetLocked} onArrange={onArrange} />);
+
+  expect(screen.getByText("Multiple layers")).toBeInTheDocument();
+  expect(screen.getByText("2 selected")).toBeInTheDocument();
+  expect(screen.getByText("Note")).toBeInTheDocument();
+  expect(screen.getByText("Image")).toBeInTheDocument();
+  expect(screen.getByText("240")).toBeInTheDocument();
+  expect(screen.getByText("140")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText("1/2 visible"));
+  fireEvent.click(screen.getByText("1/2 locked"));
+  fireEvent.click(screen.getByRole("button", { name: "Arrange" }));
+
+  expect(onSetVisible).toHaveBeenCalledWith(true);
+  expect(onSetLocked).toHaveBeenCalledWith(true);
+  expect(onArrange).toHaveBeenCalledOnce();
+});
+
 test("MoodboardAgentPanel renders project-style assistant messages with copy actions", () => {
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
@@ -982,7 +1048,7 @@ test("GeneratorPromptToolbar exposes a compact image model selector", () => {
   render(
     <GeneratorPromptToolbar
       node={node}
-      busy={false}
+      busy={true}
       models={["gpt-image-1", "gpt-image-2"]}
       model="gpt-image-1"
       onModelChange={onModelChange}

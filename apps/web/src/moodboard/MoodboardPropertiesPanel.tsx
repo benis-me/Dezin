@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { Eye, EyeOff, Lock, LockOpen, WandSparkles } from "lucide-react";
+import { Eye, EyeOff, LayoutGrid, Lock, LockOpen, WandSparkles } from "lucide-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { Button, Input, Textarea } from "../components/ui/index.ts";
 import {
@@ -36,56 +36,8 @@ export function MoodboardPropertiesPanel({
   onPatchData: (patch: Record<string, unknown>) => void;
   onGenerate: () => void;
 }) {
-  const reducedMotion = useReducedMotion();
-  const [width, setWidth] = useState(() => {
-    const storedValue = localStorage.getItem(PANEL_WIDTH_KEY);
-    if (storedValue == null) return DEFAULT_PANEL_WIDTH;
-    const stored = Number(storedValue);
-    return Number.isFinite(stored) ? Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, stored)) : DEFAULT_PANEL_WIDTH;
-  });
-
-  useEffect(() => {
-    localStorage.setItem(PANEL_WIDTH_KEY, String(width));
-  }, [width]);
-
-  const startResize = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      const startX = event.clientX;
-      const startWidth = width;
-
-      const onMove = (moveEvent: MouseEvent) => {
-        const delta = startX - moveEvent.clientX;
-        setWidth(Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, startWidth + delta)));
-      };
-      const onUp = () => {
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-      };
-
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    },
-    [width],
-  );
-
   return (
-    <motion.aside
-      data-moodboard-floating-occluder
-      className="app-no-drag absolute right-3 top-3 z-20 max-h-[calc(100%-5rem)] select-none overflow-auto rounded-md border border-border bg-card/95 text-popover-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
-      style={{ width }}
-      initial={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
-      animate={reducedMotion ? { opacity: 1 } : { opacity: 1, x: 0 }}
-      exit={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
-      transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
-    >
-      <div
-        role="separator"
-        aria-label="Resize properties panel"
-        aria-orientation="vertical"
-        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize"
-        onMouseDown={startResize}
-      />
+    <PropertiesPanelFrame>
       <div className="flex h-10 items-center justify-between gap-3 border-b border-border/70 px-3">
         <div className="min-w-0">
           <p className="truncate text-xs font-medium text-foreground">{layerLabel(node)}</p>
@@ -170,6 +122,124 @@ export function MoodboardPropertiesPanel({
           <ReadonlyValue label="Updated" value={formatDate(node.updatedAt)} />
         </div>
       </PropertySection>
+    </PropertiesPanelFrame>
+  );
+}
+
+export function MoodboardMultiPropertiesPanel({
+  nodes,
+  onSetVisible,
+  onSetLocked,
+  onArrange,
+}: {
+  nodes: MoodboardNode[];
+  onSetVisible: (visible: boolean) => void;
+  onSetLocked: (locked: boolean) => void;
+  onArrange: () => void;
+}) {
+  const bounds = selectionBounds(nodes);
+  const visibleCount = nodes.filter(isNodeVisible).length;
+  const lockedCount = nodes.filter(isNodeLocked).length;
+  const allVisible = visibleCount === nodes.length;
+  const allLocked = lockedCount === nodes.length;
+  const typeCounts = nodeTypeCounts(nodes);
+
+  return (
+    <PropertiesPanelFrame>
+      <div className="flex h-10 items-center justify-between gap-3 border-b border-border/70 px-3">
+        <div className="min-w-0">
+          <p className="truncate text-xs font-medium text-foreground">Multiple layers</p>
+          <p className="label-mono text-muted-foreground">{nodes.length} selected</p>
+        </div>
+        <span className="label-mono shrink-0 text-muted-foreground">{typeCounts.length} types</span>
+      </div>
+      <PropertySection title="Selection">
+        <div className="space-y-1.5">
+          {typeCounts.map(({ type, count }) => (
+            <ReadonlyValue key={type} label={formatNodeType(type)} value={String(count)} />
+          ))}
+        </div>
+      </PropertySection>
+      <PropertySection title="Object">
+        <div className="grid grid-cols-2 gap-2">
+          <StateButton active={allVisible} label={`${visibleCount}/${nodes.length} visible`} onClick={() => onSetVisible(!allVisible)}>
+            {allVisible ? <Eye size={13} strokeWidth={1.75} /> : <EyeOff size={13} strokeWidth={1.75} />}
+          </StateButton>
+          <StateButton active={allLocked} label={`${lockedCount}/${nodes.length} locked`} onClick={() => onSetLocked(!allLocked)}>
+            {allLocked ? <Lock size={13} strokeWidth={1.75} /> : <LockOpen size={13} strokeWidth={1.75} />}
+          </StateButton>
+        </div>
+      </PropertySection>
+      <PropertySection title="Bounds">
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <ReadonlyValue label="X" value={String(Math.round(bounds.x))} />
+          <ReadonlyValue label="Y" value={String(Math.round(bounds.y))} />
+          <ReadonlyValue label="W" value={String(Math.round(bounds.width))} />
+          <ReadonlyValue label="H" value={String(Math.round(bounds.height))} />
+        </div>
+      </PropertySection>
+      <PropertySection title="Layout">
+        <Button size="sm" variant="outline" className="h-7 w-full gap-2 text-xs" onClick={onArrange}>
+          <LayoutGrid size={13} strokeWidth={1.75} />
+          Arrange
+        </Button>
+      </PropertySection>
+    </PropertiesPanelFrame>
+  );
+}
+
+function PropertiesPanelFrame({ children }: { children: ReactNode }) {
+  const reducedMotion = useReducedMotion();
+  const [width, setWidth] = useState(() => {
+    const storedValue = localStorage.getItem(PANEL_WIDTH_KEY);
+    if (storedValue == null) return DEFAULT_PANEL_WIDTH;
+    const stored = Number(storedValue);
+    return Number.isFinite(stored) ? Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, stored)) : DEFAULT_PANEL_WIDTH;
+  });
+
+  useEffect(() => {
+    localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+  }, [width]);
+
+  const startResize = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = width;
+
+      const onMove = (moveEvent: MouseEvent) => {
+        const delta = startX - moveEvent.clientX;
+        setWidth(Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, startWidth + delta)));
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    },
+    [width],
+  );
+
+  return (
+    <motion.aside
+      data-moodboard-floating-occluder
+      className="app-no-drag absolute right-3 top-3 z-20 max-h-[calc(100%-5rem)] select-none overflow-auto rounded-md border border-border bg-card/95 text-popover-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
+      style={{ width }}
+      initial={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
+      animate={reducedMotion ? { opacity: 1 } : { opacity: 1, x: 0 }}
+      exit={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
+      transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
+    >
+      <div
+        role="separator"
+        aria-label="Resize properties panel"
+        aria-orientation="vertical"
+        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize"
+        onMouseDown={startResize}
+      />
+      {children}
     </motion.aside>
   );
 }
@@ -177,6 +247,20 @@ export function MoodboardPropertiesPanel({
 function formatNodeType(type: MoodboardNode["type"]): string {
   if (type === "image-generator") return "Image generator";
   return type.charAt(0).toUpperCase() + type.slice(1);
+}
+
+function selectionBounds(nodes: MoodboardNode[]): { x: number; y: number; width: number; height: number } {
+  const left = Math.min(...nodes.map((node) => node.x));
+  const top = Math.min(...nodes.map((node) => node.y));
+  const right = Math.max(...nodes.map((node) => node.x + node.width));
+  const bottom = Math.max(...nodes.map((node) => node.y + node.height));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function nodeTypeCounts(nodes: MoodboardNode[]): Array<{ type: MoodboardNode["type"]; count: number }> {
+  const counts = new Map<MoodboardNode["type"], number>();
+  nodes.forEach((node) => counts.set(node.type, (counts.get(node.type) ?? 0) + 1));
+  return [...counts.entries()].map(([type, count]) => ({ type, count }));
 }
 
 function formatRatio(width: number, height: number): string {

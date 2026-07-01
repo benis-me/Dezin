@@ -17,11 +17,19 @@ export function clearEditorSelection(editor?: IEditorBase | null) {
 
 export function selectAppNodesByIds(app: App | null | undefined, nodeIds: readonly string[]) {
   if (!app?.editor || nodeIds.length === 0) {
-    clearEditorSelection(app?.editor);
+    const editor = app?.editor as (IEditorBase & { select?: (target: IUI[]) => void }) | null | undefined;
+    if (typeof editor?.select === "function") editor.select([]);
+    else clearEditorSelection(editor);
     return;
   }
 
   const selectedNodes = nodeIds.map((id) => app.findId(id)).filter((node): node is IUI => Boolean(node));
 
-  setEditorSelection(app.editor, selectedNodes.length === 1 ? selectedNodes[0] : selectedNodes.length > 1 ? selectedNodes : undefined);
+  const editor = app.editor as IEditorBase & { select?: (target: IUI[]) => void };
+  if (typeof editor.select === "function") {
+    editor.select(selectedNodes);
+    return;
+  }
+
+  setEditorSelection(editor, selectedNodes.length === 1 ? selectedNodes[0] : selectedNodes.length > 1 ? selectedNodes : undefined);
 }

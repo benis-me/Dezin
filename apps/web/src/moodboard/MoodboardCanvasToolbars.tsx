@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AlignCenterHorizontal,
   AlignCenterVertical,
@@ -15,7 +15,6 @@ import {
   ImagePlus,
   LayoutGrid,
   Layers,
-  Loader2,
   Maximize2,
   Minus,
   MousePointer2,
@@ -165,6 +164,7 @@ export function MultiSelectionToolbar({
   onQuickEdit?: () => void;
 }) {
   const [alignOpen, setAlignOpen] = useState(false);
+  const pointerToggledAlignRef = useRef(false);
   const imageOnly = nodes.length > 0 && nodes.every((node) => node.type === "image");
 
   return (
@@ -199,7 +199,27 @@ export function MultiSelectionToolbar({
           <Tooltip>
             <TooltipTrigger asChild>
               <DropdownMenuTrigger asChild>
-                <IconButton aria-label="Align selected" onClick={() => setAlignOpen(true)}>
+                <IconButton
+                  aria-label="Align selected"
+                  onPointerDown={(event) => {
+                    if (event.button !== 0 || event.ctrlKey) return;
+                    event.preventDefault();
+                    pointerToggledAlignRef.current = true;
+                    setAlignOpen((open) => !open);
+                  }}
+                  onClick={() => {
+                    if (pointerToggledAlignRef.current) {
+                      pointerToggledAlignRef.current = false;
+                      return;
+                    }
+                    setAlignOpen((open) => !open);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    setAlignOpen((open) => !open);
+                  }}
+                >
                   <AlignStartVertical size={14} strokeWidth={1.75} />
                 </IconButton>
               </DropdownMenuTrigger>
@@ -441,8 +461,7 @@ export function GeneratorPromptToolbar({
       </div>
       <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
         <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
-        <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 gap-1.5 px-2.5 text-xs">
-          {busy ? <Loader2 size={13} className="animate-spin" /> : null}
+        <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
           Generate
         </Button>
       </div>
@@ -496,7 +515,6 @@ export function QuickEditPromptToolbar({
       <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
         <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
         <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
-          {busy ? <Loader2 size={13} className="mr-1.5 animate-spin" /> : null}
           Generate
         </Button>
       </div>
