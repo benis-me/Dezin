@@ -1,5 +1,5 @@
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { Button, Spinner } from "../components/ui/index.ts";
+import { Button } from "../components/ui/index.ts";
 import { panelPercentFromPixels, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { MoodboardAgentPanel } from "../moodboard/MoodboardAgentPanel.tsx";
 import { MoodboardCanvas } from "../moodboard/MoodboardCanvas.tsx";
@@ -57,12 +57,9 @@ export function MoodboardScreen({
               <div className="relative min-h-0 flex-1 overflow-hidden bg-surface">
                 <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(0,0,0,0.025)_1px,transparent_1px)] bg-[length:24px_24px] opacity-70" />
                 <LoadingCanvasChrome />
-                <div className="absolute inset-0 grid place-items-center">
-                  <div role="status" className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
-                    <Spinner size={13} />
-                    Loading moodboard
-                  </div>
-                </div>
+                <span role="status" className="sr-only">
+                  Loading moodboard
+                </span>
               </div>
             </section>
           </Panel>
@@ -143,6 +140,10 @@ export function MoodboardScreen({
 function LoadingCanvasChrome() {
   return (
     <>
+      <div aria-hidden className="absolute left-[12%] top-[14%] h-36 w-56 rounded-lg border border-border bg-card/70 backdrop-blur-xl" />
+      <div aria-hidden className="absolute left-[38%] top-[20%] h-44 w-72 rounded-lg border border-border bg-card/60 backdrop-blur-xl" />
+      <div aria-hidden className="absolute right-[14%] top-[16%] h-32 w-48 rounded-lg border border-border bg-card/70 backdrop-blur-xl" />
+      <div aria-hidden className="absolute left-[30%] top-[52%] h-24 w-64 rounded-lg border border-border bg-card/60 backdrop-blur-xl" />
       <div
         aria-hidden
         className="absolute bottom-3 left-3 z-10 flex items-center gap-1 rounded-lg border border-border bg-card/85 p-1 backdrop-blur-xl"

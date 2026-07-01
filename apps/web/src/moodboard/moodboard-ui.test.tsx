@@ -1200,8 +1200,10 @@ test("MoodboardAgentPanel keeps the real shell while loading", () => {
   );
 
   expect(screen.getByLabelText("Back to moodboards")).toBeInTheDocument();
-  expect(screen.getByText("Loading moodboard")).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("Loading moodboard");
   expect(screen.queryByLabelText("Message")).toBeNull();
+  expect(screen.getByTestId("moodboard-agent-messages")).toHaveClass("overflow-hidden");
+  expect(screen.getByTestId("moodboard-agent-messages")).not.toHaveClass("overflow-auto");
 });
 
 test("MoodboardAgentPanel drops files into the moodboard upload path", () => {

@@ -5,7 +5,7 @@ import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import { Markdown } from "../components/Markdown.tsx";
-import { Button, IconButton, Spinner, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
+import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 
 export function MoodboardAgentPanel({
@@ -150,10 +150,22 @@ export function MoodboardAgentPanel({
         style={messages.length > 0 ? { paddingBottom: composerH + 36 } : undefined}
       >
         {loading ? (
-          <div className="grid h-full place-items-center">
-            <div className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
-              <Spinner size={13} />
+          <div className="flex h-full flex-col justify-end pb-8">
+            <span role="status" className="sr-only">
               Loading moodboard
+            </span>
+            <div className="space-y-4" aria-hidden>
+              <div className="ml-auto h-9 w-44 rounded-2xl rounded-br-md bg-surface-2/80" />
+              <div className="space-y-2">
+                <div className="h-3 w-36 rounded bg-surface-2/90" />
+                <div className="h-3 w-56 rounded bg-surface-2/70" />
+                <div className="h-3 w-48 rounded bg-surface-2/60" />
+              </div>
+              <div className="ml-auto h-9 w-52 rounded-2xl rounded-br-md bg-surface-2/70" />
+              <div className="space-y-2">
+                <div className="h-3 w-44 rounded bg-surface-2/80" />
+                <div className="h-3 w-60 rounded bg-surface-2/60" />
+              </div>
             </div>
           </div>
         ) : messages.length === 0 ? (
