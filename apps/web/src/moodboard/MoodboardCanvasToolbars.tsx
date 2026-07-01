@@ -79,6 +79,10 @@ function stopToolbarEvent(event: { stopPropagation: () => void }) {
   event.stopPropagation();
 }
 
+function isToolbarEventTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest("[data-moodboard-toolbar]"));
+}
+
 function ToolbarChrome({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <div
@@ -205,15 +209,18 @@ export function MultiSelectionToolbar({
             </IconButton>
           </PopoverTrigger>
           <PopoverContent
+            data-moodboard-toolbar
             side="top"
             align="center"
             className="w-44 p-1"
             onOpenAutoFocus={(event) => event.preventDefault()}
             onPointerDown={stopToolbarEvent}
+            onPointerUp={stopToolbarEvent}
             onMouseDown={stopToolbarEvent}
+            onMouseUp={stopToolbarEvent}
+            onClick={stopToolbarEvent}
             onPointerDownOutside={(event) => {
-              const target = event.target;
-              if (target instanceof Node && document.querySelector("[data-moodboard-toolbar]")?.contains(target)) event.preventDefault();
+              if (isToolbarEventTarget(event.target)) event.preventDefault();
             }}
           >
             <AlignMenuItem
@@ -436,7 +443,15 @@ export function GeneratorPromptToolbar({
   const modelOptions = models.length ? models : [model].filter(Boolean);
 
   return (
-    <div className="pointer-events-auto app-no-drag grid min-h-[146px] w-[min(600px,calc(100vw-3rem))] grid-rows-[1fr_auto] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+    <div
+      data-moodboard-toolbar
+      className="pointer-events-auto app-no-drag grid min-h-[146px] w-[min(600px,calc(100vw-3rem))] grid-rows-[1fr_auto] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
+      onPointerDown={stopToolbarEvent}
+      onPointerUp={stopToolbarEvent}
+      onMouseDown={stopToolbarEvent}
+      onMouseUp={stopToolbarEvent}
+      onClick={stopToolbarEvent}
+    >
       <div className="min-h-0 px-2.5 pb-2.5 pt-2">
         <Textarea
           aria-label="Image generator prompt"
@@ -489,7 +504,15 @@ export function QuickEditPromptToolbar({
     setPrompt("");
   };
   return (
-    <div className="pointer-events-auto app-no-drag grid min-h-[138px] w-[min(520px,calc(100vw-3rem))] grid-rows-[1fr_auto] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+    <div
+      data-moodboard-toolbar
+      className="pointer-events-auto app-no-drag grid min-h-[138px] w-[min(520px,calc(100vw-3rem))] grid-rows-[1fr_auto] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
+      onPointerDown={stopToolbarEvent}
+      onPointerUp={stopToolbarEvent}
+      onMouseDown={stopToolbarEvent}
+      onMouseUp={stopToolbarEvent}
+      onClick={stopToolbarEvent}
+    >
       <div className="min-h-0 px-2.5 pb-2.5 pt-2">
         <Textarea
           aria-label="Quick edit prompt"

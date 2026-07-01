@@ -407,7 +407,6 @@ function FloatingCanvasSurface({
   const anchorRef = useRef(anchor);
   const layoutRef = useRef<FloatingLayoutSnapshot | null>(null);
   const updateRef = useRef<((reason?: FloatingPositionReason) => void) | null>(null);
-  const selectedKey = [...selectedIds].sort().join("\u0000");
   const anchorKey = floatingRectKey(anchor);
   selectedIdsRef.current = selectedIds;
   anchorRef.current = anchor;
@@ -465,7 +464,7 @@ function FloatingCanvasSurface({
       updateRef.current = null;
       cleanup();
     };
-  }, [appRef, avoidOccluders, hostRef, placement, selectedKey]);
+  }, [appRef, avoidOccluders, hostRef, placement]);
 
   useLayoutEffect(() => {
     updateRef.current?.("viewport");
@@ -685,7 +684,7 @@ function resolveLiveFloatingTargetRect(
   const treeX = Number(tree?.x ?? 0) || 0;
   const treeY = Number(tree?.y ?? 0) || 0;
   const rects = frames.map((frame) => {
-    const rawBounds = frame.boxBounds ?? frame;
+    const rawBounds = hasUsableFloatingFrameBounds(frame) ? frame : frame.boxBounds ?? frame;
     if (!hasUsableFloatingFrameBounds(rawBounds)) return null;
     const bounds = normalizeFloatingFrameBounds(rawBounds);
     const left = treeX + bounds.x * scaleX;

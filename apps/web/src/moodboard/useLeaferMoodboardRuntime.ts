@@ -41,6 +41,8 @@ interface UseLeaferMoodboardRuntimeOptions {
   onFrameStateChange: (nodes: SaveMoodboardNodeInput[]) => void;
 }
 
+const FLOATING_TRACK_MS = 420;
+
 export function useLeaferMoodboardRuntime({
   nodes,
   selectedIds,
@@ -149,7 +151,7 @@ export function useLeaferMoodboardRuntime({
 
   const trackFloatingSelection = useCallback(() => {
     scheduleFloatingSelection();
-    floatingTrackUntilRef.current = Math.max(floatingTrackUntilRef.current, nowMs() + 180);
+    floatingTrackUntilRef.current = Math.max(floatingTrackUntilRef.current, nowMs() + FLOATING_TRACK_MS);
     if (floatingTrackRafRef.current != null) return;
     const tick = (time: number) => {
       floatingTrackRafRef.current = null;
@@ -232,7 +234,7 @@ export function useLeaferMoodboardRuntime({
   const selectInRuntime = useCallback((id: string | null) => selectIdsInRuntime(id ? [id] : []), [selectIdsInRuntime]);
 
   const refreshSelectionInRuntime = useCallback(
-    (ids = selectedIdsRef.current) => {
+    (ids = selectedIdsRef.current, options: { resetEditor?: boolean } = {}) => {
       const app: any = appRef.current;
       const editor = app?.editor;
       if (!editor) return;
@@ -259,9 +261,9 @@ export function useLeaferMoodboardRuntime({
         }
         scheduleFloatingSelection();
       };
-      refresh();
+      refresh(options.resetEditor === true);
       window.requestAnimationFrame(() => {
-        refresh();
+        refresh(options.resetEditor === true);
         window.setTimeout(() => refresh(true), 80);
         window.setTimeout(refresh, 200);
       });
@@ -298,7 +300,7 @@ export function useLeaferMoodboardRuntime({
       });
       app.tree?.forceUpdate?.();
       app.forceUpdate?.();
-      refreshSelectionInRuntime(idsToReselect);
+      refreshSelectionInRuntime(idsToReselect, { resetEditor: true });
     },
     [findFrame, refreshSelectionInRuntime],
   );
@@ -625,9 +627,9 @@ export function useLeaferMoodboardRuntime({
         tree.forceUpdate?.();
       }
       setZoom(clamped);
-      scheduleFloatingSelection();
+      trackFloatingSelection();
     },
-    [scheduleFloatingSelection],
+    [trackFloatingSelection],
   );
 
   const fitView = useCallback(() => {
@@ -659,8 +661,8 @@ export function useLeaferMoodboardRuntime({
     tree.y = container.clientHeight / 2 - centerY * nextScale;
     tree.forceUpdate?.();
     setZoom(nextScale);
-    scheduleFloatingSelection();
-  }, [changeZoom, scheduleFloatingSelection]);
+    trackFloatingSelection();
+  }, [changeZoom, trackFloatingSelection]);
 
   return {
     appRef,
@@ -693,7 +695,7 @@ function toggleSelectionId(ids: string[], id: string): string[] {
 
 function unionFrameBounds(frames: any[], key: "boxBounds" | "worldBoxBounds" = "worldBoxBounds"): { x: number; y: number; width: number; height: number } {
   const bounds = frames
-    .map((frame) => frame[key] ?? frame)
+    .map((frame) => (key === "boxBounds" && hasUsableFrameBounds(frame) ? frame : frame[key] ?? frame))
     .map((bound) => ({
       x: Number(bound?.x ?? 0),
       y: Number(bound?.y ?? 0),
@@ -705,4 +707,8 @@ function unionFrameBounds(frames: any[], key: "boxBounds" | "worldBoxBounds" = "
   const right = Math.max(...bounds.map((bound) => bound.x + bound.width));
   const bottom = Math.max(...bounds.map((bound) => bound.y + bound.height));
   return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function hasUsableFrameBounds(frame: any): boolean {
+  return [frame?.x, frame?.y, frame?.width, frame?.height].every((value) => Number.isFinite(Number(value)));
 }

@@ -1519,6 +1519,7 @@ test("MultiSelectionToolbar exposes batch node actions", () => {
   expect(screen.getByText("2 selected")).toBeInTheDocument();
   fireEvent.click(screen.getByLabelText("Duplicate selected"));
   fireEvent.click(screen.getByLabelText("Align selected"));
+  expect(screen.getByText("Align right").closest("[data-moodboard-toolbar]")).not.toBeNull();
   fireEvent.click(screen.getByText("Align left"));
   fireEvent.click(screen.getByLabelText("Arrange selected"));
   fireEvent.click(screen.getByLabelText("Delete selected"));
@@ -1569,6 +1570,45 @@ test("GeneratorPromptToolbar exposes a compact image model selector", () => {
   fireEvent.click(screen.getByLabelText("Image generation model"));
   fireEvent.click(screen.getByRole("button", { name: /gpt-image-2/ }));
   expect(onModelChange).toHaveBeenCalledWith("gpt-image-2");
+});
+
+test("GeneratorPromptToolbar keeps prompt interactions out of the canvas event layer", () => {
+  const onCanvasPointerDown = vi.fn();
+  const onCanvasClick = vi.fn();
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <div onPointerDown={onCanvasPointerDown} onClick={onCanvasClick}>
+      <GeneratorPromptToolbar
+        node={node}
+        busy={false}
+        models={["gpt-image-1"]}
+        model="gpt-image-1"
+        onModelChange={() => {}}
+        onPromptChange={() => {}}
+        onGenerate={async () => {}}
+      />
+    </div>,
+  );
+
+  fireEvent.pointerDown(screen.getByLabelText("Image generator prompt"));
+  fireEvent.click(screen.getByLabelText("Image generation model"));
+
+  expect(onCanvasPointerDown).not.toHaveBeenCalled();
+  expect(onCanvasClick).not.toHaveBeenCalled();
 });
 
 test("QuickEditPromptToolbar submits image variations with the selected model", async () => {
