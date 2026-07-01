@@ -124,6 +124,19 @@ test("eventClientPoint reads Leafer native event origins for context menus", () 
   expect(eventClientPoint({ origin: { clientX: 260, clientY: 144 }, clientX: 0, clientY: 0 })).toEqual({ x: 260, y: 144 });
 });
 
+test("eventClientPoint maps canvas page points to viewport coordinates when native client points are missing", () => {
+  expect(
+    eventClientPoint(
+      {
+        getPagePoint: () => ({ x: 100, y: 50 }),
+        x: 100,
+        y: 50,
+      },
+      { containerLeft: 10, containerTop: 20, tree: { x: 5, y: 7, scaleX: 2, scaleY: 3 } },
+    ),
+  ).toEqual({ x: 215, y: 177 });
+});
+
 test("nodeIdFromTarget reads reconciler node ids from parent data", () => {
   expect(nodeIdFromTarget({ data: { id: "n1" } })).toBe("n1");
   expect(nodeIdFromTarget({ parent: { data: { nodeId: "n2" } } })).toBe("n2");

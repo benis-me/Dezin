@@ -247,7 +247,11 @@ export function useLeaferMoodboardRuntime({
     };
     const handleMenu = (event: any) => {
       event?.preventDefault?.();
-      const client = eventClientPoint(event);
+      const containerRect = hostRef.current?.getBoundingClientRect();
+      const client = eventClientPoint(
+        event,
+        containerRect ? { containerLeft: containerRect.left, containerTop: containerRect.top, tree: app?.tree } : undefined,
+      );
       const point = eventCanvasPoint(event);
       const targetId = contextTargetIdFromEvent(event?.target, editor.target);
       if (targetId) {

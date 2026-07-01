@@ -53,6 +53,12 @@ export interface FloatingRectInput {
   world?: FloatingRectBounds | null;
 }
 
+export interface ClientPointFallback {
+  containerLeft: number;
+  containerTop: number;
+  tree?: { x?: number; y?: number; scale?: number; scaleX?: number; scaleY?: number };
+}
+
 export interface LeaferRuntime {
   app: any;
   layer: any;
@@ -329,12 +335,28 @@ export function contextTargetIdFromEvent(eventTarget: unknown, editorTarget: unk
   return nodeIdFromTarget(eventTarget) ?? nodeIdFromTarget(editorTarget);
 }
 
-export function eventClientPoint(event: any): { x: number; y: number } {
+export function eventClientPoint(event: any, fallback?: ClientPointFallback): { x: number; y: number } {
   const source = event?.origin ?? event?.nativeEvent ?? event?.event ?? event;
+  if (hasFiniteNumber(source?.clientX) && hasFiniteNumber(source?.clientY)) {
+    return { x: Number(source.clientX), y: Number(source.clientY) };
+  }
+  if (fallback && typeof event?.getPagePoint === "function") {
+    const point = event.getPagePoint();
+    const scaleX = Number(fallback.tree?.scaleX ?? fallback.tree?.scale ?? 1) || 1;
+    const scaleY = Number(fallback.tree?.scaleY ?? fallback.tree?.scale ?? 1) || 1;
+    return {
+      x: fallback.containerLeft + Number(fallback.tree?.x ?? 0) + Number(point?.x ?? 0) * scaleX,
+      y: fallback.containerTop + Number(fallback.tree?.y ?? 0) + Number(point?.y ?? 0) * scaleY,
+    };
+  }
   return {
-    x: Number(source?.clientX ?? source?.x ?? event?.clientX ?? event?.x ?? 0),
-    y: Number(source?.clientY ?? source?.y ?? event?.clientY ?? event?.y ?? 0),
+    x: Number(source?.x ?? event?.clientX ?? event?.x ?? 0),
+    y: Number(source?.y ?? event?.clientY ?? event?.y ?? 0),
   };
+}
+
+function hasFiniteNumber(value: unknown): boolean {
+  return Number.isFinite(Number(value));
 }
 
 export function eventCanvasPoint(event: any): { x: number; y: number } {
