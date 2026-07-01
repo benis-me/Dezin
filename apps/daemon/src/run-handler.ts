@@ -216,22 +216,24 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   });
 
   const brief = body.brief.trim();
-  const moodboardContext = buildProjectMoodboardContext({
-    store,
-    dataDir: deps.dataDir,
-    refs: normalizeProjectMoodboardRefs(body.moodboardRefs),
-    request: brief,
-  });
-  const visibleBrief = appendMoodboardReferenceLine(brief, moodboardContext.labels);
-  const agentBrief = moodboardContext.promptBlock ? `${visibleBrief}\n\n${moodboardContext.promptBlock}` : visibleBrief;
+  const moodboardRefs = normalizeProjectMoodboardRefs(body.moodboardRefs);
   // Prior turns in this conversation become the agent's chat context (captured before we add
   // the new user message). System/process records are excluded.
   const history = store
     .listMessages(conversation.id)
     .flatMap(messageToAgentTurn);
+  const run = store.createRun(project.id, conversation.id, targetVariantId);
+  const moodboardContext = buildProjectMoodboardContext({
+    store,
+    dataDir: deps.dataDir,
+    runId: run.id,
+    refs: moodboardRefs,
+    request: brief,
+  });
+  const visibleBrief = appendMoodboardReferenceLine(brief, moodboardContext.labels);
+  const agentBrief = moodboardContext.promptBlock ? `${visibleBrief}\n\n${moodboardContext.promptBlock}` : visibleBrief;
   const userMessage = store.addMessage(conversation.id, "user", visibleBrief);
-  const run = store.createRun(project.id, conversation.id, targetVariantId, userMessage.id);
-  store.updateRun(run.id, { status: "running" });
+  store.updateRun(run.id, { status: "running", userMessageId: userMessage.id });
 
   // Open the SSE stream + register the run with the broker. Events are buffered + persisted to
   // a per-run log so another client can reattach (after navigating away, or an app restart) and

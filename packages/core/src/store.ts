@@ -810,7 +810,7 @@ export class Store {
   updateRun(
     id: string,
     patch: Partial<
-      Pick<Run, "status" | "repairRounds" | "lintPassed" | "score" | "findings" | "finishedAt" | "assistantMessageId" | "commitHash">
+      Pick<Run, "status" | "repairRounds" | "lintPassed" | "score" | "findings" | "finishedAt" | "userMessageId" | "assistantMessageId" | "commitHash">
     >,
   ): Run {
     const cur = this.getRun(id);
@@ -822,12 +822,13 @@ export class Store {
       score: patch.score !== undefined ? patch.score : cur.score,
       findings: patch.findings !== undefined ? patch.findings : cur.findings,
       finishedAt: patch.finishedAt !== undefined ? patch.finishedAt : cur.finishedAt,
+      userMessageId: patch.userMessageId !== undefined ? patch.userMessageId : cur.userMessageId,
       assistantMessageId: patch.assistantMessageId !== undefined ? patch.assistantMessageId : cur.assistantMessageId,
       commitHash: patch.commitHash !== undefined ? patch.commitHash : cur.commitHash,
     };
     this.db
       .prepare(
-        `UPDATE runs SET status = ?, repair_rounds = ?, lint_passed = ?, score = ?, final_findings = ?, finished_at = ?, assistant_message_id = ?, commit_hash = ? WHERE id = ?`,
+        `UPDATE runs SET status = ?, repair_rounds = ?, lint_passed = ?, score = ?, final_findings = ?, finished_at = ?, user_message_id = ?, assistant_message_id = ?, commit_hash = ? WHERE id = ?`,
       )
       .run(
         next.status,
@@ -836,6 +837,7 @@ export class Store {
         next.score,
         JSON.stringify(next.findings),
         next.finishedAt,
+        next.userMessageId,
         next.assistantMessageId,
         next.commitHash,
         id,
