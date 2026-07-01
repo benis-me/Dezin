@@ -6,6 +6,7 @@ import {
   isNodeLocked,
   isNodeVisible,
   isEditableShortcutTarget,
+  isResetZoomShortcut,
   isTemporaryHandShortcut,
   localId,
   MOODBOARD_LAYERS_OPEN_KEY,
@@ -690,7 +691,7 @@ export function useMoodboardCanvasController({
           duplicateNodes(selectedIdsRef.current);
           return;
         }
-        if (event.key === "0") {
+        if (isResetZoomShortcut(event)) {
           event.preventDefault();
           changeZoom(1);
           return;

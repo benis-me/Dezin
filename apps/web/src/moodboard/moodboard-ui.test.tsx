@@ -16,6 +16,7 @@ import {
   generatorModel,
   getFloatingChromeSafeRect,
   isEditableShortcutTarget,
+  isResetZoomShortcut,
   isTemporaryHandShortcut,
   readInitialLayersOpen,
   moveContainedNodesWithSections,
@@ -568,6 +569,13 @@ test("temporary hand shortcut only uses bare space", () => {
   expect(isTemporaryHandShortcut({ key: " ", metaKey: true, ctrlKey: false, altKey: false })).toBe(false);
   expect(isTemporaryHandShortcut({ key: " ", metaKey: false, ctrlKey: true, altKey: false })).toBe(false);
   expect(isTemporaryHandShortcut({ key: " ", metaKey: false, ctrlKey: false, altKey: true })).toBe(false);
+});
+
+test("reset zoom shortcut accepts zero and Awen-style nine variants", () => {
+  expect(isResetZoomShortcut({ key: "0", metaKey: true, ctrlKey: false })).toBe(true);
+  expect(isResetZoomShortcut({ key: "9", metaKey: false, ctrlKey: true })).toBe(true);
+  expect(isResetZoomShortcut({ key: "1", metaKey: true, ctrlKey: false })).toBe(false);
+  expect(isResetZoomShortcut({ key: "9", metaKey: false, ctrlKey: false })).toBe(false);
 });
 
 test("createSectionNode keeps dragged section dimensions", () => {

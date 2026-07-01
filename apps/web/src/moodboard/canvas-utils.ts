@@ -236,6 +236,10 @@ export function isTemporaryHandShortcut(event: Pick<KeyboardEvent, "key" | "meta
   return event.key === " " && !event.metaKey && !event.ctrlKey && !event.altKey;
 }
 
+export function isResetZoomShortcut(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey">): boolean {
+  return (event.metaKey || event.ctrlKey) && (event.key === "0" || event.key === "9");
+}
+
 function hasEditableShortcutAncestor(element: HTMLElement): boolean {
   for (let current: HTMLElement | null = element; current; current = current.parentElement) {
     const contentEditable = current.getAttribute("contenteditable");

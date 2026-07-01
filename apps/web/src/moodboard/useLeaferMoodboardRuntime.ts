@@ -73,6 +73,8 @@ export function useLeaferMoodboardRuntime({
   const transformingRef = useRef(false);
   const floatingRectRef = useRef<FloatingRect | null>(null);
   const floatingRafRef = useRef<number | null>(null);
+  const floatingTrackRafRef = useRef<number | null>(null);
+  const floatingTrackUntilRef = useRef(0);
   const callbacksRef = useRef({ onSelectIds, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange });
 
   useEffect(() => {
@@ -144,6 +146,19 @@ export function useLeaferMoodboardRuntime({
       updateFloatingSelection();
     });
   }, [updateFloatingSelection]);
+
+  const trackFloatingSelection = useCallback(() => {
+    scheduleFloatingSelection();
+    floatingTrackUntilRef.current = Math.max(floatingTrackUntilRef.current, nowMs() + 180);
+    if (floatingTrackRafRef.current != null) return;
+    const tick = (time: number) => {
+      floatingTrackRafRef.current = null;
+      if (time > floatingTrackUntilRef.current) return;
+      scheduleFloatingSelection();
+      floatingTrackRafRef.current = window.requestAnimationFrame(tick);
+    };
+    floatingTrackRafRef.current = window.requestAnimationFrame(tick);
+  }, [scheduleFloatingSelection]);
 
   const startTransforming = useCallback(() => {
     if (transformingRef.current) return;
@@ -380,6 +395,10 @@ export function useLeaferMoodboardRuntime({
         window.cancelAnimationFrame(floatingRafRef.current);
         floatingRafRef.current = null;
       }
+      if (floatingTrackRafRef.current != null) {
+        window.cancelAnimationFrame(floatingTrackRafRef.current);
+        floatingTrackRafRef.current = null;
+      }
     };
   }, []);
 
@@ -394,11 +413,12 @@ export function useLeaferMoodboardRuntime({
       scheduleFloatingSelection();
     };
     const syncFloatingOnly = () => scheduleFloatingSelection();
+    const trackFloatingOnly = () => trackFloatingSelection();
     const syncDuringViewportTransform = () => {
       startTransforming();
       const scale = Number(app.tree?.scaleX ?? app.tree?.scale ?? 1);
       if (Number.isFinite(scale)) setZoom(scale);
-      scheduleFloatingSelection();
+      trackFloatingSelection();
     };
     const syncAfterNodeTransform = () => {
       finishTransforming();
@@ -411,7 +431,7 @@ export function useLeaferMoodboardRuntime({
       finishTransforming();
       const scale = Number(app.tree?.scaleX ?? app.tree?.scale ?? 1);
       if (Number.isFinite(scale)) setZoom(scale);
-      scheduleFloatingSelection();
+      trackFloatingSelection();
     };
     const selectFromTarget = (target: unknown, event?: any) => {
       const targetId = nodeIdFromTarget(target);
@@ -487,7 +507,7 @@ export function useLeaferMoodboardRuntime({
         return;
       }
       startTransforming();
-      scheduleFloatingSelection();
+      trackFloatingSelection();
     };
     const handleDragEnd = (event: any) => {
       const point = eventCanvasPoint(event);
@@ -511,11 +531,11 @@ export function useLeaferMoodboardRuntime({
     };
     const handleZoomStart = () => {
       startTransforming();
-      scheduleFloatingSelection();
+      trackFloatingSelection();
     };
     const handleEditorTransform = () => {
       startTransforming();
-      scheduleFloatingSelection();
+      trackFloatingSelection();
     };
 
     app.on(PointerEvent.TAP, handleTap);
@@ -528,8 +548,8 @@ export function useLeaferMoodboardRuntime({
     app.on(ZoomEvent.START, handleZoomStart);
     app.on(ZoomEvent.ZOOM, syncDuringViewportTransform);
     app.on(ZoomEvent.END, syncAfterViewportTransform);
-    app.tree?.on?.(PropertyEvent.LEAFER_CHANGE, syncFloatingOnly);
-    app.tree?.on?.("move", syncFloatingOnly);
+    app.tree?.on?.(PropertyEvent.LEAFER_CHANGE, trackFloatingOnly);
+    app.tree?.on?.("move", trackFloatingOnly);
     app.tree?.on?.("move.end", syncAfterViewportTransform);
     editor.on(EditorEvent.SELECT, syncSelectedFromEditor);
     editor.on(EditorEvent.HOVER, syncFloatingOnly);
@@ -548,8 +568,8 @@ export function useLeaferMoodboardRuntime({
       app.off(ZoomEvent.START, handleZoomStart);
       app.off(ZoomEvent.ZOOM, syncDuringViewportTransform);
       app.off(ZoomEvent.END, syncAfterViewportTransform);
-      app.tree?.off?.(PropertyEvent.LEAFER_CHANGE, syncFloatingOnly);
-      app.tree?.off?.("move", syncFloatingOnly);
+      app.tree?.off?.(PropertyEvent.LEAFER_CHANGE, trackFloatingOnly);
+      app.tree?.off?.("move", trackFloatingOnly);
       app.tree?.off?.("move.end", syncAfterViewportTransform);
       editor.off(EditorEvent.SELECT, syncSelectedFromEditor);
       editor.off(EditorEvent.HOVER, syncFloatingOnly);
@@ -557,7 +577,7 @@ export function useLeaferMoodboardRuntime({
       editor.off(EditorScaleEvent.SCALE, handleEditorTransform);
       editor.off(EditorRotateEvent.ROTATE, handleEditorTransform);
     };
-  }, [commitSelectedIdsFromRuntime, finishTransforming, flushFrameState, runtimeReady, scheduleFloatingSelection, selectIdsInRuntime, startTransforming, toViewportDraftRect]);
+  }, [commitSelectedIdsFromRuntime, finishTransforming, flushFrameState, runtimeReady, scheduleFloatingSelection, selectIdsInRuntime, startTransforming, toViewportDraftRect, trackFloatingSelection]);
 
   useEffect(() => {
     selectIdsInRuntime(selectedIds);
@@ -661,6 +681,10 @@ export function useLeaferMoodboardRuntime({
     hoverInRuntime,
     getLastCanvasPoint,
   };
+}
+
+function nowMs(): number {
+  return window.performance?.now?.() ?? Date.now();
 }
 
 function toggleSelectionId(ids: string[], id: string): string[] {
