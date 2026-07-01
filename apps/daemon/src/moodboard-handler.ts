@@ -1,9 +1,16 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
-import type { Moodboard, MoodboardAsset, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
+import type { Moodboard, MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
 import { requestImage } from "./image-gen.ts";
-import { buildMoodboardAgentPrompt, clippedBlock, localMoodboardReply, runMoodboardAgentText } from "./moodboard-agent.ts";
+import {
+  buildMoodboardAgentPrompt,
+  clippedBlock,
+  localMoodboardReply,
+  parseMoodboardAgentOutput,
+  runMoodboardAgentText,
+  type MoodboardAgentCanvasOperation,
+} from "./moodboard-agent.ts";
 import type { AppDeps } from "./app.ts";
 import { readJsonBody, send, sendError, sendJson } from "./http-util.ts";
 
@@ -75,6 +82,106 @@ function validNode(input: unknown): SaveMoodboardNodeInput | null {
     zIndex: numberValue(node.zIndex, 0),
     data: asObject(node.data),
   };
+}
+
+function finiteNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function textValue(value: unknown, fallback: string, max = 2000): string {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, max) : fallback;
+}
+
+function nodeInput(node: MoodboardNode): SaveMoodboardNodeInput {
+  return {
+    id: node.id,
+    type: node.type,
+    x: node.x,
+    y: node.y,
+    width: node.width,
+    height: node.height,
+    rotation: node.rotation,
+    zIndex: node.zIndex,
+    data: node.data,
+  };
+}
+
+function sized(value: unknown, fallback: number): number {
+  return Math.max(40, finiteNumber(value, fallback));
+}
+
+function position(value: unknown, fallback: number): number {
+  return Math.round(finiteNumber(value, fallback));
+}
+
+function applyMoodboardAgentOperations(nodes: MoodboardNode[], operations: MoodboardAgentCanvasOperation[]): SaveMoodboardNodeInput[] {
+  if (!operations.length) return nodes.map(nodeInput);
+  const inputs = nodes.map(nodeInput);
+  const indexById = new Map(inputs.map((node, index) => [node.id, index]));
+  const maxZ = Math.max(0, ...nodes.map((node) => node.zIndex ?? 0));
+  let addCount = 0;
+
+  for (const operation of operations) {
+    const fallbackX = 120 + (nodes.length + addCount) * 24;
+    const fallbackY = 120 + (nodes.length + addCount) * 24;
+    if (operation.type === "add_note") {
+      inputs.push({
+        type: "note",
+        x: position(operation.x, fallbackX),
+        y: position(operation.y, fallbackY),
+        width: sized(operation.width, 220),
+        height: sized(operation.height, 140),
+        zIndex: maxZ + addCount + 1,
+        data: { ...(operation.data ?? {}), content: textValue(operation.content, "New note") },
+      });
+      addCount++;
+      continue;
+    }
+    if (operation.type === "add_section") {
+      inputs.push({
+        type: "section",
+        x: position(operation.x, fallbackX),
+        y: position(operation.y, fallbackY),
+        width: sized(operation.width, 460),
+        height: sized(operation.height, 300),
+        zIndex: maxZ + addCount + 1,
+        data: { ...(operation.data ?? {}), title: textValue(operation.title, "Section", 400) },
+      });
+      addCount++;
+      continue;
+    }
+    if (operation.type === "add_image_generator") {
+      const prompt = textValue(operation.prompt, "", 2000);
+      inputs.push({
+        type: "image-generator",
+        x: position(operation.x, fallbackX),
+        y: position(operation.y, fallbackY),
+        width: sized(operation.width, 360),
+        height: sized(operation.height, 240),
+        zIndex: maxZ + addCount + 1,
+        data: { ...(operation.data ?? {}), generatorPrompt: prompt, generatorStatus: "ready" },
+      });
+      addCount++;
+      continue;
+    }
+    if (operation.type === "update_node") {
+      const index = indexById.get(operation.id);
+      if (index == null) continue;
+      const current = inputs[index]!;
+      inputs[index] = {
+        ...current,
+        x: operation.x === undefined ? current.x : position(operation.x, current.x),
+        y: operation.y === undefined ? current.y : position(operation.y, current.y),
+        width: operation.width === undefined ? current.width : sized(operation.width, current.width),
+        height: operation.height === undefined ? current.height : sized(operation.height, current.height),
+        rotation: operation.rotation === undefined ? current.rotation : finiteNumber(operation.rotation, current.rotation ?? 0),
+        zIndex: operation.zIndex === undefined ? current.zIndex : finiteNumber(operation.zIndex, current.zIndex ?? 0),
+        data: { ...(current.data ?? {}), ...(operation.data ?? {}) },
+      };
+    }
+  }
+
+  return inputs;
 }
 
 export function handleListMoodboards(res: ServerResponse, { store }: AppDeps): void {
@@ -186,8 +293,12 @@ export async function handlePostMoodboardMessage(
       assistantText = `${assistantText}\n\nAgent note: ${agentCommand} could not respond (${clippedBlock(reason, 180)}).`;
     }
   }
-  const assistant = store.addMoodboardMessage(id!, "assistant", clippedBlock(assistantText));
-  sendJson(res, 201, { messages: [user, assistant] });
+  const parsed = parseMoodboardAgentOutput(assistantText);
+  const savedNodes = parsed.operations.length
+    ? store.replaceMoodboardNodes(id!, applyMoodboardAgentOperations(nodes, parsed.operations))
+    : undefined;
+  const assistant = store.addMoodboardMessage(id!, "assistant", clippedBlock(parsed.text || "Updated the moodboard."));
+  sendJson(res, 201, { messages: [user, assistant], ...(savedNodes ? { nodes: savedNodes } : {}) });
 }
 
 export async function handleUploadMoodboardAsset(

@@ -16,6 +16,51 @@ export interface MoodboardAgentTextInput {
 
 export type MoodboardAgentTextRunner = (input: MoodboardAgentTextInput) => Promise<string>;
 
+export type MoodboardAgentCanvasOperation =
+  | {
+      type: "add_note";
+      content?: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      data?: Record<string, unknown>;
+    }
+  | {
+      type: "add_section";
+      title?: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      data?: Record<string, unknown>;
+    }
+  | {
+      type: "add_image_generator";
+      prompt?: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      data?: Record<string, unknown>;
+    }
+  | {
+      type: "update_node";
+      id: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      rotation?: number;
+      zIndex?: number;
+      data?: Record<string, unknown>;
+    };
+
+export interface MoodboardAgentParsedOutput {
+  text: string;
+  operations: MoodboardAgentCanvasOperation[];
+}
+
 function clipped(value: string, max = 700): string {
   const text = value.replace(/\s+/g, " ").trim();
   return text.length > max ? `${text.slice(0, max - 1)}...` : text;
@@ -202,8 +247,11 @@ export function buildMoodboardAgentPrompt(input: {
   const history = budgetHistory(input.messages);
   return [
     "You are the Moodboard Agent inside Dezin.",
-    "Understand the current canvas and answer the user's latest request with concrete design direction or canvas operation guidance.",
-    "Do not create, edit, or write files. Return concise assistant text only.",
+    "Understand the current canvas and answer the user's latest request with concrete design direction. When useful, request canvas mutations through the Dezin operation block described below.",
+    "Do not create, edit, or write files. Do not claim you placed items unless you include a valid operation block.",
+    "If you need to modify the board, append one fenced block named dezin_moodboard_ops containing JSON only. The user will not see this block.",
+    'Allowed operations: [{"type":"add_note","content":"...","x":120,"y":140}, {"type":"add_section","title":"...","x":80,"y":80,"width":520,"height":320}, {"type":"add_image_generator","prompt":"...","x":160,"y":160}, {"type":"update_node","id":"existing-node-id","data":{"content":"..."}}].',
+    "Use at most 12 operations. Keep user-visible assistant text concise and separate from the operation block.",
     "If the user asks for new image/video material, suggest using an image generator node with a specific prompt. Do not fake photographic assets with SVG or DOM.",
     "The prompt includes a budgeted working set, not the full canvas. If the shown summaries are insufficient, read the structured context file before answering.",
     `Board: ${input.board.name} (${input.board.id})`,
@@ -220,6 +268,112 @@ export function buildMoodboardAgentPrompt(input: {
     "",
     `Latest user request:\n${input.content}`,
   ].join("\n");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function stringField(value: unknown, max = 1200): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text ? text.slice(0, max) : undefined;
+}
+
+function numberField(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function dataField(value: unknown): Record<string, unknown> | undefined {
+  const data = asRecord(value);
+  if (!data) return undefined;
+  return Object.fromEntries(Object.entries(data).filter(([key]) => typeof key === "string" && key.length <= 80));
+}
+
+function operationFromRecord(value: unknown): MoodboardAgentCanvasOperation | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const type = record.type;
+  if (type === "add_note") {
+    return {
+      type,
+      content: stringField(record.content),
+      x: numberField(record.x),
+      y: numberField(record.y),
+      width: numberField(record.width),
+      height: numberField(record.height),
+      data: dataField(record.data),
+    };
+  }
+  if (type === "add_section") {
+    return {
+      type,
+      title: stringField(record.title),
+      x: numberField(record.x),
+      y: numberField(record.y),
+      width: numberField(record.width),
+      height: numberField(record.height),
+      data: dataField(record.data),
+    };
+  }
+  if (type === "add_image_generator") {
+    return {
+      type,
+      prompt: stringField(record.prompt, 2000),
+      x: numberField(record.x),
+      y: numberField(record.y),
+      width: numberField(record.width),
+      height: numberField(record.height),
+      data: dataField(record.data),
+    };
+  }
+  if (type === "update_node") {
+    const id = stringField(record.id, 160);
+    if (!id) return null;
+    return {
+      type,
+      id,
+      x: numberField(record.x),
+      y: numberField(record.y),
+      width: numberField(record.width),
+      height: numberField(record.height),
+      rotation: numberField(record.rotation),
+      zIndex: numberField(record.zIndex),
+      data: dataField(record.data),
+    };
+  }
+  return null;
+}
+
+function operationsFromJson(raw: string): MoodboardAgentCanvasOperation[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const value = Array.isArray(parsed) ? parsed : asRecord(parsed)?.operations;
+    if (!Array.isArray(value)) return [];
+    return value.map(operationFromRecord).filter((op): op is MoodboardAgentCanvasOperation => Boolean(op)).slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+export function parseMoodboardAgentOutput(output: string): MoodboardAgentParsedOutput {
+  const operations: MoodboardAgentCanvasOperation[] = [];
+  let text = output.replace(/```(?:dezin_moodboard_ops|moodboard_ops)\s*([\s\S]*?)```/gi, (_match, raw: string) => {
+    operations.push(...operationsFromJson(raw.trim()));
+    return "";
+  });
+
+  text = text.replace(/```json\s*([\s\S]*?)```/gi, (match, raw: string) => {
+    const parsed = operationsFromJson(raw.trim());
+    if (!parsed.length) return match;
+    operations.push(...parsed);
+    return "";
+  });
+
+  return {
+    text: clippedBlock(text),
+    operations: operations.slice(0, 12),
+  };
 }
 
 function spawnMoodboardAgentText(command: string, args: string[], cwd: string, timeoutMs: number): Promise<string> {

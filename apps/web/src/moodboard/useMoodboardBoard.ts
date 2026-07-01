@@ -187,6 +187,7 @@ export function useMoodboardBoard(boardId: string) {
       setBusy(true);
       try {
         const result = await api.postMoodboardMessage(boardId, content, { agentCommand: runAgent || undefined, model: runModel || undefined });
+        if (result.nodes) setNodes(result.nodes);
         setMessages((cur) => [...cur, ...result.messages]);
       } catch {
         toast("Couldn't send that message.", { variant: "error" });

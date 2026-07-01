@@ -362,7 +362,7 @@ export interface ApiClient {
   listMoodboardNodes(id: string): Promise<MoodboardNode[]>;
   saveMoodboardNodes(id: string, nodes: SaveMoodboardNodeInput[]): Promise<MoodboardNode[]>;
   listMoodboardMessages(id: string): Promise<MoodboardMessage[]>;
-  postMoodboardMessage(id: string, content: string, options?: { agentCommand?: string; model?: string }): Promise<{ messages: MoodboardMessage[] }>;
+  postMoodboardMessage(id: string, content: string, options?: { agentCommand?: string; model?: string }): Promise<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>;
   uploadMoodboardAsset(
     id: string,
     input: { name: string; contentBase64: string; mimeType?: string; width?: number; height?: number },
@@ -569,7 +569,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     saveMoodboardNodes: (id, nodes) => json<MoodboardNode[]>(`/api/moodboards/${enc(id)}/nodes`, jsonInit("PUT", { nodes })),
     listMoodboardMessages: (id) => json<MoodboardMessage[]>(`/api/moodboards/${enc(id)}/messages`),
     postMoodboardMessage: (id, content, options) =>
-      json<{ messages: MoodboardMessage[] }>(`/api/moodboards/${enc(id)}/messages`, jsonInit("POST", { content, ...options })),
+      json<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>(`/api/moodboards/${enc(id)}/messages`, jsonInit("POST", { content, ...options })),
     uploadMoodboardAsset: (id, input) =>
       json<MoodboardAsset & { url: string }>(`/api/moodboards/${enc(id)}/assets`, jsonInit("POST", input)),
     generateMoodboardImage: (id, prompt, options) =>

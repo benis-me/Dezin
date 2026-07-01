@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, matchPath, safeJoin } from "../src/index.ts";
 import type { AppDeps } from "../src/index.ts";
-import { buildMoodboardAgentPrompt } from "../src/moodboard-agent.ts";
+import { buildMoodboardAgentPrompt, parseMoodboardAgentOutput } from "../src/moodboard-agent.ts";
 import { injectSelectBridge } from "../src/serve-static.ts";
 
 interface Ctx {
@@ -213,6 +213,55 @@ test("moodboard messages invoke the selected agent with canvas context", async (
   assert.match(captured.prompt, /Previous direction/);
   assert.match(captured.prompt, /Latest user request:\nUse warmer references/);
   assert.equal((captured.prompt.match(/Use warmer references/g) ?? []).length, 1);
+});
+
+test("moodboard agent output parser strips canvas operation blocks", () => {
+  const parsed = parseMoodboardAgentOutput(`Added a note.
+
+\`\`\`dezin_moodboard_ops
+[{"type":"add_note","content":"Warm material cue","x":120,"y":140}]
+\`\`\``);
+
+  assert.equal(parsed.text, "Added a note.");
+  assert.equal(parsed.operations.length, 1);
+  assert.equal(parsed.operations[0]?.type, "add_note");
+  assert.equal(parsed.operations[0]?.content, "Warm material cue");
+  assert.equal(parsed.operations[0]?.x, 120);
+  assert.equal(parsed.operations[0]?.y, 140);
+});
+
+test("moodboard messages apply agent canvas operations", async () => {
+  await withServer(
+    async ({ base, store }) => {
+      const board = store.createMoodboard({ name: "Material board" });
+      const res = await fetch(`${base}/api/moodboards/${board.id}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "Add a material cue", agentCommand: "codex" }),
+      });
+
+      assert.equal(res.status, 201);
+      const body = (await res.json()) as {
+        messages: Array<{ role: string; content: string }>;
+        nodes?: Array<{ type: string; x: number; y: number; data: Record<string, unknown> }>;
+      };
+      assert.equal(body.messages[1]?.content, "Added a note.");
+      assert.doesNotMatch(body.messages[1]?.content ?? "", /dezin_moodboard_ops/);
+      assert.equal(body.nodes?.length, 1);
+      assert.equal(body.nodes?.[0]?.type, "note");
+      assert.equal(body.nodes?.[0]?.x, 120);
+      assert.equal(body.nodes?.[0]?.y, 140);
+      assert.equal(body.nodes?.[0]?.data.content, "Warm material cue");
+      assert.equal(store.listMoodboardNodes(board.id).length, 1);
+    },
+    {
+      moodboardAgentText: async () => `Added a note.
+
+\`\`\`dezin_moodboard_ops
+[{"type":"add_note","content":"Warm material cue","x":120,"y":140}]
+\`\`\``,
+    },
+  );
 });
 
 test("moodboard agent prompt uses a budgeted working set with full context path", () => {
