@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, ChevronLeft, Loader2, Sparkles } from "lucide-react";
+import { ArrowUp, ChevronLeft, Copy, Loader2, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
-import { IconButton, Textarea, TooltipProvider } from "../components/ui/index.ts";
-import { cn } from "../lib/utils.ts";
+import { Markdown } from "../components/Markdown.tsx";
+import { IconButton, Textarea, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 
 export function MoodboardAgentPanel({
   boardName,
@@ -56,6 +56,14 @@ export function MoodboardAgentPanel({
     await onSend(content);
   };
 
+  const copyMessage = async (content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      /* Clipboard can be unavailable in local webviews. */
+    }
+  };
+
   return (
     <aside className="relative flex h-full min-w-0 flex-col bg-sidebar">
       <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
@@ -97,18 +105,7 @@ export function MoodboardAgentPanel({
         ) : (
           <div className="space-y-3">
             {messages.map((message) => (
-              <div key={message.id} className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}>
-                <div
-                  className={cn(
-                    "max-w-[88%] rounded-lg border px-3 py-2 text-sm leading-relaxed",
-                    message.role === "user"
-                      ? "border-primary bg-primary text-primary-foreground"
-                      : "border-border bg-background text-foreground",
-                  )}
-                >
-                  {message.content}
-                </div>
-              </div>
+              <MoodboardMessageRow key={message.id} message={message} busy={busy} onCopy={(content) => void copyMessage(content)} />
             ))}
             {busy ? (
               <div className="flex justify-start">
@@ -164,5 +161,47 @@ export function MoodboardAgentPanel({
         </div>
       </div>
     </aside>
+  );
+}
+
+function MoodboardMessageRow({
+  message,
+  busy,
+  onCopy,
+}: {
+  message: MoodboardMessage;
+  busy: boolean;
+  onCopy: (content: string) => void;
+}) {
+  if (message.role === "user") {
+    return (
+      <div className="flex flex-col items-end gap-1.5">
+        <span className="dz-selectable max-w-[88%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground">
+          {message.content}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group/moodboard-assistant -mx-2 rounded-xl px-2 py-1">
+      <div data-message-kind="assistant" className="dz-selectable text-sm leading-relaxed text-foreground">
+        <Markdown>{message.content}</Markdown>
+      </div>
+      {!busy ? (
+        <TooltipProvider delayDuration={120}>
+          <div className="mt-1 flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover/moodboard-assistant:opacity-100 focus-within:opacity-100">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <IconButton aria-label="Copy message" className="h-7 w-7 rounded-md" onClick={() => onCopy(message.content)}>
+                  <Copy size={13} strokeWidth={1.8} />
+                </IconButton>
+              </TooltipTrigger>
+              <TooltipContent sideOffset={2}>Copy</TooltipContent>
+            </Tooltip>
+          </div>
+        </TooltipProvider>
+      ) : null}
+    </div>
   );
 }

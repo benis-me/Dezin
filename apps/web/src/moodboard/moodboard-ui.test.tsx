@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MoodboardNode } from "../lib/api.ts";
+import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
 import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
@@ -317,6 +318,37 @@ test("MoodboardPropertiesPanel exposes object identity and state controls", () =
   expect(onPatchData).toHaveBeenCalledWith({ name: "Material cue" });
   expect(onPatchData).toHaveBeenCalledWith({ visible: false });
   expect(onPatchData).toHaveBeenCalledWith({ locked: true });
+});
+
+test("MoodboardAgentPanel renders project-style assistant messages with copy actions", () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+  render(
+    <MoodboardAgentPanel
+      boardName="Material board"
+      messages={[
+        { id: "u1", boardId: "b1", role: "user", content: "Collect warm references", createdAt: 1 },
+        { id: "a1", boardId: "b1", role: "assistant", content: "**Bold direction**\n\nUse warmer texture.", createdAt: 2 },
+      ]}
+      busy={false}
+      agents={[]}
+      agent=""
+      model=""
+      onBack={() => {}}
+      onAgentChange={() => {}}
+      onModelChange={() => {}}
+      onRescanAgents={async () => {}}
+      onSend={async () => {}}
+    />,
+  );
+
+  expect(screen.getByText("Collect warm references")).toBeInTheDocument();
+  expect(screen.getByText("Bold direction")).toBeInTheDocument();
+  expect(screen.getByText("Use warmer texture.")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByLabelText("Copy message"));
+  expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
 });
 
 test("MoodboardPropertiesPanel shows concrete layout values", () => {
