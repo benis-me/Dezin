@@ -22,7 +22,7 @@ export function MoodboardCanvasNode({ node, onSelect }: { node: MoodboardNode; o
     <Frame
       id={node.id}
       name={nodeLabel(node)}
-      className="MoodboardNode"
+      className="Node"
       x={node.x}
       y={node.y}
       width={node.width}

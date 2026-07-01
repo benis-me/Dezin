@@ -21,6 +21,7 @@ import {
   resolveFloatingRect,
   sameFloatingRect,
 } from "./canvas-utils.ts";
+import { createSnapLines, createSnapPointsFromBounds, resolveSnapDeltas } from "./leafer-adapter/snap-geometry.ts";
 import { createSectionNode } from "./moodboard-board-utils.ts";
 
 beforeEach(() => {
@@ -213,6 +214,13 @@ test("resolveFloatingChromeRect avoids floating canvas panels", () => {
 
 test("normalizeCanvasRect turns drag endpoints into a positive drawing rect", () => {
   expect(normalizeCanvasRect({ x: 320, y: 220 }, { x: 120, y: 90 })).toEqual({ x: 120, y: 90, width: 200, height: 130 });
+});
+
+test("Awen snap geometry resolves the nearest axis delta for moodboard nodes", () => {
+  const candidates = createSnapPointsFromBounds({ x: 100, y: 80, width: 160, height: 120 }, "candidate");
+  const target = createSnapPointsFromBounds({ x: 263, y: 230, width: 80, height: 60 }, "target");
+
+  expect(resolveSnapDeltas({ targetPoints: target, snapLines: createSnapLines(candidates), threshold: 6 }).x?.delta).toBe(-3);
 });
 
 test("sameFloatingRect ignores subpixel jitter during drag", () => {

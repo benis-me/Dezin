@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DragEvent, EditorEvent, EditorMoveEvent, EditorRotateEvent, EditorScaleEvent, PointerEvent, PropertyEvent, ZoomEvent, type App } from "leafer-editor";
 import { ViewportLighter } from "@dezin/leafer-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import { CanvasSnap } from "./leafer-adapter/snap.ts";
 import {
   contextTargetIdFromEvent,
   eventCanvasPoint,
@@ -56,6 +57,7 @@ export function useLeaferMoodboardRuntime({
   const layerRef = useRef<any>(null);
   const viewportLighterRef = useRef<ViewportLighter | null>(null);
   const scrollBarRef = useRef<ScrollBar | null>(null);
+  const snapRef = useRef<CanvasSnap | null>(null);
   const nodesRef = useRef(nodes);
   const selectedIdRef = useRef(selectedId);
   const toolRef = useRef(tool);
@@ -201,6 +203,21 @@ export function useLeaferMoodboardRuntime({
   const handleLayerCreated = useCallback(
     (layer: any) => {
       layerRef.current = layer;
+      const app = appRef.current;
+      if (app) {
+        try {
+          snapRef.current?.enable(false);
+          snapRef.current?.destroy();
+          snapRef.current = new CanvasSnap(app, {
+            parentContainer: layer,
+            lineColor: "rgba(48, 112, 255, 0.76)",
+            strokeWidth: 1,
+          });
+          snapRef.current.enable(true);
+        } catch {
+          snapRef.current = null;
+        }
+      }
       setRuntimeReady(true);
       selectInRuntime(selectedIdRef.current);
       scheduleFloatingSelection();
@@ -214,6 +231,9 @@ export function useLeaferMoodboardRuntime({
       viewportLighterRef.current = null;
       scrollBarRef.current?.destroy();
       scrollBarRef.current = null;
+      snapRef.current?.enable(false);
+      snapRef.current?.destroy();
+      snapRef.current = null;
       appRef.current = null;
       layerRef.current = null;
       setRuntimeReady(false);
