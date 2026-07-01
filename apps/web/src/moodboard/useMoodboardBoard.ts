@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentInfo, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -26,7 +26,7 @@ export function useMoodboardBoard(boardId: string) {
   const [runModel, setRunModel] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  const [, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const saveTimer = useRef<number | null>(null);
 
   const load = useCallback(() => {
@@ -209,12 +209,6 @@ export function useMoodboardBoard(boardId: string) {
     setRunAgent((current) => current || available[0]?.command || "");
   }, [api]);
 
-  const saveLabel = useMemo(() => {
-    if (saveState === "saving") return "Saving...";
-    if (saveState === "error") return "Save failed";
-    return "Saved";
-  }, [saveState]);
-
   return {
     detail,
     nodes,
@@ -225,7 +219,6 @@ export function useMoodboardBoard(boardId: string) {
     runModel,
     loading,
     busy,
-    saveLabel,
     setSelectedId,
     setRunAgent,
     setRunModel,

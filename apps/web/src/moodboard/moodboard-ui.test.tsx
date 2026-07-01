@@ -4,6 +4,7 @@ import type { MoodboardNode } from "../lib/api.ts";
 import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
+import { eventClientPoint } from "./canvas-utils.ts";
 
 beforeEach(() => {
   localStorage.clear();
@@ -102,6 +103,10 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
   expect(screen.queryByText("Add note here")).toBeNull();
   expect(screen.queryByText("Add image generator here")).toBeNull();
   expect(screen.getByText("View")).toBeInTheDocument();
+});
+
+test("eventClientPoint reads Leafer native event origins for context menus", () => {
+  expect(eventClientPoint({ origin: { clientX: 260, clientY: 144 }, clientX: 0, clientY: 0 })).toEqual({ x: 260, y: 144 });
 });
 
 test("MoodboardPropertiesPanel can be resized from its left edge", () => {

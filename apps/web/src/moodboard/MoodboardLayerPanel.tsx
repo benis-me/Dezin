@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  ArrowDownToLine,
-  ArrowUpToLine,
   ChevronDown,
   ChevronRight,
   Eye,
@@ -27,8 +25,6 @@ export function MoodboardLayerPanel({
   onRename,
   onToggleVisible,
   onToggleLocked,
-  onBringToFront,
-  onSendToBack,
 }: {
   items: LayerTreeItem[];
   selectedId: string | null;
@@ -39,8 +35,6 @@ export function MoodboardLayerPanel({
   onRename: (id: string, name: string) => void;
   onToggleVisible: (id: string) => void;
   onToggleLocked: (id: string) => void;
-  onBringToFront: (id: string) => void;
-  onSendToBack: (id: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -52,7 +46,7 @@ export function MoodboardLayerPanel({
   }, [selectedId, items]);
 
   return (
-    <aside className="app-no-drag absolute left-3 top-3 z-20 flex max-h-[calc(100%-5rem)] w-60 select-none flex-col overflow-hidden rounded-md border border-border bg-popover/95 text-popover-foreground shadow-pop backdrop-blur-xl">
+    <aside className="app-no-drag absolute left-3 top-3 z-20 flex max-h-[calc(100%-5rem)] w-60 select-none flex-col overflow-hidden rounded-md border border-border bg-card/95 text-popover-foreground shadow-sm shadow-black/[0.04] backdrop-blur-xl">
       <div className="flex h-9 items-center gap-2 border-b border-border px-3 text-xs font-medium">
         <Layers size={14} strokeWidth={1.75} />
         Layers
@@ -74,8 +68,6 @@ export function MoodboardLayerPanel({
               onRename={onRename}
               onToggleVisible={onToggleVisible}
               onToggleLocked={onToggleLocked}
-              onBringToFront={onBringToFront}
-              onSendToBack={onSendToBack}
             />
           ))
         )}
@@ -95,8 +87,6 @@ function LayerItem({
   onRename,
   onToggleVisible,
   onToggleLocked,
-  onBringToFront,
-  onSendToBack,
 }: {
   item: LayerTreeItem;
   depth: number;
@@ -108,8 +98,6 @@ function LayerItem({
   onRename: (id: string, name: string) => void;
   onToggleVisible: (id: string) => void;
   onToggleLocked: (id: string) => void;
-  onBringToFront: (id: string) => void;
-  onSendToBack: (id: string) => void;
 }) {
   const { node, children } = item;
   const [editing, setEditing] = useState(false);
@@ -133,7 +121,7 @@ function LayerItem({
         data-moodboard-layer-id={node.id}
         className={cn(
           "group flex h-8 min-w-0 items-center gap-1 px-1.5 text-xs transition-colors",
-          selected ? "bg-surface-2 text-foreground" : "text-muted-foreground hover:bg-surface-2/70 hover:text-foreground",
+          selected ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
         )}
         style={{ paddingLeft: 6 + depth * 14 }}
       >
@@ -145,7 +133,7 @@ function LayerItem({
             event.stopPropagation();
             onToggleCollapsed(node.id);
           }}
-          className={cn("grid size-5 shrink-0 place-items-center rounded text-muted-foreground hover:bg-surface", !hasChildren && "opacity-0")}
+          className={cn("grid size-5 shrink-0 place-items-center rounded text-muted-foreground hover:bg-surface-2", !hasChildren && "opacity-0")}
         >
           {collapsed ? <ChevronRight size={13} strokeWidth={1.75} /> : <ChevronDown size={13} strokeWidth={1.75} />}
         </button>
@@ -185,7 +173,7 @@ function LayerItem({
             event.stopPropagation();
             onToggleVisible(node.id);
           }}
-          className="grid size-6 shrink-0 place-items-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-surface hover:text-foreground group-hover:opacity-100"
+          className="grid size-6 shrink-0 place-items-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-surface-2 hover:text-foreground group-hover:opacity-100"
         >
           {isNodeVisible(node) ? <Eye size={13} strokeWidth={1.75} /> : <EyeOff size={13} strokeWidth={1.75} />}
         </button>
@@ -197,33 +185,11 @@ function LayerItem({
             onToggleLocked(node.id);
           }}
           className={cn(
-            "grid size-6 shrink-0 place-items-center rounded text-muted-foreground transition-opacity hover:bg-surface hover:text-foreground",
+            "grid size-6 shrink-0 place-items-center rounded text-muted-foreground transition-opacity hover:bg-surface-2 hover:text-foreground",
             isNodeLocked(node) ? "opacity-100" : "opacity-0 group-hover:opacity-100",
           )}
         >
           {isNodeLocked(node) ? <Lock size={13} strokeWidth={1.75} /> : <LockOpen size={13} strokeWidth={1.75} />}
-        </button>
-        <button
-          type="button"
-          aria-label="Bring to front"
-          onClick={(event) => {
-            event.stopPropagation();
-            onBringToFront(node.id);
-          }}
-          className="grid size-6 shrink-0 place-items-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-surface hover:text-foreground group-hover:opacity-100"
-        >
-          <ArrowUpToLine size={13} strokeWidth={1.75} />
-        </button>
-        <button
-          type="button"
-          aria-label="Send to back"
-          onClick={(event) => {
-            event.stopPropagation();
-            onSendToBack(node.id);
-          }}
-          className="grid size-6 shrink-0 place-items-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-surface hover:text-foreground group-hover:opacity-100"
-        >
-          <ArrowDownToLine size={13} strokeWidth={1.75} />
         </button>
       </div>
       {!collapsed
@@ -240,8 +206,6 @@ function LayerItem({
               onRename={onRename}
               onToggleVisible={onToggleVisible}
               onToggleLocked={onToggleLocked}
-              onBringToFront={onBringToFront}
-              onSendToBack={onSendToBack}
             />
           ))
         : null}

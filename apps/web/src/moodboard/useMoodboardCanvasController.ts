@@ -215,7 +215,6 @@ export function useMoodboardCanvasController({
   const runtime = useLeaferMoodboardRuntime({
     nodes,
     selectedId,
-    hoveredId,
     tool,
     onSelect: handleSelect,
     onBlankTap: handleBlankTap,
@@ -298,6 +297,7 @@ export function useMoodboardCanvasController({
   return {
     ...runtime,
     tool,
+    hoveredId,
     layersOpen,
     contextMenu,
     contextTargetId,

@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, matchPath, safeJoin } from "../src/index.ts";
 import type { AppDeps } from "../src/index.ts";
+import { buildMoodboardAgentPrompt } from "../src/moodboard-agent.ts";
 import { injectSelectBridge } from "../src/serve-static.ts";
 
 interface Ctx {
@@ -211,6 +212,38 @@ test("moodboard messages invoke the selected agent with canvas context", async (
   assert.match(captured.prompt, /hero\.png/);
   assert.match(captured.prompt, /Previous direction/);
   assert.match(captured.prompt, /Latest user request:\nUse warmer references/);
+});
+
+test("moodboard agent prompt uses a budgeted working set with full context path", () => {
+  const now = Date.now();
+  const nodes = Array.from({ length: 36 }, (_, index) => ({
+    id: `n${index}`,
+    boardId: "b1",
+    type: "note" as const,
+    x: index * 24,
+    y: index * 12,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: index,
+    data: { content: index === 35 ? "warm hero reference with tactile material" : `quiet reference ${index}` },
+    createdAt: now + index,
+    updatedAt: now + index,
+  }));
+
+  const prompt = buildMoodboardAgentPrompt({
+    board: { id: "b1", name: "Large board", createdAt: now, updatedAt: now, archivedAt: null, coverAssetId: null },
+    nodes,
+    assets: [],
+    messages: [],
+    content: "Find the warm hero direction",
+    contextPath: "/tmp/dezin/moodboard-context.json",
+  });
+
+  assert.match(prompt, /budgeted working set/);
+  assert.match(prompt, /Structured context file: \/tmp\/dezin\/moodboard-context\.json/);
+  assert.match(prompt, /warm hero reference/);
+  assert.match(prompt, /more canvas nodes omitted/);
 });
 
 test("POST /api/projects/:id/title updates a project name with a generated title", async () => {

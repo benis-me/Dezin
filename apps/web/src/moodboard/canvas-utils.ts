@@ -143,10 +143,10 @@ export function nodeIdFromTarget(target: any): string | null {
 }
 
 export function eventClientPoint(event: any): { x: number; y: number } {
-  const source = event?.event ?? event;
+  const source = event?.origin ?? event?.nativeEvent ?? event?.event ?? event;
   return {
-    x: Number(source?.clientX ?? event?.clientX ?? 0),
-    y: Number(source?.clientY ?? event?.clientY ?? 0),
+    x: Number(source?.clientX ?? source?.x ?? event?.clientX ?? event?.x ?? 0),
+    y: Number(source?.clientY ?? source?.y ?? event?.clientY ?? event?.y ?? 0),
   };
 }
 

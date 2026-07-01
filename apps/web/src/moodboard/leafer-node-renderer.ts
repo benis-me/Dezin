@@ -16,15 +16,12 @@ import {
 export function makeNodeFrame(
   runtime: LeaferRuntime,
   node: MoodboardNode,
-  selected: boolean,
-  hovered: boolean,
   onSelect: (id: string) => void,
 ): any {
   const { Frame, Rect, Image, Text, PointerEvent } = runtime;
   const radius = node.type === "section" ? 6 : 8;
   const locked = isNodeLocked(node);
   const visible = isNodeVisible(node);
-  const selectionStroke = selected ? "#2563eb" : hovered ? "#9ca3af" : undefined;
   const frame = new Frame({
     id: node.id,
     name: layerLabel(node),
@@ -46,6 +43,12 @@ export function makeNodeFrame(
     resizeChildren: true,
     data: { nodeId: node.id, node },
   });
+
+  if (PointerEvent.DOWN) {
+    frame.on(PointerEvent.DOWN, () => {
+      onSelect(node.id);
+    });
+  }
 
   frame.on(PointerEvent.TAP, (event: any) => {
     event?.stop?.();
@@ -109,9 +112,9 @@ export function makeNodeFrame(
         width: node.width,
         height: node.height,
         fill: nodeFill(node),
-        stroke: selectionStroke ?? nodeStroke(node),
-        strokeWidth: selected || hovered ? 2 : 1,
-        dashPattern: selected ? undefined : [8, 6],
+        stroke: nodeStroke(node),
+        strokeWidth: 1,
+        dashPattern: [8, 6],
         cornerRadius: radius,
         data: { nodeId: node.id },
       }),
@@ -136,9 +139,9 @@ export function makeNodeFrame(
         width: node.width,
         height: node.height,
         fill: nodeFill(node),
-        stroke: selectionStroke ?? nodeStroke(node),
-        strokeWidth: selected || hovered ? 2 : 1,
-        dashPattern: selected ? undefined : [10, 7],
+        stroke: nodeStroke(node),
+        strokeWidth: 1,
+        dashPattern: [10, 7],
         cornerRadius: 10,
         data: { nodeId: node.id },
       }),
@@ -191,7 +194,7 @@ export function makeNodeFrame(
         width: node.width,
         height: node.height,
         fill: nodeFill(node),
-        stroke: selectionStroke ?? nodeStroke(node),
+        stroke: nodeStroke(node),
         strokeWidth: 1,
         cornerRadius: radius,
         data: { nodeId: node.id },
@@ -217,10 +220,10 @@ export function makeNodeFrame(
         width: node.width,
         height: node.height,
         fill: nodeFill(node),
-        stroke: selectionStroke ?? nodeStroke(node),
-        strokeWidth: selected || hovered ? 2 : 1,
+        stroke: nodeStroke(node),
+        strokeWidth: 1,
         cornerRadius: radius,
-        shadow: selected ? undefined : { x: 0, y: 6, blur: 18, color: "rgba(0,0,0,0.08)" },
+        shadow: { x: 0, y: 1, blur: 2, color: "rgba(0,0,0,0.04)" },
         data: { nodeId: node.id },
       }),
     );
@@ -250,21 +253,11 @@ export function makeNodeFrame(
     );
   }
 
-  if ((selected || hovered) && node.type !== "section" && node.type !== "note" && node.type !== "image-generator") {
-    frame.add(
-      new Rect({
-        x: 0,
-        y: 0,
-        width: node.width,
-        height: node.height,
-        fill: "transparent",
-        stroke: selectionStroke ?? "#2563eb",
-        strokeWidth: selected ? 2 : 1,
-        cornerRadius: radius,
-        data: { nodeId: node.id },
-      }),
-    );
-  }
+  frame.children?.forEach?.((child: any) => {
+    child.draggable = false;
+    child.editable = false;
+    child.data = { ...(child.data ?? {}), nodeId: node.id };
+  });
 
   return frame;
 }

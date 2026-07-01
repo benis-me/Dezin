@@ -99,7 +99,7 @@ export function MoodboardContextMenu({
       <div
         ref={menuRef}
         role="menu"
-        className="fixed z-50 w-56 rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-pop"
+        className="fixed z-50 w-56 rounded-md border border-border bg-card p-1 text-sm text-popover-foreground shadow-sm shadow-black/[0.04]"
         style={{ left: position.x, top: position.y }}
         onClick={(event) => event.stopPropagation()}
         onContextMenu={(event) => event.preventDefault()}

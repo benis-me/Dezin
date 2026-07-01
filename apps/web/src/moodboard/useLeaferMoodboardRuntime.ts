@@ -17,7 +17,6 @@ import {
 interface UseLeaferMoodboardRuntimeOptions {
   nodes: MoodboardNode[];
   selectedId: string | null;
-  hoveredId: string | null;
   tool: MoodboardCanvasTool;
   onSelect: (id: string | null) => void;
   onBlankTap: (point: { x: number; y: number }) => void;
@@ -29,7 +28,6 @@ interface UseLeaferMoodboardRuntimeOptions {
 export function useLeaferMoodboardRuntime({
   nodes,
   selectedId,
-  hoveredId,
   tool,
   onSelect,
   onBlankTap,
@@ -45,7 +43,6 @@ export function useLeaferMoodboardRuntime({
   const framesRef = useRef<Map<string, any>>(new Map());
   const nodesRef = useRef(nodes);
   const selectedIdRef = useRef(selectedId);
-  const hoveredIdRef = useRef(hoveredId);
   const toolRef = useRef(tool);
   const callbacksRef = useRef({ onSelect, onBlankTap, onDoubleTap, onContextMenu, onFrameStateChange });
 
@@ -56,10 +53,6 @@ export function useLeaferMoodboardRuntime({
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
-
-  useEffect(() => {
-    hoveredIdRef.current = hoveredId;
-  }, [hoveredId]);
 
   useEffect(() => {
     toolRef.current = tool;
@@ -79,17 +72,16 @@ export function useLeaferMoodboardRuntime({
       return;
     }
 
+    const containerRect = container.getBoundingClientRect();
+    const world = frame.worldBoxBounds ?? frame.boxBounds;
     const tree = runtime.app?.tree;
     const scale = Number(tree?.scale ?? tree?.scaleX ?? 1) || 1;
-    const tx = Number(tree?.x ?? 0) || 0;
-    const ty = Number(tree?.y ?? 0) || 0;
-    const x = Number(frame.x ?? 0) || 0;
-    const y = Number(frame.y ?? 0) || 0;
-    const width = Number(frame.width ?? 160) || 160;
-    const height = Number(frame.height ?? 120) || 120;
-    const left = tx + (x + width / 2) * scale;
-    const top = ty + y * scale - 44;
-    const bottom = ty + (y + height) * scale + 12;
+    const fallbackLeft = Number(tree?.x ?? 0) + (Number(frame.x ?? 0) + Number(frame.width ?? 160) / 2) * scale;
+    const fallbackTop = Number(tree?.y ?? 0) + Number(frame.y ?? 0) * scale - 44;
+    const fallbackBottom = Number(tree?.y ?? 0) + (Number(frame.y ?? 0) + Number(frame.height ?? 120)) * scale + 12;
+    const left = world ? Number(world.x ?? 0) - containerRect.left + Number(world.width ?? frame.width ?? 0) / 2 : fallbackLeft;
+    const top = world ? Number(world.y ?? 0) - containerRect.top - 44 : fallbackTop;
+    const bottom = world ? Number(world.y ?? 0) - containerRect.top + Number(world.height ?? frame.height ?? 0) + 12 : fallbackBottom;
 
     setSelectionRect({
       left: Math.max(16, Math.min(container.clientWidth - 16, left)),
@@ -150,7 +142,7 @@ export function useLeaferMoodboardRuntime({
           fill: "#f7f7f5",
         },
         editor: {
-          hideOnMove: true,
+          hideOnMove: false,
           skewable: false,
           flipable: false,
           bright: true,
@@ -208,6 +200,20 @@ export function useLeaferMoodboardRuntime({
         if (Number.isFinite(scale)) setZoom(scale);
         window.requestAnimationFrame(updateFloatingSelection);
       };
+      const syncSelectionOnPointerDown = (event: any) => {
+        const targetId = nodeIdFromTarget(event?.target);
+        if (!targetId || targetId === selectedIdRef.current) return;
+        const frame = framesRef.current.get(targetId);
+        if (!frame) return;
+        try {
+          app.editor?.select([frame]);
+        } catch {
+          /* Editor may ignore early pointer-down selection. */
+        }
+        selectedIdRef.current = targetId;
+        callbacksRef.current.onSelect(targetId);
+        window.requestAnimationFrame(updateFloatingSelection);
+      };
       const handleTap = (event: any) => {
         const targetId = nodeIdFromTarget(event?.target);
         if (targetId) {
@@ -230,8 +236,13 @@ export function useLeaferMoodboardRuntime({
       };
 
       app.on(runtime.PointerEvent.TAP, handleTap);
+      if (runtime.PointerEvent.DOWN) app.on(runtime.PointerEvent.DOWN, syncSelectionOnPointerDown);
       app.on(runtime.PointerEvent.DOUBLE_TAP, handleDoubleTap);
       app.on(runtime.PointerEvent.MENU, handleMenu);
+      runtime.app?.tree?.on?.("move", syncFloatingOnly);
+      runtime.app?.tree?.on?.("zoom", syncFloatingOnly);
+      runtime.app?.tree?.on?.("transform", syncFloatingOnly);
+      runtime.app?.tree?.on?.("property.leafer_change", syncFloatingOnly);
       if (runtime.DragEvent?.DRAG) app.on(runtime.DragEvent.DRAG, syncFloatingOnly);
       app.on(runtime.DragEvent.END, syncAfterTransform);
       if (runtime.ZoomEvent?.END) app.on(runtime.ZoomEvent.END, syncAfterTransform);
@@ -243,8 +254,13 @@ export function useLeaferMoodboardRuntime({
       cleanup = () => {
         observer.disconnect();
         app.off(runtime.PointerEvent.TAP, handleTap);
+        if (runtime.PointerEvent.DOWN) app.off(runtime.PointerEvent.DOWN, syncSelectionOnPointerDown);
         app.off(runtime.PointerEvent.DOUBLE_TAP, handleDoubleTap);
         app.off(runtime.PointerEvent.MENU, handleMenu);
+        runtime.app?.tree?.off?.("move", syncFloatingOnly);
+        runtime.app?.tree?.off?.("zoom", syncFloatingOnly);
+        runtime.app?.tree?.off?.("transform", syncFloatingOnly);
+        runtime.app?.tree?.off?.("property.leafer_change", syncFloatingOnly);
         if (runtime.DragEvent?.DRAG) app.off(runtime.DragEvent.DRAG, syncFloatingOnly);
         app.off(runtime.DragEvent.END, syncAfterTransform);
         if (runtime.ZoomEvent?.END) app.off(runtime.ZoomEvent.END, syncAfterTransform);
@@ -277,7 +293,7 @@ export function useLeaferMoodboardRuntime({
     [...nodes]
       .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))
       .forEach((node) => {
-        const frame = makeNodeFrame(runtime, node, node.id === selectedId, node.id === hoveredId, (id) => {
+        const frame = makeNodeFrame(runtime, node, (id) => {
           callbacksRef.current.onSelect(id);
           selectInRuntime(id);
         });
@@ -285,9 +301,13 @@ export function useLeaferMoodboardRuntime({
         runtime.layer.add(frame);
       });
 
-    selectInRuntime(selectedId);
+    selectInRuntime(selectedIdRef.current);
     window.requestAnimationFrame(updateFloatingSelection);
-  }, [hoveredId, nodes, runtimeReady, selectedId, selectInRuntime, updateFloatingSelection]);
+  }, [nodes, runtimeReady, selectInRuntime, updateFloatingSelection]);
+
+  useEffect(() => {
+    selectInRuntime(selectedId);
+  }, [selectedId, selectInRuntime]);
 
   useEffect(() => {
     try {

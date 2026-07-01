@@ -8,7 +8,6 @@ import { cn } from "../lib/utils.ts";
 
 export function MoodboardAgentPanel({
   boardName,
-  status,
   messages,
   busy,
   agents,
@@ -21,7 +20,6 @@ export function MoodboardAgentPanel({
   onSend,
 }: {
   boardName: string;
-  status: string;
   messages: MoodboardMessage[];
   busy: boolean;
   agents: AgentInfo[];
@@ -82,7 +80,6 @@ export function MoodboardAgentPanel({
             </motion.span>
           </AnimatePresence>
         </button>
-        <span className="label-mono shrink-0 text-muted-foreground">{status}</span>
       </div>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-auto px-4 pt-5" style={{ paddingBottom: composerH + 36 }}>
@@ -129,14 +126,14 @@ export function MoodboardAgentPanel({
       <div className="pointer-events-none absolute inset-x-0 bottom-0">
         <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
         <div ref={composerRef} className="bg-background px-3 pb-3">
-          <div className="pointer-events-auto rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 hover:border-border-strong">
+          <div className="pointer-events-auto rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring hover:border-border-strong">
             <Textarea
               aria-label="Moodboard prompt"
               rows={1}
               value={text}
               onChange={(e) => setText(e.target.value)}
               placeholder="Ask for visual direction or generate material..."
-              className="field-sizing-content max-h-40 min-h-[36px] w-full border-0 bg-transparent px-1 py-0.5 text-sm leading-relaxed shadow-none outline-none focus-visible:ring-0"
+              className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none border-0 bg-transparent px-1 py-0.5 text-sm leading-relaxed shadow-none outline-none placeholder:text-muted-foreground focus-visible:ring-0"
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();

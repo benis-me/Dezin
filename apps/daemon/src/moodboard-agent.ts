@@ -26,6 +26,13 @@ export function clippedBlock(value: string, max = 8000): string {
   return text.length > max ? `${text.slice(0, max - 1)}...` : text;
 }
 
+const NODE_PROMPT_MAX_LINES = 28;
+const NODE_PROMPT_MAX_CHARS = 6200;
+const ASSET_PROMPT_MAX_LINES = 18;
+const ASSET_PROMPT_MAX_CHARS = 2200;
+const HISTORY_PROMPT_MAX_MESSAGES = 18;
+const HISTORY_PROMPT_MAX_CHARS = 5200;
+
 function dataString(data: Record<string, unknown>, key: string): string {
   const value = data[key];
   return typeof value === "string" ? value.trim() : "";
@@ -58,6 +65,78 @@ function nodeSummary(node: MoodboardNode, assetsById: Map<string, MoodboardAsset
   return `- ${details.join("; ")}`;
 }
 
+function nodeSearchText(node: MoodboardNode): string {
+  return [
+    node.type,
+    nodeLabel(node),
+    dataString(node.data, "prompt"),
+    dataString(node.data, "generatorPrompt"),
+    dataString(node.data, "content"),
+    dataString(node.data, "title"),
+    dataString(node.data, "fileName"),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function requestTerms(content: string): string[] {
+  const unique = new Set<string>();
+  for (const match of content.toLowerCase().matchAll(/[\p{L}\p{N}_-]{2,}/gu)) {
+    if (unique.size >= 16) break;
+    unique.add(match[0]);
+  }
+  return [...unique];
+}
+
+function rankNodesForRequest(nodes: MoodboardNode[], content: string): MoodboardNode[] {
+  const terms = requestTerms(content);
+  return [...nodes].sort((a, b) => {
+    const score = (node: MoodboardNode) => {
+      const text = nodeSearchText(node);
+      const termScore = terms.reduce((total, term) => total + (text.includes(term) ? 8 : 0), 0);
+      const generatorScore = node.type === "image-generator" ? 4 : 0;
+      const mediaScore = node.type === "image" || node.type === "video" ? 3 : 0;
+      const recentScore = Math.min(4, Math.max(0, Math.floor((node.updatedAt || node.createdAt || 0) / 1_000_000_000_000)));
+      return termScore + generatorScore + mediaScore + recentScore + (node.zIndex ?? 0) / 1000;
+    };
+    return score(b) - score(a);
+  });
+}
+
+function budgetLines(lines: string[], fallback: string, maxLines: number, maxChars: number, omittedLabel: string): string {
+  if (!lines.length) return fallback;
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    const next = used + line.length + 1;
+    if (kept.length >= maxLines || (kept.length > 0 && next > maxChars)) break;
+    kept.push(line);
+    used = next;
+  }
+  const omitted = Math.max(0, lines.length - kept.length);
+  if (omitted > 0) kept.push(`- ${omitted} more ${omittedLabel} omitted from prompt. Read the structured context file if needed.`);
+  return kept.join("\n");
+}
+
+function boardStats(nodes: MoodboardNode[], assets: MoodboardAsset[]): string {
+  const nodeTypes = nodes.reduce<Record<string, number>>((acc, node) => {
+    acc[node.type] = (acc[node.type] ?? 0) + 1;
+    return acc;
+  }, {});
+  const assetSources = assets.reduce<Record<string, number>>((acc, asset) => {
+    acc[asset.source] = (acc[asset.source] ?? 0) + 1;
+    return acc;
+  }, {});
+  const typeText = Object.entries(nodeTypes)
+    .map(([type, count]) => `${type}:${count}`)
+    .join(", ");
+  const assetText = Object.entries(assetSources)
+    .map(([source, count]) => `${source}:${count}`)
+    .join(", ");
+  return `Nodes=${nodes.length}${typeText ? ` (${typeText})` : ""}; assets=${assets.length}${assetText ? ` (${assetText})` : ""}.`;
+}
+
 function assetSummary(asset: MoodboardAsset): string {
   const size = asset.width && asset.height ? `${asset.width}x${asset.height}` : "unknown size";
   return `- id=${asset.id}; ${asset.kind}; ${asset.fileName}; ${asset.source}; ${size}`;
@@ -65,6 +144,18 @@ function assetSummary(asset: MoodboardAsset): string {
 
 function messageSummary(message: MoodboardMessage, index: number): string {
   return `[${index + 1}] ${message.role.toUpperCase()}: ${clipped(message.content, 900)}`;
+}
+
+function budgetHistory(messages: MoodboardMessage[]): string {
+  const recent = messages.slice(-HISTORY_PROMPT_MAX_MESSAGES).map(messageSummary);
+  if (!recent.length) return "Current conversation: no previous messages.";
+  return `Current conversation (recent, budgeted):\n${budgetLines(
+    recent,
+    "- No previous messages.",
+    HISTORY_PROMPT_MAX_MESSAGES,
+    HISTORY_PROMPT_MAX_CHARS,
+    "messages",
+  )}`;
 }
 
 export function localMoodboardReply(nodes: MoodboardNode[], assets: MoodboardAsset[]): string {
@@ -101,24 +192,31 @@ export function buildMoodboardAgentPrompt(input: {
   contextPath: string;
 }): string {
   const assetsById = new Map(input.assets.map((asset) => [asset.id, asset]));
-  const nodes = input.nodes.length ? input.nodes.map((node) => nodeSummary(node, assetsById)).join("\n") : "- No canvas nodes yet.";
-  const assets = input.assets.length ? input.assets.map(assetSummary).join("\n") : "- No uploaded or generated assets yet.";
-  const history = input.messages.slice(-18).map(messageSummary).join("\n\n");
+  const rankedNodes = rankNodesForRequest(input.nodes, input.content).map((node) => nodeSummary(node, assetsById));
+  const nodes = budgetLines(rankedNodes, "- No canvas nodes yet.", NODE_PROMPT_MAX_LINES, NODE_PROMPT_MAX_CHARS, "canvas nodes");
+  const assetLines = input.assets
+    .slice()
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map(assetSummary);
+  const assets = budgetLines(assetLines, "- No uploaded or generated assets yet.", ASSET_PROMPT_MAX_LINES, ASSET_PROMPT_MAX_CHARS, "assets");
+  const history = budgetHistory(input.messages);
   return [
     "You are the Moodboard Agent inside Dezin.",
     "Understand the current canvas and answer the user's latest request with concrete design direction or canvas operation guidance.",
     "Do not create, edit, or write files. Return concise assistant text only.",
     "If the user asks for new image/video material, suggest using an image generator node with a specific prompt. Do not fake photographic assets with SVG or DOM.",
+    "The prompt includes a budgeted working set, not the full canvas. If the shown summaries are insufficient, read the structured context file before answering.",
     `Board: ${input.board.name} (${input.board.id})`,
+    `Board summary: ${boardStats(input.nodes, input.assets)}`,
     `Structured context file: ${input.contextPath}`,
     "",
-    "Current canvas nodes:",
+    "Canvas working set:",
     nodes,
     "",
-    "Assets:",
+    "Assets working set:",
     assets,
     "",
-    history ? `Current conversation:\n${history}` : "Current conversation: no previous messages.",
+    history,
     "",
     `Latest user request:\n${input.content}`,
   ].join("\n");

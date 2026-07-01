@@ -1,6 +1,6 @@
-import { Settings } from "lucide-react";
+import { Loader2, Settings } from "lucide-react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { Button, IconButton, Loading } from "../components/ui/index.ts";
+import { Button, IconButton } from "../components/ui/index.ts";
 import { readPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { MoodboardAgentPanel } from "../moodboard/MoodboardAgentPanel.tsx";
 import { MoodboardCanvas } from "../moodboard/MoodboardCanvas.tsx";
@@ -22,7 +22,19 @@ export function MoodboardScreen({
   const agentPercent = readPanelPercent(MOODBOARD_AGENT_WIDTH_KEY, 28, 20, 44);
   const board = useMoodboardBoard(boardId);
 
-  if (board.loading) return <Loading label="Loading moodboard..." />;
+  if (board.loading) {
+    return (
+      <div className="flex h-full w-full flex-col bg-background">
+        <div className="app-drag h-10 shrink-0 border-b border-border" />
+        <div className="grid min-h-0 flex-1 place-items-center">
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-muted-foreground">
+            <Loader2 size={15} className="animate-spin" />
+            Loading moodboard
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (!board.detail) {
     return (
       <div className="grid h-full place-items-center">
@@ -48,7 +60,6 @@ export function MoodboardScreen({
         <Panel id={MOODBOARD_AGENT_PANEL} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
           <MoodboardAgentPanel
             boardName={board.detail.name}
-            status={board.saveLabel}
             messages={board.messages}
             busy={board.busy}
             agents={board.agents}

@@ -82,7 +82,7 @@ export function SelectionToolbar({
 
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-popover p-1 shadow-pop">
+      <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-sm shadow-black/[0.04] backdrop-blur-xl">
         <span className="max-w-40 truncate px-2 text-xs font-medium text-muted-foreground">{layerLabel(node)}</span>
         <span className="mx-1 h-5 w-px bg-border" />
         <ToolButton label="Duplicate" onClick={onDuplicate}>
@@ -125,7 +125,7 @@ export function CanvasActionBar({
 }) {
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-popover/95 p-1 shadow-pop backdrop-blur-xl">
+      <div className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-sm shadow-black/[0.04] backdrop-blur-xl">
         <ToolButton label="Select" active={tool === "select"} onClick={() => onToolChange("select")}>
           <MousePointer2 size={15} strokeWidth={1.75} />
         </ToolButton>
@@ -167,7 +167,7 @@ export function CanvasZoomBar({
 }) {
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="app-no-drag absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-popover/95 p-1 shadow-pop backdrop-blur-xl">
+      <div className="app-no-drag absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-sm shadow-black/[0.04] backdrop-blur-xl">
         <ToolButton label="Zoom out" onClick={() => onChangeZoom(zoom * 0.88)}>
           <Minus size={15} strokeWidth={1.75} />
         </ToolButton>
@@ -224,7 +224,7 @@ export function GeneratorPromptToolbar({
   };
 
   return (
-    <div className="pointer-events-auto app-no-drag w-[min(600px,calc(100vw-3rem))] rounded-lg border border-border bg-popover/95 p-2 shadow-pop backdrop-blur-xl">
+    <div className="pointer-events-auto app-no-drag w-[min(600px,calc(100vw-3rem))] rounded-lg border border-border bg-card/95 p-2 shadow-sm shadow-black/[0.04] backdrop-blur-xl">
       <Textarea
         aria-label="Image generator prompt"
         rows={3}
