@@ -163,6 +163,7 @@ export async function handlePostMoodboardMessage(
   if (!content) return sendError(res, 400, "content is required");
   const agentCommand = stringValue(body.agentCommand);
   const model = stringValue(body.model) || undefined;
+  const previousMessages = store.listMoodboardMessages(id!);
   const user = store.addMoodboardMessage(id!, "user", content);
   const nodes = store.listMoodboardNodes(id!);
   const assets = store.listMoodboardAssets(id!);
@@ -174,7 +175,7 @@ export async function handlePostMoodboardMessage(
 
   let assistantText = localMoodboardReply(nodes, assets);
   if (agentCommand) {
-    const prompt = buildMoodboardAgentPrompt({ board, nodes, assets, messages, content, contextPath });
+    const prompt = buildMoodboardAgentPrompt({ board, nodes, assets, messages: previousMessages, content, contextPath });
     try {
       assistantText = await runMoodboardAgentText(
         { board, nodes, assets, messages, content, agentCommand, model, prompt, cwd },

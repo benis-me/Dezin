@@ -16,6 +16,16 @@ export interface FloatingRect {
   bottom: number;
 }
 
+export interface FloatingChromeInput {
+  anchor: FloatingRect;
+  containerWidth: number;
+  containerHeight: number;
+  surfaceWidth: number;
+  surfaceHeight: number;
+  placement: "top" | "bottom";
+  padding?: number;
+}
+
 interface FloatingRectBounds {
   x?: number;
   y?: number;
@@ -177,6 +187,31 @@ export function resolveFloatingRect({
     left: Math.max(16, Math.min(containerWidth - 16, rawLeft)),
     top: Math.max(12, Math.min(containerHeight - 56, rawTop)),
     bottom: Math.max(12, Math.min(containerHeight - 132, rawBottom)),
+  };
+}
+
+export function resolveFloatingChromeRect({
+  anchor,
+  containerWidth,
+  containerHeight,
+  surfaceWidth,
+  surfaceHeight,
+  placement,
+  padding = 8,
+}: FloatingChromeInput): { left: number; top: number } {
+  const availableWidth = Math.max(0, containerWidth - padding * 2);
+  const availableHeight = Math.max(0, containerHeight - padding * 2);
+  const width = Math.min(Math.max(0, surfaceWidth), availableWidth);
+  const height = Math.min(Math.max(0, surfaceHeight), availableHeight);
+  const minLeft = padding;
+  const maxLeft = Math.max(minLeft, containerWidth - width - padding);
+  const minTop = padding;
+  const maxTop = Math.max(minTop, containerHeight - height - padding);
+  const rawTop = placement === "top" ? anchor.top : anchor.bottom;
+
+  return {
+    left: Math.max(minLeft, Math.min(maxLeft, anchor.left - width / 2)),
+    top: Math.max(minTop, Math.min(maxTop, rawTop)),
   };
 }
 

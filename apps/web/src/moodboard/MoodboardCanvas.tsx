@@ -1,5 +1,5 @@
 import { ImagePlus, Loader2, Plus } from "lucide-react";
-import { memo } from "react";
+import { memo, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Frame as LeaferFrame, Leafer } from "@dezin/leafer-react";
 import type { Frame } from "leafer-editor";
 import { Button } from "../components/ui/index.ts";
@@ -10,7 +10,7 @@ import { CanvasActionBar, CanvasZoomBar, GeneratorPromptToolbar, SelectionToolba
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { generatorPrompt } from "./canvas-utils.ts";
+import { generatorPrompt, resolveFloatingChromeRect, type FloatingRect } from "./canvas-utils.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
 export function MoodboardCanvas(props: MoodboardCanvasProps) {
@@ -91,10 +91,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         ) : null}
 
         {canvas.selected && canvas.selectionRect ? (
-          <div
-            className="pointer-events-none absolute z-30"
-            style={{ left: canvas.selectionRect.left, top: canvas.selectionRect.top, transform: "translateX(-50%)" }}
-          >
+          <FloatingCanvasSurface anchor={canvas.selectionRect} placement="top">
             <SelectionToolbar
               node={canvas.selected}
               onDuplicate={() => canvas.duplicateNode(canvas.selected!.id)}
@@ -104,21 +101,18 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               onToggleLocked={() => canvas.toggleNodeLocked(canvas.selected!.id)}
               onDelete={() => canvas.deleteNode(canvas.selected!.id)}
             />
-          </div>
+          </FloatingCanvasSurface>
         ) : null}
 
         {canvas.selected?.type === "image-generator" && canvas.selectionRect ? (
-          <div
-            className="pointer-events-none absolute z-30"
-            style={{ left: canvas.selectionRect.left, top: canvas.selectionRect.bottom, transform: "translateX(-50%)" }}
-          >
+          <FloatingCanvasSurface anchor={canvas.selectionRect} placement="bottom">
             <GeneratorPromptToolbar
               node={canvas.selected}
               busy={busy}
               onPromptChange={(prompt) => canvas.patchNodeData(canvas.selected!.id, { generatorPrompt: prompt, generatorStatus: prompt ? "ready" : "" })}
               onGenerate={(prompt) => onGenerateImage(canvas.selected!, prompt)}
             />
-          </div>
+          </FloatingCanvasSurface>
         ) : null}
 
         <CanvasActionBar
@@ -183,6 +177,49 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           />
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function FloatingCanvasSurface({
+  anchor,
+  placement,
+  children,
+}: {
+  anchor: FloatingRect;
+  placement: "top" | "bottom";
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [rect, setRect] = useState({ left: anchor.left, top: placement === "top" ? anchor.top : anchor.bottom });
+
+  useLayoutEffect(() => {
+    const element = ref.current;
+    const container = element?.parentElement;
+    if (!element || !container) return;
+
+    const update = () => {
+      const next = resolveFloatingChromeRect({
+        anchor,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+        surfaceWidth: element.offsetWidth,
+        surfaceHeight: element.offsetHeight,
+        placement,
+      });
+      setRect(next);
+    };
+
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [anchor, placement]);
+
+  return (
+    <div ref={ref} className="pointer-events-none absolute z-30" style={{ left: rect.left, top: rect.top }}>
+      {children}
     </div>
   );
 }

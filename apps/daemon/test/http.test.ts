@@ -212,6 +212,7 @@ test("moodboard messages invoke the selected agent with canvas context", async (
   assert.match(captured.prompt, /hero\.png/);
   assert.match(captured.prompt, /Previous direction/);
   assert.match(captured.prompt, /Latest user request:\nUse warmer references/);
+  assert.equal((captured.prompt.match(/Use warmer references/g) ?? []).length, 1);
 });
 
 test("moodboard agent prompt uses a budgeted working set with full context path", () => {

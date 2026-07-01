@@ -6,7 +6,14 @@ import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { eventClientPoint, nodeIdFromTarget, reorderLayerInputs, resolveFloatingRect, sameFloatingRect } from "./canvas-utils.ts";
+import {
+  eventClientPoint,
+  nodeIdFromTarget,
+  reorderLayerInputs,
+  resolveFloatingChromeRect,
+  resolveFloatingRect,
+  sameFloatingRect,
+} from "./canvas-utils.ts";
 
 beforeEach(() => {
   localStorage.clear();
@@ -127,6 +134,30 @@ test("resolveFloatingRect follows world bounds and clamps within the canvas", ()
       world: { x: 460, y: 280, width: 200, height: 120 },
     }),
   ).toEqual({ left: 484, top: 216, bottom: 188 });
+});
+
+test("resolveFloatingChromeRect keeps measured toolbars inside the canvas", () => {
+  expect(
+    resolveFloatingChromeRect({
+      anchor: { left: 12, top: 6, bottom: 290 },
+      containerWidth: 320,
+      containerHeight: 300,
+      surfaceWidth: 180,
+      surfaceHeight: 36,
+      placement: "top",
+    }),
+  ).toEqual({ left: 8, top: 8 });
+
+  expect(
+    resolveFloatingChromeRect({
+      anchor: { left: 310, top: 20, bottom: 284 },
+      containerWidth: 320,
+      containerHeight: 300,
+      surfaceWidth: 180,
+      surfaceHeight: 36,
+      placement: "bottom",
+    }),
+  ).toEqual({ left: 132, top: 256 });
 });
 
 test("sameFloatingRect ignores subpixel jitter during drag", () => {
