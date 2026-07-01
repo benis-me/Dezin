@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import {
+  allMoodboardNodeIds,
   buildLayerTree,
   isNodeLocked,
   isNodeVisible,
@@ -175,9 +176,11 @@ export function useMoodboardCanvasController({
 
   const patchNode = useCallback(
     (id: string, patch: Partial<SaveMoodboardNodeInput>) => {
-      saveInputs(nodesRef.current.map((node) => (node.id === id ? { ...toInput(node), ...patch, data: patch.data ?? node.data } : toInput(node))));
+      const next = nodesRef.current.map((node) => (node.id === id ? { ...toInput(node), ...patch, data: patch.data ?? node.data } : toInput(node)));
+      saveInputs(next);
+      if (affectsRuntimeGeometry(patch)) syncInputsAndSelectionInRuntime(next, selectedIdsRef.current);
     },
-    [saveInputs],
+    [saveInputs, syncInputsAndSelectionInRuntime],
   );
 
   const patchNodeData = useCallback(
@@ -287,10 +290,12 @@ export function useMoodboardCanvasController({
 
       let nextZIndex = Math.max(0, ...current.map((item) => item.zIndex ?? 0)) + 1;
       const zIndexById = new Map(targetIds.map((id) => [id, nextZIndex++]));
-      saveInputs(current.map((node) => (zIndexById.has(node.id) ? { ...toInput(node), zIndex: zIndexById.get(node.id) } : toInput(node))));
+      const next = current.map((node) => (zIndexById.has(node.id) ? { ...toInput(node), zIndex: zIndexById.get(node.id) } : toInput(node)));
+      saveInputs(next);
+      syncInputsAndSelectionInRuntime(next, selectedIdsRef.current);
       setContextMenu(null);
     },
-    [saveInputs],
+    [saveInputs, syncInputsAndSelectionInRuntime],
   );
 
   const sendNodesToBack = useCallback(
@@ -302,10 +307,12 @@ export function useMoodboardCanvasController({
 
       let nextZIndex = Math.min(0, ...current.map((item) => item.zIndex ?? 0)) - targetIds.length;
       const zIndexById = new Map(targetIds.map((id) => [id, nextZIndex++]));
-      saveInputs(current.map((node) => (zIndexById.has(node.id) ? { ...toInput(node), zIndex: zIndexById.get(node.id) } : toInput(node))));
+      const next = current.map((node) => (zIndexById.has(node.id) ? { ...toInput(node), zIndex: zIndexById.get(node.id) } : toInput(node)));
+      saveInputs(next);
+      syncInputsAndSelectionInRuntime(next, selectedIdsRef.current);
       setContextMenu(null);
     },
-    [saveInputs],
+    [saveInputs, syncInputsAndSelectionInRuntime],
   );
 
   const moveNodesLayerStep = useCallback(
@@ -325,10 +332,12 @@ export function useMoodboardCanvasController({
         }
       }
       const zIndexById = new Map(ordered.map((node, index) => [node.id, index + 1]));
-      saveInputs(nodesRef.current.map((node) => ({ ...toInput(node), zIndex: zIndexById.get(node.id) ?? node.zIndex })));
+      const next = nodesRef.current.map((node) => ({ ...toInput(node), zIndex: zIndexById.get(node.id) ?? node.zIndex }));
+      saveInputs(next);
+      syncInputsAndSelectionInRuntime(next, selectedIdsRef.current);
       setContextMenu(null);
     },
-    [saveInputs],
+    [saveInputs, syncInputsAndSelectionInRuntime],
   );
 
   const copyNodes = useCallback((ids: string[]) => {
@@ -428,8 +437,8 @@ export function useMoodboardCanvasController({
         return position ? { ...toInput(node), x: Math.round(position.x), y: Math.round(position.y) } : toInput(node);
       });
       const moved = moveContainedNodesWithSections(current, next);
-      syncInputsAndSelectionInRuntime(moved, targets.map((node) => node.id));
       saveInputs(moved);
+      syncInputsAndSelectionInRuntime(moved, targets.map((node) => node.id));
       setContextMenu(null);
     },
     [saveInputs, syncInputsAndSelectionInRuntime],
@@ -468,8 +477,8 @@ export function useMoodboardCanvasController({
         return position ? { ...toInput(node), x: Math.round(position.x), y: Math.round(position.y) } : toInput(node);
       });
       const moved = moveContainedNodesWithSections(current, next);
-      syncInputsAndSelectionInRuntime(moved, targets.map((node) => node.id));
       saveInputs(moved);
+      syncInputsAndSelectionInRuntime(moved, targets.map((node) => node.id));
       setContextMenu(null);
     },
     [saveInputs, syncInputsAndSelectionInRuntime],
@@ -658,6 +667,11 @@ export function useMoodboardCanvasController({
           redoCanvas();
           return;
         }
+        if (key === "a") {
+          event.preventDefault();
+          selectLayers(allMoodboardNodeIds(nodesRef.current));
+          return;
+        }
         if (key === "c") {
           if (selectedIdsRef.current.length === 0) return;
           event.preventDefault();
@@ -808,4 +822,8 @@ export function useMoodboardCanvasController({
     selectLayers,
     reorderLayer,
   };
+}
+
+function affectsRuntimeGeometry(patch: Partial<SaveMoodboardNodeInput>): boolean {
+  return "x" in patch || "y" in patch || "width" in patch || "height" in patch || "rotation" in patch || "zIndex" in patch;
 }

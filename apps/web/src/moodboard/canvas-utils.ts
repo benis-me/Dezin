@@ -213,6 +213,10 @@ export function sameIdList(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((id, index) => id === b[index]);
 }
 
+export function allMoodboardNodeIds(nodes: readonly Pick<MoodboardNode, "id">[]): string[] {
+  return nodes.map((node) => node.id);
+}
+
 export function isEditableShortcutTarget(target: EventTarget | null): boolean {
   const element = target instanceof HTMLElement ? target : null;
   if (!element) return false;

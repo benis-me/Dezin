@@ -85,7 +85,10 @@ function ToolbarChrome({ children, className }: { children: ReactNode; className
       data-moodboard-toolbar
       className={cn("pointer-events-auto app-no-drag rounded-lg border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl", className)}
       onPointerDown={stopToolbarEvent}
+      onPointerUp={stopToolbarEvent}
       onMouseDown={stopToolbarEvent}
+      onMouseUp={stopToolbarEvent}
+      onClick={stopToolbarEvent}
     >
       {children}
     </div>
@@ -279,6 +282,8 @@ function AlignMenuItem({ icon, label, onClick }: { icon: ReactNode; label: strin
     <button
       type="button"
       className="flex h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-sm text-popover-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+      onPointerDown={stopToolbarEvent}
+      onMouseDown={stopToolbarEvent}
       onClick={onClick}
     >
       <span className="grid size-4 shrink-0 place-items-center text-muted-foreground">{icon}</span>

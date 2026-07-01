@@ -9,6 +9,7 @@ import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import {
+  allMoodboardNodeIds,
   contextTargetIdFromEvent,
   eventClientPoint,
   generatorModel,
@@ -455,6 +456,10 @@ test("sameIdList treats identical selection ids as stable", () => {
   expect(sameIdList(["a", "b"], ["a", "b"])).toBe(true);
   expect(sameIdList(["a", "b"], ["b", "a"])).toBe(false);
   expect(sameIdList(["a"], ["a", "b"])).toBe(false);
+});
+
+test("allMoodboardNodeIds preserves canvas order for select all", () => {
+  expect(allMoodboardNodeIds([{ id: "first" }, { id: "second" }, { id: "third" }])).toEqual(["first", "second", "third"]);
 });
 
 test("Moodboard Leafer editor keeps the selection chrome visible while dragging", () => {
@@ -1265,6 +1270,36 @@ test("SelectionToolbar exposes compact object actions", () => {
   expect(screen.queryByLabelText("Bring to front")).toBeNull();
   expect(screen.queryByLabelText("Hide layer")).toBeNull();
   expect(screen.queryByLabelText("Lock layer")).toBeNull();
+});
+
+test("SelectionToolbar keeps toolbar clicks out of the canvas event layer", () => {
+  const onDuplicate = vi.fn();
+  const onCanvasClick = vi.fn();
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "Reference tone" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <div onClick={onCanvasClick}>
+      <SelectionToolbar node={node} onDuplicate={onDuplicate} onDelete={() => {}} />
+    </div>,
+  );
+
+  fireEvent.click(screen.getByLabelText("Duplicate"));
+
+  expect(onDuplicate).toHaveBeenCalledOnce();
+  expect(onCanvasClick).not.toHaveBeenCalled();
 });
 
 test("SelectionToolbar surfaces image-edit actions for image nodes", () => {

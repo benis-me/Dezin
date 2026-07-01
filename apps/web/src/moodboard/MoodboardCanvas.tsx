@@ -412,8 +412,9 @@ function FloatingCanvasSurface({
     const container = hostRef.current;
     const app = appRef.current;
     if (!element || !container || !app) return;
+    const hasPosition = element.style.transform.length > 0;
     layoutRef.current = null;
-    element.style.visibility = "hidden";
+    if (!hasPosition) element.style.visibility = "hidden";
     element.style.display = "";
 
     const readLayout = (reason: FloatingPositionReason): FloatingLayoutSnapshot => {
@@ -430,7 +431,7 @@ function FloatingCanvasSurface({
     };
 
     const update = (reason: FloatingPositionReason = "viewport") => {
-      const nextAnchor = anchorRef.current ?? resolveSelectedFloatingAnchor(app, container, selectedIdsRef.current);
+      const nextAnchor = resolveSelectedFloatingAnchor(app, container, selectedIdsRef.current) ?? anchorRef.current;
       if (!nextAnchor) {
         element.style.display = "none";
         element.style.visibility = "hidden";
