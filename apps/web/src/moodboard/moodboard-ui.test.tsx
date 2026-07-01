@@ -9,6 +9,7 @@ import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import {
+  contextTargetIdFromEvent,
   eventClientPoint,
   getFloatingChromeSafeRect,
   nodeIdFromTarget,
@@ -125,6 +126,11 @@ test("eventClientPoint reads Leafer native event origins for context menus", () 
 test("nodeIdFromTarget reads reconciler node ids from parent data", () => {
   expect(nodeIdFromTarget({ data: { id: "n1" } })).toBe("n1");
   expect(nodeIdFromTarget({ parent: { data: { nodeId: "n2" } } })).toBe("n2");
+});
+
+test("contextTargetIdFromEvent falls back to the editor selection", () => {
+  expect(contextTargetIdFromEvent(null, { data: { nodeId: "selected-node" } })).toBe("selected-node");
+  expect(contextTargetIdFromEvent({ parent: { data: { nodeId: "event-node" } } }, { data: { nodeId: "selected-node" } })).toBe("event-node");
 });
 
 test("resolveFloatingRect follows world bounds and clamps within the canvas", () => {

@@ -325,6 +325,10 @@ export function nodeIdFromTarget(target: any): string | null {
   return null;
 }
 
+export function contextTargetIdFromEvent(eventTarget: unknown, editorTarget: unknown): string | null {
+  return nodeIdFromTarget(eventTarget) ?? nodeIdFromTarget(editorTarget);
+}
+
 export function eventClientPoint(event: any): { x: number; y: number } {
   const source = event?.origin ?? event?.nativeEvent ?? event?.event ?? event;
   return {

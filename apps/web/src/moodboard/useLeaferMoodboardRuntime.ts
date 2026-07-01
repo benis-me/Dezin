@@ -4,6 +4,7 @@ import { DragEvent, EditorEvent, EditorMoveEvent, EditorRotateEvent, EditorScale
 import { ViewportLighter } from "@dezin/leafer-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import {
+  contextTargetIdFromEvent,
   eventCanvasPoint,
   eventClientPoint,
   nodeIdFromTarget,
@@ -231,7 +232,7 @@ export function useLeaferMoodboardRuntime({
       event?.preventDefault?.();
       const client = eventClientPoint(event);
       const point = eventCanvasPoint(event);
-      const targetId = nodeIdFromTarget(event?.target);
+      const targetId = contextTargetIdFromEvent(event?.target, editor.target);
       if (targetId) {
         selectedIdRef.current = targetId;
         callbacksRef.current.onSelect(targetId);
