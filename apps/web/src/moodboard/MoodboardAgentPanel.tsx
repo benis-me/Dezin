@@ -3,6 +3,7 @@ import { ArrowUp, ChevronLeft, Copy, Loader2, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
+import { AttachMenu } from "../components/AttachMenu.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 
@@ -62,6 +63,10 @@ export function MoodboardAgentPanel({
     } catch {
       /* Clipboard can be unavailable in local webviews. */
     }
+  };
+
+  const appendContext = (context: string) => {
+    setText((current) => `${current}${current.trim() ? "\n\n" : ""}${context}`);
   };
 
   return (
@@ -139,7 +144,13 @@ export function MoodboardAgentPanel({
               }}
             />
             <div className="mt-1 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-0.5" />
+              <div className="flex items-center gap-0.5">
+                <AttachMenu
+                  onPickPaths={(paths) => appendContext(`Reference local paths: ${paths.join(", ")}`)}
+                  onContext={appendContext}
+                  onReference={(project) => appendContext(`Reference Dezin project: ${project.name} (${project.id})`)}
+                />
+              </div>
               <TooltipProvider delayDuration={120}>
                 <div className="flex min-w-0 items-center gap-1">
                   <AgentModelSelect

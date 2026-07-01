@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MoodboardNode } from "../lib/api.ts";
+import { ApiProvider } from "../lib/api-context.tsx";
+import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
 import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
@@ -388,27 +390,30 @@ test("MoodboardAgentPanel renders project-style assistant messages with copy act
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
 
   render(
-    <MoodboardAgentPanel
-      boardName="Material board"
-      messages={[
-        { id: "u1", boardId: "b1", role: "user", content: "Collect warm references", createdAt: 1 },
-        { id: "a1", boardId: "b1", role: "assistant", content: "**Bold direction**\n\nUse warmer texture.", createdAt: 2 },
-      ]}
-      busy={false}
-      agents={[]}
-      agent=""
-      model=""
-      onBack={() => {}}
-      onAgentChange={() => {}}
-      onModelChange={() => {}}
-      onRescanAgents={async () => {}}
-      onSend={async () => {}}
-    />,
+    <ApiProvider client={makeFakeApi()}>
+      <MoodboardAgentPanel
+        boardName="Material board"
+        messages={[
+          { id: "u1", boardId: "b1", role: "user", content: "Collect warm references", createdAt: 1 },
+          { id: "a1", boardId: "b1", role: "assistant", content: "**Bold direction**\n\nUse warmer texture.", createdAt: 2 },
+        ]}
+        busy={false}
+        agents={[]}
+        agent=""
+        model=""
+        onBack={() => {}}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => {}}
+        onSend={async () => {}}
+      />
+    </ApiProvider>,
   );
 
   expect(screen.getByText("Collect warm references")).toBeInTheDocument();
   expect(screen.getByText("Bold direction")).toBeInTheDocument();
   expect(screen.getByText("Use warmer texture.")).toBeInTheDocument();
+  expect(screen.getByLabelText("Add files and context")).toBeInTheDocument();
 
   fireEvent.click(screen.getByLabelText("Copy message"));
   expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
