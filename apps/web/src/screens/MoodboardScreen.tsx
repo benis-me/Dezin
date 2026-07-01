@@ -28,23 +28,36 @@ export function MoodboardScreen({
     return (
       <div className="flex h-full w-full bg-background">
         <aside className="flex h-full w-[400px] shrink-0 flex-col border-r border-border bg-sidebar">
-          <div className="app-drag titlebar-pad-left h-10 shrink-0 border-b border-border" />
-          <div className="flex min-h-0 flex-1 flex-col justify-end px-3 pb-3">
-            <div className="rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5">
-              <div className="h-9 rounded-md bg-surface-2" />
-              <div className="mt-2 flex items-center justify-between">
-                <div className="h-8 w-24 rounded-md bg-surface-2" />
+          <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center border-b border-border px-3">
+            <div className="h-4 w-32 rounded bg-surface-2" />
+          </div>
+          <div className="min-h-0 flex-1 px-3 py-4">
+            <div className="h-16 w-4/5 rounded-lg bg-surface-2" />
+            <div className="mt-3 ml-auto h-10 w-2/3 rounded-lg bg-surface-2" />
+          </div>
+          <div className="shrink-0 px-3 pb-3">
+            <div className="rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 shadow-none">
+              <div className="h-10 rounded-md bg-surface-2" />
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <div className="h-8 w-28 rounded-md bg-surface-2" />
                 <div className="h-8 w-8 rounded-lg bg-surface-2" />
               </div>
             </div>
           </div>
         </aside>
         <section className="flex min-w-0 flex-1 flex-col">
-          <div className="app-drag h-10 shrink-0 border-b border-border" />
-          <div className="grid min-h-0 flex-1 place-items-center bg-surface">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 size={15} className="animate-spin" />
-              Loading moodboard
+          <div className="app-drag flex h-10 shrink-0 items-center justify-end border-b border-border px-1">
+            <div className="h-8 w-8 rounded-lg bg-surface-2" />
+          </div>
+          <div className="relative min-h-0 flex-1 overflow-hidden bg-surface">
+            <div className="absolute left-3 top-3 h-80 w-60 rounded-md border border-border bg-card/90" />
+            <div className="absolute bottom-3 left-1/2 h-10 w-72 -translate-x-1/2 rounded-lg border border-border bg-card/90" />
+            <div className="absolute bottom-3 right-3 h-10 w-36 rounded-lg border border-border bg-card/90" />
+            <div className="grid h-full place-items-center">
+              <div className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
+                <Loader2 size={13} className="animate-spin" />
+                Loading moodboard
+              </div>
             </div>
           </div>
         </section>
@@ -88,6 +101,7 @@ export function MoodboardScreen({
             }}
             onModelChange={board.setRunModel}
             onRescanAgents={board.rescanAgents}
+            onUploadFiles={(files) => void board.uploadFiles(files)}
             onSend={board.sendMessage}
           />
         </Panel>

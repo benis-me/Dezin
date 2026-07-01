@@ -70,7 +70,7 @@ export function MoodboardPropertiesPanel({
   return (
     <aside
       data-moodboard-floating-occluder
-      className="app-no-drag absolute right-3 top-3 z-20 max-h-[calc(100%-5rem)] select-none overflow-auto rounded-md border border-border bg-card/95 text-popover-foreground shadow-none backdrop-blur-xl"
+      className="app-no-drag absolute right-3 top-3 z-20 max-h-[calc(100%-5rem)] select-none overflow-auto rounded-md border border-border bg-card/95 text-popover-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       style={{ width }}
     >
       <div
@@ -80,7 +80,7 @@ export function MoodboardPropertiesPanel({
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize"
         onMouseDown={startResize}
       />
-      <div className="flex h-10 items-center justify-between gap-3 border-b border-border px-3">
+      <div className="flex h-10 items-center justify-between gap-3 border-b border-border/70 px-3">
         <div className="min-w-0">
           <p className="truncate text-xs font-medium text-foreground">{layerLabel(node)}</p>
           <p className="label-mono text-muted-foreground">{formatNodeType(node.type)}</p>

@@ -51,9 +51,9 @@ export function MoodboardLayerPanel({
   return (
     <aside
       data-moodboard-floating-occluder
-      className="app-no-drag absolute left-3 top-3 z-20 flex max-h-[calc(100%-5rem)] w-60 select-none flex-col overflow-hidden rounded-md border border-border bg-card/95 text-popover-foreground shadow-none backdrop-blur-xl"
+      className="app-no-drag absolute left-3 top-3 z-20 flex max-h-[calc(100%-5rem)] w-60 select-none flex-col overflow-hidden rounded-md border border-border bg-card/95 text-popover-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
     >
-      <div className="flex h-9 items-center gap-2 border-b border-border px-3 text-xs font-medium">
+      <div className="flex h-9 items-center gap-2 border-b border-border/70 px-3 text-xs font-medium">
         <Layers size={14} strokeWidth={1.75} />
         Layers
       </div>
@@ -169,8 +169,8 @@ function LayerItem({
           }
         }}
         className={cn(
-          "group flex h-8 min-w-0 items-center gap-1 px-1.5 text-left text-xs transition-colors",
-          selected ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+          "group flex h-8 min-w-0 cursor-pointer items-center gap-1 rounded-sm px-1.5 text-left text-xs transition-colors",
+          selected ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/45 hover:text-foreground",
           draggingId === node.id && "opacity-45",
           draggingId && draggingId !== node.id && "data-[drop-target=true]:bg-accent/70",
         )}
@@ -189,8 +189,16 @@ function LayerItem({
         >
           {collapsed ? <ChevronRight size={13} strokeWidth={1.75} /> : <ChevronDown size={13} strokeWidth={1.75} />}
         </button>
-        <span className="flex min-w-0 flex-1 items-center gap-2 rounded-sm py-1 text-left">
-          <span className="grid size-5 shrink-0 place-items-center rounded border border-border bg-card">
+        <span className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm py-1 text-left">
+          <span
+            className="grid size-5 shrink-0 place-items-center overflow-hidden rounded border border-border bg-card"
+            style={{
+              backgroundImage:
+                "linear-gradient(45deg, var(--checker, rgba(0,0,0,0.04)) 25%, transparent 25%), linear-gradient(-45deg, var(--checker, rgba(0,0,0,0.04)) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--checker, rgba(0,0,0,0.04)) 75%), linear-gradient(-45deg, transparent 75%, var(--checker, rgba(0,0,0,0.04)) 75%)",
+              backgroundSize: "8px 8px",
+              backgroundPosition: "0 0, 0 -4px, -4px 4px, 4px 0px",
+            }}
+          >
             <LayerIcon node={node} />
           </span>
           {editing ? (

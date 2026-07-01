@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, ChevronLeft, Copy, Loader2, Sparkles } from "lucide-react";
+import { ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
@@ -18,6 +18,7 @@ export function MoodboardAgentPanel({
   onAgentChange,
   onModelChange,
   onRescanAgents,
+  onUploadFiles,
   onSend,
 }: {
   boardName: string;
@@ -30,11 +31,14 @@ export function MoodboardAgentPanel({
   onAgentChange: (command: string) => void;
   onModelChange: (model: string) => void;
   onRescanAgents: () => Promise<void>;
+  onUploadFiles?: (files: FileList | null) => void;
   onSend: (content: string) => Promise<void>;
 }) {
   const [text, setText] = useState("");
   const [composerH, setComposerH] = useState(92);
+  const [dragging, setDragging] = useState(false);
   const composerRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -67,6 +71,11 @@ export function MoodboardAgentPanel({
 
   const appendContext = (context: string) => {
     setText((current) => `${current}${current.trim() ? "\n\n" : ""}${context}`);
+  };
+
+  const attachFiles = (files: FileList | null) => {
+    onUploadFiles?.(files);
+    setDragging(false);
   };
 
   return (
@@ -128,7 +137,46 @@ export function MoodboardAgentPanel({
       <div className="pointer-events-none absolute inset-x-0 bottom-0">
         <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
         <div ref={composerRef} className="bg-background px-3 pb-3">
-          <div className="pointer-events-auto relative rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring hover:border-border-strong">
+          {onUploadFiles ? (
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*,video/*"
+              className="hidden"
+              aria-label="Attach moodboard files"
+              onChange={(event) => {
+                attachFiles(event.target.files);
+                event.currentTarget.value = "";
+              }}
+            />
+          ) : null}
+          <div
+            onDragOver={(event) => {
+              if (!onUploadFiles) return;
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={(event) => {
+              if (event.currentTarget === event.target) setDragging(false);
+            }}
+            onDrop={(event) => {
+              if (!onUploadFiles) return;
+              event.preventDefault();
+              attachFiles(event.dataTransfer.files);
+            }}
+            className={`pointer-events-auto relative rounded-2xl border bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring ${
+              dragging ? "border-ring ring-2 ring-ring/40" : "border-input hover:border-border-strong"
+            }`}
+          >
+            {dragging ? (
+              <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl bg-card/90 text-sm font-medium text-foreground">
+                <span className="flex items-center gap-2">
+                  <Paperclip size={15} strokeWidth={1.75} />
+                  Drop files onto canvas
+                </span>
+              </div>
+            ) : null}
             <textarea
               aria-label="Moodboard prompt"
               rows={1}
@@ -146,6 +194,7 @@ export function MoodboardAgentPanel({
             <div className="mt-1 flex items-center justify-between gap-2">
               <div className="flex items-center gap-0.5">
                 <AttachMenu
+                  onAttachFile={onUploadFiles ? () => fileInputRef.current?.click() : undefined}
                   onPickPaths={(paths) => appendContext(`Reference local paths: ${paths.join(", ")}`)}
                   onContext={appendContext}
                   onReference={(project) => appendContext(`Reference Dezin project: ${project.name} (${project.id})`)}

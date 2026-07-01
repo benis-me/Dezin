@@ -504,6 +504,37 @@ test("MoodboardAgentPanel renders project-style assistant messages with copy act
   expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
 });
 
+test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
+  const onUploadFiles = vi.fn();
+  const files = [new File(["image"], "reference.png", { type: "image/png" })] as unknown as FileList;
+
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <MoodboardAgentPanel
+        boardName="Material board"
+        messages={[]}
+        busy={false}
+        agents={[]}
+        agent=""
+        model=""
+        onBack={() => {}}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => {}}
+        onUploadFiles={onUploadFiles}
+        onSend={async () => {}}
+      />
+    </ApiProvider>,
+  );
+
+  const composer = screen.getByLabelText("Moodboard prompt").closest("div")!;
+  fireEvent.dragOver(composer);
+  expect(screen.getByText("Drop files onto canvas")).toBeInTheDocument();
+  fireEvent.drop(composer, { dataTransfer: { files } });
+
+  expect(onUploadFiles).toHaveBeenCalledWith(files);
+});
+
 test("MoodboardPropertiesPanel shows concrete layout values", () => {
   const node: MoodboardNode = {
     id: "n1",

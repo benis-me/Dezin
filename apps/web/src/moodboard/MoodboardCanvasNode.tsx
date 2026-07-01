@@ -55,7 +55,9 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
     return (
       <>
         <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} cornerRadius={radius} data={data} />
-        {assetUrl(node) ? <Img url={assetUrl(node)} x={0} y={0} width={node.width} height={node.height} cornerRadius={radius} data={data} /> : null}
+        {assetUrl(node) ? (
+          <Img url={assetUrl(node)} x={0} y={0} width={node.width} height={node.height} cornerRadius={radius} draggable={false} data={data} />
+        ) : null}
         {promptText(node) ? (
           <>
             <Rect x={0} y={Math.max(0, node.height - 44)} width={node.width} height={44} fill="rgba(255,255,255,0.86)" data={data} />
@@ -67,6 +69,8 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
               fontSize={11}
               lineHeight={15}
               fill="#5f5f5f"
+              hittable={false}
+              draggable={false}
               data={data}
             />
           </>
@@ -90,7 +94,18 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
           cornerRadius={radius}
           data={data}
         />
-        <Txt text={nodeTitle(node)} x={12} y={10} width={Math.max(24, node.width - 24)} fontSize={13} fontWeight={600} fill="#222222" data={data} />
+        <Txt
+          text={nodeTitle(node)}
+          x={12}
+          y={10}
+          width={Math.max(24, node.width - 24)}
+          fontSize={13}
+          fontWeight={600}
+          fill="#222222"
+          hittable={false}
+          draggable={false}
+          data={data}
+        />
       </>
     );
   }
@@ -111,7 +126,19 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
           cornerRadius={10}
           data={data}
         />
-        <Txt text="+" x={0} y={Math.max(24, node.height / 2 - 56)} width={node.width} fontSize={58} fontWeight={300} textAlign="center" fill="#b8b8b2" data={data} />
+        <Txt
+          text="+"
+          x={0}
+          y={Math.max(24, node.height / 2 - 56)}
+          width={node.width}
+          fontSize={58}
+          fontWeight={300}
+          textAlign="center"
+          fill="#b8b8b2"
+          hittable={false}
+          draggable={false}
+          data={data}
+        />
         <Txt
           text="Image generator"
           x={18}
@@ -121,6 +148,8 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
           fontWeight={600}
           textAlign="center"
           fill="#41413d"
+          hittable={false}
+          draggable={false}
           data={data}
         />
         <Txt
@@ -132,6 +161,8 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
           lineHeight={15}
           textAlign="center"
           fill={prompt ? "#6f6f68" : "#9b9b94"}
+          hittable={false}
+          draggable={false}
           data={data}
         />
       </>
@@ -142,7 +173,18 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
     return (
       <>
         <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} stroke={nodeStroke(node)} strokeWidth={1} cornerRadius={radius} data={data} />
-        <Txt text="Video" x={0} y={Math.max(0, node.height / 2 - 8)} width={node.width} fontSize={13} textAlign="center" fill="#777777" data={data} />
+        <Txt
+          text="Video"
+          x={0}
+          y={Math.max(0, node.height / 2 - 8)}
+          width={node.width}
+          fontSize={13}
+          textAlign="center"
+          fill="#777777"
+          hittable={false}
+          draggable={false}
+          data={data}
+        />
       </>
     );
   }
@@ -150,7 +192,7 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
   return (
     <>
       <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} stroke={nodeStroke(node)} strokeWidth={1} cornerRadius={radius} data={data} />
-      <Txt text="Note" x={12} y={10} width={Math.max(24, node.width - 24)} fontSize={11} fill="#8a7b16" data={data} />
+      <Txt text="Note" x={12} y={10} width={Math.max(24, node.width - 24)} fontSize={11} fill="#8a7b16" hittable={false} draggable={false} data={data} />
       <Txt
         text={nodeText(node) || "New note"}
         x={12}
@@ -160,6 +202,8 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
         fontSize={14}
         lineHeight={20}
         fill="#24210f"
+        hittable={false}
+        draggable={false}
         data={data}
       />
     </>

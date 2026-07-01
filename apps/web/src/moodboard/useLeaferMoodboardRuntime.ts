@@ -214,6 +214,7 @@ export function useLeaferMoodboardRuntime({
       if (!targetId) return false;
       selectedIdRef.current = targetId;
       callbacksRef.current.onSelect(targetId);
+      selectInRuntime(targetId);
       scheduleFloatingSelection();
       return true;
     };
@@ -222,6 +223,7 @@ export function useLeaferMoodboardRuntime({
     };
     const handleTap = (event: any) => {
       if (selectFromTarget(event?.target)) return;
+      selectInRuntime(null);
       callbacksRef.current.onBlankTap(eventCanvasPoint(event));
     };
     const handleDoubleTap = (event: any) => {
