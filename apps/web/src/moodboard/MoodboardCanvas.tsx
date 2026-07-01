@@ -6,7 +6,7 @@ import { Button } from "../components/ui/index.ts";
 import type { MoodboardNode } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
 import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
-import { CanvasActionBar, CanvasZoomBar, GeneratorPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
+import { CanvasActionBar, CanvasZoomBar, GeneratorPromptToolbar, MultiSelectionToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
@@ -124,6 +124,20 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               onToggleVisible={() => canvas.toggleNodeVisible(canvas.selected!.id)}
               onToggleLocked={() => canvas.toggleNodeLocked(canvas.selected!.id)}
               onDelete={() => canvas.deleteNode(canvas.selected!.id)}
+            />
+          </FloatingCanvasSurface>
+        ) : null}
+
+        {!canvas.isTransforming && canvas.selectedNodes.length > 1 && canvas.selectionRect ? (
+          <FloatingCanvasSurface anchor={canvas.selectionRect} placement="top">
+            <MultiSelectionToolbar
+              nodes={canvas.selectedNodes}
+              onDuplicate={() => canvas.duplicateNodes(canvas.selectedIds)}
+              onBringToFront={() => canvas.bringNodesToFront(canvas.selectedIds)}
+              onSendToBack={() => canvas.sendNodesToBack(canvas.selectedIds)}
+              onSetVisible={(visible) => canvas.setNodesVisible(canvas.selectedIds, visible)}
+              onSetLocked={(locked) => canvas.setNodesLocked(canvas.selectedIds, locked)}
+              onDelete={() => canvas.deleteNodes(canvas.selectedIds)}
             />
           </FloatingCanvasSurface>
         ) : null}

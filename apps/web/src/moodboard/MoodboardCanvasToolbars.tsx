@@ -111,6 +111,54 @@ export function SelectionToolbar({
   );
 }
 
+export function MultiSelectionToolbar({
+  nodes,
+  onDuplicate,
+  onBringToFront,
+  onSendToBack,
+  onSetVisible,
+  onSetLocked,
+  onDelete,
+}: {
+  nodes: MoodboardNode[];
+  onDuplicate: () => void;
+  onBringToFront: () => void;
+  onSendToBack: () => void;
+  onSetVisible: (visible: boolean) => void;
+  onSetLocked: (locked: boolean) => void;
+  onDelete: () => void;
+}) {
+  const anyVisible = nodes.some((node) => isNodeVisible(node));
+  const anyUnlocked = nodes.some((node) => !isNodeLocked(node));
+
+  return (
+    <TooltipProvider delayDuration={120}>
+      <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+        <span className="px-2 text-xs font-medium text-muted-foreground">{nodes.length} selected</span>
+        <span className="mx-0.5 h-5 w-px bg-border" />
+        <ToolButton label="Duplicate selected" onClick={onDuplicate}>
+          <Copy size={14} strokeWidth={1.75} />
+        </ToolButton>
+        <ToolButton label="Bring selected to front" onClick={onBringToFront}>
+          <ArrowUpToLine size={14} strokeWidth={1.75} />
+        </ToolButton>
+        <ToolButton label="Send selected to back" onClick={onSendToBack}>
+          <ArrowDownToLine size={14} strokeWidth={1.75} />
+        </ToolButton>
+        <ToolButton label={anyVisible ? "Hide selected" : "Show selected"} onClick={() => onSetVisible(!anyVisible)}>
+          {anyVisible ? <EyeOff size={14} strokeWidth={1.75} /> : <Eye size={14} strokeWidth={1.75} />}
+        </ToolButton>
+        <ToolButton label={anyUnlocked ? "Lock selected" : "Unlock selected"} onClick={() => onSetLocked(anyUnlocked)}>
+          {anyUnlocked ? <Lock size={14} strokeWidth={1.75} /> : <LockOpen size={14} strokeWidth={1.75} />}
+        </ToolButton>
+        <ToolButton label="Delete selected" onClick={onDelete}>
+          <Trash2 size={14} strokeWidth={1.75} />
+        </ToolButton>
+      </div>
+    </TooltipProvider>
+  );
+}
+
 export function CanvasActionBar({
   tool,
   layersOpen,

@@ -102,14 +102,16 @@ export function useLeaferMoodboardRuntime({
   }, []);
 
   const updateFloatingSelection = useCallback(() => {
-    const id = selectedIdsRef.current.length === 1 ? selectedIdsRef.current[0] : null;
-    const frame = findFrame(id);
+    const ids = selectedIdsRef.current;
+    const frames = ids.map((id) => findFrame(id)).filter((frame): frame is NonNullable<typeof frame> => Boolean(frame));
     const container = hostRef.current;
     const app: any = appRef.current;
-    if (!frame || !container) {
+    if (frames.length === 0 || !container) {
       commitSelectionRect(null);
       return;
     }
+    const frame = frames.length === 1 ? frames[0] : unionFrameBounds(frames);
+    const world = frames.length === 1 ? frames[0].worldBoxBounds ?? frames[0].boxBounds : frame;
 
     const containerRect = container.getBoundingClientRect();
     commitSelectionRect(
@@ -120,7 +122,7 @@ export function useLeaferMoodboardRuntime({
         containerTop: containerRect.top,
         frame,
         tree: app?.tree,
-        world: frame.worldBoxBounds ?? frame.boxBounds,
+        world,
       }),
     );
   }, [commitSelectionRect, findFrame]);
@@ -524,4 +526,20 @@ export function useLeaferMoodboardRuntime({
 
 function toggleSelectionId(ids: string[], id: string): string[] {
   return ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id];
+}
+
+function unionFrameBounds(frames: any[]): { x: number; y: number; width: number; height: number } {
+  const bounds = frames
+    .map((frame) => frame.worldBoxBounds ?? frame.boxBounds ?? frame)
+    .map((bound) => ({
+      x: Number(bound?.x ?? 0),
+      y: Number(bound?.y ?? 0),
+      width: Math.max(1, Number(bound?.width ?? 0) || 1),
+      height: Math.max(1, Number(bound?.height ?? 0) || 1),
+    }));
+  const left = Math.min(...bounds.map((bound) => bound.x));
+  const top = Math.min(...bounds.map((bound) => bound.y));
+  const right = Math.max(...bounds.map((bound) => bound.x + bound.width));
+  const bottom = Math.max(...bounds.map((bound) => bound.y + bound.height));
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }

@@ -82,6 +82,10 @@ export function useMoodboardCanvasController({
 
   const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
   const selected = useMemo(() => (selectedId ? nodes.find((node) => node.id === selectedId) ?? null : null), [nodes, selectedId]);
+  const selectedNodes = useMemo(() => {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    return selectedIds.map((id) => byId.get(id)).filter((node): node is MoodboardNode => Boolean(node));
+  }, [nodes, selectedIds]);
   const layerTree = useMemo(() => buildLayerTree(nodes), [nodes]);
 
   const saveInputs = useCallback((next: SaveMoodboardNodeInput[]) => onNodesChangeRef.current(next), []);
@@ -145,42 +149,106 @@ export function useMoodboardCanvasController({
     [deleteNodes],
   );
 
-  const duplicateNode = useCallback(
-    (id: string) => {
-      const node = nodesRef.current.find((item) => item.id === id);
-      if (!node) return;
-      const nextId = localId();
-      saveInputs([
-        ...nodesRef.current.map(toInput),
-        {
+  const duplicateNodes = useCallback(
+    (ids: string[]) => {
+      const current = nodesRef.current;
+      const byId = new Map(current.map((node) => [node.id, node]));
+      const targetIds = ids.filter((id, index) => byId.has(id) && ids.indexOf(id) === index);
+      if (targetIds.length === 0) return;
+
+      let nextZIndex = Math.max(0, ...current.map((item) => item.zIndex ?? 0)) + 1;
+      const copies: Array<SaveMoodboardNodeInput & { id: string }> = targetIds.map((id) => {
+        const node = byId.get(id)!;
+        return {
           ...toInput(node),
-          id: nextId,
+          id: localId(),
           x: node.x + 28,
           y: node.y + 28,
-          zIndex: Math.max(0, ...nodesRef.current.map((item) => item.zIndex ?? 0)) + 1,
+          zIndex: nextZIndex++,
           data: { ...node.data },
-        },
-      ]);
-      handleSelect(nextId);
+        };
+      });
+
+      saveInputs([...current.map(toInput), ...copies]);
+      handleSelectIds(copies.map((node) => node.id));
       setContextMenu(null);
     },
-    [handleSelect, saveInputs],
+    [handleSelectIds, saveInputs],
+  );
+
+  const duplicateNode = useCallback(
+    (id: string) => {
+      duplicateNodes([id]);
+    },
+    [duplicateNodes],
+  );
+
+  const bringNodesToFront = useCallback(
+    (ids: string[]) => {
+      const current = nodesRef.current;
+      const byId = new Set(current.map((node) => node.id));
+      const targetIds = ids.filter((id, index) => byId.has(id) && ids.indexOf(id) === index);
+      if (targetIds.length === 0) return;
+
+      let nextZIndex = Math.max(0, ...current.map((item) => item.zIndex ?? 0)) + 1;
+      const zIndexById = new Map(targetIds.map((id) => [id, nextZIndex++]));
+      saveInputs(current.map((node) => (zIndexById.has(node.id) ? { ...toInput(node), zIndex: zIndexById.get(node.id) } : toInput(node))));
+      setContextMenu(null);
+    },
+    [saveInputs],
+  );
+
+  const sendNodesToBack = useCallback(
+    (ids: string[]) => {
+      const current = nodesRef.current;
+      const byId = new Set(current.map((node) => node.id));
+      const targetIds = ids.filter((id, index) => byId.has(id) && ids.indexOf(id) === index);
+      if (targetIds.length === 0) return;
+
+      let nextZIndex = Math.min(0, ...current.map((item) => item.zIndex ?? 0)) - targetIds.length;
+      const zIndexById = new Map(targetIds.map((id) => [id, nextZIndex++]));
+      saveInputs(current.map((node) => (zIndexById.has(node.id) ? { ...toInput(node), zIndex: zIndexById.get(node.id) } : toInput(node))));
+      setContextMenu(null);
+    },
+    [saveInputs],
+  );
+
+  const patchNodesData = useCallback(
+    (ids: string[], patch: Record<string, unknown>) => {
+      const targetIds = new Set(ids);
+      if (targetIds.size === 0) return;
+      saveInputs(nodesRef.current.map((node) => (targetIds.has(node.id) ? { ...toInput(node), data: { ...node.data, ...patch } } : toInput(node))));
+      setContextMenu(null);
+    },
+    [saveInputs],
+  );
+
+  const setNodesVisible = useCallback(
+    (ids: string[], visible: boolean) => {
+      patchNodesData(ids, { visible });
+    },
+    [patchNodesData],
+  );
+
+  const setNodesLocked = useCallback(
+    (ids: string[], locked: boolean) => {
+      patchNodesData(ids, { locked });
+    },
+    [patchNodesData],
   );
 
   const bringToFront = useCallback(
     (id: string) => {
-      patchNode(id, { zIndex: Math.max(0, ...nodesRef.current.map((item) => item.zIndex ?? 0)) + 1 });
-      setContextMenu(null);
+      bringNodesToFront([id]);
     },
-    [patchNode],
+    [bringNodesToFront],
   );
 
   const sendToBack = useCallback(
     (id: string) => {
-      patchNode(id, { zIndex: Math.min(0, ...nodesRef.current.map((item) => item.zIndex ?? 0)) - 1 });
-      setContextMenu(null);
+      sendNodesToBack([id]);
     },
-    [patchNode],
+    [sendNodesToBack],
   );
 
   const renameNode = useCallback(
@@ -194,20 +262,18 @@ export function useMoodboardCanvasController({
     (id: string) => {
       const node = nodesRef.current.find((item) => item.id === id);
       if (!node) return;
-      patchNodeData(id, { visible: !isNodeVisible(node) });
-      setContextMenu(null);
+      setNodesVisible([id], !isNodeVisible(node));
     },
-    [patchNodeData],
+    [setNodesVisible],
   );
 
   const toggleNodeLocked = useCallback(
     (id: string) => {
       const node = nodesRef.current.find((item) => item.id === id);
       if (!node) return;
-      patchNodeData(id, { locked: !isNodeLocked(node) });
-      setContextMenu(null);
+      setNodesLocked([id], !isNodeLocked(node));
     },
-    [patchNodeData],
+    [setNodesLocked],
   );
 
   const toggleLayerCollapsed = useCallback((id: string) => {
@@ -351,6 +417,7 @@ export function useMoodboardCanvasController({
     contextTargetId,
     selectedIds,
     selected,
+    selectedNodes,
     layerTree,
     inputRef,
     collapsedLayerIds,
@@ -365,8 +432,13 @@ export function useMoodboardCanvasController({
     deleteNode,
     deleteNodes,
     duplicateNode,
+    duplicateNodes,
     bringToFront,
+    bringNodesToFront,
     sendToBack,
+    sendNodesToBack,
+    setNodesVisible,
+    setNodesLocked,
     renameNode,
     toggleNodeVisible,
     toggleNodeLocked,

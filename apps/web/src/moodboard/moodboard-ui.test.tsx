@@ -4,7 +4,7 @@ import type { MoodboardNode } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
-import { GeneratorPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
+import { GeneratorPromptToolbar, MultiSelectionToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
@@ -807,6 +807,61 @@ test("SelectionToolbar exposes object visibility and lock actions", () => {
   expect(onToggleVisible).toHaveBeenCalledOnce();
   expect(onToggleLocked).toHaveBeenCalledOnce();
   expect(screen.queryByText("Reference tone")).toBeNull();
+});
+
+test("MultiSelectionToolbar exposes batch node actions", () => {
+  const onDuplicate = vi.fn();
+  const onBringToFront = vi.fn();
+  const onSendToBack = vi.fn();
+  const onSetVisible = vi.fn();
+  const onSetLocked = vi.fn();
+  const onDelete = vi.fn();
+  const first: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "Reference tone" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const second: MoodboardNode = {
+    ...first,
+    id: "n2",
+    data: { content: "Hidden reference", visible: false, locked: true },
+  };
+
+  render(
+    <MultiSelectionToolbar
+      nodes={[first, second]}
+      onDuplicate={onDuplicate}
+      onBringToFront={onBringToFront}
+      onSendToBack={onSendToBack}
+      onSetVisible={onSetVisible}
+      onSetLocked={onSetLocked}
+      onDelete={onDelete}
+    />,
+  );
+
+  expect(screen.getByText("2 selected")).toBeInTheDocument();
+  fireEvent.click(screen.getByLabelText("Duplicate selected"));
+  fireEvent.click(screen.getByLabelText("Bring selected to front"));
+  fireEvent.click(screen.getByLabelText("Send selected to back"));
+  fireEvent.click(screen.getByLabelText("Hide selected"));
+  fireEvent.click(screen.getByLabelText("Lock selected"));
+  fireEvent.click(screen.getByLabelText("Delete selected"));
+
+  expect(onDuplicate).toHaveBeenCalledOnce();
+  expect(onBringToFront).toHaveBeenCalledOnce();
+  expect(onSendToBack).toHaveBeenCalledOnce();
+  expect(onSetVisible).toHaveBeenCalledWith(false);
+  expect(onSetLocked).toHaveBeenCalledWith(true);
+  expect(onDelete).toHaveBeenCalledOnce();
 });
 
 test("GeneratorPromptToolbar exposes a compact image model selector", () => {
