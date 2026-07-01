@@ -200,7 +200,7 @@ test("resolveFloatingRect follows world bounds and clamps within the canvas", ()
       frame: { x: 0, y: 0, width: 200, height: 120 },
       world: { x: 460, y: 280, width: 200, height: 120 },
     }),
-  ).toEqual({ left: 484, top: 252, bottom: 188 });
+  ).toEqual({ left: 484, top: 252, bottom: 188, targetLeft: 420, targetRight: 500 });
 });
 
 test("resolveFloatingRect accepts Leafer-local world bounds without subtracting the host offset", () => {
@@ -214,7 +214,7 @@ test("resolveFloatingRect accepts Leafer-local world bounds without subtracting 
       tree: { x: 0, y: 0, scaleX: 1 },
       world: { x: 100, y: 90, width: 200, height: 120 },
     }),
-  ).toEqual({ left: 200, top: 82, bottom: 222 });
+  ).toEqual({ left: 200, top: 82, bottom: 222, targetLeft: 100, targetRight: 300 });
 });
 
 test("resolveFloatingRect follows live tree transforms over stale world bounds", () => {
@@ -228,7 +228,20 @@ test("resolveFloatingRect follows live tree transforms over stale world bounds",
       tree: { x: 10, y: 20, scaleX: 2 },
       world: { x: 100, y: 90, width: 200, height: 120 },
     }),
-  ).toEqual({ left: 410, top: 192, bottom: 452 });
+  ).toEqual({ left: 410, top: 192, bottom: 452, targetLeft: 210, targetRight: 610 });
+});
+
+test("resolveFloatingRect keeps the selected target bounds for side toolbar placement", () => {
+  expect(
+    resolveFloatingRect({
+      containerWidth: 800,
+      containerHeight: 600,
+      containerLeft: 0,
+      containerTop: 0,
+      frame: { x: 100, y: 90, width: 200, height: 120 },
+      tree: { x: 10, y: 20, scaleX: 2 },
+    }),
+  ).toMatchObject({ left: 410, targetLeft: 210, targetRight: 610 });
 });
 
 test("generatorModel reads the image model stored on a generator node", () => {
@@ -289,7 +302,7 @@ test("resolveFloatingChromeRect keeps measured toolbars inside the canvas", () =
       surfaceHeight: 36,
       placement: "top",
     }),
-  ).toEqual({ left: 8, top: 8 });
+  ).toEqual({ left: 12, top: 130 });
 
   expect(
     resolveFloatingChromeRect({
@@ -300,7 +313,7 @@ test("resolveFloatingChromeRect keeps measured toolbars inside the canvas", () =
       surfaceHeight: 36,
       placement: "bottom",
     }),
-  ).toEqual({ left: 132, top: 256 });
+  ).toEqual({ left: 130, top: 134 });
 });
 
 test("resolveFloatingChromeRect avoids floating canvas panels", () => {
@@ -326,6 +339,20 @@ test("resolveFloatingChromeRect avoids floating canvas panels", () => {
       ],
     }),
   ).toEqual({ left: 260, top: 24 });
+});
+
+test("resolveFloatingChromeRect falls back to a side placement when vertical space is blocked", () => {
+  expect(
+    resolveFloatingChromeRect({
+      anchor: { left: 100, targetLeft: 90, targetRight: 110, top: 48, bottom: 72 },
+      containerWidth: 220,
+      containerHeight: 120,
+      surfaceWidth: 80,
+      surfaceHeight: 100,
+      placement: "top",
+      padding: 8,
+    }),
+  ).toEqual({ left: 110, top: 10 });
 });
 
 test("normalizeCanvasRect turns drag endpoints into a positive drawing rect", () => {

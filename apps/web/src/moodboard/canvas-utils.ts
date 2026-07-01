@@ -15,6 +15,8 @@ export interface FloatingRect {
   left: number;
   top: number;
   bottom: number;
+  targetLeft?: number;
+  targetRight?: number;
 }
 
 export interface CanvasRect {
@@ -251,6 +253,8 @@ export function resolveFloatingRect({
   let rawLeft = fallbackLeft;
   let rawTop = fallbackTop;
   let rawBottom = fallbackBottom;
+  let rawTargetLeft = fallbackLeft - (frameWidth * scale) / 2;
+  let rawTargetRight = fallbackLeft + (frameWidth * scale) / 2;
 
   if (!hasLiveTreeTransform && world) {
     const worldWidth = Number(world.width ?? frameWidth);
@@ -259,11 +263,15 @@ export function resolveFloatingRect({
       left: Number(world.x ?? 0) + worldWidth / 2,
       top: Number(world.y ?? 0) - 8,
       bottom: Number(world.y ?? 0) + worldHeight + 12,
+      targetLeft: Number(world.x ?? 0),
+      targetRight: Number(world.x ?? 0) + worldWidth,
     };
     const viewportCandidate = {
       left: Number(world.x ?? 0) - containerLeft + worldWidth / 2,
       top: Number(world.y ?? 0) - containerTop - 8,
       bottom: Number(world.y ?? 0) - containerTop + worldHeight + 12,
+      targetLeft: Number(world.x ?? 0) - containerLeft,
+      targetRight: Number(world.x ?? 0) - containerLeft + worldWidth,
     };
     const localDistance = floatingCandidateDistance(localCandidate, fallbackLeft, fallbackTop, fallbackBottom);
     const viewportDistance = floatingCandidateDistance(viewportCandidate, fallbackLeft, fallbackTop, fallbackBottom);
@@ -271,12 +279,16 @@ export function resolveFloatingRect({
     rawLeft = candidate.left;
     rawTop = candidate.top;
     rawBottom = candidate.bottom;
+    rawTargetLeft = candidate.targetLeft;
+    rawTargetRight = candidate.targetRight;
   }
 
   return {
     left: Math.max(16, Math.min(containerWidth - 16, rawLeft)),
     top: Math.max(12, Math.min(containerHeight - 56, rawTop)),
     bottom: Math.max(12, Math.min(containerHeight - 132, rawBottom)),
+    targetLeft: Math.max(0, Math.min(containerWidth, rawTargetLeft)),
+    targetRight: Math.max(0, Math.min(containerWidth, rawTargetRight)),
   };
 }
 
@@ -305,25 +317,37 @@ export function resolveFloatingChromeRect({
   const availableHeight = Math.max(0, safeRect.height);
   const width = Math.min(Math.max(0, surfaceWidth), availableWidth);
   const height = Math.min(Math.max(0, surfaceHeight), availableHeight);
-  const targetRect = rectFromBounds(anchor.left, anchor.top, anchor.left, anchor.bottom);
+  const targetLeft = anchor.targetLeft ?? anchor.left;
+  const targetRight = anchor.targetRight ?? anchor.left;
+  const targetRect = rectFromBounds(Math.min(targetLeft, targetRight), anchor.top, Math.max(targetLeft, targetRight), anchor.bottom);
   const anchorRect = intersectRects(targetRect, safeRect) ?? targetRect;
-  const placements = placement === "top" ? ["top", "bottom"] : ["bottom", "top"];
+  const placements = placement === "top" ? (["top", "bottom", "right", "left"] as const) : (["bottom", "top", "right", "left"] as const);
 
   for (const nextPlacement of placements) {
-    const top = nextPlacement === "top" ? anchorRect.top - height : anchorRect.bottom;
-    if (top >= safeRect.top && top + height <= safeRect.bottom) {
-      return {
-        left: clamp(anchorRect.left - width / 2, safeRect.left, Math.max(safeRect.left, safeRect.right - width)),
-        top,
-      };
+    const rect = floatingChromePlacementRect(nextPlacement, anchorRect, width, height);
+    if (rect.left >= safeRect.left && rect.right <= safeRect.right && rect.top >= safeRect.top && rect.bottom <= safeRect.bottom) {
+      return { left: rect.left, top: rect.top };
     }
   }
 
-  const fallbackTop = placement === "top" ? anchorRect.top - height : anchorRect.bottom;
+  const fallback = floatingChromePlacementRect(placement, anchorRect, width, height);
   return {
-    left: clamp(anchorRect.left - width / 2, safeRect.left, Math.max(safeRect.left, safeRect.right - width)),
-    top: clamp(fallbackTop, safeRect.top, Math.max(safeRect.top, safeRect.bottom - height)),
+    left: clamp(fallback.left, safeRect.left, Math.max(safeRect.left, safeRect.right - width)),
+    top: clamp(fallback.top, safeRect.top, Math.max(safeRect.top, safeRect.bottom - height)),
   };
+}
+
+function floatingChromePlacementRect(placement: "top" | "bottom" | "right" | "left", anchorRect: CanvasRect, width: number, height: number): CanvasRect {
+  const centerX = anchorRect.left + anchorRect.width / 2;
+  const centerY = anchorRect.top + anchorRect.height / 2;
+  if (placement === "top" || placement === "bottom") {
+    const left = centerX - width / 2;
+    const top = placement === "top" ? anchorRect.top - height : anchorRect.bottom;
+    return rectFromBounds(left, top, left + width, top + height);
+  }
+  const left = placement === "left" ? anchorRect.left - width : anchorRect.right;
+  const top = centerY - height / 2;
+  return rectFromBounds(left, top, left + width, top + height);
 }
 
 export function rectFromBounds(left: number, top: number, right: number, bottom: number): CanvasRect {

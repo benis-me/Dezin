@@ -569,6 +569,8 @@ function resolveSelectedFloatingAnchor(app: any, container: HTMLElement, selecte
       left: liveRect.left + liveRect.width / 2,
       top: liveRect.top - 8,
       bottom: liveRect.bottom + 12,
+      targetLeft: liveRect.left,
+      targetRight: liveRect.right,
     };
   }
   const local = unionFloatingFrameBounds(frames, "boxBounds");
