@@ -10,6 +10,7 @@ if (typeof window !== "undefined") {
     };
   }
   const proto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
+  window.scrollTo = () => {};
   if (!proto.scrollIntoView) proto.scrollIntoView = () => {};
   if (!proto.hasPointerCapture) proto.hasPointerCapture = () => false;
   if (!proto.setPointerCapture) proto.setPointerCapture = () => {};

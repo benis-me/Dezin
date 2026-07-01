@@ -4,7 +4,7 @@ import type { MoodboardNode } from "../lib/api.ts";
 import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { eventClientPoint } from "./canvas-utils.ts";
+import { eventClientPoint, resolveFloatingRect, sameFloatingRect } from "./canvas-utils.ts";
 
 beforeEach(() => {
   localStorage.clear();
@@ -107,6 +107,24 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
 
 test("eventClientPoint reads Leafer native event origins for context menus", () => {
   expect(eventClientPoint({ origin: { clientX: 260, clientY: 144 }, clientX: 0, clientY: 0 })).toEqual({ x: 260, y: 144 });
+});
+
+test("resolveFloatingRect follows world bounds and clamps within the canvas", () => {
+  expect(
+    resolveFloatingRect({
+      containerWidth: 500,
+      containerHeight: 320,
+      containerLeft: 40,
+      containerTop: 20,
+      frame: { x: 0, y: 0, width: 200, height: 120 },
+      world: { x: 460, y: 280, width: 200, height: 120 },
+    }),
+  ).toEqual({ left: 484, top: 216, bottom: 188 });
+});
+
+test("sameFloatingRect ignores subpixel jitter during drag", () => {
+  expect(sameFloatingRect({ left: 120, top: 80, bottom: 220 }, { left: 120.25, top: 80.2, bottom: 220.4 })).toBe(true);
+  expect(sameFloatingRect({ left: 120, top: 80, bottom: 220 }, { left: 121, top: 80, bottom: 220 })).toBe(false);
 });
 
 test("MoodboardPropertiesPanel can be resized from its left edge", () => {

@@ -6,7 +6,9 @@ import {
   eventCanvasPoint,
   eventClientPoint,
   nodeIdFromTarget,
+  resolveFloatingRect,
   rounded,
+  sameFloatingRect,
   toInput,
   type ContextMenuState,
   type FloatingRect,
@@ -44,6 +46,8 @@ export function useLeaferMoodboardRuntime({
   const nodesRef = useRef(nodes);
   const selectedIdRef = useRef(selectedId);
   const toolRef = useRef(tool);
+  const floatingRectRef = useRef<FloatingRect | null>(null);
+  const floatingRafRef = useRef<number | null>(null);
   const callbacksRef = useRef({ onSelect, onBlankTap, onDoubleTap, onContextMenu, onFrameStateChange });
 
   useEffect(() => {
@@ -62,33 +66,44 @@ export function useLeaferMoodboardRuntime({
     callbacksRef.current = { onSelect, onBlankTap, onDoubleTap, onContextMenu, onFrameStateChange };
   }, [onBlankTap, onContextMenu, onDoubleTap, onFrameStateChange, onSelect]);
 
+  const commitSelectionRect = useCallback((next: FloatingRect | null) => {
+    const prev = floatingRectRef.current;
+    if (sameFloatingRect(prev, next)) return;
+    floatingRectRef.current = next;
+    setSelectionRect(next);
+  }, []);
+
   const updateFloatingSelection = useCallback(() => {
     const runtime = runtimeRef.current;
     const id = selectedIdRef.current;
     const frame = id ? framesRef.current.get(id) : null;
     const container = containerRef.current;
     if (!runtime || !frame || !container) {
-      setSelectionRect(null);
+      commitSelectionRect(null);
       return;
     }
 
     const containerRect = container.getBoundingClientRect();
-    const world = frame.worldBoxBounds ?? frame.boxBounds;
-    const tree = runtime.app?.tree;
-    const scale = Number(tree?.scale ?? tree?.scaleX ?? 1) || 1;
-    const fallbackLeft = Number(tree?.x ?? 0) + (Number(frame.x ?? 0) + Number(frame.width ?? 160) / 2) * scale;
-    const fallbackTop = Number(tree?.y ?? 0) + Number(frame.y ?? 0) * scale - 44;
-    const fallbackBottom = Number(tree?.y ?? 0) + (Number(frame.y ?? 0) + Number(frame.height ?? 120)) * scale + 12;
-    const left = world ? Number(world.x ?? 0) - containerRect.left + Number(world.width ?? frame.width ?? 0) / 2 : fallbackLeft;
-    const top = world ? Number(world.y ?? 0) - containerRect.top - 44 : fallbackTop;
-    const bottom = world ? Number(world.y ?? 0) - containerRect.top + Number(world.height ?? frame.height ?? 0) + 12 : fallbackBottom;
+    commitSelectionRect(
+      resolveFloatingRect({
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+        containerLeft: containerRect.left,
+        containerTop: containerRect.top,
+        frame,
+        tree: runtime.app?.tree,
+        world: frame.worldBoxBounds ?? frame.boxBounds,
+      }),
+    );
+  }, [commitSelectionRect]);
 
-    setSelectionRect({
-      left: Math.max(16, Math.min(container.clientWidth - 16, left)),
-      top: Math.max(12, Math.min(container.clientHeight - 56, top)),
-      bottom: Math.max(12, Math.min(container.clientHeight - 132, bottom)),
+  const scheduleFloatingSelection = useCallback(() => {
+    if (floatingRafRef.current != null) return;
+    floatingRafRef.current = window.requestAnimationFrame(() => {
+      floatingRafRef.current = null;
+      updateFloatingSelection();
     });
-  }, []);
+  }, [updateFloatingSelection]);
 
   const selectInRuntime = useCallback(
     (id: string | null) => {
@@ -97,12 +112,12 @@ export function useLeaferMoodboardRuntime({
       try {
         const frame = id ? framesRef.current.get(id) : null;
         runtime.app.editor.select(frame ? [frame] : []);
-        window.requestAnimationFrame(updateFloatingSelection);
+        scheduleFloatingSelection();
       } catch {
         /* Leafer editor may not be ready during first paint. */
       }
     },
-    [updateFloatingSelection],
+    [scheduleFloatingSelection],
   );
 
   const flushFrameState = useCallback(() => {
@@ -179,7 +194,7 @@ export function useLeaferMoodboardRuntime({
       const resize = () => {
         const rect = containerRef.current?.getBoundingClientRect();
         if (rect?.width && rect.height) app.resize({ width: rect.width, height: rect.height, pixelRatio: window.devicePixelRatio || 1 });
-        window.requestAnimationFrame(updateFloatingSelection);
+        scheduleFloatingSelection();
       };
       resize();
       const observer = new ResizeObserver(resize);
@@ -189,16 +204,16 @@ export function useLeaferMoodboardRuntime({
         const id = nodeIdFromTarget(app.editor?.target);
         selectedIdRef.current = id;
         callbacksRef.current.onSelect(id);
-        window.requestAnimationFrame(updateFloatingSelection);
+        scheduleFloatingSelection();
       };
       const syncFloatingOnly = () => {
-        window.requestAnimationFrame(updateFloatingSelection);
+        scheduleFloatingSelection();
       };
       const syncAfterTransform = () => {
         flushFrameState();
         const scale = Number(app.tree?.scaleX ?? app.tree?.scale ?? 1);
         if (Number.isFinite(scale)) setZoom(scale);
-        window.requestAnimationFrame(updateFloatingSelection);
+        scheduleFloatingSelection();
       };
       const syncSelectionOnPointerDown = (event: any) => {
         const targetId = nodeIdFromTarget(event?.target);
@@ -212,14 +227,14 @@ export function useLeaferMoodboardRuntime({
         }
         selectedIdRef.current = targetId;
         callbacksRef.current.onSelect(targetId);
-        window.requestAnimationFrame(updateFloatingSelection);
+        scheduleFloatingSelection();
       };
       const handleTap = (event: any) => {
         const targetId = nodeIdFromTarget(event?.target);
         if (targetId) {
           selectedIdRef.current = targetId;
           callbacksRef.current.onSelect(targetId);
-          window.requestAnimationFrame(updateFloatingSelection);
+          scheduleFloatingSelection();
           return;
         }
         callbacksRef.current.onBlankTap(eventCanvasPoint(event));
@@ -232,7 +247,21 @@ export function useLeaferMoodboardRuntime({
         event?.preventDefault?.();
         const client = clampMenu(eventClientPoint(event));
         const point = eventCanvasPoint(event);
-        callbacksRef.current.onContextMenu({ x: client.x, y: client.y, canvasX: point.x, canvasY: point.y, targetId: nodeIdFromTarget(event?.target) });
+        const targetId = nodeIdFromTarget(event?.target);
+        if (targetId) {
+          const frame = framesRef.current.get(targetId);
+          if (frame) {
+            try {
+              app.editor?.select([frame]);
+            } catch {
+              /* Editor may ignore context-menu selection during setup. */
+            }
+          }
+          selectedIdRef.current = targetId;
+          callbacksRef.current.onSelect(targetId);
+          scheduleFloatingSelection();
+        }
+        callbacksRef.current.onContextMenu({ x: client.x, y: client.y, canvasX: point.x, canvasY: point.y, targetId });
       };
 
       app.on(runtime.PointerEvent.TAP, handleTap);
@@ -268,6 +297,10 @@ export function useLeaferMoodboardRuntime({
         if (runtime.EditorMoveEvent?.MOVE) app.editor?.off(runtime.EditorMoveEvent.MOVE, syncFloatingOnly);
         if (runtime.EditorScaleEvent?.SCALE) app.editor?.off(runtime.EditorScaleEvent.SCALE, syncFloatingOnly);
         if (runtime.EditorRotateEvent?.ROTATE) app.editor?.off(runtime.EditorRotateEvent.ROTATE, syncFloatingOnly);
+        if (floatingRafRef.current != null) {
+          window.cancelAnimationFrame(floatingRafRef.current);
+          floatingRafRef.current = null;
+        }
         layer.removeAll(true);
         app.destroy();
         runtimeRef.current = null;
@@ -282,7 +315,7 @@ export function useLeaferMoodboardRuntime({
       disposed = true;
       cleanup?.();
     };
-  }, [flushFrameState, updateFloatingSelection]);
+  }, [flushFrameState, scheduleFloatingSelection]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -302,8 +335,8 @@ export function useLeaferMoodboardRuntime({
       });
 
     selectInRuntime(selectedIdRef.current);
-    window.requestAnimationFrame(updateFloatingSelection);
-  }, [nodes, runtimeReady, selectInRuntime, updateFloatingSelection]);
+    scheduleFloatingSelection();
+  }, [nodes, runtimeReady, scheduleFloatingSelection, selectInRuntime]);
 
   useEffect(() => {
     selectInRuntime(selectedId);
@@ -327,8 +360,8 @@ export function useLeaferMoodboardRuntime({
       runtime.app.tree.forceUpdate?.();
     }
     setZoom(clamped);
-    window.requestAnimationFrame(updateFloatingSelection);
-  }, [updateFloatingSelection]);
+    scheduleFloatingSelection();
+  }, [scheduleFloatingSelection]);
 
   const fitView = useCallback(() => {
     const runtime = runtimeRef.current;
@@ -359,8 +392,8 @@ export function useLeaferMoodboardRuntime({
     tree.y = container.clientHeight / 2 - centerY * nextScale;
     tree.forceUpdate?.();
     setZoom(nextScale);
-    window.requestAnimationFrame(updateFloatingSelection);
-  }, [changeZoom, updateFloatingSelection]);
+    scheduleFloatingSelection();
+  }, [changeZoom, scheduleFloatingSelection]);
 
   return {
     containerRef,

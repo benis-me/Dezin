@@ -16,6 +16,23 @@ export interface FloatingRect {
   bottom: number;
 }
 
+interface FloatingRectBounds {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+}
+
+export interface FloatingRectInput {
+  containerWidth: number;
+  containerHeight: number;
+  containerLeft: number;
+  containerTop: number;
+  frame: FloatingRectBounds;
+  tree?: { x?: number; y?: number; scale?: number; scaleX?: number };
+  world?: FloatingRectBounds | null;
+}
+
 export interface LeaferRuntime {
   app: any;
   layer: any;
@@ -124,6 +141,43 @@ export function generatorStatus(node: MoodboardNode): string {
 
 export function rounded(value: unknown, fallback = 0): number {
   return Math.round(Number(value ?? fallback));
+}
+
+export function sameFloatingRect(a: FloatingRect | null, b: FloatingRect | null, tolerance = 0.5): boolean {
+  return (
+    a === b ||
+    (a != null &&
+      b != null &&
+      Math.abs(a.left - b.left) < tolerance &&
+      Math.abs(a.top - b.top) < tolerance &&
+      Math.abs(a.bottom - b.bottom) < tolerance)
+  );
+}
+
+export function resolveFloatingRect({
+  containerWidth,
+  containerHeight,
+  containerLeft,
+  containerTop,
+  frame,
+  tree,
+  world,
+}: FloatingRectInput): FloatingRect {
+  const scale = Number(tree?.scale ?? tree?.scaleX ?? 1) || 1;
+  const frameWidth = Number(frame.width ?? 160);
+  const frameHeight = Number(frame.height ?? 120);
+  const fallbackLeft = Number(tree?.x ?? 0) + (Number(frame.x ?? 0) + frameWidth / 2) * scale;
+  const fallbackTop = Number(tree?.y ?? 0) + Number(frame.y ?? 0) * scale - 44;
+  const fallbackBottom = Number(tree?.y ?? 0) + (Number(frame.y ?? 0) + frameHeight) * scale + 12;
+  const rawLeft = world ? Number(world.x ?? 0) - containerLeft + Number(world.width ?? frameWidth) / 2 : fallbackLeft;
+  const rawTop = world ? Number(world.y ?? 0) - containerTop - 44 : fallbackTop;
+  const rawBottom = world ? Number(world.y ?? 0) - containerTop + Number(world.height ?? frameHeight) + 12 : fallbackBottom;
+
+  return {
+    left: Math.max(16, Math.min(containerWidth - 16, rawLeft)),
+    top: Math.max(12, Math.min(containerHeight - 56, rawTop)),
+    bottom: Math.max(12, Math.min(containerHeight - 132, rawBottom)),
+  };
 }
 
 export function numberFromEvent(value: string, fallback: number): number {
