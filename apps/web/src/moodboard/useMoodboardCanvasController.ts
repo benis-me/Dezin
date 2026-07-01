@@ -5,6 +5,8 @@ import {
   isNodeLocked,
   isNodeVisible,
   localId,
+  MOODBOARD_LAYERS_OPEN_KEY,
+  readInitialLayersOpen,
   reorderLayerInputs,
   toInput,
   type ContextMenuState,
@@ -12,12 +14,13 @@ import {
 } from "./canvas-utils.ts";
 import { useLeaferMoodboardRuntime } from "./useLeaferMoodboardRuntime.ts";
 
-const LAYERS_OPEN_KEY = "dezin:moodboard:layers-open";
-
 export interface MoodboardCanvasProps {
   nodes: MoodboardNode[];
   selectedId: string | null;
   busy?: boolean;
+  imageModels?: string[];
+  imageModel?: string;
+  onImageModelChange?: (model: string) => void;
   onSelect: (id: string | null) => void;
   onNodesChange: (nodes: SaveMoodboardNodeInput[]) => void;
   onAddNote: (point?: { x: number; y: number }) => void;
@@ -38,7 +41,7 @@ export function useMoodboardCanvasController({
   onUploadFiles,
 }: MoodboardCanvasProps) {
   const [tool, setTool] = useState<MoodboardCanvasTool>("select");
-  const [layersOpen, setLayersOpen] = useState(() => localStorage.getItem(LAYERS_OPEN_KEY) !== "0");
+  const [layersOpen, setLayersOpen] = useState(() => readInitialLayersOpen());
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [collapsedLayerIds, setCollapsedLayerIds] = useState<Set<string>>(() => new Set());
   const inputRef = useRef<HTMLInputElement>(null);
@@ -65,7 +68,7 @@ export function useMoodboardCanvasController({
   }, [tool]);
 
   useEffect(() => {
-    localStorage.setItem(LAYERS_OPEN_KEY, layersOpen ? "1" : "0");
+    localStorage.setItem(MOODBOARD_LAYERS_OPEN_KEY, layersOpen ? "1" : "0");
   }, [layersOpen]);
 
   useEffect(() => {

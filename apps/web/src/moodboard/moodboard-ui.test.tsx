@@ -4,14 +4,16 @@ import type { MoodboardNode } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
-import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
+import { GeneratorPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import {
   contextTargetIdFromEvent,
   eventClientPoint,
+  generatorModel,
   getFloatingChromeSafeRect,
+  readInitialLayersOpen,
   moveContainedNodesWithSections,
   normalizeCanvasRect,
   nodeIdFromTarget,
@@ -162,6 +164,40 @@ test("resolveFloatingRect follows world bounds and clamps within the canvas", ()
       world: { x: 460, y: 280, width: 200, height: 120 },
     }),
   ).toEqual({ left: 484, top: 216, bottom: 188 });
+});
+
+test("resolveFloatingRect accepts Leafer-local world bounds without subtracting the host offset", () => {
+  expect(
+    resolveFloatingRect({
+      containerWidth: 800,
+      containerHeight: 500,
+      containerLeft: 400,
+      containerTop: 80,
+      frame: { x: 100, y: 90, width: 200, height: 120 },
+      tree: { x: 0, y: 0, scaleX: 1 },
+      world: { x: 100, y: 90, width: 200, height: 120 },
+    }),
+  ).toEqual({ left: 200, top: 46, bottom: 222 });
+});
+
+test("generatorModel reads the image model stored on a generator node", () => {
+  const node: MoodboardNode = {
+    id: "gen1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 100,
+    y: 90,
+    width: 240,
+    height: 160,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorModel: "gpt-image-1" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  expect(generatorModel(node)).toBe("gpt-image-1");
+  expect(generatorModel({ ...node, data: {} })).toBe("");
 });
 
 test("resolveFloatingChromeRect keeps measured toolbars inside the canvas", () => {
@@ -702,4 +738,44 @@ test("SelectionToolbar exposes object visibility and lock actions", () => {
 
   expect(onToggleVisible).toHaveBeenCalledOnce();
   expect(onToggleLocked).toHaveBeenCalledOnce();
+  expect(screen.queryByText("Reference tone")).toBeNull();
+});
+
+test("GeneratorPromptToolbar exposes a compact image model selector", () => {
+  const onModelChange = vi.fn();
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light", generatorStatus: "ready" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <GeneratorPromptToolbar
+      node={node}
+      busy={false}
+      models={["gpt-image-1", "gpt-image-2"]}
+      model="gpt-image-1"
+      onModelChange={onModelChange}
+      onPromptChange={() => {}}
+      onGenerate={async () => {}}
+    />,
+  );
+
+  expect(screen.getByLabelText("Image generator prompt")).toHaveValue("soft light");
+  expect(screen.getByLabelText("Image generation model")).toHaveTextContent("gpt-image-1");
+});
+
+test("Moodboard layers default closed until the user opens them", () => {
+  expect(readInitialLayersOpen()).toBe(false);
+  localStorage.setItem("dezin:moodboard:layers-open", "1");
+  expect(readInitialLayersOpen()).toBe(true);
 });

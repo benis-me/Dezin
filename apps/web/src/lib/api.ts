@@ -367,7 +367,7 @@ export interface ApiClient {
     id: string,
     input: { name: string; contentBase64: string; mimeType?: string; width?: number; height?: number },
   ): Promise<MoodboardAsset & { url: string }>;
-  generateMoodboardImage(id: string, prompt: string, options?: { x?: number; y?: number; generatorId?: string }): Promise<{
+  generateMoodboardImage(id: string, prompt: string, options?: { x?: number; y?: number; generatorId?: string; model?: string }): Promise<{
     asset: MoodboardAsset & { url: string };
     nodes: MoodboardNode[];
     messages: MoodboardMessage[];

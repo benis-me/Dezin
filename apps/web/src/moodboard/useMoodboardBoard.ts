@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentInfo, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import type { AgentInfo, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { toInput } from "./canvas-utils.ts";
@@ -24,6 +24,8 @@ export function useMoodboardBoard(boardId: string) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
+  const [imageModels, setImageModels] = useState<string[]>([]);
+  const [imageModel, setImageModel] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const saveTimer = useRef<number | null>(null);
@@ -52,6 +54,22 @@ export function useMoodboardBoard(boardId: string) {
         setAgents(next);
         const available = next.filter((agent) => agent.available);
         setRunAgent((current) => current || available[0]?.command || "");
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    let alive = true;
+    void api
+      .getSettings()
+      .then((settings) => {
+        if (!alive) return;
+        const models = imageModelOptions(settings);
+        setImageModels(models);
+        setImageModel((current) => current || settings.imageModel || models[0] || "");
       })
       .catch(() => {});
     return () => {
@@ -157,17 +175,20 @@ export function useMoodboardBoard(boardId: string) {
 
   const generateImage = useCallback(
     async (node: MoodboardNode, prompt: string) => {
+      const selectedModel =
+        typeof node.data.generatorModel === "string" && node.data.generatorModel.trim() ? node.data.generatorModel.trim() : imageModel;
       setBusy(true);
       setNodes((prev) =>
         prev.map((item) =>
           item.id === node.id
-            ? { ...item, data: { ...item.data, generatorPrompt: prompt, generatorStatus: "running" } }
+            ? { ...item, data: { ...item.data, generatorPrompt: prompt, generatorModel: selectedModel, generatorStatus: "running" } }
             : item,
         ),
       );
       try {
         const result = await api.generateMoodboardImage(boardId, prompt, {
           generatorId: node.id,
+          model: selectedModel || undefined,
           x: node.x + node.width + 24,
           y: node.y,
         });
@@ -179,7 +200,7 @@ export function useMoodboardBoard(boardId: string) {
         setBusy(false);
       }
     },
-    [api, boardId, toast],
+    [api, boardId, imageModel, toast],
   );
 
   const sendMessage = useCallback(
@@ -213,11 +234,14 @@ export function useMoodboardBoard(boardId: string) {
     agents,
     runAgent,
     runModel,
+    imageModels,
+    imageModel,
     loading,
     busy,
     setSelectedId,
     setRunAgent,
     setRunModel,
+    setImageModel,
     updateNodes,
     addNote,
     addSection,
@@ -227,4 +251,14 @@ export function useMoodboardBoard(boardId: string) {
     sendMessage,
     rescanAgents,
   };
+}
+
+function imageModelOptions(settings: Settings): string[] {
+  const models = new Set<string>();
+  for (const raw of settings.aiProviderModels.split(/\r?\n|,/)) {
+    const model = raw.trim();
+    if (model) models.add(model);
+  }
+  if (settings.imageModel.trim()) models.add(settings.imageModel.trim());
+  return [...models];
 }

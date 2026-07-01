@@ -135,6 +135,9 @@ export function MoodboardScreen({
             <MoodboardCanvas
               nodes={board.nodes}
               selectedId={board.selectedId}
+              imageModels={board.imageModels}
+              imageModel={board.imageModel}
+              onImageModelChange={board.setImageModel}
               onSelect={board.setSelectedId}
               onNodesChange={board.updateNodes}
               onAddNote={board.addNote}

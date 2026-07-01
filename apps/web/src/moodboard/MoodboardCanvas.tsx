@@ -10,13 +10,24 @@ import { CanvasActionBar, CanvasZoomBar, GeneratorPromptToolbar, SelectionToolba
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { generatorPrompt, rectFromBounds, resolveFloatingChromeRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
+import { generatorModel, generatorPrompt, rectFromBounds, resolveFloatingChromeRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
 export function MoodboardCanvas(props: MoodboardCanvasProps) {
-  const { nodes, busy = false, onAddNote, onAddSection, onAddImageGenerator, onGenerateImage } = props;
+  const {
+    nodes,
+    busy = false,
+    imageModels = [],
+    imageModel = "",
+    onImageModelChange = () => {},
+    onAddNote,
+    onAddSection,
+    onAddImageGenerator,
+    onGenerateImage,
+  } = props;
   const canvas = useMoodboardCanvasController(props);
   const selectedGeneratorPrompt = canvas.selected ? generatorPrompt(canvas.selected) : "";
+  const selectedGeneratorModel = canvas.selected ? generatorModel(canvas.selected) : "";
   const cursor = canvas.tool === "hand" ? "grab" : canvas.tool === "note" || canvas.tool === "section" ? "crosshair" : "default";
 
   return (
@@ -122,6 +133,12 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             <GeneratorPromptToolbar
               node={canvas.selected}
               busy={busy}
+              models={imageModels}
+              model={selectedGeneratorModel || imageModel}
+              onModelChange={(model) => {
+                canvas.patchNodeData(canvas.selected!.id, { generatorModel: model });
+                onImageModelChange(model);
+              }}
               onPromptChange={(prompt) => canvas.patchNodeData(canvas.selected!.id, { generatorPrompt: prompt, generatorStatus: prompt ? "ready" : "" })}
               onGenerate={(prompt) => onGenerateImage(canvas.selected!, prompt)}
             />

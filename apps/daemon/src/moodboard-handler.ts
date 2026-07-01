@@ -354,9 +354,10 @@ export async function handleGenerateMoodboardImage(
   const prompt = stringValue(body.prompt);
   if (!prompt) return sendError(res, 400, "prompt is required");
   const generatorId = stringValue(body.generatorId);
+  const model = stringValue(body.model) || settings.imageModel;
 
   const b64 = await requestImage(
-    { baseUrl: settings.imageApiBaseUrl, apiKey: settings.imageApiKey, model: settings.imageModel },
+    { baseUrl: settings.imageApiBaseUrl, apiKey: settings.imageApiKey, model },
     prompt,
     fetch,
   );
@@ -392,6 +393,7 @@ export async function handleGenerateMoodboardImage(
               data: {
                 ...node.data,
                 generatorPrompt: prompt,
+                generatorModel: model,
                 generatorStatus: "done",
                 resultAssetId: asset.id,
                 resultUrl: assetUrl(id!, asset.id),
@@ -409,7 +411,7 @@ export async function handleGenerateMoodboardImage(
       width: generator ? Math.max(180, generator.width) : 320,
       height: generator ? Math.max(180, generator.height) : 320,
       zIndex: maxZ + 1,
-      data: { assetId: asset.id, url: assetUrl(id!, asset.id), prompt, source: "generated" },
+      data: { assetId: asset.id, url: assetUrl(id!, asset.id), prompt, model, source: "generated" },
     },
   ]);
   const user = store.addMoodboardMessage(id!, "user", `Generate image: ${prompt}`);

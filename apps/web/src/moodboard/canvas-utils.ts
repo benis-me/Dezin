@@ -175,6 +175,17 @@ export function generatorStatus(node: MoodboardNode): string {
   return typeof status === "string" ? status : "";
 }
 
+export function generatorModel(node: MoodboardNode): string {
+  const model = node.data.generatorModel;
+  return typeof model === "string" ? model : "";
+}
+
+export const MOODBOARD_LAYERS_OPEN_KEY = "dezin:moodboard:layers-open";
+
+export function readInitialLayersOpen(storage: Pick<Storage, "getItem"> = localStorage): boolean {
+  return storage.getItem(MOODBOARD_LAYERS_OPEN_KEY) === "1";
+}
+
 export function rounded(value: unknown, fallback = 0): number {
   return Math.round(Number(value ?? fallback));
 }
@@ -205,15 +216,45 @@ export function resolveFloatingRect({
   const fallbackLeft = Number(tree?.x ?? 0) + (Number(frame.x ?? 0) + frameWidth / 2) * scale;
   const fallbackTop = Number(tree?.y ?? 0) + Number(frame.y ?? 0) * scale - 44;
   const fallbackBottom = Number(tree?.y ?? 0) + (Number(frame.y ?? 0) + frameHeight) * scale + 12;
-  const rawLeft = world ? Number(world.x ?? 0) - containerLeft + Number(world.width ?? frameWidth) / 2 : fallbackLeft;
-  const rawTop = world ? Number(world.y ?? 0) - containerTop - 44 : fallbackTop;
-  const rawBottom = world ? Number(world.y ?? 0) - containerTop + Number(world.height ?? frameHeight) + 12 : fallbackBottom;
+  let rawLeft = fallbackLeft;
+  let rawTop = fallbackTop;
+  let rawBottom = fallbackBottom;
+
+  if (world) {
+    const worldWidth = Number(world.width ?? frameWidth);
+    const worldHeight = Number(world.height ?? frameHeight);
+    const localCandidate = {
+      left: Number(world.x ?? 0) + worldWidth / 2,
+      top: Number(world.y ?? 0) - 44,
+      bottom: Number(world.y ?? 0) + worldHeight + 12,
+    };
+    const viewportCandidate = {
+      left: Number(world.x ?? 0) - containerLeft + worldWidth / 2,
+      top: Number(world.y ?? 0) - containerTop - 44,
+      bottom: Number(world.y ?? 0) - containerTop + worldHeight + 12,
+    };
+    const localDistance = floatingCandidateDistance(localCandidate, fallbackLeft, fallbackTop, fallbackBottom);
+    const viewportDistance = floatingCandidateDistance(viewportCandidate, fallbackLeft, fallbackTop, fallbackBottom);
+    const candidate = localDistance <= viewportDistance ? localCandidate : viewportCandidate;
+    rawLeft = candidate.left;
+    rawTop = candidate.top;
+    rawBottom = candidate.bottom;
+  }
 
   return {
     left: Math.max(16, Math.min(containerWidth - 16, rawLeft)),
     top: Math.max(12, Math.min(containerHeight - 56, rawTop)),
     bottom: Math.max(12, Math.min(containerHeight - 132, rawBottom)),
   };
+}
+
+function floatingCandidateDistance(
+  candidate: { left: number; top: number; bottom: number },
+  left: number,
+  top: number,
+  bottom: number,
+): number {
+  return Math.abs(candidate.left - left) + Math.abs(candidate.top - top) + Math.abs(candidate.bottom - bottom);
 }
 
 export function resolveFloatingChromeRect({

@@ -28,6 +28,11 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   IconButton,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   Textarea,
   Tooltip,
   TooltipContent,
@@ -35,7 +40,7 @@ import {
   TooltipTrigger,
 } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
-import { generatorPrompt, generatorStatus, isNodeLocked, isNodeVisible, layerLabel, type MoodboardCanvasTool } from "./canvas-utils.ts";
+import { generatorPrompt, generatorStatus, isNodeLocked, isNodeVisible, type MoodboardCanvasTool } from "./canvas-utils.ts";
 
 export function ToolButton({
   label,
@@ -83,8 +88,6 @@ export function SelectionToolbar({
   return (
     <TooltipProvider delayDuration={120}>
       <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
-        <span className="max-w-40 truncate px-2 text-xs font-medium text-muted-foreground">{layerLabel(node)}</span>
-        <span className="mx-1 h-5 w-px bg-border" />
         <ToolButton label="Duplicate" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
         </ToolButton>
@@ -207,11 +210,17 @@ export function CanvasZoomBar({
 export function GeneratorPromptToolbar({
   node,
   busy,
+  models,
+  model,
+  onModelChange,
   onPromptChange,
   onGenerate,
 }: {
   node: MoodboardNode;
   busy: boolean;
+  models: string[];
+  model: string;
+  onModelChange: (model: string) => void;
   onPromptChange: (prompt: string) => void;
   onGenerate: (prompt: string) => Promise<void>;
 }) {
@@ -228,36 +237,59 @@ export function GeneratorPromptToolbar({
     onPromptChange(next);
     await onGenerate(next);
   };
+  const modelOptions = models.length ? models : [model].filter(Boolean);
 
   return (
-    <div className="pointer-events-auto app-no-drag w-[min(600px,calc(100vw-3rem))] rounded-lg border border-border bg-card/95 p-2 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
-      <Textarea
-        aria-label="Image generator prompt"
-        rows={3}
-        value={prompt}
-        autoFocus
-        placeholder="Describe the image material this generator should create..."
-        onChange={(event) => {
-          setPrompt(event.target.value);
-          onPromptChange(event.target.value);
-        }}
-        onKeyDown={(event) => {
-          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-            event.preventDefault();
-            void submit();
-          }
-        }}
-        className="min-h-20 resize-none border-0 bg-transparent px-1 py-1 text-sm shadow-none focus-visible:ring-0"
-      />
-      <div className="mt-2 flex items-center justify-between gap-3 border-t border-border pt-2">
-        <span className="label-mono text-muted-foreground">
-          {busy ? "Generating" : status === "done" ? "Ready · last image generated" : "Image generator"}
-        </span>
-        <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-8 gap-2">
-          {busy ? <Loader2 size={14} className="animate-spin" /> : <WandSparkles size={14} strokeWidth={1.75} />}
-          Generate
-        </Button>
+    <div className="pointer-events-auto app-no-drag w-[min(560px,calc(100vw-3rem))] rounded-xl border border-border bg-card/95 p-2 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+      <div className="rounded-lg border border-input bg-background px-2 pb-2 pt-2">
+        <Textarea
+          aria-label="Image generator prompt"
+          rows={2}
+          value={prompt}
+          autoFocus
+          placeholder="Describe the image material to generate..."
+          onChange={(event) => {
+            setPrompt(event.target.value);
+            onPromptChange(event.target.value);
+          }}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+          className="min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
+        />
+        <div className="mt-2 flex items-center justify-between gap-2 border-t border-border/70 pt-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="label-mono shrink-0 text-muted-foreground">Model</span>
+            {modelOptions.length ? (
+              <Select value={model || "__default__"} onValueChange={(value) => onModelChange(value === "__default__" ? "" : value)}>
+                <SelectTrigger aria-label="Image generation model" size="sm" className="h-7 max-w-52 border-border bg-surface-2 px-2 text-xs shadow-none">
+                  <SelectValue placeholder="Default" />
+                </SelectTrigger>
+                <SelectContent side="top" align="start" className="max-h-56">
+                  <SelectItem value="__default__">Default</SelectItem>
+                  {modelOptions.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      {option}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <span className="rounded-md bg-surface-2 px-2 py-1 text-xs text-muted-foreground">Default</span>
+            )}
+          </div>
+          <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 gap-1.5 px-2.5 text-xs">
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <WandSparkles size={13} strokeWidth={1.75} />}
+            Generate
+          </Button>
+        </div>
       </div>
+      <p className="mt-1.5 px-0.5 text-[11px] text-muted-foreground">
+        {busy ? "Generating..." : status === "done" ? "Last image generated." : "Creates a new image next to this generator node."}
+      </p>
     </div>
   );
 }
