@@ -136,7 +136,6 @@ export function useLeaferMoodboardRuntime({
   }, [commitSelectionRect, findFrame]);
 
   const scheduleFloatingSelection = useCallback(() => {
-    if (transformingRef.current) return;
     if (floatingRafRef.current != null) return;
     floatingRafRef.current = window.requestAnimationFrame(() => {
       floatingRafRef.current = null;
@@ -191,7 +190,14 @@ export function useLeaferMoodboardRuntime({
       const editor = app?.editor;
       if (!editor) return;
       const nextIds = ids.filter((id) => findFrame(id));
-      const refresh = () => {
+      const refresh = (resetEditor = false) => {
+        if (resetEditor) {
+          try {
+            editor.cancel?.();
+          } catch {
+            /* Some Leafer builds do not expose cancel during early setup. */
+          }
+        }
         try {
           selectAppNodesByIds(appRef.current, nextIds);
         } catch {
@@ -209,7 +215,7 @@ export function useLeaferMoodboardRuntime({
       refresh();
       window.requestAnimationFrame(() => {
         refresh();
-        window.setTimeout(refresh, 80);
+        window.setTimeout(() => refresh(true), 80);
         window.setTimeout(refresh, 200);
       });
     },
@@ -356,6 +362,12 @@ export function useLeaferMoodboardRuntime({
       scheduleFloatingSelection();
     };
     const syncFloatingOnly = () => scheduleFloatingSelection();
+    const syncDuringViewportTransform = () => {
+      startTransforming();
+      const scale = Number(app.tree?.scaleX ?? app.tree?.scale ?? 1);
+      if (Number.isFinite(scale)) setZoom(scale);
+      scheduleFloatingSelection();
+    };
     const syncAfterNodeTransform = () => {
       finishTransforming();
       flushFrameState();
@@ -435,6 +447,7 @@ export function useLeaferMoodboardRuntime({
         return;
       }
       startTransforming();
+      scheduleFloatingSelection();
     };
     const handleDragEnd = (event: any) => {
       if (toolRef.current === "section" && sectionDragStartRef.current) {
@@ -454,8 +467,14 @@ export function useLeaferMoodboardRuntime({
       if (toolRef.current === "section" && sectionDragStartRef.current) return;
       startTransforming();
     };
-    const handleZoomStart = () => startTransforming();
-    const handleEditorTransform = () => startTransforming();
+    const handleZoomStart = () => {
+      startTransforming();
+      scheduleFloatingSelection();
+    };
+    const handleEditorTransform = () => {
+      startTransforming();
+      scheduleFloatingSelection();
+    };
 
     app.on(PointerEvent.TAP, handleTap);
     app.on(PointerEvent.DOWN, handlePointerDown);
@@ -465,7 +484,7 @@ export function useLeaferMoodboardRuntime({
     app.on(DragEvent.DRAG, syncDuringDrag);
     app.on(DragEvent.END, handleDragEnd);
     app.on(ZoomEvent.START, handleZoomStart);
-    app.on(ZoomEvent.ZOOM, handleZoomStart);
+    app.on(ZoomEvent.ZOOM, syncDuringViewportTransform);
     app.on(ZoomEvent.END, syncAfterViewportTransform);
     app.tree?.on?.(PropertyEvent.LEAFER_CHANGE, syncFloatingOnly);
     app.tree?.on?.("move", syncFloatingOnly);
@@ -485,7 +504,7 @@ export function useLeaferMoodboardRuntime({
       app.off(DragEvent.DRAG, syncDuringDrag);
       app.off(DragEvent.END, handleDragEnd);
       app.off(ZoomEvent.START, handleZoomStart);
-      app.off(ZoomEvent.ZOOM, handleZoomStart);
+      app.off(ZoomEvent.ZOOM, syncDuringViewportTransform);
       app.off(ZoomEvent.END, syncAfterViewportTransform);
       app.tree?.off?.(PropertyEvent.LEAFER_CHANGE, syncFloatingOnly);
       app.tree?.off?.("move", syncFloatingOnly);

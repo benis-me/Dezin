@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
@@ -38,9 +38,11 @@ export function MoodboardAgentPanel({
   const [text, setText] = useState("");
   const [composerH, setComposerH] = useState(92);
   const [dragging, setDragging] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const composerRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const stickBottom = useRef(true);
 
   useEffect(() => {
     const element = composerRef.current;
@@ -51,9 +53,42 @@ export function MoodboardAgentPanel({
     return () => observer.disconnect();
   }, []);
 
+  const scrollMessagesToBottom = (behavior: ScrollBehavior = "auto"): void => {
+    const el = messagesRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    if (typeof el.scrollTo === "function") {
+      try {
+        el.scrollTo({ top: el.scrollHeight, behavior });
+      } catch {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+    stickBottom.current = true;
+    setShowScrollToBottom(false);
+  };
+
+  const scheduleScrollMessagesToBottom = (behavior: ScrollBehavior = "auto"): void => {
+    scrollMessagesToBottom(behavior);
+    requestAnimationFrame(() => scrollMessagesToBottom(behavior));
+    window.setTimeout(() => scrollMessagesToBottom(behavior), 80);
+  };
+
+  const updateBottomState = (): void => {
+    const el = messagesRef.current;
+    if (!el || messages.length === 0) {
+      stickBottom.current = true;
+      setShowScrollToBottom(false);
+      return;
+    }
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+    stickBottom.current = nearBottom;
+    setShowScrollToBottom(!nearBottom);
+  };
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, busy]);
+    if (stickBottom.current) scheduleScrollMessagesToBottom("auto");
+  }, [messages.length, busy, composerH]);
 
   const submit = async () => {
     const content = text.trim();
@@ -106,7 +141,9 @@ export function MoodboardAgentPanel({
       </div>
 
       <div
+        ref={messagesRef}
         data-testid="moodboard-agent-messages"
+        onScroll={updateBottomState}
         className={cn("min-h-0 flex-1 px-4 pt-5", messages.length > 0 ? "space-y-4 overflow-auto" : "overflow-hidden")}
         style={messages.length > 0 ? { paddingBottom: composerH + 36 } : undefined}
       >
@@ -136,8 +173,29 @@ export function MoodboardAgentPanel({
             ) : null}
           </div>
         )}
-        <div ref={bottomRef} />
       </div>
+
+      <AnimatePresence>
+        {showScrollToBottom ? (
+          <motion.button
+            type="button"
+            aria-label="Scroll to bottom"
+            onClick={() => scrollMessagesToBottom("smooth")}
+            initial={{ opacity: 0, y: 6, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 6, scale: 0.96 }}
+            transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
+            className={cn(
+              "app-no-drag absolute right-4 z-30 grid size-8 place-items-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+              busy &&
+                "overflow-hidden before:absolute before:inset-[-1px] before:rounded-full before:border before:border-primary/20 before:border-t-primary/70 before:content-[''] before:animate-spin",
+            )}
+            style={{ bottom: composerH + 16 }}
+          >
+            <ArrowDown size={15} strokeWidth={1.8} aria-hidden />
+          </motion.button>
+        ) : null}
+      </AnimatePresence>
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0">
         <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
@@ -966,6 +966,92 @@ test("MoodboardAgentPanel empty state does not force a scroll container", () => 
   expect(screen.getByTestId("moodboard-agent-messages")).not.toHaveClass("overflow-auto");
 });
 
+test("MoodboardAgentPanel shows a scroll-to-bottom control when reading older messages", async () => {
+  const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.dataset.testid === "moodboard-agent-messages" ? 1200 : 0;
+  });
+  const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.dataset.testid === "moodboard-agent-messages" ? 360 : 0;
+  });
+
+  try {
+    render(
+      <ApiProvider client={makeFakeApi()}>
+        <MoodboardAgentPanel
+          boardName="Material board"
+          messages={[
+            { id: "u1", boardId: "b1", role: "user", content: "First request", createdAt: 1 },
+            { id: "a1", boardId: "b1", role: "assistant", content: "Second response", createdAt: 2 },
+          ]}
+          busy={false}
+          agents={[]}
+          agent=""
+          model=""
+          onBack={() => {}}
+          onAgentChange={() => {}}
+          onModelChange={() => {}}
+          onRescanAgents={async () => {}}
+          onSend={async () => {}}
+        />
+      </ApiProvider>,
+    );
+
+    const scroller = screen.getByTestId("moodboard-agent-messages");
+    await waitFor(() => expect(scroller.scrollTop).toBe(1200));
+    expect(screen.queryByRole("button", { name: "Scroll to bottom" })).toBeNull();
+
+    scroller.scrollTop = 100;
+    fireEvent.scroll(scroller);
+    const jump = await screen.findByRole("button", { name: "Scroll to bottom" });
+    expect(jump.textContent).toBe("");
+    expect(jump.className).not.toContain("shadow");
+
+    fireEvent.click(jump);
+    expect(scroller.scrollTop).toBe(1200);
+  } finally {
+    scrollHeight.mockRestore();
+    clientHeight.mockRestore();
+  }
+});
+
+test("MoodboardAgentPanel scroll control shows a subtle loading ring while busy", async () => {
+  const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.dataset.testid === "moodboard-agent-messages" ? 1200 : 0;
+  });
+  const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return this.dataset.testid === "moodboard-agent-messages" ? 360 : 0;
+  });
+
+  try {
+    render(
+      <ApiProvider client={makeFakeApi()}>
+        <MoodboardAgentPanel
+          boardName="Material board"
+          messages={[{ id: "u1", boardId: "b1", role: "user", content: "First request", createdAt: 1 }]}
+          busy={true}
+          agents={[]}
+          agent=""
+          model=""
+          onBack={() => {}}
+          onAgentChange={() => {}}
+          onModelChange={() => {}}
+          onRescanAgents={async () => {}}
+          onSend={async () => {}}
+        />
+      </ApiProvider>,
+    );
+
+    const scroller = screen.getByTestId("moodboard-agent-messages");
+    scroller.scrollTop = 100;
+    fireEvent.scroll(scroller);
+    const jump = await screen.findByRole("button", { name: "Scroll to bottom" });
+    expect(jump.className).toContain("before:animate-spin");
+  } finally {
+    scrollHeight.mockRestore();
+    clientHeight.mockRestore();
+  }
+});
+
 test("MoodboardScreen loading state keeps the board split layout", async () => {
   vi.doMock("./MoodboardCanvas.tsx", () => ({ MoodboardCanvas: () => <div data-testid="mock-moodboard-canvas" /> }));
   const { MoodboardScreen } = await import("../screens/MoodboardScreen.tsx");
@@ -1044,6 +1130,7 @@ test("SelectionToolbar exposes compact object actions", () => {
 
 test("SelectionToolbar surfaces image-edit actions for image nodes", () => {
   const onImageAction = vi.fn();
+  const onQuickEdit = vi.fn();
   const node: MoodboardNode = {
     id: "img1",
     boardId: "b1",
@@ -1059,12 +1146,14 @@ test("SelectionToolbar surfaces image-edit actions for image nodes", () => {
     updatedAt: 1,
   };
 
-  render(<SelectionToolbar node={node} onDuplicate={() => {}} onDelete={() => {}} onImageAction={onImageAction} />);
+  render(<SelectionToolbar node={node} onDuplicate={() => {}} onDelete={() => {}} onImageAction={onImageAction} onQuickEdit={onQuickEdit} />);
 
+  fireEvent.click(screen.getByText("Quick edit"));
   fireEvent.click(screen.getByLabelText("Remove background"));
   fireEvent.click(screen.getByLabelText("Edit region"));
   fireEvent.click(screen.getByLabelText("Extract layer"));
 
+  expect(onQuickEdit).toHaveBeenCalledOnce();
   expect(onImageAction).toHaveBeenCalledWith("Remove background");
   expect(onImageAction).toHaveBeenCalledWith("Edit region");
   expect(onImageAction).toHaveBeenCalledWith("Extract layer");
@@ -1151,6 +1240,7 @@ test("GeneratorPromptToolbar exposes a compact image model selector", () => {
 
   expect(screen.getByLabelText("Image generator prompt")).toHaveValue("soft light");
   expect(screen.getByLabelText("Image generation model")).toHaveTextContent("gpt-image-1");
+  expect(screen.getByLabelText("Image generation model")).toHaveTextContent(/^Image/);
   expect(screen.queryByText("Prompt required")).toBeNull();
   expect(screen.getByRole("button", { name: "Generate" }).querySelector("svg")).toBeNull();
 });

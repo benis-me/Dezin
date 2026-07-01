@@ -368,7 +368,7 @@ function FloatingCanvasSurface({
   const ref = useRef<HTMLDivElement>(null);
   const selectedIdsRef = useRef(selectedIds);
   const layoutRef = useRef<FloatingLayoutSnapshot | null>(null);
-  const selectedKey = selectedIds.join("\u0000");
+  const selectedKey = [...selectedIds].sort().join("\u0000");
   selectedIdsRef.current = selectedIds;
 
   useLayoutEffect(() => {
@@ -547,16 +547,21 @@ function bindFloatingDomEvents(container: HTMLElement, toolbar: HTMLElement, sch
   const handleTransitionEnd = (event: Event) => {
     if (observeOccluders && event.target instanceof HTMLElement && event.target.matches("[data-moodboard-floating-occluder]")) schedule();
   };
+  const handleViewportInput = () => schedule();
   refreshTargets();
   mutationObserver?.observe(container, { childList: true, subtree: true });
   container.addEventListener("transitionend", handleTransitionEnd, true);
   container.addEventListener("animationend", handleTransitionEnd, true);
+  container.addEventListener("wheel", handleViewportInput, true);
+  container.addEventListener("pointermove", handleViewportInput, true);
   return () => {
     resizeObserver?.disconnect();
     attributeObserver?.disconnect();
     mutationObserver?.disconnect();
     container.removeEventListener("transitionend", handleTransitionEnd, true);
     container.removeEventListener("animationend", handleTransitionEnd, true);
+    container.removeEventListener("wheel", handleViewportInput, true);
+    container.removeEventListener("pointermove", handleViewportInput, true);
   };
 }
 
@@ -567,6 +572,14 @@ function containsFloatingOccluder(nodes: NodeList): boolean {
 function resolveSelectedFloatingAnchor(app: any, container: HTMLElement, selectedIds: string[]): FloatingRect | null {
   const frames = selectedIds.map((id) => findMoodboardFrame(app, id)).filter((frame): frame is FloatingFrame => Boolean(frame));
   if (frames.length === 0) return null;
+  const liveRect = resolveLiveFloatingTargetRect(app?.tree, frames);
+  if (liveRect) {
+    return {
+      left: liveRect.left + liveRect.width / 2,
+      top: liveRect.top - 8,
+      bottom: liveRect.bottom + 12,
+    };
+  }
   const local = unionFloatingFrameBounds(frames, "boxBounds");
   const world = unionFloatingFrameBounds(frames, "worldBoxBounds");
   const frame = frames.length === 1 ? frames[0] : local;
@@ -586,6 +599,39 @@ function findMoodboardFrame(app: any, id: string): FloatingFrame | null {
   return app?.findId?.(id) ?? app?.tree?.findOne?.(`#${id}`) ?? null;
 }
 
+function resolveLiveFloatingTargetRect(
+  tree: { x?: number; y?: number; scale?: number; scaleX?: number; scaleY?: number } | undefined,
+  frames: FloatingFrame[],
+): CanvasRect | null {
+  const hasLiveTreeTransform = tree != null && (tree.x != null || tree.y != null || tree.scale != null || tree.scaleX != null || tree.scaleY != null);
+  if (!hasLiveTreeTransform) return null;
+  const scaleX = Number(tree?.scaleX ?? tree?.scale ?? 1) || 1;
+  const scaleY = Number(tree?.scaleY ?? tree?.scale ?? 1) || 1;
+  const treeX = Number(tree?.x ?? 0) || 0;
+  const treeY = Number(tree?.y ?? 0) || 0;
+  const rects = frames.map((frame) => {
+    const rawBounds = frame.boxBounds ?? frame;
+    if (!hasUsableFloatingFrameBounds(rawBounds)) return null;
+    const bounds = normalizeFloatingFrameBounds(rawBounds);
+    const left = treeX + bounds.x * scaleX;
+    const top = treeY + bounds.y * scaleY;
+    const right = treeX + (bounds.x + bounds.width) * scaleX;
+    const bottom = treeY + (bounds.y + bounds.height) * scaleY;
+    return rectFromBounds(Math.min(left, right), Math.min(top, bottom), Math.max(left, right), Math.max(top, bottom));
+  }).filter((rect): rect is CanvasRect => Boolean(rect));
+  if (rects.length !== frames.length) return null;
+  return unionCanvasRects(rects);
+}
+
+function unionCanvasRects(rects: CanvasRect[]): CanvasRect | null {
+  if (rects.length === 0) return null;
+  const left = Math.min(...rects.map((rect) => rect.left));
+  const top = Math.min(...rects.map((rect) => rect.top));
+  const right = Math.max(...rects.map((rect) => rect.right));
+  const bottom = Math.max(...rects.map((rect) => rect.bottom));
+  return rectFromBounds(left, top, right, bottom);
+}
+
 function unionFloatingFrameBounds(frames: FloatingFrame[], key: "boxBounds" | "worldBoxBounds"): { x: number; y: number; width: number; height: number } {
   const bounds = frames.map((frame) => normalizeFloatingFrameBounds(frame[key] ?? frame));
   const left = Math.min(...bounds.map((bound) => bound.x));
@@ -602,6 +648,10 @@ function normalizeFloatingFrameBounds(bounds: FloatingFrame): { x: number; y: nu
     width: Math.max(1, Number(bounds.width ?? 0) || 1),
     height: Math.max(1, Number(bounds.height ?? 0) || 1),
   };
+}
+
+function hasUsableFloatingFrameBounds(bounds: FloatingFrame): boolean {
+  return [bounds.x, bounds.y, bounds.width, bounds.height].every((value) => Number.isFinite(Number(value)));
 }
 
 function hasDraggedFiles(event: ReactDragEvent<HTMLDivElement>): boolean {

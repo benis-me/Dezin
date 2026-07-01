@@ -12,7 +12,6 @@ import {
   Copy,
   Eraser,
   Hand,
-  ImagePlus,
   LayoutGrid,
   Layers,
   Maximize2,
@@ -24,6 +23,7 @@ import {
   SquareDashedMousePointer,
   StickyNote,
   Trash2,
+  WandSparkles,
 } from "lucide-react";
 import type { MoodboardNode } from "../lib/api.ts";
 import {
@@ -82,6 +82,7 @@ function stopToolbarEvent(event: { stopPropagation: () => void }) {
 function ToolbarChrome({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <div
+      data-moodboard-toolbar
       className={cn("pointer-events-auto app-no-drag rounded-lg border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl", className)}
       onPointerDown={stopToolbarEvent}
       onMouseDown={stopToolbarEvent}
@@ -194,7 +195,7 @@ export function MultiSelectionToolbar({
         <ToolButton label="Duplicate selected" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
         </ToolButton>
-        <Popover open={alignOpen} onOpenChange={setAlignOpen}>
+        <Popover open={alignOpen} onOpenChange={setAlignOpen} modal>
           <PopoverTrigger asChild>
             <IconButton aria-label="Align selected" title="Align selected">
               <AlignStartVertical size={14} strokeWidth={1.75} />
@@ -207,8 +208,12 @@ export function MultiSelectionToolbar({
             onOpenAutoFocus={(event) => event.preventDefault()}
             onPointerDown={stopToolbarEvent}
             onMouseDown={stopToolbarEvent}
+            onPointerDownOutside={(event) => {
+              const target = event.target;
+              if (target instanceof Node && document.querySelector("[data-moodboard-toolbar]")?.contains(target)) event.preventDefault();
+            }}
           >
-            <AlignPopoverItem
+            <AlignMenuItem
               icon={<AlignStartVertical size={14} strokeWidth={1.75} />}
               label="Align left"
               onClick={() => {
@@ -216,7 +221,7 @@ export function MultiSelectionToolbar({
                 setAlignOpen(false);
               }}
             />
-            <AlignPopoverItem
+            <AlignMenuItem
               icon={<AlignCenterVertical size={14} strokeWidth={1.75} />}
               label="Align center"
               onClick={() => {
@@ -224,7 +229,7 @@ export function MultiSelectionToolbar({
                 setAlignOpen(false);
               }}
             />
-            <AlignPopoverItem
+            <AlignMenuItem
               icon={<AlignEndVertical size={14} strokeWidth={1.75} />}
               label="Align right"
               onClick={() => {
@@ -232,7 +237,7 @@ export function MultiSelectionToolbar({
                 setAlignOpen(false);
               }}
             />
-            <AlignPopoverItem
+            <AlignMenuItem
               icon={<AlignStartHorizontal size={14} strokeWidth={1.75} />}
               label="Align top"
               onClick={() => {
@@ -240,7 +245,7 @@ export function MultiSelectionToolbar({
                 setAlignOpen(false);
               }}
             />
-            <AlignPopoverItem
+            <AlignMenuItem
               icon={<AlignCenterHorizontal size={14} strokeWidth={1.75} />}
               label="Align middle"
               onClick={() => {
@@ -248,7 +253,7 @@ export function MultiSelectionToolbar({
                 setAlignOpen(false);
               }}
             />
-            <AlignPopoverItem
+            <AlignMenuItem
               icon={<AlignEndHorizontal size={14} strokeWidth={1.75} />}
               label="Align bottom"
               onClick={() => {
@@ -269,7 +274,7 @@ export function MultiSelectionToolbar({
   );
 }
 
-function AlignPopoverItem({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
+function AlignMenuItem({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
   return (
     <button
       type="button"
@@ -312,7 +317,7 @@ export function CanvasActionBar({
         </ToolButton>
         <span className="mx-1 h-5 w-px bg-border" />
         <ToolButton label="Image generator" onClick={onAddImageGenerator}>
-          <ImagePlus size={15} strokeWidth={1.75} />
+          <WandSparkles size={15} strokeWidth={1.75} />
         </ToolButton>
       </div>
     </TooltipProvider>
@@ -426,8 +431,8 @@ export function GeneratorPromptToolbar({
   const modelOptions = models.length ? models : [model].filter(Boolean);
 
   return (
-    <div className="pointer-events-auto app-no-drag flex min-h-[132px] w-[min(600px,calc(100vw-3rem))] flex-col overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
-      <div className="min-h-0 flex-1 px-2.5 pb-2.5 pt-2">
+    <div className="pointer-events-auto app-no-drag grid min-h-[146px] w-[min(600px,calc(100vw-3rem))] grid-rows-[1fr_auto] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+      <div className="min-h-0 px-2.5 pb-2.5 pt-2">
         <Textarea
           aria-label="Image generator prompt"
           rows={2}
@@ -447,7 +452,7 @@ export function GeneratorPromptToolbar({
           className="h-full min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
         />
       </div>
-      <div className="mt-auto flex h-10 shrink-0 items-center justify-between gap-2 border-t border-border/70 px-2">
+      <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
         <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
         <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
           Generate
@@ -479,8 +484,8 @@ export function QuickEditPromptToolbar({
     setPrompt("");
   };
   return (
-    <div className="pointer-events-auto app-no-drag flex min-h-[124px] w-[min(520px,calc(100vw-3rem))] flex-col overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
-      <div className="min-h-0 flex-1 px-2.5 pb-2.5 pt-2">
+    <div className="pointer-events-auto app-no-drag grid min-h-[138px] w-[min(520px,calc(100vw-3rem))] grid-rows-[1fr_auto] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+      <div className="min-h-0 px-2.5 pb-2.5 pt-2">
         <Textarea
           aria-label="Quick edit prompt"
           rows={2}
@@ -500,7 +505,7 @@ export function QuickEditPromptToolbar({
           className="h-full min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
         />
       </div>
-      <div className="mt-auto flex h-10 shrink-0 items-center justify-between gap-2 border-t border-border/70 px-2">
+      <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
         <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
         <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
           Generate
@@ -514,12 +519,11 @@ function ImageModelPicker({ model, options, onModelChange }: { model: string; op
   const [open, setOpen] = useState(false);
   const selected = model || options[0] || "";
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger
         aria-label="Image generation model"
         className="flex h-7 min-w-0 max-w-[21rem] items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
       >
-        <ImagePlus size={13} strokeWidth={1.75} className="shrink-0" />
         <span className="label-mono shrink-0 text-muted-foreground">Image</span>
         <span className="truncate font-medium text-foreground">{selected || "Default model"}</span>
         <ChevronDown size={13} strokeWidth={2} className="shrink-0" />
@@ -543,9 +547,6 @@ function ImageModelPicker({ model, options, onModelChange }: { model: string; op
                     active ? "border-ring bg-surface text-foreground ring-1 ring-ring/30" : "border-border text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
                   )}
                 >
-                  <span className="grid size-6 shrink-0 place-items-center rounded-md bg-surface-2 text-foreground">
-                    <ImagePlus size={13} strokeWidth={1.75} />
-                  </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">{option}</span>
                     <span className="block truncate text-[10px] text-muted-foreground">Image generation</span>
