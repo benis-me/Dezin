@@ -1,9 +1,24 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { ArrowDownToLine, ArrowUpToLine, Copy, Loader2, Trash2, WandSparkles } from "lucide-react";
+import {
+  ArrowDownToLine,
+  ArrowUpToLine,
+  Copy,
+  Hand,
+  Layers,
+  Loader2,
+  Minus,
+  MousePointer2,
+  Plus,
+  SquareDashedMousePointer,
+  StickyNote,
+  Trash2,
+  Upload,
+  WandSparkles,
+} from "lucide-react";
 import type { MoodboardNode } from "../lib/api.ts";
 import { Button, IconButton, Textarea, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
-import { generatorPrompt, generatorStatus, layerLabel } from "./canvas-utils.ts";
+import { generatorPrompt, generatorStatus, layerLabel, type MoodboardCanvasTool } from "./canvas-utils.ts";
 
 export function ToolButton({
   label,
@@ -57,6 +72,75 @@ export function SelectionToolbar({
         </ToolButton>
         <ToolButton label="Delete" onClick={onDelete}>
           <Trash2 size={14} strokeWidth={1.75} />
+        </ToolButton>
+      </div>
+    </TooltipProvider>
+  );
+}
+
+export function CanvasActionBar({
+  tool,
+  layersOpen,
+  onToolChange,
+  onUpload,
+  onAddImageGenerator,
+  onToggleLayers,
+}: {
+  tool: MoodboardCanvasTool;
+  layersOpen: boolean;
+  onToolChange: (tool: MoodboardCanvasTool) => void;
+  onUpload: () => void;
+  onAddImageGenerator: () => void;
+  onToggleLayers: () => void;
+}) {
+  return (
+    <TooltipProvider delayDuration={120}>
+      <div className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-popover/95 p-1 shadow-pop backdrop-blur-xl">
+        <ToolButton label="Select" active={tool === "select"} onClick={() => onToolChange("select")}>
+          <MousePointer2 size={15} strokeWidth={1.75} />
+        </ToolButton>
+        <ToolButton label="Hand" active={tool === "hand"} onClick={() => onToolChange("hand")}>
+          <Hand size={15} strokeWidth={1.75} />
+        </ToolButton>
+        <span className="mx-1 h-5 w-px bg-border" />
+        <ToolButton label="Add note" active={tool === "note"} onClick={() => onToolChange("note")}>
+          <StickyNote size={15} strokeWidth={1.75} />
+        </ToolButton>
+        <ToolButton label="Add section" active={tool === "section"} onClick={() => onToolChange("section")}>
+          <SquareDashedMousePointer size={15} strokeWidth={1.75} />
+        </ToolButton>
+        <ToolButton label="Upload images" onClick={onUpload}>
+          <Upload size={15} strokeWidth={1.75} />
+        </ToolButton>
+        <ToolButton label="Image generator" onClick={onAddImageGenerator}>
+          <WandSparkles size={15} strokeWidth={1.75} />
+        </ToolButton>
+        <span className="mx-1 h-5 w-px bg-border" />
+        <ToolButton label="Layers" active={layersOpen} onClick={onToggleLayers}>
+          <Layers size={15} strokeWidth={1.75} />
+        </ToolButton>
+      </div>
+    </TooltipProvider>
+  );
+}
+
+export function CanvasZoomBar({ zoom, onChangeZoom }: { zoom: number; onChangeZoom: (zoom: number) => void }) {
+  return (
+    <TooltipProvider delayDuration={120}>
+      <div className="app-no-drag absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-popover/95 p-1 shadow-pop backdrop-blur-xl">
+        <ToolButton label="Zoom out" onClick={() => onChangeZoom(zoom * 0.88)}>
+          <Minus size={15} strokeWidth={1.75} />
+        </ToolButton>
+        <button
+          type="button"
+          onClick={() => onChangeZoom(1)}
+          className="h-8 min-w-12 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+          aria-label="Reset zoom"
+        >
+          {Math.round(zoom * 100)}%
+        </button>
+        <ToolButton label="Zoom in" onClick={() => onChangeZoom(zoom * 1.14)}>
+          <Plus size={15} strokeWidth={1.75} />
         </ToolButton>
       </div>
     </TooltipProvider>

@@ -1,5 +1,20 @@
-import type { ReactNode } from "react";
-import { ArrowDownToLine, ArrowUpToLine, Copy, Eye, EyeOff, Lock, LockOpen, SquareDashedMousePointer, StickyNote, Trash2, WandSparkles } from "lucide-react";
+import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  ArrowDownToLine,
+  ArrowUpToLine,
+  Copy,
+  Eye,
+  EyeOff,
+  Lock,
+  LockOpen,
+  Minus,
+  Plus,
+  RotateCcw,
+  SquareDashedMousePointer,
+  StickyNote,
+  Trash2,
+  WandSparkles,
+} from "lucide-react";
 import type { MoodboardNode } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
 import { isNodeLocked, isNodeVisible, type ContextMenuState } from "./canvas-utils.ts";
@@ -18,6 +33,9 @@ export function MoodboardContextMenu({
   onToggleVisible,
   onToggleLocked,
   onDelete,
+  onZoomIn,
+  onZoomOut,
+  onResetZoom,
 }: {
   menu: ContextMenuState;
   targetId: string | null;
@@ -32,14 +50,56 @@ export function MoodboardContextMenu({
   onToggleVisible?: () => void;
   onToggleLocked?: () => void;
   onDelete?: () => void;
+  onZoomIn?: () => void;
+  onZoomOut?: () => void;
+  onResetZoom?: () => void;
 }) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState(() => ({ x: menu.x, y: menu.y }));
+
+  const updatePosition = useCallback(() => {
+    const element = menuRef.current;
+    if (!element) {
+      setPosition({ x: menu.x, y: menu.y });
+      return;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const padding = 8;
+    const maxX = Math.max(padding, window.innerWidth - rect.width - padding);
+    const maxY = Math.max(padding, window.innerHeight - rect.height - padding);
+    setPosition({
+      x: Math.min(maxX, Math.max(padding, menu.x)),
+      y: Math.min(maxY, Math.max(padding, menu.y)),
+    });
+  }, [menu.x, menu.y]);
+
+  useLayoutEffect(() => {
+    setPosition({ x: menu.x, y: menu.y });
+    const frame = window.requestAnimationFrame(updatePosition);
+    window.addEventListener("resize", updatePosition);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [menu.x, menu.y, updatePosition]);
+
   return (
     <>
-      <button type="button" aria-label="Close canvas menu" className="fixed inset-0 z-40 cursor-default" onClick={onClose} />
+      <button
+        type="button"
+        aria-label="Close canvas menu"
+        className="fixed inset-0 z-40 cursor-default"
+        onClick={onClose}
+        onContextMenu={(event) => event.preventDefault()}
+      />
       <div
+        ref={menuRef}
+        role="menu"
         className="fixed z-50 w-56 rounded-md border border-border bg-popover p-1 text-sm text-popover-foreground shadow-pop"
-        style={{ left: menu.x, top: menu.y }}
+        style={{ left: position.x, top: position.y }}
         onClick={(event) => event.stopPropagation()}
+        onContextMenu={(event) => event.preventDefault()}
       >
         {targetId ? <MenuLabel>Selection</MenuLabel> : null}
         {targetId && onDuplicate ? <MenuButton icon={<Copy size={14} strokeWidth={1.75} />} label="Duplicate" onClick={onDuplicate} /> : null}
@@ -65,6 +125,11 @@ export function MoodboardContextMenu({
         <MenuButton icon={<StickyNote size={14} strokeWidth={1.75} />} label="Add note here" onClick={onAddNote} />
         <MenuButton icon={<SquareDashedMousePointer size={14} strokeWidth={1.75} />} label="Add section here" onClick={onAddSection} />
         <MenuButton icon={<WandSparkles size={14} strokeWidth={1.75} />} label="Add image generator here" onClick={onGenerate} />
+        {onZoomIn || onZoomOut || onResetZoom ? <div className="my-1 h-px bg-border" /> : null}
+        {onZoomIn || onZoomOut || onResetZoom ? <MenuLabel>View</MenuLabel> : null}
+        {onZoomIn ? <MenuButton icon={<Plus size={14} strokeWidth={1.75} />} label="Zoom in" onClick={onZoomIn} /> : null}
+        {onZoomOut ? <MenuButton icon={<Minus size={14} strokeWidth={1.75} />} label="Zoom out" onClick={onZoomOut} /> : null}
+        {onResetZoom ? <MenuButton icon={<RotateCcw size={14} strokeWidth={1.75} />} label="Reset zoom" onClick={onResetZoom} /> : null}
       </div>
     </>
   );

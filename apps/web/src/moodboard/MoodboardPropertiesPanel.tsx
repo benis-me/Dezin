@@ -1,8 +1,13 @@
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { WandSparkles } from "lucide-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { Button, Input, Textarea } from "../components/ui/index.ts";
 import { fileName, generatorPrompt, nodeText, nodeTitle, numberFromEvent, promptText } from "./canvas-utils.ts";
+
+const PANEL_WIDTH_KEY = "dezin:moodboard:properties-width";
+const DEFAULT_PANEL_WIDTH = 280;
+const MIN_PANEL_WIDTH = 248;
+const MAX_PANEL_WIDTH = 440;
 
 export function MoodboardPropertiesPanel({
   node,
@@ -15,8 +20,50 @@ export function MoodboardPropertiesPanel({
   onPatchData: (patch: Record<string, unknown>) => void;
   onGenerate: () => void;
 }) {
+  const [width, setWidth] = useState(() => {
+    const storedValue = localStorage.getItem(PANEL_WIDTH_KEY);
+    if (storedValue == null) return DEFAULT_PANEL_WIDTH;
+    const stored = Number(storedValue);
+    return Number.isFinite(stored) ? Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, stored)) : DEFAULT_PANEL_WIDTH;
+  });
+
+  useEffect(() => {
+    localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+  }, [width]);
+
+  const startResize = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = width;
+
+      const onMove = (moveEvent: MouseEvent) => {
+        const delta = startX - moveEvent.clientX;
+        setWidth(Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, startWidth + delta)));
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    },
+    [width],
+  );
+
   return (
-    <aside className="app-no-drag absolute right-3 top-3 z-20 hidden max-h-[calc(100%-5rem)] w-64 select-none overflow-auto rounded-md border border-border bg-popover/95 text-popover-foreground shadow-pop backdrop-blur-xl lg:block">
+    <aside
+      className="app-no-drag absolute right-3 top-3 z-20 hidden max-h-[calc(100%-5rem)] select-none overflow-auto rounded-md border border-border bg-popover/95 text-popover-foreground shadow-pop backdrop-blur-xl lg:block"
+      style={{ width }}
+    >
+      <div
+        role="separator"
+        aria-label="Resize properties panel"
+        aria-orientation="vertical"
+        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize"
+        onMouseDown={startResize}
+      />
       <div className="flex h-9 items-center justify-between border-b border-border px-3">
         <span className="text-xs font-medium">Properties</span>
         <span className="label-mono">{node.type}</span>

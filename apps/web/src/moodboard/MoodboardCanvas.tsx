@@ -1,21 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import {
-  Hand,
-  ImagePlus,
-  Layers,
-  Minus,
-  MousePointer2,
-  Plus,
-  SquareDashedMousePointer,
-  StickyNote,
-  Upload,
-  WandSparkles,
-} from "lucide-react";
+import { ImagePlus, Plus } from "lucide-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
-import { Button, TooltipProvider } from "../components/ui/index.ts";
+import { Button } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
-import { GeneratorPromptToolbar, SelectionToolbar, ToolButton } from "./MoodboardCanvasToolbars.tsx";
+import { CanvasActionBar, CanvasZoomBar, GeneratorPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 import { makeNodeFrame } from "./leafer-node-renderer.ts";
@@ -36,6 +25,8 @@ import {
   type LeaferRuntime,
   type MoodboardCanvasTool,
 } from "./canvas-utils.ts";
+
+const LAYERS_OPEN_KEY = "dezin:moodboard:layers-open";
 
 export function MoodboardCanvas({
   nodes,
@@ -61,7 +52,7 @@ export function MoodboardCanvas({
   onGenerateImage: (node: MoodboardNode, prompt: string) => Promise<void>;
 }) {
   const [tool, setTool] = useState<MoodboardCanvasTool>("select");
-  const [layersOpen, setLayersOpen] = useState(true);
+  const [layersOpen, setLayersOpen] = useState(() => localStorage.getItem(LAYERS_OPEN_KEY) !== "0");
   const [runtimeReady, setRuntimeReady] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -92,6 +83,10 @@ export function MoodboardCanvas({
   useEffect(() => {
     toolRef.current = tool;
   }, [tool]);
+
+  useEffect(() => {
+    localStorage.setItem(LAYERS_OPEN_KEY, layersOpen ? "1" : "0");
+  }, [layersOpen]);
 
   useEffect(() => {
     onSelectRef.current = onSelect;
@@ -199,7 +194,7 @@ export function MoodboardCanvas({
           pointSize: 9,
         },
         wheel: { preventDefault: true },
-        move: { dragEmpty: true },
+        move: { dragEmpty: false },
         zoom: { min: 0.1, max: 4 },
       });
 
@@ -343,16 +338,40 @@ export function MoodboardCanvas({
   }, [hoveredId, nodes, selectedId, selectInRuntime, runtimeReady, updateFloatingSelection]);
 
   useEffect(() => {
+    try {
+      const app = runtimeRef.current?.app;
+      if (app?.config) app.config.move = { ...(app.config.move ?? {}), dragEmpty: tool === "hand" };
+    } catch {
+      /* Leafer config shape can vary by version. */
+    }
+  }, [runtimeReady, tool]);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      const tag = (event.target as HTMLElement | null)?.tagName;
+      const editing = tag === "INPUT" || tag === "TEXTAREA" || (event.target as HTMLElement | null)?.isContentEditable;
+      if (editing) return;
+
       if (event.key === "Escape") {
-        if (contextMenu) setContextMenu(null);
-        else onSelect(null);
+        if (contextMenu) {
+          setContextMenu(null);
+        } else if (toolRef.current !== "select") {
+          setTool("select");
+        } else {
+          onSelect(null);
+        }
       }
       if ((event.key === "Backspace" || event.key === "Delete") && selectedId) {
-        const tag = (event.target as HTMLElement | null)?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA") return;
         event.preventDefault();
         deleteNode(selectedId);
+      }
+      if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === "v") setTool("select");
+        if (key === "h") setTool("hand");
+        if (key === "n") setTool("note");
+        if (key === "f") setTool("section");
+        if (key === "l") setLayersOpen((value) => !value);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -448,7 +467,7 @@ export function MoodboardCanvas({
     event.currentTarget.value = "";
   };
 
-  const contextTargetId = contextMenu?.targetId ?? selectedId;
+  const contextTargetId = contextMenu?.targetId ?? null;
 
   return (
     <div className="relative min-h-0 flex-1 bg-surface">
@@ -531,46 +550,15 @@ export function MoodboardCanvas({
           </div>
         ) : null}
 
-        <TooltipProvider delayDuration={120}>
-          <div className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-popover p-1 shadow-pop">
-              <ToolButton label="Select" active={tool === "select"} onClick={() => setTool("select")}>
-                <MousePointer2 size={15} strokeWidth={1.75} />
-              </ToolButton>
-              <ToolButton label="Hand" active={tool === "hand"} onClick={() => setTool("hand")}>
-                <Hand size={15} strokeWidth={1.75} />
-              </ToolButton>
-              <span className="mx-1 h-5 w-px bg-border" />
-              <ToolButton label="Add note" active={tool === "note"} onClick={() => setTool("note")}>
-                <StickyNote size={15} strokeWidth={1.75} />
-              </ToolButton>
-              <ToolButton label="Add section" active={tool === "section"} onClick={() => setTool("section")}>
-                <SquareDashedMousePointer size={15} strokeWidth={1.75} />
-              </ToolButton>
-              <ToolButton label="Upload images" onClick={() => inputRef.current?.click()}>
-                <Upload size={15} strokeWidth={1.75} />
-              </ToolButton>
-              <ToolButton label="Image generator" onClick={() => onAddImageGenerator()}>
-                <WandSparkles size={15} strokeWidth={1.75} />
-              </ToolButton>
-              <span className="mx-1 h-5 w-px bg-border" />
-              <ToolButton label="Layers" active={layersOpen} onClick={() => setLayersOpen((value) => !value)}>
-                <Layers size={15} strokeWidth={1.75} />
-              </ToolButton>
-              <ToolButton label="Zoom out" onClick={() => changeZoom(zoom * 0.88)}>
-                <Minus size={15} strokeWidth={1.75} />
-              </ToolButton>
-              <button
-                type="button"
-                onClick={() => changeZoom(1)}
-                className="h-8 min-w-12 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
-              >
-                {Math.round(zoom * 100)}%
-              </button>
-              <ToolButton label="Zoom in" onClick={() => changeZoom(zoom * 1.14)}>
-                <Plus size={15} strokeWidth={1.75} />
-              </ToolButton>
-            </div>
-          </TooltipProvider>
+        <CanvasActionBar
+          tool={tool}
+          layersOpen={layersOpen}
+          onToolChange={setTool}
+          onUpload={() => inputRef.current?.click()}
+          onAddImageGenerator={() => onAddImageGenerator()}
+          onToggleLayers={() => setLayersOpen((value) => !value)}
+        />
+        <CanvasZoomBar zoom={zoom} onChangeZoom={changeZoom} />
 
         {contextMenu ? (
             <MoodboardContextMenu
@@ -595,6 +583,18 @@ export function MoodboardCanvas({
               onToggleVisible={contextTargetId ? () => toggleNodeVisible(contextTargetId) : undefined}
               onToggleLocked={contextTargetId ? () => toggleNodeLocked(contextTargetId) : undefined}
               onDelete={contextTargetId ? () => deleteNode(contextTargetId) : undefined}
+              onZoomIn={() => {
+                changeZoom(zoom * 1.14);
+                setContextMenu(null);
+              }}
+              onZoomOut={() => {
+                changeZoom(zoom * 0.88);
+                setContextMenu(null);
+              }}
+              onResetZoom={() => {
+                changeZoom(1);
+                setContextMenu(null);
+              }}
               targetNode={contextTargetId ? nodes.find((node) => node.id === contextTargetId) ?? null : null}
             />
           ) : null}
