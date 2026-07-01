@@ -598,9 +598,9 @@ test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
     </ApiProvider>,
   );
 
-  const composer = screen.getByLabelText("Moodboard prompt").closest("div")!;
+  const composer = screen.getByLabelText("Message").closest("div")!;
   fireEvent.dragOver(composer);
-  expect(screen.getByText("Drop files onto canvas")).toBeInTheDocument();
+  expect(screen.getByText("Drop files to attach")).toBeInTheDocument();
   fireEvent.drop(composer, { dataTransfer: { files } });
 
   expect(onUploadFiles).toHaveBeenCalledWith(files);

@@ -79,7 +79,7 @@ export function MoodboardAgentPanel({
   };
 
   return (
-    <aside className="relative flex h-full min-w-0 flex-col bg-sidebar">
+    <aside className="relative flex h-full min-w-0 flex-col bg-background">
       <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
         <button
           type="button"
@@ -137,20 +137,6 @@ export function MoodboardAgentPanel({
       <div className="pointer-events-none absolute inset-x-0 bottom-0">
         <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
         <div ref={composerRef} className="bg-background px-3 pb-3">
-          {onUploadFiles ? (
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept="image/*,video/*"
-              className="hidden"
-              aria-label="Attach moodboard files"
-              onChange={(event) => {
-                attachFiles(event.target.files);
-                event.currentTarget.value = "";
-              }}
-            />
-          ) : null}
           <div
             onDragOver={(event) => {
               if (!onUploadFiles) return;
@@ -173,12 +159,26 @@ export function MoodboardAgentPanel({
               <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl bg-card/90 text-sm font-medium text-foreground">
                 <span className="flex items-center gap-2">
                   <Paperclip size={15} strokeWidth={1.75} />
-                  Drop files onto canvas
+                  Drop files to attach
                 </span>
               </div>
             ) : null}
+            {onUploadFiles ? (
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,video/*"
+                className="hidden"
+                aria-label="Attach moodboard files"
+                onChange={(event) => {
+                  attachFiles(event.target.files);
+                  event.currentTarget.value = "";
+                }}
+              />
+            ) : null}
             <textarea
-              aria-label="Moodboard prompt"
+              aria-label="Message"
               rows={1}
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -211,9 +211,14 @@ export function MoodboardAgentPanel({
                     onModelChange={onModelChange}
                     onRescan={onRescanAgents}
                   />
-                  <Button aria-label="Send message" size="icon-sm" disabled={busy || text.trim().length === 0} onClick={() => void submit()} className="ml-0.5 rounded-lg">
-                    <ArrowUp size={15} strokeWidth={2} />
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button aria-label="Send" size="icon-sm" disabled={busy || text.trim().length === 0} onClick={() => void submit()} className="ml-0.5 rounded-lg">
+                        <ArrowUp size={15} strokeWidth={2} />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent sideOffset={2}>Send</TooltipContent>
+                  </Tooltip>
                 </div>
               </TooltipProvider>
             </div>
