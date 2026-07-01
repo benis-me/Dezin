@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import type { Moodboard, MoodboardAsset, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
 import { requestImage } from "./image-gen.ts";
+import { buildMoodboardAgentPrompt, clippedBlock, localMoodboardReply, runMoodboardAgentText } from "./moodboard-agent.ts";
 import type { AppDeps } from "./app.ts";
 import { readJsonBody, send, sendError, sendJson } from "./http-util.ts";
 
@@ -153,19 +154,38 @@ export async function handlePostMoodboardMessage(
   req: IncomingMessage,
   res: ServerResponse,
   { id }: Record<string, string>,
-  { store }: AppDeps,
+  { store, dataDir, moodboardAgentText }: AppDeps,
 ): Promise<void> {
-  if (!store.getMoodboard(id!)) return sendError(res, 404, "moodboard not found");
+  const board = store.getMoodboard(id!);
+  if (!board) return sendError(res, 404, "moodboard not found");
   const body = asObject(await readJsonBody(req));
   const content = stringValue(body.content);
   if (!content) return sendError(res, 400, "content is required");
+  const agentCommand = stringValue(body.agentCommand);
+  const model = stringValue(body.model) || undefined;
   const user = store.addMoodboardMessage(id!, "user", content);
   const nodes = store.listMoodboardNodes(id!);
-  const assistant = store.addMoodboardMessage(
-    id!,
-    "assistant",
-    `Canvas context: ${nodes.length} item${nodes.length === 1 ? "" : "s"}. Use an image generator node to place new visual material on the board.`,
-  );
+  const assets = store.listMoodboardAssets(id!);
+  const messages = store.listMoodboardMessages(id!);
+  const cwd = moodboardDir(dataDir, id!);
+  mkdirSync(cwd, { recursive: true });
+  const contextPath = join(cwd, "moodboard-context.json");
+  writeFileSync(contextPath, JSON.stringify({ board, nodes, assets, messages }, null, 2));
+
+  let assistantText = localMoodboardReply(nodes, assets);
+  if (agentCommand) {
+    const prompt = buildMoodboardAgentPrompt({ board, nodes, assets, messages, content, contextPath });
+    try {
+      assistantText = await runMoodboardAgentText(
+        { board, nodes, assets, messages, content, agentCommand, model, prompt, cwd },
+        moodboardAgentText,
+      );
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "request failed";
+      assistantText = `${assistantText}\n\nAgent note: ${agentCommand} could not respond (${clippedBlock(reason, 180)}).`;
+    }
+  }
+  const assistant = store.addMoodboardMessage(id!, "assistant", clippedBlock(assistantText));
   sendJson(res, 201, { messages: [user, assistant] });
 }
 

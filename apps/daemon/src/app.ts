@@ -52,6 +52,7 @@ import {
   handleServeMoodboardAsset,
   handleUploadMoodboardAsset,
 } from "./moodboard-handler.ts";
+import type { MoodboardAgentTextRunner } from "./moodboard-agent.ts";
 
 export interface AppDeps {
   store: Store;
@@ -79,6 +80,8 @@ export interface AppDeps {
   captureCover?: typeof captureCover;
   /** Background title generator hook; tests can avoid launching an agent. */
   titleGenerator?: TitleGenerator;
+  /** Moodboard chat one-shot agent hook; tests can avoid launching a real CLI. */
+  moodboardAgentText?: MoodboardAgentTextRunner;
 }
 
 type Handler = (

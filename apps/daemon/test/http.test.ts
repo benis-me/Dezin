@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, matchPath, safeJoin } from "../src/index.ts";
+import type { AppDeps } from "../src/index.ts";
 import { injectSelectBridge } from "../src/serve-static.ts";
 
 interface Ctx {
@@ -14,10 +15,10 @@ interface Ctx {
   store: Store;
 }
 
-async function withServer(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
+async function withServer(fn: (ctx: Ctx) => Promise<void>, extraDeps: Partial<AppDeps> = {}): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-test-"));
   const store = new Store(":memory:");
-  const server = createApp({ store, dataDir, version: "9.9.9" });
+  const server = createApp({ ...extraDeps, store, dataDir, version: extraDeps.version ?? "9.9.9" });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
@@ -133,6 +134,11 @@ test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
       body: JSON.stringify({ content: "Use calmer references" }),
     });
     assert.equal(message.status, 201);
+    const messageBody = (await message.json()) as { messages: Array<{ role: string; content: string }> };
+    assert.equal(messageBody.messages[1]?.role, "assistant");
+    assert.match(messageBody.messages[1]?.content ?? "", /Canvas context: 2 items/);
+    assert.match(messageBody.messages[1]?.content ?? "", /image-generator/);
+    assert.match(messageBody.messages[1]?.content ?? "", /Soft studio references/);
     const detail = (await (await fetch(`${base}/api/moodboards/${board.id}`)).json()) as {
       nodes: Array<{ type: string }>;
       messages: unknown[];
@@ -143,6 +149,68 @@ test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
     assert.equal(detail.messages.length, 2);
     assert.ok(detail.coverUrl);
   });
+});
+
+test("moodboard messages invoke the selected agent with canvas context", async () => {
+  const captures: Array<Parameters<NonNullable<AppDeps["moodboardAgentText"]>>[0]> = [];
+  await withServer(
+    async ({ base, store }) => {
+      const board = store.createMoodboard({ name: "Editorial references" });
+      const asset = store.createMoodboardAsset(board.id, {
+        kind: "image",
+        fileName: "hero.png",
+        mimeType: "image/png",
+        width: 1024,
+        height: 768,
+        source: "upload",
+      });
+      store.replaceMoodboardNodes(board.id, [
+        {
+          type: "image-generator",
+          x: 10,
+          y: 20,
+          width: 360,
+          height: 240,
+          data: { generatorPrompt: "Soft shadows, editorial still life", generatorStatus: "ready" },
+        },
+        {
+          type: "image",
+          x: 400,
+          y: 20,
+          width: 320,
+          height: 240,
+          data: { assetId: asset.id, fileName: asset.fileName },
+        },
+      ]);
+      store.addMoodboardMessage(board.id, "user", "Previous direction: calm, tactile, warm neutrals.");
+
+      const res = await fetch(`${base}/api/moodboards/${board.id}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "Use warmer references", agentCommand: "codex", model: "gpt-5" }),
+      });
+      assert.equal(res.status, 201);
+      const body = (await res.json()) as { messages: Array<{ role: string; content: string }> };
+      assert.equal(body.messages[1]?.content, "Agent saw the current canvas.");
+    },
+    {
+      moodboardAgentText: async (input) => {
+        captures.push(input);
+        return "Agent saw the current canvas.";
+      },
+    },
+  );
+  const captured = captures[0];
+  assert.ok(captured);
+  assert.equal(captured.agentCommand, "codex");
+  assert.equal(captured.model, "gpt-5");
+  assert.equal(captured.nodes.length, 2);
+  assert.equal(captured.assets.length, 1);
+  assert.match(captured.prompt, /Editorial references/);
+  assert.match(captured.prompt, /Soft shadows, editorial still life/);
+  assert.match(captured.prompt, /hero\.png/);
+  assert.match(captured.prompt, /Previous direction/);
+  assert.match(captured.prompt, /Latest user request:\nUse warmer references/);
 });
 
 test("POST /api/projects/:id/title updates a project name with a generated title", async () => {

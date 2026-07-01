@@ -191,7 +191,7 @@ export function useMoodboardBoard(boardId: string) {
     async (content: string) => {
       setBusy(true);
       try {
-        const result = await api.postMoodboardMessage(boardId, content);
+        const result = await api.postMoodboardMessage(boardId, content, { agentCommand: runAgent || undefined, model: runModel || undefined });
         setMessages((cur) => [...cur, ...result.messages]);
       } catch {
         toast("Couldn't send that message.", { variant: "error" });
@@ -199,7 +199,7 @@ export function useMoodboardBoard(boardId: string) {
         setBusy(false);
       }
     },
-    [api, boardId, toast],
+    [api, boardId, runAgent, runModel, toast],
   );
 
   const rescanAgents = useCallback(async () => {
