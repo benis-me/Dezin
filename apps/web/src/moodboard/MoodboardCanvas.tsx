@@ -538,6 +538,8 @@ function bindFloatingCanvasSurfaceEvents(
   options: { container: HTMLElement; toolbar: HTMLElement; observeOccluders: boolean },
 ): () => void {
   let frame: number | null = null;
+  let trackingFrame: number | null = null;
+  let trackingUntil = 0;
   let pendingReason: FloatingPositionReason = "viewport";
   const schedule = (reason: FloatingPositionReason = "viewport") => {
     pendingReason = reason === "layout" || pendingReason === "layout" ? "layout" : "viewport";
@@ -549,19 +551,31 @@ function bindFloatingCanvasSurfaceEvents(
       updatePosition(nextReason);
     });
   };
-  const scheduleViewport = () => schedule("viewport");
+  const trackViewport = () => {
+    schedule("viewport");
+    trackingUntil = Math.max(trackingUntil, nowMs() + 180);
+    if (trackingFrame != null) return;
+    const tick = (time: number) => {
+      trackingFrame = null;
+      if (time > trackingUntil) return;
+      schedule("viewport");
+      trackingFrame = window.requestAnimationFrame(tick);
+    };
+    trackingFrame = window.requestAnimationFrame(tick);
+  };
   const scheduleLayout = () => schedule("layout");
   const cleanups = [
-    bindFloatingEvents(app, FLOATING_TREE_VIEWPORT_EVENTS, scheduleViewport),
-    bindFloatingEvents(app.tree, FLOATING_TREE_VIEWPORT_EVENTS, scheduleViewport),
-    bindFloatingEvents(app.tree, FLOATING_VIEWPORT_END_EVENTS, scheduleViewport),
-    bindFloatingEvents(app, FLOATING_VIEWPORT_END_EVENTS, scheduleViewport),
-    bindFloatingEvents(app.editor, FLOATING_EDITOR_EVENTS, scheduleViewport),
-    bindFloatingDomEvents(options.container, options.toolbar, scheduleLayout, options.observeOccluders),
+    bindFloatingEvents(app, FLOATING_TREE_VIEWPORT_EVENTS, trackViewport),
+    bindFloatingEvents(app.tree, FLOATING_TREE_VIEWPORT_EVENTS, trackViewport),
+    bindFloatingEvents(app.tree, FLOATING_VIEWPORT_END_EVENTS, trackViewport),
+    bindFloatingEvents(app, FLOATING_VIEWPORT_END_EVENTS, trackViewport),
+    bindFloatingEvents(app.editor, FLOATING_EDITOR_EVENTS, trackViewport),
+    bindFloatingDomEvents(options.container, options.toolbar, scheduleLayout, trackViewport, options.observeOccluders),
   ];
   return () => {
     cleanups.forEach((cleanup) => cleanup());
     if (frame != null) window.cancelAnimationFrame(frame);
+    if (trackingFrame != null) window.cancelAnimationFrame(trackingFrame);
   };
 }
 
@@ -571,7 +585,7 @@ function bindFloatingEvents(target: FloatingEventTarget | undefined, events: rea
   return () => events.forEach((event) => target.off?.(event, handler));
 }
 
-function bindFloatingDomEvents(container: HTMLElement, toolbar: HTMLElement, schedule: () => void, observeOccluders: boolean): () => void {
+function bindFloatingDomEvents(container: HTMLElement, toolbar: HTMLElement, schedule: () => void, trackViewport: () => void, observeOccluders: boolean): () => void {
   const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : null;
   const attributeObserver = typeof MutationObserver === "function" ? new MutationObserver(schedule) : null;
   const mutationObserver =
@@ -602,7 +616,7 @@ function bindFloatingDomEvents(container: HTMLElement, toolbar: HTMLElement, sch
   const handleTransitionEnd = (event: Event) => {
     if (observeOccluders && event.target instanceof HTMLElement && event.target.matches("[data-moodboard-floating-occluder]")) schedule();
   };
-  const handleViewportInput = () => schedule();
+  const handleViewportInput = () => trackViewport();
   refreshTargets();
   mutationObserver?.observe(container, { childList: true, subtree: true });
   container.addEventListener("transitionend", handleTransitionEnd, true);
@@ -618,6 +632,10 @@ function bindFloatingDomEvents(container: HTMLElement, toolbar: HTMLElement, sch
     container.removeEventListener("wheel", handleViewportInput, true);
     container.removeEventListener("pointermove", handleViewportInput, true);
   };
+}
+
+function nowMs(): number {
+  return window.performance?.now?.() ?? Date.now();
 }
 
 function containsFloatingOccluder(nodes: NodeList): boolean {
