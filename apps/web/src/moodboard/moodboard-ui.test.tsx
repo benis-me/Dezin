@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MoodboardNode } from "../lib/api.ts";
+import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
 
@@ -151,4 +152,41 @@ test("MoodboardPropertiesPanel edits node appearance data", () => {
   fireEvent.change(screen.getByDisplayValue("#fff8c7"), { target: { value: "#ffeeaa" } });
 
   expect(onPatchData).toHaveBeenCalledWith({ fill: "#ffeeaa" });
+});
+
+test("SelectionToolbar exposes object visibility and lock actions", () => {
+  const onToggleVisible = vi.fn();
+  const onToggleLocked = vi.fn();
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "Reference tone" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <SelectionToolbar
+      node={node}
+      onDuplicate={() => {}}
+      onBringToFront={() => {}}
+      onSendToBack={() => {}}
+      onToggleVisible={onToggleVisible}
+      onToggleLocked={onToggleLocked}
+      onDelete={() => {}}
+    />,
+  );
+
+  fireEvent.click(screen.getByLabelText("Hide layer"));
+  fireEvent.click(screen.getByLabelText("Lock layer"));
+
+  expect(onToggleVisible).toHaveBeenCalledOnce();
+  expect(onToggleLocked).toHaveBeenCalledOnce();
 });

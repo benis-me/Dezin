@@ -75,6 +75,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               onDuplicate={() => canvas.duplicateNode(canvas.selected!.id)}
               onBringToFront={() => canvas.bringToFront(canvas.selected!.id)}
               onSendToBack={() => canvas.sendToBack(canvas.selected!.id)}
+              onToggleVisible={() => canvas.toggleNodeVisible(canvas.selected!.id)}
+              onToggleLocked={() => canvas.toggleNodeLocked(canvas.selected!.id)}
               onDelete={() => canvas.deleteNode(canvas.selected!.id)}
             />
           </div>

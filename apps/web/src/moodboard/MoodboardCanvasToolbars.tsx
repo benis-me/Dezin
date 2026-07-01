@@ -3,9 +3,13 @@ import {
   ArrowDownToLine,
   ArrowUpToLine,
   Copy,
+  Eye,
+  EyeOff,
   Hand,
   Layers,
   Loader2,
+  Lock,
+  LockOpen,
   Maximize2,
   Minus,
   MousePointer2,
@@ -31,7 +35,7 @@ import {
   TooltipTrigger,
 } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
-import { generatorPrompt, generatorStatus, layerLabel, type MoodboardCanvasTool } from "./canvas-utils.ts";
+import { generatorPrompt, generatorStatus, isNodeLocked, isNodeVisible, layerLabel, type MoodboardCanvasTool } from "./canvas-utils.ts";
 
 export function ToolButton({
   label,
@@ -61,14 +65,21 @@ export function SelectionToolbar({
   onDuplicate,
   onBringToFront,
   onSendToBack,
+  onToggleVisible,
+  onToggleLocked,
   onDelete,
 }: {
   node: MoodboardNode;
   onDuplicate: () => void;
   onBringToFront: () => void;
   onSendToBack: () => void;
+  onToggleVisible: () => void;
+  onToggleLocked: () => void;
   onDelete: () => void;
 }) {
+  const visible = isNodeVisible(node);
+  const locked = isNodeLocked(node);
+
   return (
     <TooltipProvider delayDuration={120}>
       <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-popover p-1 shadow-pop">
@@ -82,6 +93,12 @@ export function SelectionToolbar({
         </ToolButton>
         <ToolButton label="Send to back" onClick={onSendToBack}>
           <ArrowDownToLine size={14} strokeWidth={1.75} />
+        </ToolButton>
+        <ToolButton label={visible ? "Hide layer" : "Show layer"} onClick={onToggleVisible}>
+          {visible ? <EyeOff size={14} strokeWidth={1.75} /> : <Eye size={14} strokeWidth={1.75} />}
+        </ToolButton>
+        <ToolButton label={locked ? "Unlock layer" : "Lock layer"} onClick={onToggleLocked}>
+          {locked ? <LockOpen size={14} strokeWidth={1.75} /> : <Lock size={14} strokeWidth={1.75} />}
         </ToolButton>
         <ToolButton label="Delete" onClick={onDelete}>
           <Trash2 size={14} strokeWidth={1.75} />
