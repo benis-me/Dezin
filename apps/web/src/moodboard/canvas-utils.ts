@@ -393,8 +393,8 @@ export function nodeIdFromTarget(target: any): string | null {
   return null;
 }
 
-export function contextTargetIdFromEvent(eventTarget: unknown, editorTarget: unknown): string | null {
-  return nodeIdFromTarget(eventTarget) ?? nodeIdFromTarget(editorTarget);
+export function contextTargetIdFromEvent(eventTarget: unknown, _editorTarget: unknown): string | null {
+  return nodeIdFromTarget(eventTarget);
 }
 
 export function eventClientPoint(event: any, fallback?: ClientPointFallback): { x: number; y: number } {

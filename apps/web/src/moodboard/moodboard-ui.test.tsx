@@ -148,8 +148,8 @@ test("nodeIdFromTarget reads reconciler node ids from parent data", () => {
   expect(nodeIdFromTarget({ parent: { data: { nodeId: "n2" } } })).toBe("n2");
 });
 
-test("contextTargetIdFromEvent falls back to the editor selection", () => {
-  expect(contextTargetIdFromEvent(null, { data: { nodeId: "selected-node" } })).toBe("selected-node");
+test("contextTargetIdFromEvent only uses the right-clicked target", () => {
+  expect(contextTargetIdFromEvent(null, { data: { nodeId: "selected-node" } })).toBeNull();
   expect(contextTargetIdFromEvent({ parent: { data: { nodeId: "event-node" } } }, { data: { nodeId: "selected-node" } })).toBe("event-node");
 });
 

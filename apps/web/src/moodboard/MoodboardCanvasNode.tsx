@@ -1,4 +1,5 @@
 import { Frame, Img, Rect, Txt } from "@dezin/leafer-react";
+import { Platform } from "leafer-editor";
 import type { MoodboardNode } from "../lib/api.ts";
 import {
   assetUrl,
@@ -106,7 +107,7 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
   }
 
   if (node.type === "image-generator") {
-    const prompt = generatorPrompt(node);
+    const iconSize = generatorIconSize(node.width, node.height);
     return (
       <>
         <Rect
@@ -121,41 +122,12 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
           cornerRadius={10}
           data={data}
         />
-        <Txt
-          text="+"
-          x={0}
-          y={Math.max(24, node.height / 2 - 56)}
-          width={node.width}
-          fontSize={58}
-          fontWeight={300}
-          textAlign="center"
-          fill="#b8b8b2"
-          hittable={false}
-          draggable={false}
-          data={data}
-        />
-        <Txt
-          text="Image generator"
-          x={18}
-          y={Math.max(24, node.height / 2 + 12)}
-          width={Math.max(24, node.width - 36)}
-          fontSize={14}
-          fontWeight={600}
-          textAlign="center"
-          fill="#41413d"
-          hittable={false}
-          draggable={false}
-          data={data}
-        />
-        <Txt
-          text={prompt || "Select this node and write a prompt below."}
-          x={22}
-          y={Math.max(48, node.height / 2 + 38)}
-          width={Math.max(24, node.width - 44)}
-          fontSize={11}
-          lineHeight={15}
-          textAlign="center"
-          fill={prompt ? "#6f6f68" : "#9b9b94"}
+        <Rect
+          x={Math.max(0, (node.width - iconSize) / 2)}
+          y={Math.max(0, (node.height - iconSize) / 2)}
+          width={iconSize}
+          height={iconSize}
+          fill={IMAGE_GENERATOR_ICON_FILL}
           hittable={false}
           draggable={false}
           data={data}
@@ -210,4 +182,18 @@ function nodeLabel(node: MoodboardNode): string {
   if (node.type === "section") return nodeTitle(node);
   if (node.type === "note") return nodeText(node) || "Note";
   return node.type;
+}
+
+const GENERATOR_ICON_COLOR = "#c2c2bd";
+const IMAGE_GENERATOR_ICON_FILL = {
+  type: "image",
+  url: Platform.toURL(
+    `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="${GENERATOR_ICON_COLOR}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M16 5h6"/><path d="M19 2v6"/><path d="M21 11.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/><circle cx="9" cy="9" r="2"/></svg>`,
+    "svg",
+  ),
+};
+
+function generatorIconSize(width: number, height: number): number {
+  const base = Math.min(width, height) * 0.22;
+  return Math.min(180, Math.max(72, Math.round(base)));
 }
