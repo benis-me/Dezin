@@ -52,6 +52,7 @@ export function useLeaferMoodboardRuntime({
   const [runtimeReady, setRuntimeReady] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [selectionRect, setSelectionRect] = useState<FloatingRect | null>(null);
+  const [isTransforming, setIsTransforming] = useState(false);
   const [sectionDraftRect, setSectionDraftRect] = useState<CanvasRect | null>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<App | null>(null);
@@ -64,6 +65,7 @@ export function useLeaferMoodboardRuntime({
   const toolRef = useRef(tool);
   const sectionDragStartRef = useRef<CanvasPoint | null>(null);
   const sectionDragHandledRef = useRef(false);
+  const transformingRef = useRef(false);
   const floatingRectRef = useRef<FloatingRect | null>(null);
   const floatingRafRef = useRef<number | null>(null);
   const callbacksRef = useRef({ onSelect, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange });
@@ -122,12 +124,25 @@ export function useLeaferMoodboardRuntime({
   }, [commitSelectionRect, findFrame]);
 
   const scheduleFloatingSelection = useCallback(() => {
+    if (transformingRef.current) return;
     if (floatingRafRef.current != null) return;
     floatingRafRef.current = window.requestAnimationFrame(() => {
       floatingRafRef.current = null;
       updateFloatingSelection();
     });
   }, [updateFloatingSelection]);
+
+  const startTransforming = useCallback(() => {
+    if (transformingRef.current) return;
+    transformingRef.current = true;
+    setIsTransforming(true);
+  }, []);
+
+  const finishTransforming = useCallback(() => {
+    if (!transformingRef.current) return;
+    transformingRef.current = false;
+    setIsTransforming(false);
+  }, []);
 
   const toViewportDraftRect = useCallback((rect: CanvasDrawRect): CanvasRect | null => {
     const tree: any = appRef.current?.tree;
@@ -238,6 +253,8 @@ export function useLeaferMoodboardRuntime({
       appRef.current = null;
       layerRef.current = null;
       setRuntimeReady(false);
+      transformingRef.current = false;
+      setIsTransforming(false);
       if (floatingRafRef.current != null) {
         window.cancelAnimationFrame(floatingRafRef.current);
         floatingRafRef.current = null;
@@ -257,8 +274,15 @@ export function useLeaferMoodboardRuntime({
       scheduleFloatingSelection();
     };
     const syncFloatingOnly = () => scheduleFloatingSelection();
-    const syncAfterTransform = () => {
+    const syncAfterNodeTransform = () => {
+      finishTransforming();
       flushFrameState();
+      const scale = Number(app.tree?.scaleX ?? app.tree?.scale ?? 1);
+      if (Number.isFinite(scale)) setZoom(scale);
+      scheduleFloatingSelection();
+    };
+    const syncAfterViewportTransform = () => {
+      finishTransforming();
       const scale = Number(app.tree?.scaleX ?? app.tree?.scale ?? 1);
       if (Number.isFinite(scale)) setZoom(scale);
       scheduleFloatingSelection();
@@ -319,62 +343,69 @@ export function useLeaferMoodboardRuntime({
         setSectionDraftRect(rect.width >= 4 && rect.height >= 4 ? toViewportDraftRect(rect) : null);
         return;
       }
-      syncFloatingOnly();
+      startTransforming();
     };
     const handleDragEnd = (event: any) => {
       if (toolRef.current === "section" && sectionDragStartRef.current) {
         const rect = normalizeCanvasRect(sectionDragStartRef.current, eventCanvasPoint(event));
         sectionDragStartRef.current = null;
         setSectionDraftRect(null);
+        finishTransforming();
         if (rect.width >= 48 && rect.height >= 48) {
           sectionDragHandledRef.current = true;
           callbacksRef.current.onSectionDraw(rect);
         }
         return;
       }
-      syncAfterTransform();
+      syncAfterNodeTransform();
     };
+    const handleDragStart = () => {
+      if (toolRef.current === "section" && sectionDragStartRef.current) return;
+      startTransforming();
+    };
+    const handleZoomStart = () => startTransforming();
+    const handleEditorTransform = () => startTransforming();
 
     app.on(PointerEvent.TAP, handleTap);
     app.on(PointerEvent.DOWN, handlePointerDown);
     app.on(PointerEvent.DOUBLE_TAP, handleDoubleTap);
     app.on(PointerEvent.MENU, handleMenu);
-    app.on(DragEvent.START, syncFloatingOnly);
+    app.on(DragEvent.START, handleDragStart);
     app.on(DragEvent.DRAG, syncDuringDrag);
     app.on(DragEvent.END, handleDragEnd);
-    app.on(ZoomEvent.START, syncFloatingOnly);
-    app.on(ZoomEvent.ZOOM, syncFloatingOnly);
-    app.on(ZoomEvent.END, syncAfterTransform);
+    app.on(ZoomEvent.START, handleZoomStart);
+    app.on(ZoomEvent.ZOOM, handleZoomStart);
+    app.on(ZoomEvent.END, syncAfterViewportTransform);
     app.tree?.on?.(PropertyEvent.LEAFER_CHANGE, syncFloatingOnly);
     app.tree?.on?.("move", syncFloatingOnly);
-    app.tree?.on?.("move.end", syncAfterTransform);
+    app.tree?.on?.("move.end", syncAfterViewportTransform);
     editor.on(EditorEvent.SELECT, syncSelectedFromEditor);
     editor.on(EditorEvent.HOVER, syncFloatingOnly);
-    editor.on(EditorMoveEvent.MOVE, syncFloatingOnly);
-    editor.on(EditorScaleEvent.SCALE, syncFloatingOnly);
-    editor.on(EditorRotateEvent.ROTATE, syncFloatingOnly);
+    editor.on(EditorMoveEvent.MOVE, handleEditorTransform);
+    editor.on(EditorScaleEvent.SCALE, handleEditorTransform);
+    editor.on(EditorRotateEvent.ROTATE, handleEditorTransform);
 
     return () => {
       app.off(PointerEvent.TAP, handleTap);
       app.off(PointerEvent.DOWN, handlePointerDown);
       app.off(PointerEvent.DOUBLE_TAP, handleDoubleTap);
       app.off(PointerEvent.MENU, handleMenu);
-      app.off(DragEvent.START, syncFloatingOnly);
+      app.off(DragEvent.START, handleDragStart);
       app.off(DragEvent.DRAG, syncDuringDrag);
       app.off(DragEvent.END, handleDragEnd);
-      app.off(ZoomEvent.START, syncFloatingOnly);
-      app.off(ZoomEvent.ZOOM, syncFloatingOnly);
-      app.off(ZoomEvent.END, syncAfterTransform);
+      app.off(ZoomEvent.START, handleZoomStart);
+      app.off(ZoomEvent.ZOOM, handleZoomStart);
+      app.off(ZoomEvent.END, syncAfterViewportTransform);
       app.tree?.off?.(PropertyEvent.LEAFER_CHANGE, syncFloatingOnly);
       app.tree?.off?.("move", syncFloatingOnly);
-      app.tree?.off?.("move.end", syncAfterTransform);
+      app.tree?.off?.("move.end", syncAfterViewportTransform);
       editor.off(EditorEvent.SELECT, syncSelectedFromEditor);
       editor.off(EditorEvent.HOVER, syncFloatingOnly);
-      editor.off(EditorMoveEvent.MOVE, syncFloatingOnly);
-      editor.off(EditorScaleEvent.SCALE, syncFloatingOnly);
-      editor.off(EditorRotateEvent.ROTATE, syncFloatingOnly);
+      editor.off(EditorMoveEvent.MOVE, handleEditorTransform);
+      editor.off(EditorScaleEvent.SCALE, handleEditorTransform);
+      editor.off(EditorRotateEvent.ROTATE, handleEditorTransform);
     };
-  }, [flushFrameState, runtimeReady, scheduleFloatingSelection, selectInRuntime, toViewportDraftRect]);
+  }, [finishTransforming, flushFrameState, runtimeReady, scheduleFloatingSelection, selectInRuntime, startTransforming, toViewportDraftRect]);
 
   useEffect(() => {
     selectInRuntime(selectedId);
@@ -463,6 +494,7 @@ export function useLeaferMoodboardRuntime({
     hostRef,
     runtimeReady,
     selectionRect,
+    isTransforming,
     sectionDraftRect,
     zoom,
     changeZoom,

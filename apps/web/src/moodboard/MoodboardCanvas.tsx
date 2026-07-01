@@ -70,7 +70,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             className={cn("h-full w-full overflow-hidden", canvas.tool === "hand" && "active:cursor-grabbing")}
             style={{ cursor }}
           >
-            <MoodboardNodeLayer nodes={nodes} onSelect={canvas.selectLayer} onLayerCreated={canvas.handleLayerCreated} />
+            <MoodboardNodeLayer nodes={nodes} onLayerCreated={canvas.handleLayerCreated} />
           </Leafer>
         </div>
 
@@ -114,7 +114,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           </div>
         ) : null}
 
-        {canvas.selected && canvas.selectionRect ? (
+        {!canvas.isTransforming && canvas.selected && canvas.selectionRect ? (
           <FloatingCanvasSurface anchor={canvas.selectionRect} placement="top">
             <SelectionToolbar
               node={canvas.selected}
@@ -128,7 +128,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           </FloatingCanvasSurface>
         ) : null}
 
-        {canvas.selected?.type === "image-generator" && canvas.selectionRect ? (
+        {!canvas.isTransforming && canvas.selected?.type === "image-generator" && canvas.selectionRect ? (
           <FloatingCanvasSurface anchor={canvas.selectionRect} placement="bottom">
             <GeneratorPromptToolbar
               node={canvas.selected}
@@ -279,11 +279,9 @@ function getFloatingOccluders(container: HTMLElement, current: HTMLElement): Can
 
 const MoodboardNodeLayer = memo(function MoodboardNodeLayer({
   nodes,
-  onSelect,
   onLayerCreated,
 }: {
   nodes: MoodboardNode[];
-  onSelect: (id: string) => void;
   onLayerCreated: (frame: Frame) => void;
 }) {
   return (
@@ -291,7 +289,7 @@ const MoodboardNodeLayer = memo(function MoodboardNodeLayer({
       {[...nodes]
         .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))
         .map((node) => (
-          <MoodboardCanvasNode key={node.id} node={node} onSelect={onSelect} />
+          <MoodboardCanvasNode key={node.id} node={node} />
         ))}
     </LeaferFrame>
   );

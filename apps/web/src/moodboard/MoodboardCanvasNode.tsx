@@ -12,7 +12,7 @@ import {
   promptText,
 } from "./canvas-utils.ts";
 
-export function MoodboardCanvasNode({ node, onSelect }: { node: MoodboardNode; onSelect: (id: string) => void }) {
+export function MoodboardCanvasNode({ node }: { node: MoodboardNode }) {
   const radius = node.type === "section" ? 6 : 8;
   const locked = isNodeLocked(node);
   const visible = isNodeVisible(node);
@@ -39,11 +39,6 @@ export function MoodboardCanvasNode({ node, onSelect }: { node: MoodboardNode; o
       lockRatio={node.type === "image" || node.type === "video" || node.type === "image-generator"}
       resizeChildren
       data={data}
-      onPointerDown={() => onSelect(node.id)}
-      onTap={(event: any) => {
-        event?.stop?.();
-        onSelect(node.id);
-      }}
     >
       <NodeBody node={node} radius={radius} data={data} />
     </Frame>
