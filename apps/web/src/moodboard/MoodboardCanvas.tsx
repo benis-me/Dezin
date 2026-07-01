@@ -289,6 +289,19 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             onGenerate={() => {
               canvas.addImageGeneratorAt({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
             }}
+            onCopy={
+              canvas.contextTargetId
+                ? () => {
+                    const targetIds = canvas.selectedIds.includes(canvas.contextTargetId!) ? canvas.selectedIds : [canvas.contextTargetId!];
+                    canvas.copyNodes(targetIds);
+                    canvas.setContextMenu(null);
+                  }
+                : undefined
+            }
+            onPaste={() => {
+              canvas.pasteCopiedNodes({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
+              canvas.setContextMenu(null);
+            }}
             onDuplicate={canvas.contextTargetId ? () => canvas.duplicateNode(canvas.contextTargetId!) : undefined}
             onBringToFront={canvas.contextTargetId ? () => canvas.bringToFront(canvas.contextTargetId!) : undefined}
             onSendToBack={canvas.contextTargetId ? () => canvas.sendToBack(canvas.contextTargetId!) : undefined}

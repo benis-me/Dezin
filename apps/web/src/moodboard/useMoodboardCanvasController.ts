@@ -331,20 +331,28 @@ export function useMoodboardCanvasController({
     [saveInputs],
   );
 
-  const copySelectedNodes = useCallback(() => {
-    const targetIds = new Set(selectedIdsRef.current);
+  const copyNodes = useCallback((ids: string[]) => {
+    const targetIds = new Set(ids);
     clipboardRef.current = nodesRef.current.filter((node) => targetIds.has(node.id)).map(toInput);
   }, []);
 
-  const pasteCopiedNodes = useCallback(() => {
+  const copySelectedNodes = useCallback(() => {
+    copyNodes(selectedIdsRef.current);
+  }, [copyNodes]);
+
+  const pasteCopiedNodes = useCallback((point?: { x: number; y: number }) => {
     if (clipboardRef.current.length === 0) return;
     const current = nodesRef.current;
     let nextZIndex = Math.max(0, ...current.map((node) => node.zIndex ?? 0)) + 1;
+    const minX = Math.min(...clipboardRef.current.map((node) => node.x));
+    const minY = Math.min(...clipboardRef.current.map((node) => node.y));
+    const dx = point ? point.x - minX : 32;
+    const dy = point ? point.y - minY : 32;
     const copies: Array<SaveMoodboardNodeInput & { id: string }> = clipboardRef.current.map((node) => ({
       ...node,
       id: localId(),
-      x: node.x + 32,
-      y: node.y + 32,
+      x: Math.round(node.x + dx),
+      y: Math.round(node.y + dy),
       zIndex: nextZIndex++,
       data: { ...node.data },
     }));
@@ -775,6 +783,9 @@ export function useMoodboardCanvasController({
     duplicateNode,
     duplicateNodes,
     nudgeNodes,
+    copyNodes,
+    copySelectedNodes,
+    pasteCopiedNodes,
     bringToFront,
     bringNodesToFront,
     moveNodesLayerStep,

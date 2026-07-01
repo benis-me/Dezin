@@ -2,6 +2,8 @@ import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "
 import {
   ArrowDownToLine,
   ArrowUpToLine,
+  ClipboardCopy,
+  ClipboardPaste,
   Copy,
   Eye,
   EyeOff,
@@ -28,6 +30,8 @@ export function MoodboardContextMenu({
   onAddNote,
   onAddSection,
   onGenerate,
+  onCopy,
+  onPaste,
   onDuplicate,
   onBringToFront,
   onSendToBack,
@@ -46,6 +50,8 @@ export function MoodboardContextMenu({
   onAddNote: () => void;
   onAddSection: () => void;
   onGenerate: () => void;
+  onCopy?: () => void;
+  onPaste?: () => void;
   onDuplicate?: () => void;
   onBringToFront?: () => void;
   onSendToBack?: () => void;
@@ -105,6 +111,8 @@ export function MoodboardContextMenu({
         onContextMenu={(event) => event.preventDefault()}
       >
         {targetId ? <MenuLabel>Selection</MenuLabel> : null}
+        {targetId && onCopy ? <MenuButton icon={<ClipboardCopy size={14} strokeWidth={1.75} />} label="Copy" shortcut="Cmd C" onClick={onCopy} /> : null}
+        {targetId && onPaste ? <MenuButton icon={<ClipboardPaste size={14} strokeWidth={1.75} />} label="Paste" shortcut="Cmd V" onClick={onPaste} /> : null}
         {targetId && onDuplicate ? <MenuButton icon={<Copy size={14} strokeWidth={1.75} />} label="Duplicate" shortcut="Cmd D" onClick={onDuplicate} /> : null}
         {targetId && onBringToFront ? <MenuButton icon={<ArrowUpToLine size={14} strokeWidth={1.75} />} label="Bring to front" shortcut="]" onClick={onBringToFront} /> : null}
         {targetId && onSendToBack ? <MenuButton icon={<ArrowDownToLine size={14} strokeWidth={1.75} />} label="Send to back" shortcut="[" onClick={onSendToBack} /> : null}
@@ -126,6 +134,7 @@ export function MoodboardContextMenu({
         {!targetId ? (
           <>
             <MenuLabel>Canvas</MenuLabel>
+            {onPaste ? <MenuButton icon={<ClipboardPaste size={14} strokeWidth={1.75} />} label="Paste" shortcut="Cmd V" onClick={onPaste} /> : null}
             <MenuButton icon={<StickyNote size={14} strokeWidth={1.75} />} label="Add note here" shortcut="S" onClick={onAddNote} />
             <MenuButton icon={<SquareDashedMousePointer size={14} strokeWidth={1.75} />} label="Add section here" onClick={onAddSection} />
             <MenuButton icon={<WandSparkles size={14} strokeWidth={1.75} />} label="Add image generator here" onClick={onGenerate} />

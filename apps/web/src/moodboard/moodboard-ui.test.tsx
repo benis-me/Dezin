@@ -111,6 +111,8 @@ test("MoodboardContextMenu clamps to the visible viewport after measuring itself
 });
 
 test("MoodboardContextMenu separates selection actions from blank-canvas creation actions", () => {
+  const onCopy = vi.fn();
+  const onPaste = vi.fn();
   const node: MoodboardNode = {
     id: "n1",
     boardId: "b1",
@@ -131,11 +133,13 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
       menu={{ x: 24, y: 32, canvasX: 240, canvasY: 260, targetId: node.id }}
       targetId={node.id}
       targetNode={node}
-      onClose={() => {}}
-      onAddNote={() => {}}
-      onAddSection={() => {}}
-      onGenerate={() => {}}
-      onDuplicate={() => {}}
+        onClose={() => {}}
+        onAddNote={() => {}}
+        onAddSection={() => {}}
+        onGenerate={() => {}}
+        onCopy={onCopy}
+        onPaste={onPaste}
+        onDuplicate={() => {}}
       onBringToFront={() => {}}
       onSendToBack={() => {}}
       onToggleVisible={() => {}}
@@ -149,7 +153,13 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
   );
 
   expect(screen.getByText("Selection")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Copy"));
+  fireEvent.click(screen.getByText("Paste"));
+  expect(onCopy).toHaveBeenCalledOnce();
+  expect(onPaste).toHaveBeenCalledOnce();
   expect(screen.getByText("Duplicate")).toBeInTheDocument();
+  expect(screen.getByText("Cmd C")).toBeInTheDocument();
+  expect(screen.getByText("Cmd V")).toBeInTheDocument();
   expect(screen.getByText("Cmd D")).toBeInTheDocument();
   expect(screen.getByText("]")).toBeInTheDocument();
   expect(screen.getByText("[")).toBeInTheDocument();
@@ -157,6 +167,30 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
   expect(screen.queryByText("Add note here")).toBeNull();
   expect(screen.queryByText("Add image generator here")).toBeNull();
   expect(screen.getByText("View")).toBeInTheDocument();
+});
+
+test("MoodboardContextMenu exposes paste on the blank canvas menu", () => {
+  const onPaste = vi.fn();
+  render(
+    <MoodboardContextMenu
+      menu={{ x: 24, y: 32, canvasX: 240, canvasY: 260, targetId: null }}
+      targetId={null}
+      targetNode={null}
+      onClose={() => {}}
+      onAddNote={() => {}}
+      onAddSection={() => {}}
+      onGenerate={() => {}}
+      onPaste={onPaste}
+      onZoomIn={() => {}}
+      onZoomOut={() => {}}
+      onFitView={() => {}}
+      onResetZoom={() => {}}
+    />,
+  );
+
+  fireEvent.click(screen.getByText("Paste"));
+  expect(onPaste).toHaveBeenCalledOnce();
+  expect(screen.getByText("Add note here")).toBeInTheDocument();
 });
 
 test("eventClientPoint reads Leafer native event origins for context menus", () => {
