@@ -35,33 +35,20 @@ export function MoodboardScreen({
           resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
         >
           <Panel id={MOODBOARD_AGENT_PANEL} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
-            <aside className="relative flex h-full min-w-0 flex-col bg-background">
-              <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
-                <div className="flex min-w-0 items-center gap-2">
-                  <div className="h-5 w-5 rounded-md bg-surface-2" />
-                  <div className="h-4 w-36 rounded bg-surface-2" />
-                </div>
-                <div className="h-8 w-8 rounded-lg bg-surface-2" />
-              </div>
-              <div className="min-h-0 flex-1 space-y-4 overflow-hidden px-4 pt-5">
-                <div className="h-16 w-4/5 rounded-2xl rounded-bl-md bg-surface-2" />
-                <div className="ml-auto h-10 w-2/3 rounded-2xl rounded-br-md bg-surface-2" />
-                <div className="h-24 w-[88%] rounded-xl bg-surface-2" />
-                <div className="h-14 w-3/4 rounded-2xl rounded-bl-md bg-surface-2/80" />
-              </div>
-              <div className="pointer-events-none absolute inset-x-0 bottom-0">
-                <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
-                <div className="bg-background px-3 pb-3">
-                  <div className="rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5">
-                    <div className="h-10 rounded-md bg-surface-2" />
-                    <div className="mt-2 flex items-center justify-between gap-2">
-                      <div className="h-8 w-28 rounded-md bg-surface-2" />
-                      <div className="h-8 w-8 rounded-lg bg-surface-2" />
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </aside>
+            <MoodboardAgentPanel
+              loading
+              boardName="Moodboard"
+              messages={[]}
+              busy
+              agents={[]}
+              agent=""
+              model=""
+              onBack={onBack}
+              onAgentChange={() => {}}
+              onModelChange={() => {}}
+              onRescanAgents={async () => {}}
+              onSend={async () => {}}
+            />
           </Panel>
           <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
           <Panel id={MOODBOARD_CANVAS_PANEL} minSize="480px">

@@ -5,7 +5,7 @@ import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import { Markdown } from "../components/Markdown.tsx";
-import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
+import { Button, IconButton, Spinner, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 
 export function MoodboardAgentPanel({
@@ -21,6 +21,7 @@ export function MoodboardAgentPanel({
   onRescanAgents,
   onUploadFiles,
   onSend,
+  loading = false,
 }: {
   boardName: string;
   messages: MoodboardMessage[];
@@ -34,6 +35,7 @@ export function MoodboardAgentPanel({
   onRescanAgents: () => Promise<void>;
   onUploadFiles?: (files: FileList | null) => void;
   onSend: (content: string) => Promise<void>;
+  loading?: boolean;
 }) {
   const [text, setText] = useState("");
   const [composerH, setComposerH] = useState(92);
@@ -147,7 +149,14 @@ export function MoodboardAgentPanel({
         className={cn("min-h-0 flex-1 px-4 pt-5", messages.length > 0 ? "space-y-4 overflow-auto" : "overflow-hidden")}
         style={messages.length > 0 ? { paddingBottom: composerH + 36 } : undefined}
       >
-        {messages.length === 0 ? (
+        {loading ? (
+          <div className="grid h-full place-items-center">
+            <div className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
+              <Spinner size={13} />
+              Loading moodboard
+            </div>
+          </div>
+        ) : messages.length === 0 ? (
           <div className="grid h-full place-items-center">
             <div className="flex max-w-[16rem] flex-col items-center gap-3 text-center">
               <span className="grid h-11 w-11 place-items-center rounded-2xl border border-border bg-card text-foreground">
@@ -226,7 +235,7 @@ export function MoodboardAgentPanel({
                 </span>
               </div>
             ) : null}
-            {onUploadFiles ? (
+            {!loading && onUploadFiles ? (
               <input
                 ref={fileInputRef}
                 type="file"
@@ -240,51 +249,63 @@ export function MoodboardAgentPanel({
                 }}
               />
             ) : null}
-            <textarea
-              aria-label="Message"
-              rows={1}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Ask for visual direction or generate material..."
-              className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none bg-transparent px-1 py-0.5 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void submit();
-                }
-              }}
-            />
-            <div className="mt-1 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-0.5">
-                <AttachMenu
-                  onAttachFile={onUploadFiles ? () => fileInputRef.current?.click() : undefined}
-                  onPickPaths={(paths) => appendContext(`Reference local paths: ${paths.join(", ")}`)}
-                  onContext={appendContext}
-                  onReference={(project) => appendContext(`Reference Dezin project: ${project.name} (${project.id})`)}
-                />
-              </div>
-              <TooltipProvider delayDuration={120}>
-                <div className="flex min-w-0 items-center gap-1">
-                  <AgentModelSelect
-                    agents={agents}
-                    agent={agent}
-                    model={model}
-                    dropUp
-                    onAgentChange={onAgentChange}
-                    onModelChange={onModelChange}
-                    onRescan={onRescanAgents}
-                  />
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button aria-label="Send" size="icon-sm" disabled={busy || text.trim().length === 0} onClick={() => void submit()} className="ml-0.5 rounded-lg">
-                        <ArrowUp size={15} strokeWidth={2} />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent sideOffset={2}>Send</TooltipContent>
-                  </Tooltip>
+            {loading ? (
+              <div className="space-y-2">
+                <div className="h-9 rounded-md bg-surface-2/80" />
+                <div className="flex items-center justify-between gap-2">
+                  <div className="h-7 w-28 rounded-md bg-surface-2/80" />
+                  <div className="h-8 w-8 rounded-lg bg-surface-2/80" />
                 </div>
-              </TooltipProvider>
-            </div>
+              </div>
+            ) : (
+              <>
+                <textarea
+                  aria-label="Message"
+                  rows={1}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="Ask for visual direction or generate material..."
+                  className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none bg-transparent px-1 py-0.5 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void submit();
+                    }
+                  }}
+                />
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-0.5">
+                    <AttachMenu
+                      onAttachFile={onUploadFiles ? () => fileInputRef.current?.click() : undefined}
+                      onPickPaths={(paths) => appendContext(`Reference local paths: ${paths.join(", ")}`)}
+                      onContext={appendContext}
+                      onReference={(project) => appendContext(`Reference Dezin project: ${project.name} (${project.id})`)}
+                    />
+                  </div>
+                  <TooltipProvider delayDuration={120}>
+                    <div className="flex min-w-0 items-center gap-1">
+                      <AgentModelSelect
+                        agents={agents}
+                        agent={agent}
+                        model={model}
+                        dropUp
+                        onAgentChange={onAgentChange}
+                        onModelChange={onModelChange}
+                        onRescan={onRescanAgents}
+                      />
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button aria-label="Send" size="icon-sm" disabled={busy || text.trim().length === 0} onClick={() => void submit()} className="ml-0.5 rounded-lg">
+                            <ArrowUp size={15} strokeWidth={2} />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent sideOffset={2}>Send</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </TooltipProvider>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>

@@ -1028,6 +1028,29 @@ test("MoodboardAgentPanel renders project-style assistant messages with copy act
   expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
 });
 
+test("MoodboardAgentPanel keeps the real shell while loading", () => {
+  render(
+    <MoodboardAgentPanel
+      loading
+      boardName="Moodboard"
+      messages={[]}
+      busy
+      agents={[]}
+      agent=""
+      model=""
+      onBack={() => {}}
+      onAgentChange={() => {}}
+      onModelChange={() => {}}
+      onRescanAgents={async () => {}}
+      onSend={async () => {}}
+    />,
+  );
+
+  expect(screen.getByLabelText("Back to moodboards")).toBeInTheDocument();
+  expect(screen.getByText("Loading moodboard")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Message")).toBeNull();
+});
+
 test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
   const onUploadFiles = vi.fn();
   const files = [new File(["image"], "reference.png", { type: "image/png" })] as unknown as FileList;
@@ -1178,7 +1201,7 @@ test("MoodboardScreen loading state keeps the board split layout", async () => {
     </ApiProvider>,
   );
 
-  expect(screen.getByText("Loading moodboard")).toBeInTheDocument();
+  expect(screen.getAllByText("Loading moodboard")).toHaveLength(2);
   expect(screen.getByRole("separator", { name: "Resize moodboard agent panel" })).toHaveAttribute("data-separator");
   expect(screen.getByRole("region", { name: "Moodboard canvas" })).toBeInTheDocument();
 
