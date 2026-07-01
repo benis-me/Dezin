@@ -72,6 +72,19 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           </div>
         ) : null}
 
+        {canvas.sectionDraftRect ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute z-10 rounded-md border border-dashed border-foreground/35 bg-foreground/[0.03]"
+            style={{
+              left: canvas.sectionDraftRect.left,
+              top: canvas.sectionDraftRect.top,
+              width: canvas.sectionDraftRect.width,
+              height: canvas.sectionDraftRect.height,
+            }}
+          />
+        ) : null}
+
         {nodes.length === 0 ? (
           <div className="pointer-events-none absolute inset-0 grid place-items-center">
             <div className="pointer-events-auto flex flex-col items-center gap-3 text-center">

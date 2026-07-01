@@ -25,6 +25,16 @@ export interface CanvasRect {
   height: number;
 }
 
+export interface CanvasPoint {
+  x: number;
+  y: number;
+}
+
+export interface CanvasDrawRect extends CanvasPoint {
+  width: number;
+  height: number;
+}
+
 export interface FloatingChromeInput {
   anchor: FloatingRect;
   containerWidth: number;
@@ -251,6 +261,17 @@ export function rectFromBounds(left: number, top: number, right: number, bottom:
     bottom,
     width: right - left,
     height: bottom - top,
+  };
+}
+
+export function normalizeCanvasRect(start: CanvasPoint, end: CanvasPoint): CanvasDrawRect {
+  const x = Math.min(start.x, end.x);
+  const y = Math.min(start.y, end.y);
+  return {
+    x,
+    y,
+    width: Math.abs(end.x - start.x),
+    height: Math.abs(end.y - start.y),
   };
 }
 

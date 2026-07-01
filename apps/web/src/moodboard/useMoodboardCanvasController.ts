@@ -21,7 +21,7 @@ export interface MoodboardCanvasProps {
   onSelect: (id: string | null) => void;
   onNodesChange: (nodes: SaveMoodboardNodeInput[]) => void;
   onAddNote: (point?: { x: number; y: number }) => void;
-  onAddSection: (point?: { x: number; y: number }) => void;
+  onAddSection: (point?: { x: number; y: number; width?: number; height?: number }) => void;
   onAddImageGenerator: (point?: { x: number; y: number }) => void;
   onUploadFiles: (files: FileList | null) => void;
   onGenerateImage: (node: MoodboardNode, prompt: string) => Promise<void>;
@@ -218,6 +218,10 @@ export function useMoodboardCanvasController({
     tool,
     onSelect: handleSelect,
     onBlankTap: handleBlankTap,
+    onSectionDraw: (rect) => {
+      onAddSectionRef.current(rect);
+      setTool("select");
+    },
     onDoubleTap: (point) => onAddImageGeneratorRef.current(point),
     onContextMenu: setContextMenu,
     onFrameStateChange: saveInputs,

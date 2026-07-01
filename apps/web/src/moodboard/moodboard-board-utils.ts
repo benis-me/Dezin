@@ -69,14 +69,14 @@ export function createNoteNode(count: number, point?: { x: number; y: number }):
   };
 }
 
-export function createSectionNode(count: number, point?: { x: number; y: number }): SaveMoodboardNodeInput {
+export function createSectionNode(count: number, point?: { x: number; y: number; width?: number; height?: number }): SaveMoodboardNodeInput {
   return {
     id: localId(),
     type: "section",
     x: point?.x ?? 40 + count * 18,
     y: point?.y ?? 40 + count * 18,
-    width: 460,
-    height: 300,
+    width: Math.max(80, point?.width ?? 460),
+    height: Math.max(80, point?.height ?? 300),
     zIndex: Math.max(0, count - 1),
     data: { title: "Section" },
   };

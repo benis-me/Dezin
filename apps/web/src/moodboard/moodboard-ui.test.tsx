@@ -13,6 +13,7 @@ import {
   eventClientPoint,
   getFloatingChromeSafeRect,
   moveContainedNodesWithSections,
+  normalizeCanvasRect,
   nodeIdFromTarget,
   reorderLayerInputs,
   rectFromBounds,
@@ -20,6 +21,7 @@ import {
   resolveFloatingRect,
   sameFloatingRect,
 } from "./canvas-utils.ts";
+import { createSectionNode } from "./moodboard-board-utils.ts";
 
 beforeEach(() => {
   localStorage.clear();
@@ -209,9 +211,23 @@ test("resolveFloatingChromeRect avoids floating canvas panels", () => {
   ).toEqual({ left: 260, top: 24 });
 });
 
+test("normalizeCanvasRect turns drag endpoints into a positive drawing rect", () => {
+  expect(normalizeCanvasRect({ x: 320, y: 220 }, { x: 120, y: 90 })).toEqual({ x: 120, y: 90, width: 200, height: 130 });
+});
+
 test("sameFloatingRect ignores subpixel jitter during drag", () => {
   expect(sameFloatingRect({ left: 120, top: 80, bottom: 220 }, { left: 120.25, top: 80.2, bottom: 220.4 })).toBe(true);
   expect(sameFloatingRect({ left: 120, top: 80, bottom: 220 }, { left: 121, top: 80, bottom: 220 })).toBe(false);
+});
+
+test("createSectionNode keeps dragged section dimensions", () => {
+  expect(createSectionNode(4, { x: 120, y: 90, width: 260, height: 180 })).toMatchObject({
+    type: "section",
+    x: 120,
+    y: 90,
+    width: 260,
+    height: 180,
+  });
 });
 
 test("MoodboardPropertiesPanel can be resized from its left edge", () => {
