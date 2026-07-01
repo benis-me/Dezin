@@ -25,6 +25,20 @@ const AGENTS = [
   { id: "codex", command: "codex", available: true, version: "codex 1.0.0", models: ["gpt-5"] },
 ];
 
+test("workspace loading state preserves the project split layout", () => {
+  render(
+    <ApiProvider client={makeFakeApi({ getProject: async () => new Promise(() => {}) })}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  expect(screen.getByRole("region", { name: "Conversation loading" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Artifact loading" })).toBeInTheDocument();
+  expect(screen.getByRole("separator", { name: "Resize panels" })).toHaveAttribute("data-separator");
+  expect(screen.getByText("Loading project")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Message")).toBeNull();
+});
+
 test("workspace conversation panel defaults to 400px before the user resizes it", async () => {
   const innerWidth = vi.spyOn(window, "innerWidth", "get").mockReturnValue(1000);
   try {
@@ -223,7 +237,7 @@ test("sending a brief streams events into the chat and shows the preview + expor
     </ApiProvider>,
   );
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make a hero" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "make a hero" } });
   fireEvent.click(screen.getByLabelText("Send"));
 
   // user message + streamed assistant text + done status
@@ -266,7 +280,7 @@ test("completed runs collapse the interleaved process above the final summary", 
     </ApiProvider>,
   );
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make a hero" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "make a hero" } });
   fireEvent.click(screen.getByLabelText("Send"));
 
   expect(await screen.findByRole("button", { name: /Processed/ })).toBeInTheDocument();
@@ -305,7 +319,7 @@ test("summary-boundary runs keep process text folded and final summary outside",
     </ApiProvider>,
   );
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make a pricing page" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "make a pricing page" } });
   fireEvent.click(screen.getByLabelText("Send"));
 
   expect(await screen.findByText("Done. Updated the pricing page.")).toBeInTheDocument();
@@ -411,7 +425,7 @@ test("agent questions render as answerable transcript cards", async () => {
     </ApiProvider>,
   );
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make a pricing page" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "make a pricing page" } });
   fireEvent.click(screen.getByLabelText("Send"));
 
   expect(await screen.findByText("Which billing plan should the pricing page feature?")).toBeInTheDocument();
@@ -469,7 +483,7 @@ test("live generating status uses shiny text", async () => {
         <WorkspaceScreen projectId="p1" />
       </ApiProvider>,
     );
-    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+    fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
     fireEvent.click(screen.getByLabelText("Send"));
 
     expect(await screen.findByText("Generating…")).toHaveClass("shiny-text");
@@ -521,7 +535,7 @@ test("Stop explicitly cancels the active daemon run", async () => {
     </ApiProvider>,
   );
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "keep going" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "keep going" } });
   fireEvent.click(screen.getByLabelText("Send"));
   fireEvent.click(await screen.findByLabelText("Stop"));
 
@@ -574,13 +588,13 @@ test("queued prompts can be edited, reordered, and removed before they run", asy
     </ApiProvider>,
   );
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "first prompt" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "first prompt" } });
   fireEvent.click(screen.getByLabelText("Send"));
   await waitFor(() => expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ brief: "first prompt" }), expect.anything()));
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "second prompt" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "second prompt" } });
   fireEvent.click(screen.getByLabelText("Queue"));
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "third prompt" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "third prompt" } });
   fireEvent.click(screen.getByLabelText("Queue"));
 
   expect(await screen.findByLabelText("Queued prompt 1")).toHaveValue("second prompt");
@@ -653,7 +667,7 @@ test("/projects/new preserves the selected agent and model for the first run", a
   await user.click(await screen.findByRole("button", { name: "Agent and model" }));
   await user.click(await screen.findByText("Codex"));
   await user.click(await screen.findByText("gpt-5"));
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make a hero" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "make a hero" } });
   fireEvent.click(screen.getByLabelText("Send"));
 
   await waitFor(() => expect(createProject).toHaveBeenCalled());
@@ -689,7 +703,7 @@ test("rehydrates the prior transcript and reuses the conversation on the next ru
   expect(screen.getByText("Built it.")).toBeInTheDocument();
 
   // a new message reuses the rehydrated conversation id
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "tweak it" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "tweak it" } });
   fireEvent.click(screen.getByLabelText("Send"));
   expect(await screen.findByText("Continued.")).toBeInTheDocument();
   expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "c1", brief: "tweak it" }), expect.anything());
@@ -1122,7 +1136,7 @@ test("scroll to bottom button shows a subtle loading ring while generation is ru
       </ApiProvider>,
     );
 
-    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "make it" } });
+    fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "make it" } });
     fireEvent.click(screen.getByLabelText("Send"));
     await screen.findByText("Still generating.");
 
@@ -1251,7 +1265,7 @@ test("the Files tab lists project files and previews the selected file's source"
     </ApiProvider>,
   );
   expect(screen.queryByRole("tab", { name: "Code" })).toBeNull();
-  expect(screen.getByRole("tablist", { name: "Artifact views" }).className).toContain("[&_[role=tab]]:px-2.5");
+  expect((await screen.findByRole("tablist", { name: "Artifact views" })).className).toContain("[&_[role=tab]]:px-2.5");
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
   const fileResize = await screen.findByRole("separator", { name: "Resize file browser" });
   expect(fileResize).toHaveAttribute("data-separator");
@@ -1362,7 +1376,7 @@ test("the Quality tab surfaces the run's lint findings + fix", async () => {
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
   fireEvent.click(screen.getByLabelText("Send"));
   await screen.findByTitle("Artifact preview");
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
@@ -1394,7 +1408,7 @@ test("the Quality tab shows final run-done findings even when no repair lint eve
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
   fireEvent.click(screen.getByLabelText("Send"));
   await screen.findByText(/Done, quality 94\/100/);
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
@@ -1427,7 +1441,7 @@ test("the Quality tab separates static, geometry, and agent visual lanes", async
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
   fireEvent.click(screen.getByLabelText("Send"));
   await screen.findByText(/Done, quality 89\/100/);
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
@@ -1492,7 +1506,7 @@ test("a clean run shows the Quality pane's clean empty state", async () => {
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
   fireEvent.click(screen.getByLabelText("Send"));
   await screen.findByTitle("Artifact preview");
   fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
@@ -1514,7 +1528,7 @@ test("generated material sources render only in the run result card", async () =
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
   fireEvent.click(screen.getByLabelText("Send"));
 
   expect(await screen.findByText("Material sources")).toBeInTheDocument();
@@ -1586,7 +1600,7 @@ test("repair rounds surface a lint status line", async () => {
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
   fireEvent.click(screen.getByLabelText("Send"));
 
   // intermediate "Found N issues" status is transient; the result card records the run
