@@ -114,6 +114,7 @@ export function MoodboardLayerPanel({
               depth={0}
               selectedIds={effectiveSelectedIds}
               collapsedIds={collapsedIds}
+              visibleIds={visibleIds}
               onToggleCollapsed={onToggleCollapsed}
               onSelect={handleLayerSelect}
               onHover={onHover}
@@ -140,6 +141,7 @@ function LayerItem({
   depth,
   selectedIds,
   collapsedIds,
+  visibleIds,
   onToggleCollapsed,
   onSelect,
   onHover,
@@ -155,6 +157,7 @@ function LayerItem({
   depth: number;
   selectedIds: string[];
   collapsedIds: Set<string>;
+  visibleIds: string[];
   onToggleCollapsed: (id: string) => void;
   onSelect: (id: string, event?: Pick<MouseEvent, "metaKey" | "ctrlKey" | "shiftKey">) => void;
   onHover: (id: string | null) => void;
@@ -170,6 +173,9 @@ function LayerItem({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(layerLabel(node));
   const selected = selectedIds.includes(node.id);
+  const visibleIndex = visibleIds.indexOf(node.id);
+  const selectedPrevious = selected && visibleIndex > 0 && selectedIds.includes(visibleIds[visibleIndex - 1]!);
+  const selectedNext = selected && visibleIndex >= 0 && selectedIds.includes(visibleIds[visibleIndex + 1]!);
   const collapsed = collapsedIds.has(node.id);
   const hasChildren = children.length > 0;
 
@@ -189,6 +195,8 @@ function LayerItem({
         tabIndex={0}
         draggable={!editing}
         data-moodboard-layer-id={node.id}
+        data-selected-previous={selectedPrevious ? "true" : undefined}
+        data-selected-next={selectedNext ? "true" : undefined}
         onClick={(event) => onSelect(node.id, event)}
         onDoubleClick={() => setEditing(true)}
         onDragStart={(event) => {
@@ -217,6 +225,8 @@ function LayerItem({
         className={cn(
           "group flex h-8 min-w-0 cursor-pointer items-center gap-1 rounded-sm px-1.5 text-left text-xs transition-colors",
           selected ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/45 hover:text-foreground",
+          selectedPrevious && "rounded-t-none",
+          selectedNext && "rounded-b-none",
           draggingId === node.id && "opacity-45",
           draggingId && draggingId !== node.id && "data-[drop-target=true]:bg-accent/70",
         )}
@@ -292,6 +302,7 @@ function LayerItem({
               depth={depth + 1}
               selectedIds={selectedIds}
               collapsedIds={collapsedIds}
+              visibleIds={visibleIds}
               onToggleCollapsed={onToggleCollapsed}
               onSelect={onSelect}
               onHover={onHover}

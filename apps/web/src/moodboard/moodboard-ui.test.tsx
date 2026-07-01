@@ -624,6 +624,48 @@ test("MoodboardLayerPanel supports command toggle and shift range selection", ()
   expect(onSelectIds).toHaveBeenLastCalledWith(["n1", "n2", "n3"]);
 });
 
+test("MoodboardLayerPanel marks adjacent selected rows as one grouped selection", () => {
+  const first: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 40,
+    y: 50,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 3,
+    data: { content: "First" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const second: MoodboardNode = { ...first, id: "n2", zIndex: 2, data: { content: "Second" } };
+  const third: MoodboardNode = { ...first, id: "n3", zIndex: 1, data: { content: "Third" } };
+
+  render(
+    <MoodboardLayerPanel
+      items={[
+        { node: first, children: [] },
+        { node: second, children: [] },
+        { node: third, children: [] },
+      ]}
+      selectedIds={["n1", "n2"]}
+      collapsedIds={new Set()}
+      onToggleCollapsed={() => {}}
+      onSelectIds={() => {}}
+      onHover={() => {}}
+      onRename={() => {}}
+      onToggleVisible={() => {}}
+      onToggleLocked={() => {}}
+      onReorder={() => {}}
+    />,
+  );
+
+  expect(screen.getByText("First").closest("[data-moodboard-layer-id]")).toHaveAttribute("data-selected-next", "true");
+  expect(screen.getByText("Second").closest("[data-moodboard-layer-id]")).toHaveAttribute("data-selected-previous", "true");
+  expect(screen.getByText("Third").closest("[data-moodboard-layer-id]")).not.toHaveAttribute("data-selected-previous");
+});
+
 test("MoodboardLayerPanel supports drag reordering rows", () => {
   const onReorder = vi.fn();
   const first: MoodboardNode = {
