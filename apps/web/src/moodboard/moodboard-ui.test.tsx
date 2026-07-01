@@ -649,6 +649,69 @@ test("MoodboardLayerPanel selects rows without letting inline actions bubble", (
   expect(onSelect).not.toHaveBeenCalled();
 });
 
+test("MoodboardLayerPanel exposes selected layer duplicate and delete actions", () => {
+  const onSelectIds = vi.fn();
+  const onDuplicateSelected = vi.fn();
+  const onDeleteSelected = vi.fn();
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 40,
+    y: 50,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "Direction note" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const { rerender } = render(
+    <MoodboardLayerPanel
+      items={[{ node, children: [] }]}
+      selectedIds={[]}
+      collapsedIds={new Set()}
+      onToggleCollapsed={() => {}}
+      onSelectIds={onSelectIds}
+      onHover={() => {}}
+      onRename={() => {}}
+      onToggleVisible={() => {}}
+      onToggleLocked={() => {}}
+      onReorder={() => {}}
+      onDuplicateSelected={onDuplicateSelected}
+      onDeleteSelected={onDeleteSelected}
+    />,
+  );
+
+  expect(screen.queryByLabelText("Duplicate selected layers")).toBeNull();
+  expect(screen.queryByLabelText("Delete selected layers")).toBeNull();
+
+  rerender(
+    <MoodboardLayerPanel
+      items={[{ node, children: [] }]}
+      selectedIds={["n1"]}
+      collapsedIds={new Set()}
+      onToggleCollapsed={() => {}}
+      onSelectIds={onSelectIds}
+      onHover={() => {}}
+      onRename={() => {}}
+      onToggleVisible={() => {}}
+      onToggleLocked={() => {}}
+      onReorder={() => {}}
+      onDuplicateSelected={onDuplicateSelected}
+      onDeleteSelected={onDeleteSelected}
+    />,
+  );
+
+  fireEvent.click(screen.getByLabelText("Duplicate selected layers"));
+  fireEvent.click(screen.getByLabelText("Delete selected layers"));
+
+  expect(onDuplicateSelected).toHaveBeenCalledWith(["n1"]);
+  expect(onDeleteSelected).toHaveBeenCalledWith(["n1"]);
+  expect(onSelectIds).not.toHaveBeenCalled();
+});
+
 test("MoodboardLayerPanel supports command toggle and shift range selection", () => {
   const onSelectIds = vi.fn();
   const first: MoodboardNode = {

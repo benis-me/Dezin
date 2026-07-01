@@ -102,6 +102,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               onToggleVisible={canvas.toggleNodeVisible}
               onToggleLocked={canvas.toggleNodeLocked}
               onReorder={canvas.reorderLayer}
+              onDuplicateSelected={canvas.duplicateNodes}
+              onDeleteSelected={canvas.deleteNodes}
             />
           ) : null}
         </AnimatePresence>

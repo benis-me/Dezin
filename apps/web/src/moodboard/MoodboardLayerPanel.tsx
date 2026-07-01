@@ -3,6 +3,7 @@ import { motion, useReducedMotion } from "motion/react";
 import {
   ChevronDown,
   ChevronRight,
+  Copy,
   Eye,
   EyeOff,
   ImagePlus,
@@ -11,6 +12,7 @@ import {
   LockOpen,
   SquareDashedMousePointer,
   StickyNote,
+  Trash2,
 } from "lucide-react";
 import type { MoodboardNode } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
@@ -29,6 +31,8 @@ export function MoodboardLayerPanel({
   onToggleVisible,
   onToggleLocked,
   onReorder,
+  onDuplicateSelected,
+  onDeleteSelected,
 }: {
   items: LayerTreeItem[];
   selectedId?: string | null;
@@ -42,6 +46,8 @@ export function MoodboardLayerPanel({
   onToggleVisible: (id: string) => void;
   onToggleLocked: (id: string) => void;
   onReorder: (sourceId: string, targetId: string) => void;
+  onDuplicateSelected?: (ids: string[]) => void;
+  onDeleteSelected?: (ids: string[]) => void;
 }) {
   const reducedMotion = useReducedMotion();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -99,9 +105,44 @@ export function MoodboardLayerPanel({
       exit={reducedMotion ? { opacity: 0 } : { opacity: 0, x: -8 }}
       transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
     >
-      <div className="flex h-9 items-center gap-2 border-b border-border/70 px-3 text-xs font-medium">
-        <Layers size={14} strokeWidth={1.75} />
-        Layers
+      <div className="flex h-9 items-center justify-between gap-2 border-b border-border/70 px-2.5 text-xs font-medium">
+        <div className="flex min-w-0 items-center gap-2">
+          <Layers size={14} strokeWidth={1.75} />
+          <span className="truncate">Layers</span>
+          {effectiveSelectedIds.length > 0 ? (
+            <span className="rounded-sm bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
+              {effectiveSelectedIds.length}
+            </span>
+          ) : null}
+        </div>
+        {effectiveSelectedIds.length > 0 ? (
+          <div className="flex items-center gap-0.5">
+            <button
+              type="button"
+              aria-label="Duplicate selected layers"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDuplicateSelected?.(effectiveSelectedIds);
+              }}
+              className="grid size-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!onDuplicateSelected}
+            >
+              <Copy size={13} strokeWidth={1.75} />
+            </button>
+            <button
+              type="button"
+              aria-label="Delete selected layers"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDeleteSelected?.(effectiveSelectedIds);
+              }}
+              className="grid size-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+              disabled={!onDeleteSelected}
+            >
+              <Trash2 size={13} strokeWidth={1.75} />
+            </button>
+          </div>
+        ) : null}
       </div>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto px-1.5 py-1">
         {items.length === 0 ? (
