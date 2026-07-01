@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent, t
 import { WandSparkles } from "lucide-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { Button, Input, Textarea } from "../components/ui/index.ts";
-import { fileName, generatorPrompt, nodeText, nodeTitle, numberFromEvent, promptText } from "./canvas-utils.ts";
+import { assetUrl, fileName, generatorPrompt, generatorStatus, nodeFill, nodeStroke, nodeText, nodeTitle, numberFromEvent, promptText } from "./canvas-utils.ts";
 
 const PANEL_WIDTH_KEY = "dezin:moodboard:properties-width";
 const DEFAULT_PANEL_WIDTH = 280;
@@ -97,17 +97,21 @@ export function MoodboardPropertiesPanel({
           </div>
         ) : node.type === "image" ? (
           <div className="space-y-2">
+            {assetUrl(node) ? (
+              <img src={assetUrl(node)} alt={fileName(node) || "Moodboard image"} className="max-h-36 w-full rounded-md border border-border object-contain" />
+            ) : null}
             <Input value={fileName(node) || "Generated image"} readOnly className="h-8 text-xs" />
-            <Textarea value={promptText(node)} readOnly className="min-h-20 resize-none text-xs text-muted-foreground" />
+            {promptText(node) ? <Textarea value={promptText(node)} readOnly className="min-h-20 resize-none text-xs text-muted-foreground" /> : null}
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">Video node metadata will appear here once video generation is enabled.</p>
         )}
       </PropertySection>
       <PropertySection title="Appearance">
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          <Swatch label="Fill" value={node.type === "note" ? "#fff8c7" : node.type === "section" ? "transparent" : "#efefed"} />
-          <Swatch label="Stroke" value={node.type === "section" ? "#cfcfca" : "#e7e7e2"} />
+        <div className="space-y-2 text-xs">
+          <ColorValue label="Fill" value={nodeFill(node)} onChange={(value) => onPatchData({ fill: value })} />
+          <ColorValue label="Stroke" value={nodeStroke(node)} onChange={(value) => onPatchData({ stroke: value })} />
+          {node.type === "image-generator" ? <ReadonlyValue label="Status" value={generatorStatus(node) || "ready"} /> : null}
         </div>
       </PropertySection>
     </aside>
@@ -137,14 +141,21 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
   );
 }
 
-function Swatch({ label, value }: { label: string; value: string }) {
+function ColorValue({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   return (
-    <div className="min-w-0 rounded-md bg-surface-2 p-2">
-      <div className="flex items-center gap-1.5">
-        <span className="size-3 shrink-0 rounded border border-border" style={{ background: value }} />
-        <span className="truncate text-muted-foreground">{label}</span>
-      </div>
-      <p className="mt-1 truncate font-mono text-[10px] text-foreground">{value}</p>
+    <label className="flex min-w-0 items-center gap-2 rounded-md bg-surface-2 px-2 py-1.5">
+      <span className="w-12 shrink-0 text-muted-foreground">{label}</span>
+      <span className="size-4 shrink-0 rounded border border-border" style={{ background: value }} />
+      <input value={value} onChange={(event) => onChange(event.target.value)} className="min-w-0 flex-1 bg-transparent font-mono text-[11px] outline-none" />
+    </label>
+  );
+}
+
+function ReadonlyValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2 rounded-md bg-surface-2 px-2 py-1.5">
+      <span className="w-12 shrink-0 text-muted-foreground">{label}</span>
+      <span className="truncate font-mono text-[11px]">{value}</span>
     </div>
   );
 }

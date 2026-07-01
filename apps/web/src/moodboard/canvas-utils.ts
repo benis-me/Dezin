@@ -85,6 +85,25 @@ export function dataName(node: MoodboardNode): string {
   return typeof name === "string" ? name.trim() : "";
 }
 
+function dataColor(node: MoodboardNode, key: "fill" | "stroke", fallback: string): string {
+  const value = node.data[key];
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+export function nodeFill(node: MoodboardNode): string {
+  if (node.type === "note") return dataColor(node, "fill", "#fff8c7");
+  if (node.type === "section") return dataColor(node, "fill", "rgba(255,255,255,0.24)");
+  if (node.type === "image-generator") return dataColor(node, "fill", "#f4f4f2");
+  return dataColor(node, "fill", "#efefed");
+}
+
+export function nodeStroke(node: MoodboardNode): string {
+  if (node.type === "note") return dataColor(node, "stroke", "#e7d980");
+  if (node.type === "section") return dataColor(node, "stroke", "#cfcfca");
+  if (node.type === "image-generator") return dataColor(node, "stroke", "#d7d7d2");
+  return dataColor(node, "stroke", "#e7e7e2");
+}
+
 export function isNodeVisible(node: MoodboardNode): boolean {
   return node.data.visible !== false;
 }

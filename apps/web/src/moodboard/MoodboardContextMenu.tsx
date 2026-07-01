@@ -7,6 +7,7 @@ import {
   EyeOff,
   Lock,
   LockOpen,
+  Maximize2,
   Minus,
   Plus,
   RotateCcw,
@@ -35,6 +36,7 @@ export function MoodboardContextMenu({
   onDelete,
   onZoomIn,
   onZoomOut,
+  onFitView,
   onResetZoom,
 }: {
   menu: ContextMenuState;
@@ -52,6 +54,7 @@ export function MoodboardContextMenu({
   onDelete?: () => void;
   onZoomIn?: () => void;
   onZoomOut?: () => void;
+  onFitView?: () => void;
   onResetZoom?: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -128,8 +131,9 @@ export function MoodboardContextMenu({
             <MenuButton icon={<WandSparkles size={14} strokeWidth={1.75} />} label="Add image generator here" onClick={onGenerate} />
           </>
         ) : null}
-        {onZoomIn || onZoomOut || onResetZoom ? <div className="my-1 h-px bg-border" /> : null}
-        {onZoomIn || onZoomOut || onResetZoom ? <MenuLabel>View</MenuLabel> : null}
+        {onZoomIn || onZoomOut || onFitView || onResetZoom ? <div className="my-1 h-px bg-border" /> : null}
+        {onZoomIn || onZoomOut || onFitView || onResetZoom ? <MenuLabel>View</MenuLabel> : null}
+        {onFitView ? <MenuButton icon={<Maximize2 size={14} strokeWidth={1.75} />} label="Fit view" onClick={onFitView} /> : null}
         {onZoomIn ? <MenuButton icon={<Plus size={14} strokeWidth={1.75} />} label="Zoom in" onClick={onZoomIn} /> : null}
         {onZoomOut ? <MenuButton icon={<Minus size={14} strokeWidth={1.75} />} label="Zoom out" onClick={onZoomOut} /> : null}
         {onResetZoom ? <MenuButton icon={<RotateCcw size={14} strokeWidth={1.75} />} label="Reset zoom" onClick={onResetZoom} /> : null}

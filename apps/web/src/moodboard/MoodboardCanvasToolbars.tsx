@@ -6,6 +6,7 @@ import {
   Hand,
   Layers,
   Loader2,
+  Maximize2,
   Minus,
   MousePointer2,
   Plus,
@@ -16,7 +17,19 @@ import {
   WandSparkles,
 } from "lucide-react";
 import type { MoodboardNode } from "../lib/api.ts";
-import { Button, IconButton, Textarea, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
+import {
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  IconButton,
+  Textarea,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import { generatorPrompt, generatorStatus, layerLabel, type MoodboardCanvasTool } from "./canvas-utils.ts";
 
@@ -124,21 +137,42 @@ export function CanvasActionBar({
   );
 }
 
-export function CanvasZoomBar({ zoom, onChangeZoom }: { zoom: number; onChangeZoom: (zoom: number) => void }) {
+const ZOOM_PRESETS = [0.5, 1, 2];
+
+export function CanvasZoomBar({
+  zoom,
+  onChangeZoom,
+  onFitView,
+}: {
+  zoom: number;
+  onChangeZoom: (zoom: number) => void;
+  onFitView: () => void;
+}) {
   return (
     <TooltipProvider delayDuration={120}>
       <div className="app-no-drag absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-popover/95 p-1 shadow-pop backdrop-blur-xl">
         <ToolButton label="Zoom out" onClick={() => onChangeZoom(zoom * 0.88)}>
           <Minus size={15} strokeWidth={1.75} />
         </ToolButton>
-        <button
-          type="button"
-          onClick={() => onChangeZoom(1)}
-          className="h-8 min-w-12 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
-          aria-label="Reset zoom"
-        >
-          {Math.round(zoom * 100)}%
-        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            className="h-8 min-w-12 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+            aria-label="Canvas zoom options"
+          >
+            {Math.round(zoom * 100)}%
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="center" className="w-36">
+            <DropdownMenuItem onClick={onFitView}>
+              <Maximize2 size={13} strokeWidth={1.75} />
+              Fit view
+            </DropdownMenuItem>
+            {ZOOM_PRESETS.map((preset) => (
+              <DropdownMenuItem key={preset} onClick={() => onChangeZoom(preset)}>
+                {Math.round(preset * 100)}%
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
         <ToolButton label="Zoom in" onClick={() => onChangeZoom(zoom * 1.14)}>
           <Plus size={15} strokeWidth={1.75} />
         </ToolButton>

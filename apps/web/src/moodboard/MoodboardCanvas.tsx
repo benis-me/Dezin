@@ -102,7 +102,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           onAddImageGenerator={() => onAddImageGenerator()}
           onToggleLayers={() => canvas.setLayersOpen((value) => !value)}
         />
-        <CanvasZoomBar zoom={canvas.zoom} onChangeZoom={canvas.changeZoom} />
+        <CanvasZoomBar zoom={canvas.zoom} onChangeZoom={canvas.changeZoom} onFitView={canvas.fitView} />
 
         {canvas.contextMenu ? (
           <MoodboardContextMenu
@@ -133,6 +133,10 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             }}
             onZoomOut={() => {
               canvas.changeZoom(canvas.zoom * 0.88);
+              canvas.setContextMenu(null);
+            }}
+            onFitView={() => {
+              canvas.fitView();
               canvas.setContextMenu(null);
             }}
             onResetZoom={() => {

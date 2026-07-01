@@ -45,6 +45,7 @@ test("MoodboardContextMenu clamps to the visible viewport after measuring itself
         onGenerate={() => {}}
         onZoomIn={() => {}}
         onZoomOut={() => {}}
+        onFitView={() => {}}
         onResetZoom={() => {}}
       />,
     );
@@ -53,6 +54,7 @@ test("MoodboardContextMenu clamps to the visible viewport after measuring itself
   const menu = screen.getByRole("menu");
   expect(menu).toHaveStyle({ left: "268px", top: "112px" });
   expect(screen.getByText("View")).toBeInTheDocument();
+  expect(screen.getByText("Fit view")).toBeInTheDocument();
   expect(screen.getByText("Reset zoom")).toBeInTheDocument();
 });
 
@@ -89,6 +91,7 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
       onDelete={() => {}}
       onZoomIn={() => {}}
       onZoomOut={() => {}}
+      onFitView={() => {}}
       onResetZoom={() => {}}
     />,
   );
@@ -125,4 +128,27 @@ test("MoodboardPropertiesPanel can be resized from its left edge", () => {
 
   expect(screen.getByText("Properties").closest("aside")).toHaveStyle({ width: "360px" });
   expect(localStorage.getItem("dezin:moodboard:properties-width")).toBe("360");
+});
+
+test("MoodboardPropertiesPanel edits node appearance data", () => {
+  const onPatchData = vi.fn();
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "Reference tone" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(<MoodboardPropertiesPanel node={node} onPatch={() => {}} onPatchData={onPatchData} onGenerate={() => {}} />);
+  fireEvent.change(screen.getByDisplayValue("#fff8c7"), { target: { value: "#ffeeaa" } });
+
+  expect(onPatchData).toHaveBeenCalledWith({ fill: "#ffeeaa" });
 });

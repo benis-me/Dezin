@@ -223,7 +223,7 @@ export function useMoodboardCanvasController({
     onContextMenu: setContextMenu,
     onFrameStateChange: saveInputs,
   });
-  const { selectInRuntime } = runtime;
+  const { changeZoom, fitView, selectInRuntime, zoom } = runtime;
 
   const upload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     onUploadFilesRef.current(event.target.files);
@@ -243,6 +243,29 @@ export function useMoodboardCanvasController({
       const tag = (event.target as HTMLElement | null)?.tagName;
       const editing = tag === "INPUT" || tag === "TEXTAREA" || (event.target as HTMLElement | null)?.isContentEditable;
       if (editing) return;
+
+      if (event.shiftKey && event.key === "1") {
+        event.preventDefault();
+        fitView();
+        return;
+      }
+      if (event.metaKey || event.ctrlKey) {
+        if (event.key === "0") {
+          event.preventDefault();
+          changeZoom(1);
+          return;
+        }
+        if (event.key === "=" || event.key === "+") {
+          event.preventDefault();
+          changeZoom(zoom * 1.14);
+          return;
+        }
+        if (event.key === "-") {
+          event.preventDefault();
+          changeZoom(zoom * 0.88);
+          return;
+        }
+      }
 
       if (event.key === "Escape") {
         if (contextMenu) {
@@ -268,7 +291,7 @@ export function useMoodboardCanvasController({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [contextMenu, deleteNode, handleSelect]);
+  }, [changeZoom, contextMenu, deleteNode, fitView, handleSelect, zoom]);
 
   const contextTargetId = contextMenu?.targetId ?? null;
 

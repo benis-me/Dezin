@@ -307,7 +307,40 @@ export function useLeaferMoodboardRuntime({
       runtime.app.tree.forceUpdate?.();
     }
     setZoom(clamped);
-  }, []);
+    window.requestAnimationFrame(updateFloatingSelection);
+  }, [updateFloatingSelection]);
+
+  const fitView = useCallback(() => {
+    const runtime = runtimeRef.current;
+    const container = containerRef.current;
+    const tree = runtime?.app?.tree;
+    const currentNodes = nodesRef.current;
+    if (!tree || !container || currentNodes.length === 0) {
+      changeZoom(1);
+      return;
+    }
+
+    const left = Math.min(...currentNodes.map((node) => node.x));
+    const top = Math.min(...currentNodes.map((node) => node.y));
+    const right = Math.max(...currentNodes.map((node) => node.x + node.width));
+    const bottom = Math.max(...currentNodes.map((node) => node.y + node.height));
+    const width = Math.max(1, right - left);
+    const height = Math.max(1, bottom - top);
+    const padding = 96;
+    const availableWidth = Math.max(120, container.clientWidth - padding * 2);
+    const availableHeight = Math.max(120, container.clientHeight - padding * 2);
+    const nextScale = Math.max(0.1, Math.min(2, Math.min(availableWidth / width, availableHeight / height)));
+    const centerX = left + width / 2;
+    const centerY = top + height / 2;
+
+    tree.scaleX = nextScale;
+    tree.scaleY = nextScale;
+    tree.x = container.clientWidth / 2 - centerX * nextScale;
+    tree.y = container.clientHeight / 2 - centerY * nextScale;
+    tree.forceUpdate?.();
+    setZoom(nextScale);
+    window.requestAnimationFrame(updateFloatingSelection);
+  }, [changeZoom, updateFloatingSelection]);
 
   return {
     containerRef,
@@ -315,6 +348,7 @@ export function useLeaferMoodboardRuntime({
     selectionRect,
     zoom,
     changeZoom,
+    fitView,
     selectInRuntime,
   };
 }
