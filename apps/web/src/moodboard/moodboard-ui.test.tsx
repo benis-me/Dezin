@@ -13,6 +13,8 @@ import {
   eventClientPoint,
   generatorModel,
   getFloatingChromeSafeRect,
+  isEditableShortcutTarget,
+  isTemporaryHandShortcut,
   readInitialLayersOpen,
   moveContainedNodesWithSections,
   normalizeCanvasRect,
@@ -385,6 +387,31 @@ test("sameIdList treats identical selection ids as stable", () => {
   expect(sameIdList(["a", "b"], ["a", "b"])).toBe(true);
   expect(sameIdList(["a", "b"], ["b", "a"])).toBe(false);
   expect(sameIdList(["a"], ["a", "b"])).toBe(false);
+});
+
+test("canvas shortcuts ignore editable targets", () => {
+  const input = document.createElement("input");
+  const select = document.createElement("select");
+  const editable = document.createElement("div");
+  editable.setAttribute("contenteditable", "true");
+  const nestedTextbox = document.createElement("span");
+  const textbox = document.createElement("div");
+  textbox.setAttribute("role", "textbox");
+  textbox.append(nestedTextbox);
+
+  expect(isEditableShortcutTarget(input)).toBe(true);
+  expect(isEditableShortcutTarget(select)).toBe(true);
+  expect(isEditableShortcutTarget(editable)).toBe(true);
+  expect(isEditableShortcutTarget(nestedTextbox)).toBe(true);
+  expect(isEditableShortcutTarget(document.createElement("button"))).toBe(false);
+});
+
+test("temporary hand shortcut only uses bare space", () => {
+  expect(isTemporaryHandShortcut({ key: " ", metaKey: false, ctrlKey: false, altKey: false })).toBe(true);
+  expect(isTemporaryHandShortcut({ key: "Space", metaKey: false, ctrlKey: false, altKey: false })).toBe(false);
+  expect(isTemporaryHandShortcut({ key: " ", metaKey: true, ctrlKey: false, altKey: false })).toBe(false);
+  expect(isTemporaryHandShortcut({ key: " ", metaKey: false, ctrlKey: true, altKey: false })).toBe(false);
+  expect(isTemporaryHandShortcut({ key: " ", metaKey: false, ctrlKey: false, altKey: true })).toBe(false);
 });
 
 test("createSectionNode keeps dragged section dimensions", () => {

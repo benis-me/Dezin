@@ -4,6 +4,8 @@ import {
   buildLayerTree,
   isNodeLocked,
   isNodeVisible,
+  isEditableShortcutTarget,
+  isTemporaryHandShortcut,
   localId,
   MOODBOARD_LAYERS_OPEN_KEY,
   moveContainedNodesWithSections,
@@ -71,6 +73,7 @@ export function useMoodboardCanvasController({
   const onUploadFilesRef = useRef(onUploadFiles);
   const clipboardRef = useRef<SaveMoodboardNodeInput[]>([]);
   const historyRef = useRef<MoodboardHistoryState>({ undoStack: [], redoStack: [] });
+  const temporaryHandToolRef = useRef<MoodboardCanvasTool | null>(null);
   const syncNodeInputsInRuntimeRef = useRef<(inputs: SaveMoodboardNodeInput[], idsToReselect?: string[]) => void>(() => {});
   const refreshSelectionInRuntimeRef = useRef<(ids?: string[]) => void>(() => {});
 
@@ -618,9 +621,16 @@ export function useMoodboardCanvasController({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const tag = (event.target as HTMLElement | null)?.tagName;
-      const editing = tag === "INPUT" || tag === "TEXTAREA" || (event.target as HTMLElement | null)?.isContentEditable;
-      if (editing) return;
+      if (isEditableShortcutTarget(event.target)) return;
+
+      if (isTemporaryHandShortcut(event)) {
+        event.preventDefault();
+        if (!event.repeat && temporaryHandToolRef.current == null) {
+          temporaryHandToolRef.current = toolRef.current;
+          if (toolRef.current !== "hand") setTool("hand");
+        }
+        return;
+      }
 
       if (event.shiftKey && event.key === "1") {
         event.preventDefault();
@@ -723,8 +733,19 @@ export function useMoodboardCanvasController({
         if (key === "[") sendNodesToBack(selectedIdsRef.current);
       }
     };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (!isTemporaryHandShortcut(event) || temporaryHandToolRef.current == null) return;
+      event.preventDefault();
+      const restoreTool = temporaryHandToolRef.current;
+      temporaryHandToolRef.current = null;
+      if (toolRef.current === "hand") setTool(restoreTool);
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+    };
   }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, moveNodesLayerStep, nudgeNodes, pasteCopiedNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
 
   const contextTargetId = contextMenu?.targetId ?? null;

@@ -11,7 +11,7 @@ import { CanvasActionBar, CanvasViewBar, CanvasZoomBar, GeneratorPromptToolbar, 
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { generatorModel, generatorPrompt, rectFromBounds, resolveFloatingChromeRect, resolveFloatingRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
+import { generatorModel, generatorPrompt, isEditableShortcutTarget, rectFromBounds, resolveFloatingChromeRect, resolveFloatingRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
 export function MoodboardCanvas(props: MoodboardCanvasProps) {
@@ -42,7 +42,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Tab" || event.metaKey || event.ctrlKey || event.altKey || presentationMode || !quickEditNode || !canvas.runtimeReady) return;
-      if (isEditableEventTarget(event.target)) return;
+      if (isEditableShortcutTarget(event.target)) return;
       event.preventDefault();
       setQuickEditOpen(true);
     };
@@ -606,12 +606,6 @@ function normalizeFloatingFrameBounds(bounds: FloatingFrame): { x: number; y: nu
 
 function hasDraggedFiles(event: ReactDragEvent<HTMLDivElement>): boolean {
   return Array.from(event.dataTransfer.types ?? []).includes("Files");
-}
-
-function isEditableEventTarget(target: EventTarget | null): boolean {
-  const element = target instanceof HTMLElement ? target : null;
-  const tag = element?.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || Boolean(element?.isContentEditable);
 }
 
 const MoodboardNodeLayer = memo(function MoodboardNodeLayer({

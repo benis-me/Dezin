@@ -206,6 +206,26 @@ export function sameIdList(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((id, index) => id === b[index]);
 }
 
+export function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  const element = target instanceof HTMLElement ? target : null;
+  if (!element) return false;
+  const tag = element.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || element.isContentEditable || hasEditableShortcutAncestor(element);
+}
+
+export function isTemporaryHandShortcut(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey">): boolean {
+  return event.key === " " && !event.metaKey && !event.ctrlKey && !event.altKey;
+}
+
+function hasEditableShortcutAncestor(element: HTMLElement): boolean {
+  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+    const contentEditable = current.getAttribute("contenteditable");
+    if (contentEditable != null && contentEditable.toLowerCase() !== "false") return true;
+    if (current.getAttribute("role") === "textbox") return true;
+  }
+  return false;
+}
+
 export function resolveFloatingRect({
   containerWidth,
   containerHeight,
