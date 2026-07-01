@@ -6,8 +6,13 @@ import {
   AlignEndVertical,
   AlignStartHorizontal,
   AlignStartVertical,
+  Brush,
+  Check,
+  ChevronDown,
   Copy,
+  Eraser,
   Hand,
+  ImagePlus,
   LayoutGrid,
   Layers,
   Loader2,
@@ -15,10 +20,10 @@ import {
   Minus,
   MousePointer2,
   Plus,
+  Scissors,
   SquareDashedMousePointer,
   StickyNote,
   Trash2,
-  Upload,
   WandSparkles,
 } from "lucide-react";
 import type { MoodboardNode } from "../lib/api.ts";
@@ -29,11 +34,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   IconButton,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
   Textarea,
   Tooltip,
   TooltipContent,
@@ -48,16 +51,23 @@ export function ToolButton({
   active = false,
   onClick,
   children,
+  disabled = false,
 }: {
   label: string;
   active?: boolean;
   onClick: () => void;
   children: ReactNode;
+  disabled?: boolean;
 }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <IconButton aria-label={label} onClick={onClick} className={cn(active && "bg-accent text-foreground")}>
+        <IconButton
+          aria-label={label}
+          onClick={disabled ? undefined : onClick}
+          aria-disabled={disabled}
+          className={cn(active && "bg-accent text-foreground", disabled && "cursor-not-allowed opacity-45 hover:bg-transparent hover:text-muted-foreground")}
+        >
           {children}
         </IconButton>
       </TooltipTrigger>
@@ -67,15 +77,34 @@ export function ToolButton({
 }
 
 export function SelectionToolbar({
+  node,
   onDuplicate,
   onDelete,
+  onImageAction,
 }: {
+  node: MoodboardNode;
   onDuplicate: () => void;
   onDelete: () => void;
+  onImageAction?: (action: string) => void;
 }) {
+  const imageLike = node.type === "image";
   return (
     <TooltipProvider delayDuration={120}>
       <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+        {imageLike ? (
+          <>
+            <ToolButton label="Remove background" onClick={() => onImageAction?.("Remove background")}>
+              <Eraser size={14} strokeWidth={1.75} />
+            </ToolButton>
+            <ToolButton label="Edit region" onClick={() => onImageAction?.("Edit region")}>
+              <Brush size={14} strokeWidth={1.75} />
+            </ToolButton>
+            <ToolButton label="Extract layer" onClick={() => onImageAction?.("Extract layer")}>
+              <Scissors size={14} strokeWidth={1.75} />
+            </ToolButton>
+            <span className="mx-0.5 h-5 w-px bg-border" />
+          </>
+        ) : null}
         <ToolButton label="Duplicate" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
         </ToolButton>
@@ -93,20 +122,34 @@ export function MultiSelectionToolbar({
   onAlign,
   onArrange,
   onDelete,
+  onImageAction,
 }: {
   nodes: MoodboardNode[];
   onDuplicate: () => void;
   onAlign: (type: MoodboardAlignType) => void;
   onArrange: () => void;
   onDelete: () => void;
+  onImageAction?: (action: string) => void;
 }) {
   const [alignOpen, setAlignOpen] = useState(false);
+  const imageOnly = nodes.length > 0 && nodes.every((node) => node.type === "image");
 
   return (
     <TooltipProvider delayDuration={120}>
       <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
         <span className="px-2 text-xs font-medium text-muted-foreground">{nodes.length} selected</span>
         <span className="mx-0.5 h-5 w-px bg-border" />
+        {imageOnly ? (
+          <>
+            <ToolButton label="Remove backgrounds" onClick={() => onImageAction?.("Remove backgrounds")}>
+              <Eraser size={14} strokeWidth={1.75} />
+            </ToolButton>
+            <ToolButton label="Edit regions" onClick={() => onImageAction?.("Edit regions")}>
+              <Brush size={14} strokeWidth={1.75} />
+            </ToolButton>
+            <span className="mx-0.5 h-5 w-px bg-border" />
+          </>
+        ) : null}
         <ToolButton label="Duplicate selected" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
         </ToolButton>
@@ -163,14 +206,12 @@ export function CanvasActionBar({
   tool,
   layersOpen,
   onToolChange,
-  onUpload,
   onAddImageGenerator,
   onToggleLayers,
 }: {
   tool: MoodboardCanvasTool;
   layersOpen: boolean;
   onToolChange: (tool: MoodboardCanvasTool) => void;
-  onUpload: () => void;
   onAddImageGenerator: () => void;
   onToggleLayers: () => void;
 }) {
@@ -193,9 +234,7 @@ export function CanvasActionBar({
         <ToolButton label="Add section" active={tool === "section"} onClick={() => onToolChange("section")}>
           <SquareDashedMousePointer size={15} strokeWidth={1.75} />
         </ToolButton>
-        <ToolButton label="Upload images" onClick={onUpload}>
-          <Upload size={15} strokeWidth={1.75} />
-        </ToolButton>
+        <span className="mx-1 h-5 w-px bg-border" />
         <ToolButton label="Image generator" onClick={onAddImageGenerator}>
           <WandSparkles size={15} strokeWidth={1.75} />
         </ToolButton>
@@ -288,8 +327,15 @@ export function GeneratorPromptToolbar({
   const modelOptions = models.length ? models : [model].filter(Boolean);
 
   return (
-    <div className="pointer-events-auto app-no-drag w-[min(560px,calc(100vw-3rem))] rounded-xl border border-border bg-card/95 p-2 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
-      <div className="rounded-lg border border-input bg-background px-2 pb-2 pt-2">
+    <div className="pointer-events-auto app-no-drag w-[min(600px,calc(100vw-3rem))] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+      <div className="flex h-10 items-center justify-between gap-2 border-b border-border/70 px-2">
+        <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
+        <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 gap-1.5 px-2.5 text-xs">
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <WandSparkles size={13} strokeWidth={1.75} />}
+          Generate
+        </Button>
+      </div>
+      <div className="px-2.5 pb-2.5 pt-2">
         <Textarea
           aria-label="Image generator prompt"
           rows={2}
@@ -308,36 +354,63 @@ export function GeneratorPromptToolbar({
           }}
           className="min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
         />
-        <div className="mt-2 flex items-center justify-between gap-2 border-t border-border/70 pt-2">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="label-mono shrink-0 text-muted-foreground">Model</span>
-            {modelOptions.length ? (
-              <Select value={model || "__default__"} onValueChange={(value) => onModelChange(value === "__default__" ? "" : value)}>
-                <SelectTrigger aria-label="Image generation model" size="sm" className="h-7 max-w-52 border-border bg-surface-2 px-2 text-xs shadow-none">
-                  <SelectValue placeholder="Default" />
-                </SelectTrigger>
-                <SelectContent side="top" align="start" className="max-h-56">
-                  <SelectItem value="__default__">Default</SelectItem>
-                  {modelOptions.map((option) => (
-                    <SelectItem key={option} value={option}>
-                      {option}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <span className="rounded-md bg-surface-2 px-2 py-1 text-xs text-muted-foreground">Default</span>
-            )}
-          </div>
-          <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 gap-1.5 px-2.5 text-xs">
-            {busy ? <Loader2 size={13} className="animate-spin" /> : <WandSparkles size={13} strokeWidth={1.75} />}
-            Generate
-          </Button>
-        </div>
       </div>
-      <p className="mt-1.5 px-0.5 text-[11px] text-muted-foreground">
-        {busy ? "Generating..." : status === "done" ? "Last image generated." : "Creates a new image next to this generator node."}
+      <p className="border-t border-border/60 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+        {busy ? "Generating..." : status === "done" ? "Generated" : prompt.trim() ? "Ready" : "Prompt required"}
       </p>
     </div>
+  );
+}
+
+function ImageModelPicker({ model, options, onModelChange }: { model: string; options: string[]; onModelChange: (model: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const selected = model || options[0] || "";
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        aria-label="Image generation model"
+        className="flex h-7 min-w-0 max-w-[21rem] items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
+      >
+        <ImagePlus size={13} strokeWidth={1.75} className="shrink-0" />
+        <span className="label-mono shrink-0 text-muted-foreground">Image</span>
+        <span className="truncate font-medium text-foreground">{selected || "Default model"}</span>
+        <ChevronDown size={13} strokeWidth={2} className="shrink-0" />
+      </PopoverTrigger>
+      <PopoverContent side="top" align="start" className="w-72 p-2">
+        <p className="label-mono px-0.5 pb-1.5">Image model</p>
+        {options.length ? (
+          <div className="flex max-h-48 flex-col gap-1 overflow-y-auto pr-0.5">
+            {options.map((option) => {
+              const active = option === selected;
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => {
+                    onModelChange(option);
+                    setOpen(false);
+                  }}
+                  className={cn(
+                    "flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-xs transition-colors",
+                    active ? "border-ring bg-surface text-foreground ring-1 ring-ring/30" : "border-border text-muted-foreground hover:bg-surface-2/60 hover:text-foreground",
+                  )}
+                >
+                  <span className="grid size-6 shrink-0 place-items-center rounded-md bg-surface-2 text-foreground">
+                    <ImagePlus size={13} strokeWidth={1.75} />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{option}</span>
+                    <span className="block truncate text-[10px] text-muted-foreground">Image generation</span>
+                  </span>
+                  {active ? <Check size={13} strokeWidth={2.4} className="shrink-0 text-foreground" /> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="px-1 py-4 text-center text-xs text-muted-foreground">No image models configured.</p>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }

@@ -781,9 +781,24 @@ test("MoodboardPropertiesPanel shows concrete layout values", () => {
 test("SelectionToolbar exposes compact object actions", () => {
   const onDuplicate = vi.fn();
   const onDelete = vi.fn();
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "Reference tone" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
 
   render(
     <SelectionToolbar
+      node={node}
       onDuplicate={onDuplicate}
       onDelete={onDelete}
     />,
@@ -797,6 +812,34 @@ test("SelectionToolbar exposes compact object actions", () => {
   expect(screen.queryByLabelText("Bring to front")).toBeNull();
   expect(screen.queryByLabelText("Hide layer")).toBeNull();
   expect(screen.queryByLabelText("Lock layer")).toBeNull();
+});
+
+test("SelectionToolbar surfaces image-edit actions for image nodes", () => {
+  const onImageAction = vi.fn();
+  const node: MoodboardNode = {
+    id: "img1",
+    boardId: "b1",
+    type: "image",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { url: "dezin://assets/reference.png" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(<SelectionToolbar node={node} onDuplicate={() => {}} onDelete={() => {}} onImageAction={onImageAction} />);
+
+  fireEvent.click(screen.getByLabelText("Remove background"));
+  fireEvent.click(screen.getByLabelText("Edit region"));
+  fireEvent.click(screen.getByLabelText("Extract layer"));
+
+  expect(onImageAction).toHaveBeenCalledWith("Remove background");
+  expect(onImageAction).toHaveBeenCalledWith("Edit region");
+  expect(onImageAction).toHaveBeenCalledWith("Extract layer");
 });
 
 test("MultiSelectionToolbar exposes batch node actions", () => {

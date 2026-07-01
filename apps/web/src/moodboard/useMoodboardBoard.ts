@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentInfo, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { MODEL_PROVIDERS } from "../settings/model-provider-registry.ts";
+import { inferCapabilities } from "../settings/model-provider-ui-utils.tsx";
 import { toInput } from "./canvas-utils.ts";
 import {
   appendInputs,
@@ -68,8 +70,9 @@ export function useMoodboardBoard(boardId: string) {
       .then((settings) => {
         if (!alive) return;
         const models = imageModelOptions(settings);
+        const configuredImageModel = settings.imageModel.trim();
         setImageModels(models);
-        setImageModel((current) => current || settings.imageModel || models[0] || "");
+        setImageModel((current) => (current && models.includes(current) ? current : models.includes(configuredImageModel) ? configuredImageModel : models[0] || ""));
       })
       .catch(() => {});
     return () => {
@@ -260,10 +263,26 @@ export function useMoodboardBoard(boardId: string) {
 
 function imageModelOptions(settings: Settings): string[] {
   const models = new Set<string>();
+  const selectedProvider = MODEL_PROVIDERS.find((provider) => provider.id === settings.aiProviderId);
+  const knownCapabilities = new Map<string, Set<string>>();
+  for (const provider of MODEL_PROVIDERS) {
+    for (const model of provider.models) knownCapabilities.set(model.id, new Set(model.capabilities));
+  }
+  for (const model of selectedProvider?.models ?? []) {
+    if (model.capabilities.includes("Image")) models.add(model.id);
+  }
   for (const raw of settings.aiProviderModels.split(/\r?\n|,/)) {
     const model = raw.trim();
-    if (model) models.add(model);
+    if (!model) continue;
+    const known = knownCapabilities.get(model);
+    const capabilities = known ? [...known] : inferCapabilities(model);
+    if (capabilities.includes("Image") && !capabilities.includes("Video")) models.add(model);
   }
-  if (settings.imageModel.trim()) models.add(settings.imageModel.trim());
+  const configuredImageModel = settings.imageModel.trim();
+  if (configuredImageModel) {
+    const known = knownCapabilities.get(configuredImageModel);
+    const capabilities = known ? [...known] : inferCapabilities(configuredImageModel);
+    if (capabilities.includes("Image") && !capabilities.includes("Video")) models.add(configuredImageModel);
+  }
   return [...models];
 }

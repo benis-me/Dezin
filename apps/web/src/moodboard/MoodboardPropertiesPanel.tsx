@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { Eye, EyeOff, Lock, LockOpen, WandSparkles } from "lucide-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { Button, Input, Textarea } from "../components/ui/index.ts";
@@ -35,6 +36,7 @@ export function MoodboardPropertiesPanel({
   onPatchData: (patch: Record<string, unknown>) => void;
   onGenerate: () => void;
 }) {
+  const reducedMotion = useReducedMotion();
   const [width, setWidth] = useState(() => {
     const storedValue = localStorage.getItem(PANEL_WIDTH_KEY);
     if (storedValue == null) return DEFAULT_PANEL_WIDTH;
@@ -68,10 +70,14 @@ export function MoodboardPropertiesPanel({
   );
 
   return (
-    <aside
+    <motion.aside
       data-moodboard-floating-occluder
       className="app-no-drag absolute right-3 top-3 z-20 max-h-[calc(100%-5rem)] select-none overflow-auto rounded-md border border-border bg-card/95 text-popover-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       style={{ width }}
+      initial={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
+      animate={reducedMotion ? { opacity: 1 } : { opacity: 1, x: 0 }}
+      exit={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
+      transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
     >
       <div
         role="separator"
@@ -164,7 +170,7 @@ export function MoodboardPropertiesPanel({
           <ReadonlyValue label="Updated" value={formatDate(node.updatedAt)} />
         </div>
       </PropertySection>
-    </aside>
+    </motion.aside>
   );
 }
 
@@ -187,7 +193,7 @@ function formatDate(value: number): string {
 
 function PropertySection({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="border-b border-border px-3 py-3">
+    <section className="border-b border-border px-3 py-3 last:border-b-0">
       <h3 className="mb-2 text-xs font-medium text-foreground">{title}</h3>
       {children}
     </section>

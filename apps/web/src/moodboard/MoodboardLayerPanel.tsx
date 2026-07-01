@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { motion, useReducedMotion } from "motion/react";
 import {
   ChevronDown,
   ChevronRight,
@@ -42,6 +43,7 @@ export function MoodboardLayerPanel({
   onToggleLocked: (id: string) => void;
   onReorder: (sourceId: string, targetId: string) => void;
 }) {
+  const reducedMotion = useReducedMotion();
   const scrollRef = useRef<HTMLDivElement>(null);
   const effectiveSelectedIds = useMemo(() => selectedIds ?? (selectedId ? [selectedId] : []), [selectedId, selectedIds]);
   const visibleIds = useMemo(() => flattenVisibleLayerIds(items, collapsedIds), [collapsedIds, items]);
@@ -89,9 +91,13 @@ export function MoodboardLayerPanel({
   );
 
   return (
-    <aside
+    <motion.aside
       data-moodboard-floating-occluder
       className="app-no-drag absolute left-3 top-3 z-20 flex max-h-[calc(100%-5rem)] w-60 select-none flex-col overflow-hidden rounded-md border border-border bg-card/95 text-popover-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
+      initial={reducedMotion ? { opacity: 0 } : { opacity: 0, x: -8 }}
+      animate={reducedMotion ? { opacity: 1 } : { opacity: 1, x: 0 }}
+      exit={reducedMotion ? { opacity: 0 } : { opacity: 0, x: -8 }}
+      transition={{ duration: 0.18, ease: [0.23, 1, 0.32, 1] }}
     >
       <div className="flex h-9 items-center gap-2 border-b border-border/70 px-3 text-xs font-medium">
         <Layers size={14} strokeWidth={1.75} />
@@ -125,7 +131,7 @@ export function MoodboardLayerPanel({
           ))
         )}
       </div>
-    </aside>
+    </motion.aside>
   );
 }
 
