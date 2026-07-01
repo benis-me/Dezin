@@ -22,6 +22,7 @@ import {
   sameFloatingRect,
 } from "./canvas-utils.ts";
 import { createSnapLines, createSnapPointsFromBounds, resolveSnapDeltas } from "./leafer-adapter/snap-geometry.ts";
+import { selectAppNodesByIds } from "./leafer-adapter/editor-selection.ts";
 import { createSectionNode } from "./moodboard-board-utils.ts";
 
 beforeEach(() => {
@@ -221,6 +222,26 @@ test("Awen snap geometry resolves the nearest axis delta for moodboard nodes", (
   const target = createSnapPointsFromBounds({ x: 263, y: 230, width: 80, height: 60 }, "target");
 
   expect(resolveSnapDeltas({ targetPoints: target, snapLines: createSnapLines(candidates), threshold: 6 }).x?.delta).toBe(-3);
+});
+
+test("Awen editor selection adapter maps node ids onto the Leafer editor target", () => {
+  const nodes = new Map([
+    ["a", { id: "a" }],
+    ["b", { id: "b" }],
+  ]);
+  const app = {
+    editor: { target: undefined as unknown },
+    findId: (id: string) => nodes.get(id),
+  };
+
+  selectAppNodesByIds(app as any, ["a"]);
+  expect(app.editor.target).toBe(nodes.get("a"));
+
+  selectAppNodesByIds(app as any, ["a", "b"]);
+  expect(app.editor.target).toEqual([nodes.get("a"), nodes.get("b")]);
+
+  selectAppNodesByIds(app as any, []);
+  expect(app.editor.target).toBeUndefined();
 });
 
 test("sameFloatingRect ignores subpixel jitter during drag", () => {

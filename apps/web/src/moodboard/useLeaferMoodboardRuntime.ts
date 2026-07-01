@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { DragEvent, EditorEvent, EditorMoveEvent, EditorRotateEvent, EditorScaleEvent, PointerEvent, PropertyEvent, ZoomEvent, type App } from "leafer-editor";
 import { ViewportLighter } from "@dezin/leafer-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import { selectAppNodesByIds } from "./leafer-adapter/editor-selection.ts";
 import { CanvasSnap } from "./leafer-adapter/snap.ts";
 import {
   contextTargetIdFromEvent,
@@ -142,13 +143,13 @@ export function useLeaferMoodboardRuntime({
       const editor = (appRef.current as any)?.editor;
       if (!editor) return;
       try {
-        editor.target = findFrame(id) ?? undefined;
+        selectAppNodesByIds(appRef.current, id ? [id] : []);
         scheduleFloatingSelection();
       } catch {
         /* Leafer editor may not be ready during first paint. */
       }
     },
-    [findFrame, scheduleFloatingSelection],
+    [scheduleFloatingSelection],
   );
 
   const hoverInRuntime = useCallback(
