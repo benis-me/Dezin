@@ -211,11 +211,23 @@ function FloatingCanvasSurface({
       setRect(next);
     };
 
-    update();
     const observer = new ResizeObserver(update);
-    observer.observe(element);
-    observer.observe(container);
-    return () => observer.disconnect();
+    const observeTargets = () => {
+      observer.disconnect();
+      observer.observe(element);
+      observer.observe(container);
+      for (const occluder of container.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]")) {
+        if (occluder !== element && !element.contains(occluder) && !occluder.contains(element)) observer.observe(occluder);
+      }
+      update();
+    };
+    const mutationObserver = typeof MutationObserver !== "undefined" ? new MutationObserver(observeTargets) : null;
+    observeTargets();
+    mutationObserver?.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-moodboard-floating-occluder", "style", "class"] });
+    return () => {
+      observer.disconnect();
+      mutationObserver?.disconnect();
+    };
   }, [anchor, placement]);
 
   return (

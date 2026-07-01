@@ -1,7 +1,7 @@
 import { Loader2, Settings } from "lucide-react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { Button, IconButton } from "../components/ui/index.ts";
-import { readPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
+import { panelPercentFromPixels, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { MoodboardAgentPanel } from "../moodboard/MoodboardAgentPanel.tsx";
 import { MoodboardCanvas } from "../moodboard/MoodboardCanvas.tsx";
 import { useMoodboardBoard } from "../moodboard/useMoodboardBoard.ts";
@@ -19,7 +19,9 @@ export function MoodboardScreen({
   onBack: () => void;
   onOpenSettings: (section?: string) => void;
 }) {
-  const agentPercent = readPanelPercent(MOODBOARD_AGENT_WIDTH_KEY, 28, 20, 44);
+  const agentPercent =
+    readStoredPanelPercent(MOODBOARD_AGENT_WIDTH_KEY, 20, 44) ??
+    panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 28, 20, 44);
   const board = useMoodboardBoard(boardId);
 
   if (board.loading) {
