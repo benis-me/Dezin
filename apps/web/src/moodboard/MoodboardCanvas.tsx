@@ -117,12 +117,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         {!canvas.isTransforming && canvas.selected && canvas.selectionRect ? (
           <FloatingCanvasSurface anchor={canvas.selectionRect} placement="top">
             <SelectionToolbar
-              node={canvas.selected}
               onDuplicate={() => canvas.duplicateNode(canvas.selected!.id)}
-              onBringToFront={() => canvas.bringToFront(canvas.selected!.id)}
-              onSendToBack={() => canvas.sendToBack(canvas.selected!.id)}
-              onToggleVisible={() => canvas.toggleNodeVisible(canvas.selected!.id)}
-              onToggleLocked={() => canvas.toggleNodeLocked(canvas.selected!.id)}
               onDelete={() => canvas.deleteNode(canvas.selected!.id)}
             />
           </FloatingCanvasSurface>
@@ -133,10 +128,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             <MultiSelectionToolbar
               nodes={canvas.selectedNodes}
               onDuplicate={() => canvas.duplicateNodes(canvas.selectedIds)}
-              onBringToFront={() => canvas.bringNodesToFront(canvas.selectedIds)}
-              onSendToBack={() => canvas.sendNodesToBack(canvas.selectedIds)}
-              onSetVisible={(visible) => canvas.setNodesVisible(canvas.selectedIds, visible)}
-              onSetLocked={(locked) => canvas.setNodesLocked(canvas.selectedIds, locked)}
+              onAlign={(type) => canvas.alignNodes(canvas.selectedIds, type)}
+              onArrange={() => canvas.arrangeNodes(canvas.selectedIds)}
               onDelete={() => canvas.deleteNodes(canvas.selectedIds)}
             />
           </FloatingCanvasSurface>
@@ -235,7 +228,9 @@ function FloatingCanvasSurface({
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [rect, setRect] = useState({ left: anchor.left, top: placement === "top" ? anchor.top : anchor.bottom });
+  const anchorKey = floatingAnchorKey(anchor, placement);
+  const approximateRect = approximateFloatingRect(anchor, placement);
+  const [rect, setRect] = useState({ ...approximateRect, key: anchorKey });
 
   useLayoutEffect(() => {
     const element = ref.current;
@@ -252,7 +247,9 @@ function FloatingCanvasSurface({
         placement,
         occluders: getFloatingOccluders(container, element),
       });
-      setRect(next);
+      setRect((current) =>
+        current.key === anchorKey && Math.abs(current.left - next.left) < 0.5 && Math.abs(current.top - next.top) < 0.5 ? current : { ...next, key: anchorKey },
+      );
     };
 
     const observer = new ResizeObserver(update);
@@ -273,12 +270,29 @@ function FloatingCanvasSurface({
       mutationObserver?.disconnect();
     };
   }, [anchor, placement]);
+  const visibleRect = rect.key === anchorKey ? rect : approximateRect;
 
   return (
-    <div ref={ref} className="pointer-events-none absolute z-30" style={{ left: rect.left, top: rect.top }}>
+    <div
+      ref={ref}
+      className="pointer-events-none absolute z-30"
+      style={{
+        left: visibleRect.left,
+        top: visibleRect.top,
+        opacity: rect.key === anchorKey ? 1 : 0,
+      }}
+    >
       {children}
     </div>
   );
+}
+
+function floatingAnchorKey(anchor: FloatingRect, placement: "top" | "bottom"): string {
+  return `${placement}:${Math.round(anchor.left * 10)}:${Math.round(anchor.top * 10)}:${Math.round(anchor.bottom * 10)}`;
+}
+
+function approximateFloatingRect(anchor: FloatingRect, placement: "top" | "bottom"): { left: number; top: number } {
+  return { left: anchor.left, top: placement === "top" ? anchor.top : anchor.bottom };
 }
 
 function getFloatingOccluders(container: HTMLElement, current: HTMLElement): CanvasRect[] {

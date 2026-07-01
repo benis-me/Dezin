@@ -18,6 +18,7 @@ import {
   resolveFloatingRect,
   rounded,
   sameFloatingRect,
+  sameIdList,
   toInput,
   type CanvasDrawRect,
   type CanvasPoint,
@@ -101,6 +102,13 @@ export function useLeaferMoodboardRuntime({
     return app?.findId?.(id) ?? app?.tree?.findOne?.(`#${id}`) ?? layerRef.current?.findOne?.(`#${id}`) ?? null;
   }, []);
 
+  const commitSelectedIdsFromRuntime = useCallback((ids: string[]) => {
+    if (sameIdList(selectedIdsRef.current, ids)) return false;
+    selectedIdsRef.current = ids;
+    callbacksRef.current.onSelectIds(ids);
+    return true;
+  }, []);
+
   const updateFloatingSelection = useCallback(() => {
     const ids = selectedIdsRef.current;
     const frames = ids.map((id) => findFrame(id)).filter((frame): frame is NonNullable<typeof frame> => Boolean(frame));
@@ -162,6 +170,10 @@ export function useLeaferMoodboardRuntime({
       const editor = (appRef.current as any)?.editor;
       if (!editor) return;
       try {
+        if (sameIdList(nodeIdsFromTarget(editor.target), ids)) {
+          scheduleFloatingSelection();
+          return;
+        }
         selectAppNodesByIds(appRef.current, ids);
         scheduleFloatingSelection();
       } catch {
@@ -275,8 +287,7 @@ export function useLeaferMoodboardRuntime({
 
     const syncSelectedFromEditor = (event?: any) => {
       const ids = nodeIdsFromTarget(event?.value ?? editor.target);
-      selectedIdsRef.current = ids;
-      callbacksRef.current.onSelectIds(ids);
+      commitSelectedIdsFromRuntime(ids);
       scheduleFloatingSelection();
     };
     const syncFloatingOnly = () => scheduleFloatingSelection();
@@ -300,9 +311,8 @@ export function useLeaferMoodboardRuntime({
       const source = event?.origin ?? event?.nativeEvent ?? event;
       const additive = Boolean(source?.metaKey || source?.ctrlKey || source?.shiftKey);
       const nextIds = additive ? toggleSelectionId(current, targetId) : [targetId];
-      selectedIdsRef.current = nextIds;
-      callbacksRef.current.onSelectIds(nextIds);
-      selectIdsInRuntime(nextIds);
+      const changed = commitSelectedIdsFromRuntime(nextIds);
+      if (changed) selectIdsInRuntime(nextIds);
       scheduleFloatingSelection();
       return true;
     };
@@ -348,9 +358,8 @@ export function useLeaferMoodboardRuntime({
       const targetId = contextTargetIdFromEvent(event?.target, editor.target);
       if (targetId) {
         const nextIds = selectedIdsRef.current.includes(targetId) ? selectedIdsRef.current : [targetId];
-        selectedIdsRef.current = nextIds;
-        callbacksRef.current.onSelectIds(nextIds);
-        selectIdsInRuntime(nextIds);
+        const changed = commitSelectedIdsFromRuntime(nextIds);
+        if (changed) selectIdsInRuntime(nextIds);
       }
       callbacksRef.current.onContextMenu({ x: client.x, y: client.y, canvasX: point.x, canvasY: point.y, targetId });
     };
@@ -422,7 +431,7 @@ export function useLeaferMoodboardRuntime({
       editor.off(EditorScaleEvent.SCALE, handleEditorTransform);
       editor.off(EditorRotateEvent.ROTATE, handleEditorTransform);
     };
-  }, [finishTransforming, flushFrameState, runtimeReady, scheduleFloatingSelection, selectIdsInRuntime, startTransforming, toViewportDraftRect]);
+  }, [commitSelectedIdsFromRuntime, finishTransforming, flushFrameState, runtimeReady, scheduleFloatingSelection, selectIdsInRuntime, startTransforming, toViewportDraftRect]);
 
   useEffect(() => {
     selectIdsInRuntime(selectedIds);

@@ -6,10 +6,12 @@ import {
   isNodeVisible,
   localId,
   MOODBOARD_LAYERS_OPEN_KEY,
+  moveContainedNodesWithSections,
   readInitialLayersOpen,
   reorderLayerInputs,
   toInput,
   type ContextMenuState,
+  type MoodboardAlignType,
   type MoodboardCanvasTool,
 } from "./canvas-utils.ts";
 import { useLeaferMoodboardRuntime } from "./useLeaferMoodboardRuntime.ts";
@@ -237,6 +239,92 @@ export function useMoodboardCanvasController({
     [patchNodesData],
   );
 
+  const alignNodes = useCallback(
+    (ids: string[], type: MoodboardAlignType) => {
+      const current = nodesRef.current;
+      const byId = new Map(current.map((node) => [node.id, node]));
+      const targets = ids.map((id) => byId.get(id)).filter((node): node is MoodboardNode => Boolean(node));
+      if (targets.length < 2) return;
+
+      const bounds = targets.map((node) => ({
+        id: node.id,
+        left: node.x,
+        right: node.x + node.width,
+        top: node.y,
+        bottom: node.y + node.height,
+        centerX: node.x + node.width / 2,
+        centerY: node.y + node.height / 2,
+        width: node.width,
+        height: node.height,
+      }));
+      const target =
+        type === "left"
+          ? Math.min(...bounds.map((bound) => bound.left))
+          : type === "center-v"
+            ? bounds.reduce((sum, bound) => sum + bound.centerX, 0) / bounds.length
+            : type === "right"
+              ? Math.max(...bounds.map((bound) => bound.right))
+              : type === "top"
+                ? Math.min(...bounds.map((bound) => bound.top))
+                : type === "center-h"
+                  ? bounds.reduce((sum, bound) => sum + bound.centerY, 0) / bounds.length
+                  : Math.max(...bounds.map((bound) => bound.bottom));
+      const positionById = new Map(
+        targets.map((node, index) => {
+          const bound = bounds[index];
+          const x = type === "left" ? target : type === "center-v" ? target - bound.width / 2 : type === "right" ? target - bound.width : node.x;
+          const y = type === "top" ? target : type === "center-h" ? target - bound.height / 2 : type === "bottom" ? target - bound.height : node.y;
+          return [node.id, { x, y }];
+        }),
+      );
+      const next = current.map((node) => {
+        const position = positionById.get(node.id);
+        return position ? { ...toInput(node), x: Math.round(position.x), y: Math.round(position.y) } : toInput(node);
+      });
+      saveInputs(moveContainedNodesWithSections(current, next));
+      setContextMenu(null);
+    },
+    [saveInputs],
+  );
+
+  const arrangeNodes = useCallback(
+    (ids: string[]) => {
+      const current = nodesRef.current;
+      const byId = new Map(current.map((node) => [node.id, node]));
+      const targets = ids.map((id) => byId.get(id)).filter((node): node is MoodboardNode => Boolean(node));
+      if (targets.length < 2) return;
+
+      const sorted = [...targets].sort((a, b) => a.y - b.y || a.x - b.x || a.createdAt - b.createdAt);
+      const minX = Math.min(...sorted.map((node) => node.x));
+      const minY = Math.min(...sorted.map((node) => node.y));
+      const columnCount = Math.max(2, Math.ceil(Math.sqrt(sorted.length)));
+      const gap = 24;
+      let x = minX;
+      let y = minY;
+      let rowHeight = 0;
+      const positionById = new Map<string, { x: number; y: number }>();
+
+      sorted.forEach((node, index) => {
+        if (index > 0 && index % columnCount === 0) {
+          x = minX;
+          y += rowHeight + gap;
+          rowHeight = 0;
+        }
+        positionById.set(node.id, { x, y });
+        x += node.width + gap;
+        rowHeight = Math.max(rowHeight, node.height);
+      });
+
+      const next = current.map((node) => {
+        const position = positionById.get(node.id);
+        return position ? { ...toInput(node), x: Math.round(position.x), y: Math.round(position.y) } : toInput(node);
+      });
+      saveInputs(moveContainedNodesWithSections(current, next));
+      setContextMenu(null);
+    },
+    [saveInputs],
+  );
+
   const bringToFront = useCallback(
     (id: string) => {
       bringNodesToFront([id]);
@@ -439,6 +527,8 @@ export function useMoodboardCanvasController({
     sendNodesToBack,
     setNodesVisible,
     setNodesLocked,
+    alignNodes,
+    arrangeNodes,
     renameNode,
     toggleNodeVisible,
     toggleNodeLocked,

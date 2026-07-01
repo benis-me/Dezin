@@ -1,15 +1,16 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  ArrowDownToLine,
-  ArrowUpToLine,
+  AlignCenterHorizontal,
+  AlignCenterVertical,
+  AlignEndHorizontal,
+  AlignEndVertical,
+  AlignStartHorizontal,
+  AlignStartVertical,
   Copy,
-  Eye,
-  EyeOff,
   Hand,
+  LayoutGrid,
   Layers,
   Loader2,
-  Lock,
-  LockOpen,
   Maximize2,
   Minus,
   MousePointer2,
@@ -40,7 +41,7 @@ import {
   TooltipTrigger,
 } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
-import { generatorPrompt, generatorStatus, isNodeLocked, isNodeVisible, type MoodboardCanvasTool } from "./canvas-utils.ts";
+import { generatorPrompt, generatorStatus, type MoodboardAlignType, type MoodboardCanvasTool } from "./canvas-utils.ts";
 
 export function ToolButton({
   label,
@@ -66,42 +67,17 @@ export function ToolButton({
 }
 
 export function SelectionToolbar({
-  node,
   onDuplicate,
-  onBringToFront,
-  onSendToBack,
-  onToggleVisible,
-  onToggleLocked,
   onDelete,
 }: {
-  node: MoodboardNode;
   onDuplicate: () => void;
-  onBringToFront: () => void;
-  onSendToBack: () => void;
-  onToggleVisible: () => void;
-  onToggleLocked: () => void;
   onDelete: () => void;
 }) {
-  const visible = isNodeVisible(node);
-  const locked = isNodeLocked(node);
-
   return (
     <TooltipProvider delayDuration={120}>
       <div className="pointer-events-auto app-no-drag flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
         <ToolButton label="Duplicate" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
-        </ToolButton>
-        <ToolButton label="Bring to front" onClick={onBringToFront}>
-          <ArrowUpToLine size={14} strokeWidth={1.75} />
-        </ToolButton>
-        <ToolButton label="Send to back" onClick={onSendToBack}>
-          <ArrowDownToLine size={14} strokeWidth={1.75} />
-        </ToolButton>
-        <ToolButton label={visible ? "Hide layer" : "Show layer"} onClick={onToggleVisible}>
-          {visible ? <EyeOff size={14} strokeWidth={1.75} /> : <Eye size={14} strokeWidth={1.75} />}
-        </ToolButton>
-        <ToolButton label={locked ? "Unlock layer" : "Lock layer"} onClick={onToggleLocked}>
-          {locked ? <LockOpen size={14} strokeWidth={1.75} /> : <Lock size={14} strokeWidth={1.75} />}
         </ToolButton>
         <ToolButton label="Delete" onClick={onDelete}>
           <Trash2 size={14} strokeWidth={1.75} />
@@ -114,22 +90,17 @@ export function SelectionToolbar({
 export function MultiSelectionToolbar({
   nodes,
   onDuplicate,
-  onBringToFront,
-  onSendToBack,
-  onSetVisible,
-  onSetLocked,
+  onAlign,
+  onArrange,
   onDelete,
 }: {
   nodes: MoodboardNode[];
   onDuplicate: () => void;
-  onBringToFront: () => void;
-  onSendToBack: () => void;
-  onSetVisible: (visible: boolean) => void;
-  onSetLocked: (locked: boolean) => void;
+  onAlign: (type: MoodboardAlignType) => void;
+  onArrange: () => void;
   onDelete: () => void;
 }) {
-  const anyVisible = nodes.some((node) => isNodeVisible(node));
-  const anyUnlocked = nodes.some((node) => !isNodeLocked(node));
+  const [alignOpen, setAlignOpen] = useState(false);
 
   return (
     <TooltipProvider delayDuration={120}>
@@ -139,17 +110,46 @@ export function MultiSelectionToolbar({
         <ToolButton label="Duplicate selected" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
         </ToolButton>
-        <ToolButton label="Bring selected to front" onClick={onBringToFront}>
-          <ArrowUpToLine size={14} strokeWidth={1.75} />
-        </ToolButton>
-        <ToolButton label="Send selected to back" onClick={onSendToBack}>
-          <ArrowDownToLine size={14} strokeWidth={1.75} />
-        </ToolButton>
-        <ToolButton label={anyVisible ? "Hide selected" : "Show selected"} onClick={() => onSetVisible(!anyVisible)}>
-          {anyVisible ? <EyeOff size={14} strokeWidth={1.75} /> : <Eye size={14} strokeWidth={1.75} />}
-        </ToolButton>
-        <ToolButton label={anyUnlocked ? "Lock selected" : "Unlock selected"} onClick={() => onSetLocked(anyUnlocked)}>
-          {anyUnlocked ? <Lock size={14} strokeWidth={1.75} /> : <LockOpen size={14} strokeWidth={1.75} />}
+        <DropdownMenu open={alignOpen} onOpenChange={setAlignOpen}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <IconButton aria-label="Align selected" onClick={() => setAlignOpen((open) => !open)}>
+                  <AlignStartVertical size={14} strokeWidth={1.75} />
+                </IconButton>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent sideOffset={2}>Align selected</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent side="top" align="center" className="w-44">
+            <DropdownMenuItem onClick={() => onAlign("left")}>
+              <AlignStartVertical size={14} strokeWidth={1.75} />
+              Align left
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onAlign("center-v")}>
+              <AlignCenterVertical size={14} strokeWidth={1.75} />
+              Align center
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onAlign("right")}>
+              <AlignEndVertical size={14} strokeWidth={1.75} />
+              Align right
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onAlign("top")}>
+              <AlignStartHorizontal size={14} strokeWidth={1.75} />
+              Align top
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onAlign("center-h")}>
+              <AlignCenterHorizontal size={14} strokeWidth={1.75} />
+              Align middle
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onAlign("bottom")}>
+              <AlignEndHorizontal size={14} strokeWidth={1.75} />
+              Align bottom
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <ToolButton label="Arrange selected" onClick={onArrange}>
+          <LayoutGrid size={14} strokeWidth={1.75} />
         </ToolButton>
         <ToolButton label="Delete selected" onClick={onDelete}>
           <Trash2 size={14} strokeWidth={1.75} />

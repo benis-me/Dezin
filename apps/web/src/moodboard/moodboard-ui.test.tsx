@@ -23,6 +23,7 @@ import {
   resolveFloatingChromeRect,
   resolveFloatingRect,
   sameFloatingRect,
+  sameIdList,
 } from "./canvas-utils.ts";
 import { createSnapLines, createSnapPointsFromBounds, resolveSnapDeltas } from "./leafer-adapter/snap-geometry.ts";
 import { selectAppNodesByIds } from "./leafer-adapter/editor-selection.ts";
@@ -168,7 +169,7 @@ test("resolveFloatingRect follows world bounds and clamps within the canvas", ()
       frame: { x: 0, y: 0, width: 200, height: 120 },
       world: { x: 460, y: 280, width: 200, height: 120 },
     }),
-  ).toEqual({ left: 484, top: 216, bottom: 188 });
+  ).toEqual({ left: 484, top: 252, bottom: 188 });
 });
 
 test("resolveFloatingRect accepts Leafer-local world bounds without subtracting the host offset", () => {
@@ -182,7 +183,7 @@ test("resolveFloatingRect accepts Leafer-local world bounds without subtracting 
       tree: { x: 0, y: 0, scaleX: 1 },
       world: { x: 100, y: 90, width: 200, height: 120 },
     }),
-  ).toEqual({ left: 200, top: 46, bottom: 222 });
+  ).toEqual({ left: 200, top: 82, bottom: 222 });
 });
 
 test("generatorModel reads the image model stored on a generator node", () => {
@@ -288,6 +289,12 @@ test("Awen editor selection adapter maps node ids onto the Leafer editor target"
 test("sameFloatingRect ignores subpixel jitter during drag", () => {
   expect(sameFloatingRect({ left: 120, top: 80, bottom: 220 }, { left: 120.25, top: 80.2, bottom: 220.4 })).toBe(true);
   expect(sameFloatingRect({ left: 120, top: 80, bottom: 220 }, { left: 121, top: 80, bottom: 220 })).toBe(false);
+});
+
+test("sameIdList treats identical selection ids as stable", () => {
+  expect(sameIdList(["a", "b"], ["a", "b"])).toBe(true);
+  expect(sameIdList(["a", "b"], ["b", "a"])).toBe(false);
+  expect(sameIdList(["a"], ["a", "b"])).toBe(false);
 });
 
 test("createSectionNode keeps dragged section dimensions", () => {
@@ -771,50 +778,31 @@ test("MoodboardPropertiesPanel shows concrete layout values", () => {
   expect(screen.getByText("15 deg")).toBeInTheDocument();
 });
 
-test("SelectionToolbar exposes object visibility and lock actions", () => {
-  const onToggleVisible = vi.fn();
-  const onToggleLocked = vi.fn();
-  const node: MoodboardNode = {
-    id: "n1",
-    boardId: "b1",
-    type: "note",
-    x: 120,
-    y: 140,
-    width: 220,
-    height: 140,
-    rotation: 0,
-    zIndex: 0,
-    data: { content: "Reference tone" },
-    createdAt: 1,
-    updatedAt: 1,
-  };
+test("SelectionToolbar exposes compact object actions", () => {
+  const onDuplicate = vi.fn();
+  const onDelete = vi.fn();
 
   render(
     <SelectionToolbar
-      node={node}
-      onDuplicate={() => {}}
-      onBringToFront={() => {}}
-      onSendToBack={() => {}}
-      onToggleVisible={onToggleVisible}
-      onToggleLocked={onToggleLocked}
-      onDelete={() => {}}
+      onDuplicate={onDuplicate}
+      onDelete={onDelete}
     />,
   );
 
-  fireEvent.click(screen.getByLabelText("Hide layer"));
-  fireEvent.click(screen.getByLabelText("Lock layer"));
+  fireEvent.click(screen.getByLabelText("Duplicate"));
+  fireEvent.click(screen.getByLabelText("Delete"));
 
-  expect(onToggleVisible).toHaveBeenCalledOnce();
-  expect(onToggleLocked).toHaveBeenCalledOnce();
-  expect(screen.queryByText("Reference tone")).toBeNull();
+  expect(onDuplicate).toHaveBeenCalledOnce();
+  expect(onDelete).toHaveBeenCalledOnce();
+  expect(screen.queryByLabelText("Bring to front")).toBeNull();
+  expect(screen.queryByLabelText("Hide layer")).toBeNull();
+  expect(screen.queryByLabelText("Lock layer")).toBeNull();
 });
 
 test("MultiSelectionToolbar exposes batch node actions", () => {
   const onDuplicate = vi.fn();
-  const onBringToFront = vi.fn();
-  const onSendToBack = vi.fn();
-  const onSetVisible = vi.fn();
-  const onSetLocked = vi.fn();
+  const onAlign = vi.fn();
+  const onArrange = vi.fn();
   const onDelete = vi.fn();
   const first: MoodboardNode = {
     id: "n1",
@@ -840,28 +828,25 @@ test("MultiSelectionToolbar exposes batch node actions", () => {
     <MultiSelectionToolbar
       nodes={[first, second]}
       onDuplicate={onDuplicate}
-      onBringToFront={onBringToFront}
-      onSendToBack={onSendToBack}
-      onSetVisible={onSetVisible}
-      onSetLocked={onSetLocked}
+      onAlign={onAlign}
+      onArrange={onArrange}
       onDelete={onDelete}
     />,
   );
 
   expect(screen.getByText("2 selected")).toBeInTheDocument();
   fireEvent.click(screen.getByLabelText("Duplicate selected"));
-  fireEvent.click(screen.getByLabelText("Bring selected to front"));
-  fireEvent.click(screen.getByLabelText("Send selected to back"));
-  fireEvent.click(screen.getByLabelText("Hide selected"));
-  fireEvent.click(screen.getByLabelText("Lock selected"));
+  fireEvent.click(screen.getByLabelText("Align selected"));
+  fireEvent.click(screen.getByText("Align left"));
+  fireEvent.click(screen.getByLabelText("Arrange selected"));
   fireEvent.click(screen.getByLabelText("Delete selected"));
 
   expect(onDuplicate).toHaveBeenCalledOnce();
-  expect(onBringToFront).toHaveBeenCalledOnce();
-  expect(onSendToBack).toHaveBeenCalledOnce();
-  expect(onSetVisible).toHaveBeenCalledWith(false);
-  expect(onSetLocked).toHaveBeenCalledWith(true);
+  expect(onAlign).toHaveBeenCalledWith("left");
+  expect(onArrange).toHaveBeenCalledOnce();
   expect(onDelete).toHaveBeenCalledOnce();
+  expect(screen.queryByLabelText("Bring selected to front")).toBeNull();
+  expect(screen.queryByLabelText("Hide selected")).toBeNull();
 });
 
 test("GeneratorPromptToolbar exposes a compact image model selector", () => {

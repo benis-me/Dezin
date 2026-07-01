@@ -1,6 +1,7 @@
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 
 export type MoodboardCanvasTool = "select" | "hand" | "note" | "section";
+export type MoodboardAlignType = "left" | "center-v" | "right" | "top" | "center-h" | "bottom";
 
 export interface ContextMenuState {
   x: number;
@@ -201,6 +202,10 @@ export function sameFloatingRect(a: FloatingRect | null, b: FloatingRect | null,
   );
 }
 
+export function sameIdList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
 export function resolveFloatingRect({
   containerWidth,
   containerHeight,
@@ -214,7 +219,7 @@ export function resolveFloatingRect({
   const frameWidth = Number(frame.width ?? 160);
   const frameHeight = Number(frame.height ?? 120);
   const fallbackLeft = Number(tree?.x ?? 0) + (Number(frame.x ?? 0) + frameWidth / 2) * scale;
-  const fallbackTop = Number(tree?.y ?? 0) + Number(frame.y ?? 0) * scale - 44;
+  const fallbackTop = Number(tree?.y ?? 0) + Number(frame.y ?? 0) * scale - 8;
   const fallbackBottom = Number(tree?.y ?? 0) + (Number(frame.y ?? 0) + frameHeight) * scale + 12;
   let rawLeft = fallbackLeft;
   let rawTop = fallbackTop;
@@ -225,12 +230,12 @@ export function resolveFloatingRect({
     const worldHeight = Number(world.height ?? frameHeight);
     const localCandidate = {
       left: Number(world.x ?? 0) + worldWidth / 2,
-      top: Number(world.y ?? 0) - 44,
+      top: Number(world.y ?? 0) - 8,
       bottom: Number(world.y ?? 0) + worldHeight + 12,
     };
     const viewportCandidate = {
       left: Number(world.x ?? 0) - containerLeft + worldWidth / 2,
-      top: Number(world.y ?? 0) - containerTop - 44,
+      top: Number(world.y ?? 0) - containerTop - 8,
       bottom: Number(world.y ?? 0) - containerTop + worldHeight + 12,
     };
     const localDistance = floatingCandidateDistance(localCandidate, fallbackLeft, fallbackTop, fallbackBottom);

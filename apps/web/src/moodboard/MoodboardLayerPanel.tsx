@@ -97,7 +97,7 @@ export function MoodboardLayerPanel({
         <Layers size={14} strokeWidth={1.75} />
         Layers
       </div>
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto py-1">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto px-1.5 py-1">
         {items.length === 0 ? (
           <p className="px-3 py-5 text-xs text-muted-foreground">No canvas items yet.</p>
         ) : (
