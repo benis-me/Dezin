@@ -98,7 +98,7 @@ export interface Artifact {
   createdAt: number;
 }
 
-export type MoodboardNodeType = "image" | "note" | "section" | "video";
+export type MoodboardNodeType = "image" | "image-generator" | "note" | "section" | "video";
 
 export interface Moodboard {
   id: string;
@@ -193,6 +193,14 @@ export interface Settings {
   videoApiKey: string;
   /** Optional video model, e.g. "sora". */
   videoModel: string;
+  /** Selected AI provider in the model platform settings. */
+  aiProviderId: string;
+  /** Whether the selected AI provider is enabled for generation surfaces. */
+  aiProviderEnabled: boolean;
+  /** Newline-separated model ids for the selected provider. */
+  aiProviderModels: string;
+  /** Optional organization/project id for providers that support it. */
+  aiProviderOrganization: string;
   /** When enabled, the selected Agent/model reviews a rendered screenshot after prototype runs. */
   visualQaEnabled: boolean;
 }

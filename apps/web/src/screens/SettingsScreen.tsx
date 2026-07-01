@@ -1,20 +1,20 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Check, Eye, ImagePlus, Info, KeyRound, Palette, Puzzle, RotateCw, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
-import { Button, Field, Input, Picker, Textarea, Loading, Spinner, Badge, ScrollArea } from "../components/ui/index.ts";
+import { Check, Eye, Info, Palette, Puzzle, RotateCw, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
+import { Button, Input, Picker, Textarea, Loading, Spinner, Badge, ScrollArea } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import { AgentLogo, agentLabel } from "../components/agent-logos.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import type { DesignSystemCard, Settings } from "../lib/api.ts";
+import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
 
-type SectionId = "appearance" | "provider" | "connection" | "media" | "quality" | "defaults" | "instructions" | "extension" | "about";
+type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
 const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "provider", label: "Provider", icon: Server },
-  { id: "connection", label: "Connection", icon: KeyRound },
-  { id: "media", label: "Media", icon: ImagePlus },
+  { id: "models", label: "Models", icon: SlidersHorizontal },
   { id: "quality", label: "Quality", icon: Eye },
   { id: "defaults", label: "Defaults", icon: SlidersHorizontal },
   { id: "instructions", label: "Custom instructions", icon: Type },
@@ -33,8 +33,9 @@ export function SettingsScreen({
 }) {
   const api = useApi();
   const { toast } = useToast();
+  const normalizedInitialSection = initialSection === "connection" || initialSection === "media" ? "models" : initialSection;
   const [section, setSection] = useState<SectionId>(
-    SECTIONS.some((s) => s.id === initialSection) ? (initialSection as SectionId) : "appearance",
+    SECTIONS.some((s) => s.id === normalizedInitialSection) ? (normalizedInitialSection as SectionId) : "appearance",
   );
   const [settings, setSettings] = useState<Settings | null>(null);
   const { agents, loading: agentsInitial, scanning, status: scanStatus, rescan } = useAgents();
@@ -53,9 +54,14 @@ export function SettingsScreen({
   }, [api]);
 
   const setLocal = (key: keyof Settings, value: string | boolean) => setSettings((s) => (s ? { ...s, [key]: value } : s));
+  const setLocalPatch = (patch: Partial<Settings>) => setSettings((s) => (s ? { ...s, ...patch } : s));
   const save = (key: keyof Settings, value: string | boolean) => {
     setLocal(key, value);
     void api.updateSettings({ [key]: value } as Partial<Settings>).catch(() => toast("Couldn't save settings.", { variant: "error" }));
+  };
+  const savePatch = (patch: Partial<Settings>) => {
+    setLocalPatch(patch);
+    void api.updateSettings(patch).then((next) => setSettings(next)).catch(() => toast("Couldn't save settings.", { variant: "error" }));
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);
@@ -101,7 +107,7 @@ export function SettingsScreen({
         {settings === null ? (
           <Loading label="Loading settings…" />
         ) : (
-          <div className="mx-auto max-w-2xl p-8">
+          <div className={cn(section === "models" ? "h-full" : "mx-auto max-w-2xl p-8")}>
             {section === "appearance" && (
               <Panel title="Appearance" desc="How Dezin looks. Monochrome surfaces, borders over shadows, one near-black accent.">
                 <Rows>
@@ -209,122 +215,7 @@ export function SettingsScreen({
                 </div>
               </Panel>
             )}
-
-            {section === "connection" && (
-              <Panel title="Connection" desc="Optional BYOK endpoint. Stored locally; never leaves your machine.">
-                <div className="space-y-4">
-                  <Field label="API base URL">
-                    <Input
-                      aria-label="API base URL"
-                      value={settings.apiBaseUrl}
-                      placeholder="https://…"
-                      onChange={(e) => setLocal("apiBaseUrl", e.target.value)}
-                      onBlur={(e) => save("apiBaseUrl", e.target.value)}
-                    />
-                  </Field>
-                  <Field label="API key">
-                    <Input
-                      aria-label="API key"
-                      type="password"
-                      value={settings.apiKey}
-                      placeholder="sk-…"
-                      onChange={(e) => setLocal("apiKey", e.target.value)}
-                      onBlur={(e) => save("apiKey", e.target.value)}
-                    />
-                  </Field>
-
-                </div>
-              </Panel>
-            )}
-
-            {section === "media" && (
-              <Panel title="Media" desc="Providers and default models for Moodboard asset generation.">
-                <div className="space-y-6">
-                  <div>
-                    <div className="text-sm font-medium">Image generation</div>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      OpenAI Images-compatible. Moodboard uses this to generate image assets onto the canvas.
-                    </p>
-                    <div className="mt-4 space-y-4">
-                      <Field label="Image API base URL">
-                        <Input
-                          aria-label="Image API base URL"
-                          value={settings.imageApiBaseUrl}
-                          placeholder="https://api.openai.com/v1"
-                          onChange={(e) => setLocal("imageApiBaseUrl", e.target.value)}
-                          onBlur={(e) => save("imageApiBaseUrl", e.target.value)}
-                        />
-                      </Field>
-                      <div className="grid grid-cols-2 gap-4">
-                        <Field label="Image API key">
-                          <Input
-                            aria-label="Image API key"
-                            type="password"
-                            value={settings.imageApiKey}
-                            placeholder="sk-..."
-                            onChange={(e) => setLocal("imageApiKey", e.target.value)}
-                            onBlur={(e) => save("imageApiKey", e.target.value)}
-                          />
-                        </Field>
-                        <Field label="Image model">
-                          <Input
-                            aria-label="Image model"
-                            value={settings.imageModel}
-                            placeholder="gpt-image-1"
-                            onChange={(e) => setLocal("imageModel", e.target.value)}
-                            onBlur={(e) => save("imageModel", e.target.value)}
-                          />
-                        </Field>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="border-t border-border pt-5">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-medium">Video generation</div>
-                        <p className="mt-0.5 text-xs text-muted-foreground">
-                          Configuration is saved now; real video jobs are reserved for a later Moodboard iteration.
-                        </p>
-                      </div>
-                      <Badge variant="outline">Planned</Badge>
-                    </div>
-                    <div className="mt-4 space-y-4 opacity-80">
-                      <Field label="Video API base URL">
-                        <Input
-                          aria-label="Video API base URL"
-                          value={settings.videoApiBaseUrl}
-                          placeholder="https://api.openai.com/v1"
-                          onChange={(e) => setLocal("videoApiBaseUrl", e.target.value)}
-                          onBlur={(e) => save("videoApiBaseUrl", e.target.value)}
-                        />
-                      </Field>
-                      <div className="grid grid-cols-2 gap-4">
-                        <Field label="Video API key">
-                          <Input
-                            aria-label="Video API key"
-                            type="password"
-                            value={settings.videoApiKey}
-                            placeholder="sk-..."
-                            onChange={(e) => setLocal("videoApiKey", e.target.value)}
-                            onBlur={(e) => save("videoApiKey", e.target.value)}
-                          />
-                        </Field>
-                        <Field label="Video model">
-                          <Input
-                            aria-label="Video model"
-                            value={settings.videoModel}
-                            placeholder="sora"
-                            onChange={(e) => setLocal("videoModel", e.target.value)}
-                            onBlur={(e) => save("videoModel", e.target.value)}
-                          />
-                        </Field>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </Panel>
-            )}
+            {section === "models" && <ModelProviderSettings settings={settings} onLocalPatch={setLocalPatch} onSavePatch={savePatch} />}
 
             {section === "quality" && (
               <Panel title="Quality" desc="Checks the finished prototype against visible layout problems.">

@@ -107,13 +107,25 @@ test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        nodes: [{ type: "image", x: 10, y: 20, width: 320, height: 240, data: { assetId: asset.id, url: asset.url } }],
+        nodes: [
+          {
+            type: "image-generator",
+            x: 10,
+            y: 20,
+            width: 360,
+            height: 240,
+            data: { generatorPrompt: "Soft studio references", generatorStatus: "ready" },
+          },
+          { type: "image", x: 400, y: 20, width: 320, height: 240, data: { assetId: asset.id, url: asset.url } },
+        ],
       }),
     });
     assert.equal(nodesRes.status, 200);
-    const nodes = (await nodesRes.json()) as Array<{ type: string; data: { assetId?: string } }>;
-    assert.equal(nodes.length, 1);
-    assert.equal(nodes[0]?.data.assetId, asset.id);
+    const nodes = (await nodesRes.json()) as Array<{ type: string; data: { assetId?: string; generatorStatus?: string } }>;
+    assert.equal(nodes.length, 2);
+    assert.equal(nodes[0]?.type, "image-generator");
+    assert.equal(nodes[0]?.data.generatorStatus, "ready");
+    assert.equal(nodes[1]?.data.assetId, asset.id);
 
     const message = await fetch(`${base}/api/moodboards/${board.id}/messages`, {
       method: "POST",
@@ -121,8 +133,13 @@ test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
       body: JSON.stringify({ content: "Use calmer references" }),
     });
     assert.equal(message.status, 201);
-    const detail = (await (await fetch(`${base}/api/moodboards/${board.id}`)).json()) as { nodes: unknown[]; messages: unknown[]; coverUrl: string | null };
-    assert.equal(detail.nodes.length, 1);
+    const detail = (await (await fetch(`${base}/api/moodboards/${board.id}`)).json()) as {
+      nodes: Array<{ type: string }>;
+      messages: unknown[];
+      coverUrl: string | null;
+    };
+    assert.equal(detail.nodes.length, 2);
+    assert.equal(detail.nodes[0]?.type, "image-generator");
     assert.equal(detail.messages.length, 2);
     assert.ok(detail.coverUrl);
   });

@@ -633,6 +633,10 @@ test("/projects/new preserves the selected agent and model for the first run", a
       videoApiBaseUrl: "",
       videoApiKey: "",
       videoModel: "",
+      aiProviderId: "openai",
+      aiProviderEnabled: false,
+      aiProviderModels: "gpt-image-1",
+      aiProviderOrganization: "",
       visualQaEnabled: false,
     }),
   });

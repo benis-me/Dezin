@@ -66,7 +66,7 @@ export interface CreateProjectInput {
   mode?: ProjectMode;
 }
 
-export type MoodboardNodeType = "image" | "note" | "section" | "video";
+export type MoodboardNodeType = "image" | "image-generator" | "note" | "section" | "video";
 
 export interface Moodboard {
   id: string;
@@ -195,6 +195,10 @@ export interface Settings {
   videoApiBaseUrl: string;
   videoApiKey: string;
   videoModel: string;
+  aiProviderId: string;
+  aiProviderEnabled: boolean;
+  aiProviderModels: string;
+  aiProviderOrganization: string;
   visualQaEnabled: boolean;
 }
 
@@ -363,7 +367,7 @@ export interface ApiClient {
     id: string,
     input: { name: string; contentBase64: string; mimeType?: string; width?: number; height?: number },
   ): Promise<MoodboardAsset & { url: string }>;
-  generateMoodboardImage(id: string, prompt: string, options?: { x?: number; y?: number }): Promise<{
+  generateMoodboardImage(id: string, prompt: string, options?: { x?: number; y?: number; generatorId?: string }): Promise<{
     asset: MoodboardAsset & { url: string };
     nodes: MoodboardNode[];
     messages: MoodboardMessage[];

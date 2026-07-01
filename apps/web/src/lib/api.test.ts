@@ -211,6 +211,10 @@ test("settings + agents + health endpoints", async () => {
         videoApiBaseUrl: "",
         videoApiKey: "",
         videoModel: "",
+        aiProviderId: "openai",
+        aiProviderEnabled: false,
+        aiProviderModels: "gpt-image-1",
+        aiProviderOrganization: "",
         visualQaEnabled: false,
       });
     }
@@ -228,6 +232,10 @@ test("settings + agents + health endpoints", async () => {
         videoApiBaseUrl: "",
         videoApiKey: "",
         videoModel: "",
+        aiProviderId: "openai",
+        aiProviderEnabled: false,
+        aiProviderModels: "gpt-image-1",
+        aiProviderOrganization: "",
         visualQaEnabled: false,
       });
     }

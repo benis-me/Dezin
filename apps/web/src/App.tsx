@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Shell } from "./components/Shell.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
-import { Dialog } from "./components/ui/index.ts";
+import { Dialog, Loading } from "./components/ui/index.ts";
 import { useToast } from "./components/Toast.tsx";
 import { useRoute, navigate, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
@@ -14,7 +14,10 @@ import { DesignSystemNewScreen } from "./screens/DesignSystemNewScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
 import { OnboardingScreen } from "./screens/OnboardingScreen.tsx";
 import { MoodboardsScreen } from "./screens/MoodboardsScreen.tsx";
-import { MoodboardScreen } from "./screens/MoodboardScreen.tsx";
+
+const MoodboardScreen = lazy(() =>
+  import("./screens/MoodboardScreen.tsx").then((module) => ({ default: module.MoodboardScreen })),
+);
 
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
@@ -30,7 +33,11 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
     case "moodboards":
       return <MoodboardsScreen onOpenBoard={(id) => navigate(`/moodboards/${id}`)} />;
     case "moodboard":
-      return <MoodboardScreen boardId={route.id} onBack={() => navigate("/moodboards")} onOpenSettings={onOpenSettings} />;
+      return (
+        <Suspense fallback={<Loading label="Loading moodboard..." />}>
+          <MoodboardScreen boardId={route.id} onBack={() => navigate("/moodboards")} onOpenSettings={onOpenSettings} />
+        </Suspense>
+      );
     case "design-systems":
       return <DesignSystemsScreen />;
     case "design-system":

@@ -56,15 +56,20 @@ function mimeForFile(fileName: string, fallback: string): string {
 
 function validNode(input: unknown): SaveMoodboardNodeInput | null {
   const node = asObject(input);
-  const type = node.type === "note" || node.type === "section" || node.type === "video" ? node.type : node.type === "image" ? "image" : null;
+  const type =
+    node.type === "note" || node.type === "section" || node.type === "video" || node.type === "image-generator"
+      ? node.type
+      : node.type === "image"
+        ? "image"
+        : null;
   if (!type) return null;
   return {
     id: typeof node.id === "string" && node.id.trim() ? node.id.trim() : undefined,
     type,
     x: numberValue(node.x, 0),
     y: numberValue(node.y, 0),
-    width: Math.max(32, numberValue(node.width, type === "note" ? 220 : 260)),
-    height: Math.max(32, numberValue(node.height, type === "note" ? 140 : 180)),
+    width: Math.max(32, numberValue(node.width, type === "note" ? 220 : type === "image-generator" ? 360 : 260)),
+    height: Math.max(32, numberValue(node.height, type === "note" ? 140 : type === "image-generator" ? 240 : 180)),
     rotation: numberValue(node.rotation, 0),
     zIndex: numberValue(node.zIndex, 0),
     data: asObject(node.data),
@@ -159,7 +164,7 @@ export async function handlePostMoodboardMessage(
   const assistant = store.addMoodboardMessage(
     id!,
     "assistant",
-    `Canvas context: ${nodes.length} item${nodes.length === 1 ? "" : "s"}. Use Generate image to place new visual material on the board.`,
+    `Canvas context: ${nodes.length} item${nodes.length === 1 ? "" : "s"}. Use an image generator node to place new visual material on the board.`,
   );
   sendJson(res, 201, { messages: [user, assistant] });
 }
@@ -216,6 +221,7 @@ export async function handleGenerateMoodboardImage(
   const body = asObject(await readJsonBody(req));
   const prompt = stringValue(body.prompt);
   if (!prompt) return sendError(res, 400, "prompt is required");
+  const generatorId = stringValue(body.generatorId);
 
   const b64 = await requestImage(
     { baseUrl: settings.imageApiBaseUrl, apiKey: settings.imageApiKey, model: settings.imageModel },
@@ -235,17 +241,42 @@ export async function handleGenerateMoodboardImage(
   writeFileSync(join(dir, `${asset.id}.png`), Buffer.from(b64, "base64"));
 
   const nodes = store.listMoodboardNodes(id!);
-  const x = numberValue(body.x, 80 + nodes.length * 24);
-  const y = numberValue(body.y, 80 + nodes.length * 24);
+  const generator = generatorId ? nodes.find((node) => node.id === generatorId && node.type === "image-generator") : null;
+  const x = numberValue(body.x, generator ? generator.x + generator.width + 24 : 80 + nodes.length * 24);
+  const y = numberValue(body.y, generator ? generator.y : 80 + nodes.length * 24);
+  const maxZ = Math.max(0, ...nodes.map((node) => node.zIndex ?? 0));
+  const updatedNodes = generator
+    ? nodes.map((node) =>
+        node.id === generator.id
+          ? {
+              type: node.type,
+              x: node.x,
+              y: node.y,
+              width: node.width,
+              height: node.height,
+              rotation: node.rotation,
+              zIndex: node.zIndex,
+              id: node.id,
+              data: {
+                ...node.data,
+                generatorPrompt: prompt,
+                generatorStatus: "done",
+                resultAssetId: asset.id,
+                resultUrl: assetUrl(id!, asset.id),
+              },
+            }
+          : node,
+      )
+    : nodes;
   const saved = store.replaceMoodboardNodes(id!, [
-    ...nodes,
+    ...updatedNodes,
     {
       type: "image",
       x,
       y,
-      width: 320,
-      height: 320,
-      zIndex: nodes.length,
+      width: generator ? Math.max(180, generator.width) : 320,
+      height: generator ? Math.max(180, generator.height) : 320,
+      zIndex: maxZ + 1,
       data: { assetId: asset.id, url: assetUrl(id!, asset.id), prompt, source: "generated" },
     },
   ]);

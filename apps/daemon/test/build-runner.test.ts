@@ -18,6 +18,10 @@ function settings(over: Partial<Settings>): Settings {
     videoApiBaseUrl: "",
     videoApiKey: "",
     videoModel: "",
+    aiProviderId: "openai",
+    aiProviderEnabled: false,
+    aiProviderModels: "gpt-image-1",
+    aiProviderOrganization: "",
     visualQaEnabled: false,
     ...over,
   };

@@ -1,285 +1,492 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
-import { Hand, ImagePlus, MousePointer2, Plus, SquareDashedMousePointer, StickyNote, Upload } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import {
+  Hand,
+  ImagePlus,
+  Layers,
+  Minus,
+  MousePointer2,
+  Plus,
+  SquareDashedMousePointer,
+  StickyNote,
+  Upload,
+  WandSparkles,
+} from "lucide-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
-import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
+import { Button, TooltipProvider } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
-
-type Tool = "select" | "pan";
-
-interface Viewport {
-  x: number;
-  y: number;
-  scale: number;
-}
-
-interface DragState {
-  kind: "pan" | "node";
-  id?: string;
-  startX: number;
-  startY: number;
-  originX: number;
-  originY: number;
-}
-
-function nodeText(node: MoodboardNode): string {
-  const content = node.data.content;
-  return typeof content === "string" ? content : "";
-}
-
-function nodeTitle(node: MoodboardNode): string {
-  const title = node.data.title;
-  return typeof title === "string" ? title : node.type === "section" ? "Section" : "Note";
-}
-
-function assetUrl(node: MoodboardNode): string {
-  const url = node.data.url;
-  return typeof url === "string" ? url : "";
-}
-
-function promptText(node: MoodboardNode): string {
-  const prompt = node.data.prompt;
-  return typeof prompt === "string" ? prompt : "";
-}
+import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
+import { GeneratorPromptToolbar, SelectionToolbar, ToolButton } from "./MoodboardCanvasToolbars.tsx";
+import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
+import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
+import { makeNodeFrame } from "./leafer-node-renderer.ts";
+import {
+  buildLayerTree,
+  clampMenu,
+  eventCanvasPoint,
+  eventClientPoint,
+  generatorPrompt,
+  isNodeLocked,
+  isNodeVisible,
+  localId,
+  nodeIdFromTarget,
+  rounded,
+  toInput,
+  type ContextMenuState,
+  type FloatingRect,
+  type LeaferRuntime,
+  type MoodboardCanvasTool,
+} from "./canvas-utils.ts";
 
 export function MoodboardCanvas({
   nodes,
   selectedId,
+  busy = false,
   onSelect,
   onNodesChange,
   onAddNote,
   onAddSection,
+  onAddImageGenerator,
   onUploadFiles,
-  onGenerateAt,
+  onGenerateImage,
 }: {
   nodes: MoodboardNode[];
   selectedId: string | null;
+  busy?: boolean;
   onSelect: (id: string | null) => void;
   onNodesChange: (nodes: SaveMoodboardNodeInput[]) => void;
-  onAddNote: () => void;
-  onAddSection: () => void;
+  onAddNote: (point?: { x: number; y: number }) => void;
+  onAddSection: (point?: { x: number; y: number }) => void;
+  onAddImageGenerator: (point?: { x: number; y: number }) => void;
   onUploadFiles: (files: FileList | null) => void;
-  onGenerateAt: (x: number, y: number) => void;
+  onGenerateImage: (node: MoodboardNode, prompt: string) => Promise<void>;
 }) {
-  const [tool, setTool] = useState<Tool>("select");
-  const [viewport, setViewport] = useState<Viewport>({ x: 220, y: 120, scale: 1 });
-  const drag = useRef<DragState | null>(null);
+  const [tool, setTool] = useState<MoodboardCanvasTool>("select");
+  const [layersOpen, setLayersOpen] = useState(true);
+  const [runtimeReady, setRuntimeReady] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [selectionRect, setSelectionRect] = useState<FloatingRect | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [collapsedLayerIds, setCollapsedLayerIds] = useState<Set<string>>(() => new Set());
+  const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const runtimeRef = useRef<LeaferRuntime | null>(null);
+  const framesRef = useRef<Map<string, any>>(new Map());
+  const nodesRef = useRef(nodes);
+  const selectedIdRef = useRef(selectedId);
+  const toolRef = useRef(tool);
+  const onSelectRef = useRef(onSelect);
+  const onNodesChangeRef = useRef(onNodesChange);
+  const onAddNoteRef = useRef(onAddNote);
+  const onAddSectionRef = useRef(onAddSection);
+  const onAddImageGeneratorRef = useRef(onAddImageGenerator);
 
-  const save = useCallback(
-    (next: MoodboardNode[]) =>
-      onNodesChange(
-        next.map((n) => ({
-          id: n.id,
-          type: n.type,
-          x: n.x,
-          y: n.y,
-          width: n.width,
-          height: n.height,
-          rotation: n.rotation,
-          zIndex: n.zIndex,
-          data: n.data,
-        })),
-      ),
-    [onNodesChange],
-  );
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
 
-  const updateNode = useCallback(
-    (id: string, patch: Partial<MoodboardNode>) => {
-      const next = nodes.map((node) => (node.id === id ? { ...node, ...patch } : node));
-      save(next);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    toolRef.current = tool;
+  }, [tool]);
+
+  useEffect(() => {
+    onSelectRef.current = onSelect;
+    onNodesChangeRef.current = onNodesChange;
+    onAddNoteRef.current = onAddNote;
+    onAddSectionRef.current = onAddSection;
+    onAddImageGeneratorRef.current = onAddImageGenerator;
+  }, [onAddImageGenerator, onAddNote, onAddSection, onNodesChange, onSelect]);
+
+  const selected = useMemo(() => nodes.find((node) => node.id === selectedId) ?? null, [nodes, selectedId]);
+  const layerTree = useMemo(() => buildLayerTree(nodes), [nodes]);
+
+  const saveInputs = useCallback((next: SaveMoodboardNodeInput[]) => onNodesChangeRef.current(next), []);
+
+  const patchNode = useCallback(
+    (id: string, patch: Partial<SaveMoodboardNodeInput>) => {
+      saveInputs(nodesRef.current.map((node) => (node.id === id ? { ...toInput(node), ...patch, data: patch.data ?? node.data } : toInput(node))));
     },
-    [nodes, save],
+    [saveInputs],
   );
 
-  const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    if (event.metaKey || event.ctrlKey) {
-      const rect = event.currentTarget.getBoundingClientRect();
-      const nextScale = Math.min(2.5, Math.max(0.25, viewport.scale * (event.deltaY > 0 ? 0.92 : 1.08)));
-      const mx = event.clientX - rect.left;
-      const my = event.clientY - rect.top;
-      const wx = (mx - viewport.x) / viewport.scale;
-      const wy = (my - viewport.y) / viewport.scale;
-      setViewport({ x: mx - wx * nextScale, y: my - wy * nextScale, scale: nextScale });
-    } else {
-      setViewport((v) => ({ ...v, x: v.x - event.deltaX, y: v.y - event.deltaY }));
-    }
-  };
+  const flushFrameState = useCallback(() => {
+    const frames = framesRef.current;
+    const next = nodesRef.current.map((node) => {
+      const frame = frames.get(node.id);
+      if (!frame) return toInput(node);
+      return {
+        ...toInput(node),
+        x: rounded(frame.x, node.x),
+        y: rounded(frame.y, node.y),
+        width: Math.max(40, rounded(frame.width, node.width)),
+        height: Math.max(40, rounded(frame.height, node.height)),
+        rotation: rounded(frame.rotation, node.rotation ?? 0),
+        zIndex: rounded(frame.zIndex, node.zIndex ?? 0),
+      };
+    });
+    saveInputs(next);
+  }, [saveInputs]);
 
-  const onBlankPointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    onSelect(null);
-    drag.current = { kind: "pan", startX: event.clientX, startY: event.clientY, originX: viewport.x, originY: viewport.y };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-
-  const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
-    const d = drag.current;
-    if (!d) return;
-    if (d.kind === "pan") {
-      setViewport((v) => ({ ...v, x: d.originX + event.clientX - d.startX, y: d.originY + event.clientY - d.startY }));
+  const updateFloatingSelection = useCallback(() => {
+    const runtime = runtimeRef.current;
+    const id = selectedIdRef.current;
+    const frame = id ? framesRef.current.get(id) : null;
+    const container = containerRef.current;
+    if (!runtime || !frame || !container) {
+      setSelectionRect(null);
       return;
     }
-    if (d.id) {
-      updateNode(d.id, {
-        x: d.originX + (event.clientX - d.startX) / viewport.scale,
-        y: d.originY + (event.clientY - d.startY) / viewport.scale,
-      });
-    }
-  };
+    const tree = runtime.app?.tree;
+    const scale = Number(tree?.scale ?? tree?.scaleX ?? 1) || 1;
+    const tx = Number(tree?.x ?? 0) || 0;
+    const ty = Number(tree?.y ?? 0) || 0;
+    const x = Number(frame.x ?? 0) || 0;
+    const y = Number(frame.y ?? 0) || 0;
+    const width = Number(frame.width ?? 160) || 160;
+    const height = Number(frame.height ?? 120) || 120;
+    const left = tx + (x + width / 2) * scale;
+    const top = ty + y * scale - 44;
+    const bottom = ty + (y + height) * scale + 12;
+    setSelectionRect({
+      left: Math.max(16, Math.min(container.clientWidth - 16, left)),
+      top: Math.max(12, Math.min(container.clientHeight - 56, top)),
+      bottom: Math.max(12, Math.min(container.clientHeight - 132, bottom)),
+    });
+  }, []);
 
-  const stopDrag = (event: PointerEvent<HTMLDivElement>) => {
-    drag.current = null;
+  const selectInRuntime = useCallback((id: string | null) => {
+    const runtime = runtimeRef.current;
+    if (!runtime?.app?.editor) return;
     try {
-      event.currentTarget.releasePointerCapture(event.pointerId);
+      const frame = id ? framesRef.current.get(id) : null;
+      runtime.app.editor.select(frame ? [frame] : []);
+      window.requestAnimationFrame(updateFloatingSelection);
     } catch {
-      /* pointer may already be released */
+      /* Leafer editor may not be ready during first paint. */
     }
-  };
+  }, [updateFloatingSelection]);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | null = null;
+
+    const setup = async () => {
+      await Promise.all([import("@leafer-in/editor"), import("@leafer-in/resize"), import("@leafer-in/scroll")]);
+      const leafer = (await import("leafer-editor")) as any;
+      if (disposed || !containerRef.current) return;
+
+      const app = new leafer.App({
+        view: containerRef.current,
+        tree: {
+          type: "design",
+          pixelSnap: true,
+          pointSnap: true,
+          smooth: true,
+          fill: "#f7f7f5",
+        },
+        editor: {
+          hideOnMove: true,
+          skewable: false,
+          flipable: false,
+          bright: true,
+          stroke: "#2563eb",
+          pointFill: "#ffffff",
+          pointRadius: 2,
+          pointSize: 9,
+        },
+        wheel: { preventDefault: true },
+        move: { dragEmpty: true },
+        zoom: { min: 0.1, max: 4 },
+      });
+
+      const layer = new leafer.Frame({ id: "moodboard-node-layer", name: "nodes", fill: "transparent", hitSelf: false, isSnap: false });
+      app.tree.add(layer);
+
+      const runtime: LeaferRuntime = {
+        app,
+        layer,
+        Frame: leafer.Frame,
+        Rect: leafer.Rect,
+        Image: leafer.Image,
+        Text: leafer.Text,
+        PointerEvent: leafer.PointerEvent,
+        DragEvent: leafer.DragEvent,
+        EditorEvent: leafer.EditorEvent,
+        EditorMoveEvent: leafer.EditorMoveEvent,
+        EditorRotateEvent: leafer.EditorRotateEvent,
+        EditorScaleEvent: leafer.EditorScaleEvent,
+        ZoomEvent: leafer.ZoomEvent,
+      };
+      runtimeRef.current = runtime;
+
+      const resize = () => {
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (rect?.width && rect.height) app.resize({ width: rect.width, height: rect.height, pixelRatio: window.devicePixelRatio || 1 });
+        window.requestAnimationFrame(updateFloatingSelection);
+      };
+      resize();
+      const observer = new ResizeObserver(resize);
+      observer.observe(containerRef.current);
+
+      const syncSelectedFromEditor = () => {
+        const id = nodeIdFromTarget(app.editor?.target);
+        selectedIdRef.current = id;
+        onSelectRef.current(id);
+        window.requestAnimationFrame(updateFloatingSelection);
+      };
+      const syncFloatingOnly = () => {
+        window.requestAnimationFrame(updateFloatingSelection);
+      };
+      const syncAfterTransform = () => {
+        flushFrameState();
+        const scale = Number(app.tree?.scaleX ?? app.tree?.scale ?? 1);
+        if (Number.isFinite(scale)) setZoom(scale);
+        window.requestAnimationFrame(updateFloatingSelection);
+      };
+      const handleTap = (event: any) => {
+        setContextMenu(null);
+        const targetId = nodeIdFromTarget(event?.target);
+        if (targetId) {
+          selectedIdRef.current = targetId;
+          onSelectRef.current(targetId);
+          window.requestAnimationFrame(updateFloatingSelection);
+          return;
+        }
+        const point = eventCanvasPoint(event);
+        if (toolRef.current === "note") {
+          onAddNoteRef.current(point);
+          setTool("select");
+          return;
+        }
+        if (toolRef.current === "section") {
+          onAddSectionRef.current(point);
+          setTool("select");
+          return;
+        }
+        selectedIdRef.current = null;
+        onSelectRef.current(null);
+        setSelectionRect(null);
+      };
+      const handleDoubleTap = (event: any) => {
+        const point = eventCanvasPoint(event);
+        if (Number.isFinite(point.x) && Number.isFinite(point.y)) onAddImageGeneratorRef.current(point);
+      };
+      const handleMenu = (event: any) => {
+        event?.preventDefault?.();
+        const client = clampMenu(eventClientPoint(event));
+        const point = eventCanvasPoint(event);
+        setContextMenu({ x: client.x, y: client.y, canvasX: point.x, canvasY: point.y, targetId: nodeIdFromTarget(event?.target) });
+      };
+
+      app.on(runtime.PointerEvent.TAP, handleTap);
+      app.on(runtime.PointerEvent.DOUBLE_TAP, handleDoubleTap);
+      app.on(runtime.PointerEvent.MENU, handleMenu);
+      if (runtime.DragEvent?.DRAG) app.on(runtime.DragEvent.DRAG, syncFloatingOnly);
+      app.on(runtime.DragEvent.END, syncAfterTransform);
+      if (runtime.ZoomEvent?.END) app.on(runtime.ZoomEvent.END, syncAfterTransform);
+      app.editor?.on(runtime.EditorEvent.SELECT, syncSelectedFromEditor);
+      if (runtime.EditorMoveEvent?.MOVE) app.editor?.on(runtime.EditorMoveEvent.MOVE, syncFloatingOnly);
+      if (runtime.EditorScaleEvent?.SCALE) app.editor?.on(runtime.EditorScaleEvent.SCALE, syncFloatingOnly);
+      if (runtime.EditorRotateEvent?.ROTATE) app.editor?.on(runtime.EditorRotateEvent.ROTATE, syncFloatingOnly);
+
+      cleanup = () => {
+        observer.disconnect();
+        app.off(runtime.PointerEvent.TAP, handleTap);
+        app.off(runtime.PointerEvent.DOUBLE_TAP, handleDoubleTap);
+        app.off(runtime.PointerEvent.MENU, handleMenu);
+        if (runtime.DragEvent?.DRAG) app.off(runtime.DragEvent.DRAG, syncFloatingOnly);
+        app.off(runtime.DragEvent.END, syncAfterTransform);
+        if (runtime.ZoomEvent?.END) app.off(runtime.ZoomEvent.END, syncAfterTransform);
+        app.editor?.off(runtime.EditorEvent.SELECT, syncSelectedFromEditor);
+        if (runtime.EditorMoveEvent?.MOVE) app.editor?.off(runtime.EditorMoveEvent.MOVE, syncFloatingOnly);
+        if (runtime.EditorScaleEvent?.SCALE) app.editor?.off(runtime.EditorScaleEvent.SCALE, syncFloatingOnly);
+        if (runtime.EditorRotateEvent?.ROTATE) app.editor?.off(runtime.EditorRotateEvent.ROTATE, syncFloatingOnly);
+        layer.removeAll(true);
+        app.destroy();
+        runtimeRef.current = null;
+        framesRef.current.clear();
+      };
+
+      setRuntimeReady(true);
+    };
+
+    void setup();
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, [flushFrameState]);
+
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+    runtime.layer.removeAll(true);
+    framesRef.current.clear();
+
+    [...nodes]
+      .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))
+      .forEach((node) => {
+        const frame = makeNodeFrame(runtime, node, node.id === selectedId, node.id === hoveredId, (id) => {
+          onSelectRef.current(id);
+          selectInRuntime(id);
+        });
+        framesRef.current.set(node.id, frame);
+        runtime.layer.add(frame);
+      });
+
+    selectInRuntime(selectedId);
+    window.requestAnimationFrame(updateFloatingSelection);
+  }, [hoveredId, nodes, selectedId, selectInRuntime, runtimeReady, updateFloatingSelection]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onSelect(null);
+      if (event.key === "Escape") {
+        if (contextMenu) setContextMenu(null);
+        else onSelect(null);
+      }
+      if ((event.key === "Backspace" || event.key === "Delete") && selectedId) {
+        const tag = (event.target as HTMLElement | null)?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        event.preventDefault();
+        deleteNode(selectedId);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onSelect]);
+  });
 
-  const selected = nodes.find((n) => n.id === selectedId) ?? null;
+  const changeZoom = (next: number) => {
+    const runtime = runtimeRef.current;
+    const clamped = Math.max(0.1, Math.min(4, next));
+    if (runtime?.app?.tree) {
+      runtime.app.tree.scaleX = clamped;
+      runtime.app.tree.scaleY = clamped;
+      runtime.app.tree.forceUpdate?.();
+    }
+    setZoom(clamped);
+  };
+
+  const patchSelectedData = (patch: Record<string, unknown>) => {
+    if (!selected) return;
+    patchNode(selected.id, { data: { ...selected.data, ...patch } });
+  };
+
+  const deleteNode = (id: string) => {
+    saveInputs(nodesRef.current.filter((node) => node.id !== id).map(toInput));
+    onSelectRef.current(null);
+    setContextMenu(null);
+  };
+
+  const duplicateNode = (id: string) => {
+    const node = nodesRef.current.find((item) => item.id === id);
+    if (!node) return;
+    const nextId = localId();
+    saveInputs([
+      ...nodesRef.current.map(toInput),
+      {
+        ...toInput(node),
+        id: nextId,
+        x: node.x + 28,
+        y: node.y + 28,
+        zIndex: Math.max(0, ...nodesRef.current.map((item) => item.zIndex ?? 0)) + 1,
+        data: { ...node.data },
+      },
+    ]);
+    onSelectRef.current(nextId);
+    setContextMenu(null);
+  };
+
+  const bringToFront = (id: string) => {
+    patchNode(id, { zIndex: Math.max(0, ...nodesRef.current.map((item) => item.zIndex ?? 0)) + 1 });
+    setContextMenu(null);
+  };
+
+  const sendToBack = (id: string) => {
+    patchNode(id, { zIndex: Math.min(0, ...nodesRef.current.map((item) => item.zIndex ?? 0)) - 1 });
+    setContextMenu(null);
+  };
+
+  const patchNodeData = (id: string, patch: Record<string, unknown>) => {
+    const node = nodesRef.current.find((item) => item.id === id);
+    if (!node) return;
+    patchNode(id, { data: { ...node.data, ...patch } });
+  };
+
+  const renameNode = (id: string, name: string) => {
+    patchNodeData(id, { name });
+  };
+
+  const toggleNodeVisible = (id: string) => {
+    const node = nodesRef.current.find((item) => item.id === id);
+    if (!node) return;
+    patchNodeData(id, { visible: !isNodeVisible(node) });
+    setContextMenu(null);
+  };
+
+  const toggleNodeLocked = (id: string) => {
+    const node = nodesRef.current.find((item) => item.id === id);
+    if (!node) return;
+    patchNodeData(id, { locked: !isNodeLocked(node) });
+    setContextMenu(null);
+  };
+
+  const toggleLayerCollapsed = (id: string) => {
+    setCollapsedLayerIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const upload = (event: ChangeEvent<HTMLInputElement>) => {
+    onUploadFiles(event.target.files);
+    event.currentTarget.value = "";
+  };
+
+  const contextTargetId = contextMenu?.targetId ?? selectedId;
 
   return (
-    <div className="relative h-full min-w-0 bg-background">
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          onUploadFiles(e.target.files);
-          e.currentTarget.value = "";
-        }}
-      />
+    <div className="relative min-h-0 flex-1 bg-surface">
+      <input ref={inputRef} type="file" accept="image/*" multiple className="hidden" onChange={upload} />
+      <div className="relative h-full min-w-0 overflow-hidden">
+        {layersOpen ? (
+          <MoodboardLayerPanel
+            items={layerTree}
+            selectedId={selectedId}
+            collapsedIds={collapsedLayerIds}
+            onToggleCollapsed={toggleLayerCollapsed}
+            onSelect={(id) => {
+              onSelect(id);
+              selectInRuntime(id);
+            }}
+            onHover={setHoveredId}
+            onRename={renameNode}
+            onToggleVisible={toggleNodeVisible}
+            onToggleLocked={toggleNodeLocked}
+            onBringToFront={bringToFront}
+            onSendToBack={sendToBack}
+          />
+        ) : null}
 
-      <TooltipProvider delayDuration={120}>
-        <div className="app-no-drag absolute left-3 top-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-popover p-1 shadow-pop">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <IconButton aria-label="Select" className={cn(tool === "select" && "bg-accent text-foreground")} onClick={() => setTool("select")}>
-                <MousePointer2 size={15} strokeWidth={1.75} />
-              </IconButton>
-            </TooltipTrigger>
-            <TooltipContent sideOffset={2}>Select</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <IconButton aria-label="Pan" className={cn(tool === "pan" && "bg-accent text-foreground")} onClick={() => setTool("pan")}>
-                <Hand size={15} strokeWidth={1.75} />
-              </IconButton>
-            </TooltipTrigger>
-            <TooltipContent sideOffset={2}>Pan</TooltipContent>
-          </Tooltip>
-          <span className="mx-1 h-5 w-px bg-border" />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <IconButton aria-label="Add note" onClick={onAddNote}>
-                <StickyNote size={15} strokeWidth={1.75} />
-              </IconButton>
-            </TooltipTrigger>
-            <TooltipContent sideOffset={2}>Add note</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <IconButton aria-label="Add section" onClick={onAddSection}>
-                <SquareDashedMousePointer size={15} strokeWidth={1.75} />
-              </IconButton>
-            </TooltipTrigger>
-            <TooltipContent sideOffset={2}>Add section</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <IconButton aria-label="Upload images" onClick={() => inputRef.current?.click()}>
-                <Upload size={15} strokeWidth={1.75} />
-              </IconButton>
-            </TooltipTrigger>
-            <TooltipContent sideOffset={2}>Upload images</TooltipContent>
-          </Tooltip>
-        </div>
-      </TooltipProvider>
-
-      <div
-        className={cn("dz-canvas h-full w-full overflow-hidden", tool === "pan" ? "cursor-grab active:cursor-grabbing" : "cursor-default")}
-        onWheel={onWheel}
-        onPointerDown={onBlankPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={stopDrag}
-        onPointerCancel={stopDrag}
-        onDoubleClick={(event) => {
-          const rect = event.currentTarget.getBoundingClientRect();
-          onGenerateAt((event.clientX - rect.left - viewport.x) / viewport.scale, (event.clientY - rect.top - viewport.y) / viewport.scale);
-        }}
-      >
         <div
-          className="absolute left-0 top-0"
-          style={{ transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`, transformOrigin: "0 0" }}
-        >
-          {nodes.map((node) => {
-            const selectedNode = selectedId === node.id;
-            return (
-              <div
-                key={node.id}
-                className={cn(
-                  "absolute overflow-hidden rounded-lg border bg-card text-card-foreground transition-[border-color,box-shadow]",
-                  node.type === "section" ? "bg-background/35" : "bg-card",
-                  selectedNode ? "border-primary ring-2 ring-ring/25" : "border-border hover:border-border-strong",
-                )}
-                style={{
-                  left: node.x,
-                  top: node.y,
-                  width: node.width,
-                  height: node.height,
-                  zIndex: node.zIndex,
-                  transform: `rotate(${node.rotation}deg)`,
-                }}
-                onPointerDown={(event) => {
-                  event.stopPropagation();
-                  if (event.button !== 0 || tool === "pan") return;
-                  onSelect(node.id);
-                  drag.current = { kind: "node", id: node.id, startX: event.clientX, startY: event.clientY, originX: node.x, originY: node.y };
-                  event.currentTarget.setPointerCapture(event.pointerId);
-                }}
-              >
-                {node.type === "image" ? (
-                  <div className="h-full w-full bg-surface-2">
-                    {assetUrl(node) ? <img src={assetUrl(node)} alt={promptText(node) || "Moodboard image"} className="h-full w-full object-cover" draggable={false} /> : null}
-                    {promptText(node) ? (
-                      <div className="absolute inset-x-0 bottom-0 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur">
-                        <span className="line-clamp-2">{promptText(node)}</span>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : node.type === "section" ? (
-                  <div className="flex h-full flex-col">
-                    <div className="border-b border-border bg-background/70 px-2 py-1.5 text-xs font-medium">{nodeTitle(node)}</div>
-                    <div className="flex-1" />
-                  </div>
-                ) : node.type === "video" ? (
-                  <div className="grid h-full place-items-center bg-surface-2 text-xs text-muted-foreground">Video placeholder</div>
-                ) : (
-                  <div className="flex h-full flex-col bg-[color-mix(in_oklch,var(--surface)_88%,var(--background))]">
-                    <div className="h-6 shrink-0 border-b border-border px-2 py-1 text-[11px] font-medium text-muted-foreground">Note</div>
-                    <textarea
-                      value={nodeText(node)}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      onChange={(event) => updateNode(node.id, { data: { ...node.data, content: event.target.value } })}
-                      className="dz-selectable min-h-0 flex-1 resize-none bg-transparent p-3 text-sm leading-relaxed outline-none"
-                    />
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+          ref={containerRef}
+          data-testid="moodboard-leafer-canvas"
+          className={cn(
+            "h-full w-full overflow-hidden",
+            tool === "hand" && "cursor-grab active:cursor-grabbing",
+            (tool === "note" || tool === "section") && "cursor-crosshair",
+          )}
+        />
+
+        {!runtimeReady ? (
+          <div className="pointer-events-none absolute inset-0 grid place-items-center text-xs text-muted-foreground">Loading canvas...</div>
+        ) : null}
+
         {nodes.length === 0 ? (
           <div className="pointer-events-none absolute inset-0 grid place-items-center">
             <div className="pointer-events-auto flex flex-col items-center gap-3 text-center">
@@ -288,7 +495,7 @@ export function MoodboardCanvas({
               </span>
               <div>
                 <p className="text-sm font-medium text-foreground">Start collecting direction</p>
-                <p className="mt-1 text-xs text-muted-foreground">Upload images, add notes, or double-click the canvas to generate.</p>
+                <p className="mt-1 text-xs text-muted-foreground">Upload images, add notes, or double-click the canvas to add a generator.</p>
               </div>
               <Button size="sm" variant="outline" onClick={() => inputRef.current?.click()}>
                 <Plus size={14} strokeWidth={1.75} />
@@ -297,11 +504,109 @@ export function MoodboardCanvas({
             </div>
           </div>
         ) : null}
-      </div>
 
-      <div className="absolute bottom-3 right-3 rounded-md border border-border bg-popover px-2 py-1 text-[11px] text-muted-foreground shadow-pop">
-        {Math.round(viewport.scale * 100)}%
-        {selected ? <span className="ml-2 text-foreground">{selected.type}</span> : null}
+        {selected && selectionRect ? (
+          <div className="pointer-events-none absolute z-30" style={{ left: selectionRect.left, top: selectionRect.top, transform: "translateX(-50%)" }}>
+            <SelectionToolbar
+              node={selected}
+              onDuplicate={() => duplicateNode(selected.id)}
+              onBringToFront={() => bringToFront(selected.id)}
+              onSendToBack={() => sendToBack(selected.id)}
+              onDelete={() => deleteNode(selected.id)}
+            />
+          </div>
+        ) : null}
+
+        {selected?.type === "image-generator" && selectionRect ? (
+          <div
+            className="pointer-events-none absolute z-30"
+            style={{ left: selectionRect.left, top: selectionRect.bottom, transform: "translateX(-50%)" }}
+          >
+            <GeneratorPromptToolbar
+              node={selected}
+              busy={busy}
+              onPromptChange={(prompt) => patchNodeData(selected.id, { generatorPrompt: prompt, generatorStatus: prompt ? "ready" : "" })}
+              onGenerate={(prompt) => onGenerateImage(selected, prompt)}
+            />
+          </div>
+        ) : null}
+
+        <TooltipProvider delayDuration={120}>
+          <div className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-popover p-1 shadow-pop">
+              <ToolButton label="Select" active={tool === "select"} onClick={() => setTool("select")}>
+                <MousePointer2 size={15} strokeWidth={1.75} />
+              </ToolButton>
+              <ToolButton label="Hand" active={tool === "hand"} onClick={() => setTool("hand")}>
+                <Hand size={15} strokeWidth={1.75} />
+              </ToolButton>
+              <span className="mx-1 h-5 w-px bg-border" />
+              <ToolButton label="Add note" active={tool === "note"} onClick={() => setTool("note")}>
+                <StickyNote size={15} strokeWidth={1.75} />
+              </ToolButton>
+              <ToolButton label="Add section" active={tool === "section"} onClick={() => setTool("section")}>
+                <SquareDashedMousePointer size={15} strokeWidth={1.75} />
+              </ToolButton>
+              <ToolButton label="Upload images" onClick={() => inputRef.current?.click()}>
+                <Upload size={15} strokeWidth={1.75} />
+              </ToolButton>
+              <ToolButton label="Image generator" onClick={() => onAddImageGenerator()}>
+                <WandSparkles size={15} strokeWidth={1.75} />
+              </ToolButton>
+              <span className="mx-1 h-5 w-px bg-border" />
+              <ToolButton label="Layers" active={layersOpen} onClick={() => setLayersOpen((value) => !value)}>
+                <Layers size={15} strokeWidth={1.75} />
+              </ToolButton>
+              <ToolButton label="Zoom out" onClick={() => changeZoom(zoom * 0.88)}>
+                <Minus size={15} strokeWidth={1.75} />
+              </ToolButton>
+              <button
+                type="button"
+                onClick={() => changeZoom(1)}
+                className="h-8 min-w-12 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+              >
+                {Math.round(zoom * 100)}%
+              </button>
+              <ToolButton label="Zoom in" onClick={() => changeZoom(zoom * 1.14)}>
+                <Plus size={15} strokeWidth={1.75} />
+              </ToolButton>
+            </div>
+          </TooltipProvider>
+
+        {contextMenu ? (
+            <MoodboardContextMenu
+              menu={contextMenu}
+              targetId={contextTargetId}
+              onClose={() => setContextMenu(null)}
+              onAddNote={() => {
+                onAddNote({ x: contextMenu.canvasX, y: contextMenu.canvasY });
+                setContextMenu(null);
+              }}
+              onAddSection={() => {
+                onAddSection({ x: contextMenu.canvasX, y: contextMenu.canvasY });
+                setContextMenu(null);
+              }}
+              onGenerate={() => {
+                onAddImageGenerator({ x: contextMenu.canvasX, y: contextMenu.canvasY });
+                setContextMenu(null);
+              }}
+              onDuplicate={contextTargetId ? () => duplicateNode(contextTargetId) : undefined}
+              onBringToFront={contextTargetId ? () => bringToFront(contextTargetId) : undefined}
+              onSendToBack={contextTargetId ? () => sendToBack(contextTargetId) : undefined}
+              onToggleVisible={contextTargetId ? () => toggleNodeVisible(contextTargetId) : undefined}
+              onToggleLocked={contextTargetId ? () => toggleNodeLocked(contextTargetId) : undefined}
+              onDelete={contextTargetId ? () => deleteNode(contextTargetId) : undefined}
+              targetNode={contextTargetId ? nodes.find((node) => node.id === contextTargetId) ?? null : null}
+            />
+          ) : null}
+
+        {selected ? (
+          <MoodboardPropertiesPanel
+            node={selected}
+            onPatch={(patch) => selected && patchNode(selected.id, patch)}
+            onPatchData={patchSelectedData}
+            onGenerate={() => selected.type === "image-generator" && onGenerateImage(selected, generatorPrompt(selected))}
+          />
+        ) : null}
       </div>
     </div>
   );

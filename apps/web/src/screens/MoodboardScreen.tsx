@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ImagePlus, Settings } from "lucide-react";
+import { Settings } from "lucide-react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import type { MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import type { AgentInfo, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useToast } from "../components/Toast.tsx";
-import { Button, Dialog, IconButton, Input, Loading } from "../components/ui/index.ts";
+import { Button, IconButton, Loading } from "../components/ui/index.ts";
 import { readPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { MoodboardAgentPanel } from "../moodboard/MoodboardAgentPanel.tsx";
 import { MoodboardCanvas } from "../moodboard/MoodboardCanvas.tsx";
@@ -97,11 +97,12 @@ export function MoodboardScreen({
   const [nodes, setNodes] = useState<MoodboardNode[]>([]);
   const [messages, setMessages] = useState<MoodboardMessage[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [runAgent, setRunAgent] = useState("");
+  const [runModel, setRunModel] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
-  const [generatePoint, setGeneratePoint] = useState<{ x: number; y: number } | null>(null);
-  const [generatePrompt, setGeneratePrompt] = useState("");
   const saveTimer = useRef<number | null>(null);
   const agentPercent = readPanelPercent(MOODBOARD_AGENT_WIDTH_KEY, 28, 20, 44);
 
@@ -119,6 +120,22 @@ export function MoodboardScreen({
   }, [api, boardId, toast]);
 
   useEffect(() => load(), [load]);
+
+  useEffect(() => {
+    let alive = true;
+    void api
+      .listAgents()
+      .then((next) => {
+        if (!alive) return;
+        setAgents(next);
+        const available = next.filter((agent) => agent.available);
+        setRunAgent((current) => current || available[0]?.command || "");
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [api]);
 
   useEffect(() => {
     return () => {
@@ -168,13 +185,13 @@ export function MoodboardScreen({
     [boardId, persistNodes],
   );
 
-  const addNote = () => {
+  const addNote = (point?: { x: number; y: number }) => {
     appendNodes([
       {
         id: localId(),
         type: "note",
-        x: 80 + nodes.length * 18,
-        y: 80 + nodes.length * 18,
+        x: point?.x ?? 80 + nodes.length * 18,
+        y: point?.y ?? 80 + nodes.length * 18,
         width: 220,
         height: 140,
         zIndex: nodes.length,
@@ -183,19 +200,36 @@ export function MoodboardScreen({
     ]);
   };
 
-  const addSection = () => {
+  const addSection = (point?: { x: number; y: number }) => {
     appendNodes([
       {
         id: localId(),
         type: "section",
-        x: 40 + nodes.length * 18,
-        y: 40 + nodes.length * 18,
+        x: point?.x ?? 40 + nodes.length * 18,
+        y: point?.y ?? 40 + nodes.length * 18,
         width: 460,
         height: 300,
         zIndex: Math.max(0, nodes.length - 1),
         data: { title: "Section" },
       },
     ]);
+  };
+
+  const addImageGenerator = (point?: { x: number; y: number }) => {
+    const id = localId();
+    appendNodes([
+      {
+        id,
+        type: "image-generator",
+        x: point?.x ?? 120 + nodes.length * 20,
+        y: point?.y ?? 120 + nodes.length * 20,
+        width: 360,
+        height: 240,
+        zIndex: Math.max(0, nodes.length),
+        data: { generatorPrompt: "", generatorStatus: "ready" },
+      },
+    ]);
+    setSelectedId(id);
   };
 
   const uploadFiles = async (files: FileList | null) => {
@@ -232,15 +266,26 @@ export function MoodboardScreen({
     }
   };
 
-  const generateImage = async (prompt: string, point?: { x: number; y: number }) => {
+  const generateImage = async (node: MoodboardNode, prompt: string) => {
     setBusy(true);
+    setNodes((prev) =>
+      prev.map((item) =>
+        item.id === node.id
+          ? { ...item, data: { ...item.data, generatorPrompt: prompt, generatorStatus: "running" } }
+          : item,
+      ),
+    );
     try {
-      const result = await api.generateMoodboardImage(boardId, prompt, point);
+      const result = await api.generateMoodboardImage(boardId, prompt, {
+        generatorId: node.id,
+        x: node.x + node.width + 24,
+        y: node.y,
+      });
       setNodes(result.nodes);
       setMessages((cur) => [...cur, ...result.messages]);
       setSaveState("saved");
     } catch {
-      toast("Couldn't generate an image. Check Media settings.", { variant: "error" });
+      toast("Couldn't generate an image. Check Models settings.", { variant: "error" });
     } finally {
       setBusy(false);
     }
@@ -256,6 +301,13 @@ export function MoodboardScreen({
     } finally {
       setBusy(false);
     }
+  };
+
+  const rescanAgents = async () => {
+    const next = await api.rescanAgents();
+    setAgents(next);
+    const available = next.filter((agent) => agent.available);
+    setRunAgent((current) => current || available[0]?.command || "");
   };
 
   const saveLabel = useMemo(() => {
@@ -280,27 +332,6 @@ export function MoodboardScreen({
 
   return (
     <div className="flex h-full w-full flex-col bg-background">
-      <header className="app-drag titlebar-pad-top flex h-[72px] shrink-0 items-end justify-between border-b border-border bg-background px-3 pb-2">
-        <div className="app-no-drag flex min-w-0 items-center gap-2">
-          <IconButton aria-label="Back to moodboards" onClick={onBack}>
-            <ArrowLeft size={16} strokeWidth={1.75} />
-          </IconButton>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">{detail.name}</div>
-            <div className="text-[11px] text-muted-foreground">{saveLabel}</div>
-          </div>
-        </div>
-        <div className="app-no-drag flex items-center gap-1">
-          <Button size="sm" variant="ghost" className="gap-2" onClick={() => setGeneratePoint({ x: 120, y: 120 })}>
-            <ImagePlus size={14} strokeWidth={1.75} />
-            Generate
-          </Button>
-          <IconButton aria-label="Open Media settings" onClick={() => onOpenSettings("media")}>
-            <Settings size={15} strokeWidth={1.75} />
-          </IconButton>
-        </div>
-      </header>
-
       <Group
         id="dezin-moodboard-layout"
         className="min-h-0 flex-1"
@@ -309,56 +340,48 @@ export function MoodboardScreen({
         resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
       >
         <Panel id={MOODBOARD_AGENT_PANEL} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
-          <MoodboardAgentPanel messages={messages} nodes={nodes} busy={busy} onSend={sendMessage} onGenerate={(prompt) => generateImage(prompt)} />
+          <MoodboardAgentPanel
+            boardName={detail.name}
+            status={saveLabel}
+            messages={messages}
+            busy={busy}
+            agents={agents}
+            agent={runAgent}
+            model={runModel}
+            onBack={onBack}
+            onAgentChange={(value) => {
+              setRunAgent(value);
+              setRunModel("");
+            }}
+            onModelChange={setRunModel}
+            onRescanAgents={rescanAgents}
+            onSend={sendMessage}
+          />
         </Panel>
         <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
         <Panel id={MOODBOARD_CANVAS_PANEL} minSize="480px">
-          <MoodboardCanvas
-            nodes={nodes}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onNodesChange={updateNodes}
-            onAddNote={addNote}
-            onAddSection={addSection}
-            onUploadFiles={(files) => void uploadFiles(files)}
-            onGenerateAt={(x, y) => setGeneratePoint({ x, y })}
-          />
+          <section aria-label="Moodboard canvas" className="flex h-full min-w-0 flex-col">
+            <div className="app-drag flex h-10 shrink-0 items-center justify-end gap-2 border-b border-border px-1">
+              <div className="app-no-drag flex items-center gap-1">
+                <IconButton aria-label="Open model settings" onClick={() => onOpenSettings("models")}>
+                  <Settings size={15} strokeWidth={1.75} />
+                </IconButton>
+              </div>
+            </div>
+            <MoodboardCanvas
+              nodes={nodes}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onNodesChange={updateNodes}
+              onAddNote={addNote}
+              onAddSection={addSection}
+              onAddImageGenerator={addImageGenerator}
+              onUploadFiles={(files) => void uploadFiles(files)}
+              onGenerateImage={generateImage}
+            />
+          </section>
         </Panel>
       </Group>
-
-      <Dialog open={generatePoint !== null} onClose={() => setGeneratePoint(null)} label="Generate image" className="max-w-md">
-        <form
-          className="p-5"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const prompt = generatePrompt.trim();
-            const point = generatePoint;
-            if (!prompt || !point) return;
-            setGeneratePoint(null);
-            setGeneratePrompt("");
-            void generateImage(prompt, point);
-          }}
-        >
-          <h2 className="text-base font-semibold tracking-tight">Generate image</h2>
-          <p className="mt-1 text-sm text-muted-foreground">The image will be placed at the selected canvas position.</p>
-          <Input
-            aria-label="Image prompt"
-            value={generatePrompt}
-            autoFocus
-            onChange={(e) => setGeneratePrompt(e.target.value)}
-            placeholder="A refined material board with brushed steel and soft glass..."
-            className="mt-4"
-          />
-          <div className="mt-5 flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => setGeneratePoint(null)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={generatePrompt.trim().length === 0 || busy}>
-              Generate
-            </Button>
-          </div>
-        </form>
-      </Dialog>
     </div>
   );
 }

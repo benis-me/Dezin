@@ -237,11 +237,22 @@ test("moodboards persist nodes, assets, and messages", () => {
 
   const nodes = s.replaceMoodboardNodes(board.id, [
     { type: "section", x: 0, y: 0, width: 400, height: 260, data: { title: "Direction" } },
+    {
+      type: "image-generator",
+      x: 16,
+      y: 24,
+      width: 360,
+      height: 240,
+      zIndex: 1,
+      data: { generatorPrompt: "Soft studio references", generatorStatus: "ready" },
+    },
     { type: "image", x: 24, y: 48, width: 320, height: 213, zIndex: 2, data: { assetId: asset.id } },
   ]);
-  assert.equal(nodes.length, 2);
+  assert.equal(nodes.length, 3);
   assert.equal(nodes[0]?.type, "section");
-  assert.equal(nodes[1]?.data.assetId, asset.id);
+  assert.equal(nodes[1]?.type, "image-generator");
+  assert.equal(nodes[1]?.data.generatorStatus, "ready");
+  assert.equal(nodes[2]?.data.assetId, asset.id);
 
   const msg = s.addMoodboardMessage(board.id, "user", "Collect softer references");
   assert.equal(msg.content, "Collect softer references");
