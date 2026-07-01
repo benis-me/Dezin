@@ -15,6 +15,17 @@ import {
   type MoodboardAlignType,
   type MoodboardCanvasTool,
 } from "./canvas-utils.ts";
+import {
+  cloneMoodboardSnapshot,
+  createMoodboardHistorySnapshot,
+  pushMoodboardUndo,
+  redoMoodboardHistory,
+  sameMoodboardNodeInputs,
+  undoMoodboardHistory,
+  uniqueExistingIds,
+  type MoodboardHistoryState,
+  type MoodboardHistorySnapshot,
+} from "./canvas-history.ts";
 import { useLeaferMoodboardRuntime } from "./useLeaferMoodboardRuntime.ts";
 
 export interface MoodboardCanvasProps {
@@ -49,6 +60,7 @@ export function useMoodboardCanvasController({
   const [collapsedLayerIds, setCollapsedLayerIds] = useState<Set<string>>(() => new Set());
   const inputRef = useRef<HTMLInputElement>(null);
   const nodesRef = useRef(nodes);
+  const currentInputsRef = useRef(nodes.map(toInput));
   const selectedIdsRef = useRef(selectedIds);
   const toolRef = useRef(tool);
   const onSelectIdsRef = useRef(onSelectIds);
@@ -58,10 +70,13 @@ export function useMoodboardCanvasController({
   const onAddImageGeneratorRef = useRef(onAddImageGenerator);
   const onUploadFilesRef = useRef(onUploadFiles);
   const clipboardRef = useRef<SaveMoodboardNodeInput[]>([]);
+  const historyRef = useRef<MoodboardHistoryState>({ undoStack: [], redoStack: [] });
   const syncNodeInputsInRuntimeRef = useRef<(inputs: SaveMoodboardNodeInput[], idsToReselect?: string[]) => void>(() => {});
+  const refreshSelectionInRuntimeRef = useRef<(ids?: string[]) => void>(() => {});
 
   useEffect(() => {
     nodesRef.current = nodes;
+    currentInputsRef.current = nodes.map(toInput);
   }, [nodes]);
 
   useEffect(() => {
@@ -93,7 +108,67 @@ export function useMoodboardCanvasController({
   }, [nodes, selectedIds]);
   const layerTree = useMemo(() => buildLayerTree(nodes), [nodes]);
 
-  const saveInputs = useCallback((next: SaveMoodboardNodeInput[]) => onNodesChangeRef.current(next), []);
+  const currentSnapshot = useCallback(
+    (): MoodboardHistorySnapshot => createMoodboardHistorySnapshot(currentInputsRef.current, selectedIdsRef.current),
+    [],
+  );
+
+  const recordHistory = useCallback(() => {
+    historyRef.current = pushMoodboardUndo(historyRef.current, currentSnapshot());
+  }, [currentSnapshot]);
+
+  const commitSelectionIds = useCallback((ids: string[], existingIds?: Array<string | undefined>) => {
+    const nextIds = uniqueExistingIds(ids, existingIds ?? nodesRef.current.map((node) => node.id));
+    setContextMenu(null);
+    selectedIdsRef.current = nextIds;
+    onSelectIdsRef.current(nextIds);
+    return nextIds;
+  }, []);
+
+  const restoreHistorySnapshot = useCallback((snapshot: MoodboardHistorySnapshot) => {
+    const nextSnapshot = cloneMoodboardSnapshot(snapshot);
+    const nextSelectedIds = commitSelectionIds(
+      nextSnapshot.selectedIds,
+      nextSnapshot.nodes.map((node) => node.id),
+    );
+    currentInputsRef.current = nextSnapshot.nodes;
+    onNodesChangeRef.current(nextSnapshot.nodes);
+    syncNodeInputsInRuntimeRef.current(nextSnapshot.nodes, nextSelectedIds);
+    window.requestAnimationFrame(() => syncNodeInputsInRuntimeRef.current(nextSnapshot.nodes, nextSelectedIds));
+  }, [commitSelectionIds]);
+
+  const undoCanvas = useCallback(() => {
+    const result = undoMoodboardHistory(historyRef.current, currentSnapshot());
+    if (!result.snapshot) return false;
+    historyRef.current = result.state;
+    restoreHistorySnapshot(result.snapshot);
+    return true;
+  }, [currentSnapshot, restoreHistorySnapshot]);
+
+  const redoCanvas = useCallback(() => {
+    const result = redoMoodboardHistory(historyRef.current, currentSnapshot());
+    if (!result.snapshot) return false;
+    historyRef.current = result.state;
+    restoreHistorySnapshot(result.snapshot);
+    return true;
+  }, [currentSnapshot, restoreHistorySnapshot]);
+
+  const saveInputs = useCallback((next: SaveMoodboardNodeInput[], options: { recordHistory?: boolean } = {}) => {
+    const current = currentInputsRef.current;
+    if (options.recordHistory !== false && !sameMoodboardNodeInputs(current, next)) {
+      historyRef.current = pushMoodboardUndo(historyRef.current, createMoodboardHistorySnapshot(current, selectedIdsRef.current));
+    }
+    currentInputsRef.current = next.map((node) => ({ ...node, data: { ...node.data } }));
+    onNodesChangeRef.current(next);
+  }, []);
+
+  const syncInputsAndSelectionInRuntime = useCallback((inputs: SaveMoodboardNodeInput[], idsToReselect: string[]) => {
+    syncNodeInputsInRuntimeRef.current(inputs, idsToReselect);
+    window.requestAnimationFrame(() => {
+      syncNodeInputsInRuntimeRef.current(inputs, idsToReselect);
+      refreshSelectionInRuntimeRef.current(idsToReselect);
+    });
+  }, []);
 
   const patchNode = useCallback(
     (id: string, patch: Partial<SaveMoodboardNodeInput>) => {
@@ -122,12 +197,8 @@ export function useMoodboardCanvasController({
   );
 
   const handleSelectIds = useCallback((ids: string[]) => {
-    const existing = new Set(nodesRef.current.map((node) => node.id));
-    const nextIds = ids.filter((id, index) => existing.has(id) && ids.indexOf(id) === index);
-    setContextMenu(null);
-    selectedIdsRef.current = nextIds;
-    onSelectIdsRef.current(nextIds);
-  }, []);
+    commitSelectionIds(ids);
+  }, [commitSelectionIds]);
 
   const handleSelect = useCallback(
     (id: string | null) => {
@@ -197,11 +268,11 @@ export function useMoodboardCanvasController({
       if (targets.length === 0) return;
 
       const moved = nudgeNodeInputs(current, ids, delta);
-      syncNodeInputsInRuntimeRef.current(moved, targets.map((node) => node.id));
+      syncInputsAndSelectionInRuntime(moved, targets.map((node) => node.id));
       saveInputs(moved);
       setContextMenu(null);
     },
-    [saveInputs],
+    [saveInputs, syncInputsAndSelectionInRuntime],
   );
 
   const bringNodesToFront = useCallback(
@@ -346,11 +417,11 @@ export function useMoodboardCanvasController({
         return position ? { ...toInput(node), x: Math.round(position.x), y: Math.round(position.y) } : toInput(node);
       });
       const moved = moveContainedNodesWithSections(current, next);
-      syncNodeInputsInRuntimeRef.current(moved, targets.map((node) => node.id));
+      syncInputsAndSelectionInRuntime(moved, targets.map((node) => node.id));
       saveInputs(moved);
       setContextMenu(null);
     },
-    [saveInputs],
+    [saveInputs, syncInputsAndSelectionInRuntime],
   );
 
   const arrangeNodes = useCallback(
@@ -386,11 +457,11 @@ export function useMoodboardCanvasController({
         return position ? { ...toInput(node), x: Math.round(position.x), y: Math.round(position.y) } : toInput(node);
       });
       const moved = moveContainedNodesWithSections(current, next);
-      syncNodeInputsInRuntimeRef.current(moved, targets.map((node) => node.id));
+      syncInputsAndSelectionInRuntime(moved, targets.map((node) => node.id));
       saveInputs(moved);
       setContextMenu(null);
     },
-    [saveInputs],
+    [saveInputs, syncInputsAndSelectionInRuntime],
   );
 
   const bringToFront = useCallback(
@@ -441,20 +512,55 @@ export function useMoodboardCanvasController({
     });
   }, []);
 
+  const addNoteAt = useCallback(
+    (point?: { x: number; y: number }) => {
+      recordHistory();
+      onAddNoteRef.current(point);
+      setContextMenu(null);
+    },
+    [recordHistory],
+  );
+
+  const addSectionAt = useCallback(
+    (point?: { x: number; y: number; width?: number; height?: number }) => {
+      recordHistory();
+      onAddSectionRef.current(point);
+      setContextMenu(null);
+    },
+    [recordHistory],
+  );
+
+  const addImageGeneratorAt = useCallback(
+    (point?: { x: number; y: number }) => {
+      recordHistory();
+      onAddImageGeneratorRef.current(point);
+      setContextMenu(null);
+    },
+    [recordHistory],
+  );
+
+  const uploadFiles = useCallback(
+    (files: FileList | null) => {
+      if (files?.length) recordHistory();
+      onUploadFilesRef.current(files);
+    },
+    [recordHistory],
+  );
+
   const handleBlankTap = useCallback((point: { x: number; y: number }) => {
     setContextMenu(null);
     if (toolRef.current === "note") {
-      onAddNoteRef.current(point);
+      addNoteAt(point);
       setTool("select");
       return;
     }
     if (toolRef.current === "section") {
-      onAddSectionRef.current(point);
+      addSectionAt(point);
       setTool("select");
       return;
     }
     handleSelectIds([]);
-  }, [handleSelectIds]);
+  }, [addNoteAt, addSectionAt, handleSelectIds]);
 
   const runtime = useLeaferMoodboardRuntime({
     nodes,
@@ -463,20 +569,21 @@ export function useMoodboardCanvasController({
     onSelectIds: handleSelectIds,
     onBlankTap: handleBlankTap,
     onSectionDraw: (rect) => {
-      onAddSectionRef.current(rect);
+      addSectionAt(rect);
       setTool("select");
     },
-    onDoubleTap: (point) => onAddImageGeneratorRef.current(point),
+    onDoubleTap: (point) => addImageGeneratorAt(point),
     onContextMenu: setContextMenu,
     onFrameStateChange: saveInputs,
   });
   syncNodeInputsInRuntimeRef.current = runtime.syncNodeInputsInRuntime;
+  refreshSelectionInRuntimeRef.current = runtime.refreshSelectionInRuntime;
   const { changeZoom, fitView, hoverInRuntime, selectIdsInRuntime, selectInRuntime, zoom } = runtime;
 
   const upload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
-    onUploadFilesRef.current(event.target.files);
+    uploadFiles(event.target.files);
     event.currentTarget.value = "";
-  }, []);
+  }, [uploadFiles]);
 
   const selectLayer = useCallback(
     (id: string) => {
@@ -521,19 +628,31 @@ export function useMoodboardCanvasController({
         return;
       }
       if (event.metaKey || event.ctrlKey) {
-        if (event.key.toLowerCase() === "c") {
+        const key = event.key.toLowerCase();
+        if (key === "z") {
+          event.preventDefault();
+          if (event.shiftKey) redoCanvas();
+          else undoCanvas();
+          return;
+        }
+        if (key === "y") {
+          event.preventDefault();
+          redoCanvas();
+          return;
+        }
+        if (key === "c") {
           if (selectedIdsRef.current.length === 0) return;
           event.preventDefault();
           copySelectedNodes();
           return;
         }
-        if (event.key.toLowerCase() === "v") {
+        if (key === "v") {
           if (clipboardRef.current.length === 0) return;
           event.preventDefault();
           pasteCopiedNodes();
           return;
         }
-        if (event.key.toLowerCase() === "d") {
+        if (key === "d") {
           if (selectedIdsRef.current.length === 0) return;
           event.preventDefault();
           duplicateNodes(selectedIdsRef.current);
@@ -606,7 +725,7 @@ export function useMoodboardCanvasController({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, moveNodesLayerStep, nudgeNodes, pasteCopiedNodes, selectLayers, sendNodesToBack, zoom]);
+  }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, moveNodesLayerStep, nudgeNodes, pasteCopiedNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
 
   const contextTargetId = contextMenu?.targetId ?? null;
 
@@ -648,6 +767,11 @@ export function useMoodboardCanvasController({
     toggleNodeVisible,
     toggleNodeLocked,
     toggleLayerCollapsed,
+    recordHistory,
+    addNoteAt,
+    addSectionAt,
+    addImageGeneratorAt,
+    uploadFiles,
     selectLayer,
     selectLayers,
     reorderLayer,

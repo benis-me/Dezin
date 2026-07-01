@@ -21,9 +21,6 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     imageModels = [],
     imageModel = "",
     onImageModelChange = () => {},
-    onAddNote,
-    onAddSection,
-    onAddImageGenerator,
     onGenerateImage,
   } = props;
   const { toast } = useToast();
@@ -75,7 +72,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
     setDragDepth(0);
-    props.onUploadFiles(event.dataTransfer.files);
+    canvas.uploadFiles(event.dataTransfer.files);
   };
 
   const unavailableImageAction = (action: string): void => {
@@ -236,7 +233,10 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                   onImageModelChange(model);
                 }}
                 onPromptChange={(prompt) => canvas.patchNodeData(canvas.selected!.id, { generatorPrompt: prompt, generatorStatus: prompt ? "ready" : "" })}
-                onGenerate={(prompt) => onGenerateImage(canvas.selected!, prompt)}
+                onGenerate={(prompt) => {
+                  canvas.recordHistory();
+                  return onGenerateImage(canvas.selected!, prompt);
+                }}
               />
             </FloatingCanvasSurface>
           ) : null}
@@ -254,6 +254,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                   onImageModelChange(model);
                 }}
                 onGenerate={async (prompt) => {
+                  canvas.recordHistory();
                   await onGenerateImage(quickEditNode, prompt);
                   setQuickEditOpen(false);
                 }}
@@ -263,7 +264,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
 
         {!presentationMode ? (
-          <CanvasActionBar tool={canvas.tool} onToolChange={canvas.setTool} onAddImageGenerator={() => onAddImageGenerator()} />
+          <CanvasActionBar tool={canvas.tool} onToolChange={canvas.setTool} onAddImageGenerator={() => canvas.addImageGeneratorAt()} />
         ) : null}
         <CanvasViewBar
           layersOpen={canvas.layersOpen && !presentationMode}
@@ -289,16 +290,13 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             targetId={canvas.contextTargetId}
             onClose={() => canvas.setContextMenu(null)}
             onAddNote={() => {
-              onAddNote({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
-              canvas.setContextMenu(null);
+              canvas.addNoteAt({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
             }}
             onAddSection={() => {
-              onAddSection({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
-              canvas.setContextMenu(null);
+              canvas.addSectionAt({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
             }}
             onGenerate={() => {
-              onAddImageGenerator({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
-              canvas.setContextMenu(null);
+              canvas.addImageGeneratorAt({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
             }}
             onDuplicate={canvas.contextTargetId ? () => canvas.duplicateNode(canvas.contextTargetId!) : undefined}
             onBringToFront={canvas.contextTargetId ? () => canvas.bringToFront(canvas.contextTargetId!) : undefined}
@@ -332,7 +330,11 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               node={canvas.selected}
               onPatch={(patch) => canvas.selected && canvas.patchNode(canvas.selected.id, patch)}
               onPatchData={canvas.patchSelectedData}
-              onGenerate={() => canvas.selected?.type === "image-generator" && onGenerateImage(canvas.selected, selectedGeneratorPrompt)}
+              onGenerate={() => {
+                if (canvas.selected?.type !== "image-generator") return;
+                canvas.recordHistory();
+                void onGenerateImage(canvas.selected, selectedGeneratorPrompt);
+              }}
             />
           ) : canvas.selectedNodes.length > 1 && !presentationMode ? (
             <MoodboardMultiPropertiesPanel
@@ -375,6 +377,8 @@ function FloatingCanvasSurface({
     const app = appRef.current;
     if (!element || !container || !app) return;
     layoutRef.current = null;
+    element.style.visibility = "hidden";
+    element.style.display = "";
 
     const readLayout = (reason: FloatingPositionReason): FloatingLayoutSnapshot => {
       if (reason === "layout" || layoutRef.current == null) {
@@ -393,6 +397,7 @@ function FloatingCanvasSurface({
       const anchor = resolveSelectedFloatingAnchor(app, container, selectedIdsRef.current);
       if (!anchor) {
         element.style.display = "none";
+        element.style.visibility = "hidden";
         return;
       }
       element.style.display = "";
@@ -408,6 +413,7 @@ function FloatingCanvasSurface({
       });
       const transform = `translate3d(${Math.round(next.left)}px, ${Math.round(next.top)}px, 0)`;
       if (element.style.transform !== transform) element.style.transform = transform;
+      element.style.visibility = "visible";
     };
 
     const cleanup = bindFloatingCanvasSurfaceEvents(app, update, { container, toolbar: element, observeOccluders: avoidOccluders });
@@ -421,6 +427,7 @@ function FloatingCanvasSurface({
     <div
       ref={ref}
       className="pointer-events-none absolute left-0 top-0 z-30 will-change-transform"
+      style={{ visibility: "hidden" }}
     >
       {children}
     </div>

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import type { MoodboardNode } from "../lib/api.ts";
+import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
@@ -26,6 +26,13 @@ import {
   sameFloatingRect,
   sameIdList,
 } from "./canvas-utils.ts";
+import {
+  createMoodboardHistorySnapshot,
+  pushMoodboardUndo,
+  redoMoodboardHistory,
+  undoMoodboardHistory,
+  uniqueExistingIds,
+} from "./canvas-history.ts";
 import { createSnapLines, createSnapPointsFromBounds, resolveSnapDeltas } from "./leafer-adapter/snap-geometry.ts";
 import { selectAppNodesByIds } from "./leafer-adapter/editor-selection.ts";
 import { createSectionNode } from "./moodboard-board-utils.ts";
@@ -38,6 +45,20 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
+
+function historyInput(id: string, x: number, y: number): SaveMoodboardNodeInput {
+  return {
+    id,
+    type: "note",
+    x,
+    y,
+    width: 160,
+    height: 120,
+    rotation: 0,
+    zIndex: 1,
+    data: { content: id },
+  };
+}
 
 test("MoodboardContextMenu clamps to the visible viewport after measuring itself", async () => {
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
@@ -225,6 +246,34 @@ test("generatorModel reads the image model stored on a generator node", () => {
 
   expect(generatorModel(node)).toBe("gpt-image-1");
   expect(generatorModel({ ...node, data: {} })).toBe("");
+});
+
+test("Moodboard history snapshots drive undo and redo without losing selection", () => {
+  const original = historyInput("n1", 100, 120);
+  const moved = { ...original, x: 180, y: 220 };
+  const initialSnapshot = createMoodboardHistorySnapshot([original], ["n1"]);
+  const movedSnapshot = createMoodboardHistorySnapshot([moved], ["n1"]);
+  const state = pushMoodboardUndo({ undoStack: [], redoStack: [] }, initialSnapshot);
+
+  const undo = undoMoodboardHistory(state, movedSnapshot);
+  expect(undo.snapshot).toEqual(initialSnapshot);
+  expect(undo.state.undoStack).toHaveLength(0);
+  expect(undo.state.redoStack).toEqual([movedSnapshot]);
+
+  const redo = redoMoodboardHistory(undo.state, initialSnapshot);
+  expect(redo.snapshot).toEqual(movedSnapshot);
+  expect(redo.state.undoStack).toEqual([initialSnapshot]);
+  expect(redo.state.redoStack).toHaveLength(0);
+});
+
+test("Moodboard history ignores duplicate snapshots and invalid selected ids", () => {
+  const node = historyInput("n1", 100, 120);
+  const snapshot = createMoodboardHistorySnapshot([node], ["missing", "n1", "n1"]);
+  const state = pushMoodboardUndo(pushMoodboardUndo({ undoStack: [], redoStack: [] }, snapshot), snapshot);
+
+  expect(snapshot.selectedIds).toEqual(["n1"]);
+  expect(state.undoStack).toHaveLength(1);
+  expect(uniqueExistingIds(["a", "b", "a"], ["a"])).toEqual(["a"]);
 });
 
 test("resolveFloatingChromeRect keeps measured toolbars inside the canvas", () => {

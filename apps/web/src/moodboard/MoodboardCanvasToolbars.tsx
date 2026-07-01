@@ -194,80 +194,70 @@ export function MultiSelectionToolbar({
         <ToolButton label="Duplicate selected" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
         </ToolButton>
-        <DropdownMenu modal={false} open={alignOpen} onOpenChange={setAlignOpen}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <DropdownMenuTrigger asChild>
-                <IconButton
-                  aria-label="Align selected"
-                  onClick={(event) => {
-                    if (event.detail !== 0) return;
-                    setAlignOpen((open) => !open);
-                  }}
-                >
-                  <AlignStartVertical size={14} strokeWidth={1.75} />
-                </IconButton>
-              </DropdownMenuTrigger>
-            </TooltipTrigger>
-            <TooltipContent sideOffset={2}>Align selected</TooltipContent>
-          </Tooltip>
-          <DropdownMenuContent side="top" align="center" className="w-44" onPointerDown={stopToolbarEvent} onMouseDown={stopToolbarEvent}>
-            <DropdownMenuItem
+        <Popover open={alignOpen} onOpenChange={setAlignOpen}>
+          <PopoverTrigger asChild>
+            <IconButton aria-label="Align selected" title="Align selected">
+              <AlignStartVertical size={14} strokeWidth={1.75} />
+            </IconButton>
+          </PopoverTrigger>
+          <PopoverContent
+            side="top"
+            align="center"
+            className="w-44 p-1"
+            onOpenAutoFocus={(event) => event.preventDefault()}
+            onPointerDown={stopToolbarEvent}
+            onMouseDown={stopToolbarEvent}
+          >
+            <AlignPopoverItem
+              icon={<AlignStartVertical size={14} strokeWidth={1.75} />}
+              label="Align left"
               onClick={() => {
                 onAlign("left");
                 setAlignOpen(false);
               }}
-            >
-              <AlignStartVertical size={14} strokeWidth={1.75} />
-              Align left
-            </DropdownMenuItem>
-            <DropdownMenuItem
+            />
+            <AlignPopoverItem
+              icon={<AlignCenterVertical size={14} strokeWidth={1.75} />}
+              label="Align center"
               onClick={() => {
                 onAlign("center-v");
                 setAlignOpen(false);
               }}
-            >
-              <AlignCenterVertical size={14} strokeWidth={1.75} />
-              Align center
-            </DropdownMenuItem>
-            <DropdownMenuItem
+            />
+            <AlignPopoverItem
+              icon={<AlignEndVertical size={14} strokeWidth={1.75} />}
+              label="Align right"
               onClick={() => {
                 onAlign("right");
                 setAlignOpen(false);
               }}
-            >
-              <AlignEndVertical size={14} strokeWidth={1.75} />
-              Align right
-            </DropdownMenuItem>
-            <DropdownMenuItem
+            />
+            <AlignPopoverItem
+              icon={<AlignStartHorizontal size={14} strokeWidth={1.75} />}
+              label="Align top"
               onClick={() => {
                 onAlign("top");
                 setAlignOpen(false);
               }}
-            >
-              <AlignStartHorizontal size={14} strokeWidth={1.75} />
-              Align top
-            </DropdownMenuItem>
-            <DropdownMenuItem
+            />
+            <AlignPopoverItem
+              icon={<AlignCenterHorizontal size={14} strokeWidth={1.75} />}
+              label="Align middle"
               onClick={() => {
                 onAlign("center-h");
                 setAlignOpen(false);
               }}
-            >
-              <AlignCenterHorizontal size={14} strokeWidth={1.75} />
-              Align middle
-            </DropdownMenuItem>
-            <DropdownMenuItem
+            />
+            <AlignPopoverItem
+              icon={<AlignEndHorizontal size={14} strokeWidth={1.75} />}
+              label="Align bottom"
               onClick={() => {
                 onAlign("bottom");
                 setAlignOpen(false);
               }}
-            >
-              <AlignEndHorizontal size={14} strokeWidth={1.75} />
-              Align bottom
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+            />
+          </PopoverContent>
+        </Popover>
         <ToolButton label="Arrange selected" onClick={onArrange}>
           <LayoutGrid size={14} strokeWidth={1.75} />
         </ToolButton>
@@ -276,6 +266,19 @@ export function MultiSelectionToolbar({
         </ToolButton>
       </ToolbarChrome>
     </TooltipProvider>
+  );
+}
+
+function AlignPopoverItem({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="flex h-8 w-full items-center gap-2 rounded-sm px-2 text-left text-sm text-popover-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+      onClick={onClick}
+    >
+      <span className="grid size-4 shrink-0 place-items-center text-muted-foreground">{icon}</span>
+      <span className="truncate">{label}</span>
+    </button>
   );
 }
 
