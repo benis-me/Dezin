@@ -38,6 +38,21 @@ import { analyzeImage } from "./analyze-image.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import type { VisualQaRunner } from "./visual-qa.ts";
 import { handleGenerateProjectTitle, type TitleGenerator } from "./title-handler.ts";
+import {
+  handleCreateMoodboard,
+  handleDeleteMoodboard,
+  handleGenerateMoodboardImage,
+  handleGetMoodboard,
+  handleListMoodboardMessages,
+  handleListMoodboardNodes,
+  handleListMoodboards,
+  handlePatchMoodboard,
+  handlePostMoodboardMessage,
+  handlePutMoodboardNodes,
+  handleServeMoodboardAsset,
+  handleUploadMoodboardAsset,
+} from "./moodboard-handler.ts";
+import type { MoodboardAgentTextRunner } from "./moodboard-agent.ts";
 
 export interface AppDeps {
   store: Store;
@@ -65,6 +80,8 @@ export interface AppDeps {
   captureCover?: typeof captureCover;
   /** Background title generator hook; tests can avoid launching an agent. */
   titleGenerator?: TitleGenerator;
+  /** Moodboard chat one-shot agent hook; tests can avoid launching a real CLI. */
+  moodboardAgentText?: MoodboardAgentTextRunner;
 }
 
 type Handler = (
@@ -262,6 +279,66 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/projects/import",
     handler: (req, res, _p, deps) => handleImportProject(req, res, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/moodboards",
+    handler: (_req, res, _p, deps) => handleListMoodboards(res, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/moodboards",
+    handler: (req, res, _p, deps) => handleCreateMoodboard(req, res, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/moodboards/:id",
+    handler: (_req, res, params, deps) => handleGetMoodboard(res, params, deps),
+  },
+  {
+    method: "PATCH",
+    pattern: "/api/moodboards/:id",
+    handler: (req, res, params, deps) => handlePatchMoodboard(req, res, params, deps),
+  },
+  {
+    method: "DELETE",
+    pattern: "/api/moodboards/:id",
+    handler: (_req, res, params, deps) => handleDeleteMoodboard(res, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/moodboards/:id/nodes",
+    handler: (_req, res, params, deps) => handleListMoodboardNodes(res, params, deps),
+  },
+  {
+    method: "PUT",
+    pattern: "/api/moodboards/:id/nodes",
+    handler: (req, res, params, deps) => handlePutMoodboardNodes(req, res, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/moodboards/:id/messages",
+    handler: (_req, res, params, deps) => handleListMoodboardMessages(res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/moodboards/:id/messages",
+    handler: (req, res, params, deps) => handlePostMoodboardMessage(req, res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/moodboards/:id/assets",
+    handler: (req, res, params, deps) => handleUploadMoodboardAsset(req, res, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/moodboards/:id/assets/:assetId",
+    handler: (_req, res, params, deps) => handleServeMoodboardAsset(res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/moodboards/:id/generate-image",
+    handler: (req, res, params, deps) => handleGenerateMoodboardImage(req, res, params, deps),
   },
   {
     method: "GET",

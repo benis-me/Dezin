@@ -1,0 +1,31 @@
+{
+  "name": "@dezin/leafer-react",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "React reconciler bridge for rendering Leafer canvas trees inside Dezin.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'src/plugins/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "react-reconciler": "^0.33.0"
+  },
+  "peerDependencies": {
+    "@leafer-in/editor": "2.0.8",
+    "@leafer-in/flow": "2.0.8",
+    "leafer-editor": "2.0.8",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@leafer-in/editor": "2.0.8",
+    "@leafer-in/flow": "2.0.8",
+    "@types/react": "^19.0.0",
+    "@types/react-reconciler": "^0.33.0",
+    "leafer-editor": "2.0.8",
+    "typescript": "^5.7.2"
+  }
+}

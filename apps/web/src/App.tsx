@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Shell } from "./components/Shell.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
-import { Dialog } from "./components/ui/index.ts";
+import { Dialog, Loading } from "./components/ui/index.ts";
 import { useToast } from "./components/Toast.tsx";
 import { useRoute, navigate, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
@@ -13,6 +13,11 @@ import { DesignSystemDetailScreen } from "./screens/DesignSystemDetailScreen.tsx
 import { DesignSystemNewScreen } from "./screens/DesignSystemNewScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
 import { OnboardingScreen } from "./screens/OnboardingScreen.tsx";
+import { MoodboardsScreen } from "./screens/MoodboardsScreen.tsx";
+
+const MoodboardScreen = lazy(() =>
+  import("./screens/MoodboardScreen.tsx").then((module) => ({ default: module.MoodboardScreen })),
+);
 
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
@@ -25,6 +30,14 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
   switch (route.name) {
     case "project":
       return <WorkspaceScreen projectId={route.id} onOpenSettings={onOpenSettings} />;
+    case "moodboards":
+      return <MoodboardsScreen onOpenBoard={(id) => navigate(`/moodboards/${id}`)} />;
+    case "moodboard":
+      return (
+        <Suspense fallback={<RouteLoading label="Loading moodboard..." />}>
+          <MoodboardScreen boardId={route.id} onBack={() => navigate("/moodboards")} onOpenSettings={onOpenSettings} />
+        </Suspense>
+      );
     case "design-systems":
       return <DesignSystemsScreen />;
     case "design-system":
@@ -52,6 +65,14 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
         />
       );
   }
+}
+
+function RouteLoading({ label }: { label: string }) {
+  return (
+    <div className="grid h-full min-h-0 w-full place-items-center">
+      <Loading label={label} />
+    </div>
+  );
 }
 
 export default function App() {
@@ -123,7 +144,7 @@ export default function App() {
         onToggleTheme={onToggleDark}
         onOpenSettings={() => openSettings()}
       />
-      <Dialog open={settingsOpen} onClose={() => setSettingsOpen(false)} label="Settings" className="sm:max-w-4xl" showClose>
+      <Dialog open={settingsOpen} onClose={() => setSettingsOpen(false)} label="Settings" className="sm:max-w-5xl" showClose>
         <SettingsScreen dark={dark} onToggleDark={onToggleDark} initialSection={settingsSection} />
       </Dialog>
     </Shell>

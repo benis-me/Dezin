@@ -192,16 +192,19 @@ test("settings: defaults, round-trip, and partial merge", () => {
   assert.equal(d.defaultDesignSystemId, "modern-minimal");
   assert.equal(d.model, "");
   assert.equal(d.visualQaEnabled, false);
+  assert.equal(d.videoModel, "");
 
   const u = s.updateSettings({
     agentCommand: "codex",
     model: "o3",
     customInstructions: "be terse",
+    videoModel: "sora",
     visualQaEnabled: true,
   });
   assert.equal(u.agentCommand, "codex");
   assert.equal(u.model, "o3");
   assert.equal(s.getSettings().customInstructions, "be terse");
+  assert.equal(s.getSettings().videoModel, "sora");
   assert.equal(s.getSettings().visualQaEnabled, true);
 
   // a partial update only changes the given fields
@@ -210,7 +213,56 @@ test("settings: defaults, round-trip, and partial merge", () => {
   assert.equal(after.model, "o4");
   assert.equal(after.agentCommand, "codex");
   assert.equal(after.customInstructions, "be terse");
+  assert.equal(after.videoModel, "sora");
   assert.equal(after.visualQaEnabled, true);
+  s.close();
+});
+
+test("moodboards persist nodes, assets, and messages", () => {
+  const s = freshStore();
+  const board = s.createMoodboard({ name: "Launch references" });
+  assert.equal(board.id, "id-1");
+  assert.equal(s.listMoodboards().length, 1);
+
+  const asset = s.createMoodboardAsset(board.id, {
+    kind: "image",
+    fileName: "hero.png",
+    mimeType: "image/png",
+    width: 1200,
+    height: 800,
+    source: "upload",
+  });
+  assert.equal(asset.boardId, board.id);
+  assert.equal(s.getMoodboard(board.id)?.coverAssetId, asset.id);
+
+  const nodes = s.replaceMoodboardNodes(board.id, [
+    { type: "section", x: 0, y: 0, width: 400, height: 260, data: { title: "Direction" } },
+    {
+      type: "image-generator",
+      x: 16,
+      y: 24,
+      width: 360,
+      height: 240,
+      zIndex: 1,
+      data: { generatorPrompt: "Soft studio references", generatorStatus: "ready" },
+    },
+    { type: "image", x: 24, y: 48, width: 320, height: 213, zIndex: 2, data: { assetId: asset.id } },
+  ]);
+  assert.equal(nodes.length, 3);
+  assert.equal(nodes[0]?.type, "section");
+  assert.equal(nodes[1]?.type, "image-generator");
+  assert.equal(nodes[1]?.data.generatorStatus, "ready");
+  assert.equal(nodes[2]?.data.assetId, asset.id);
+
+  const msg = s.addMoodboardMessage(board.id, "user", "Collect softer references");
+  assert.equal(msg.content, "Collect softer references");
+  assert.equal(s.listMoodboardMessages(board.id).length, 1);
+
+  s.setMoodboardArchived(board.id, true);
+  assert.ok(s.getMoodboard(board.id)?.archivedAt);
+  s.deleteMoodboard(board.id);
+  assert.equal(s.getMoodboard(board.id), null);
+  assert.equal(s.listMoodboardNodes(board.id).length, 0);
   s.close();
 });
 

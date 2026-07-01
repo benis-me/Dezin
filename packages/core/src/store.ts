@@ -14,10 +14,16 @@ import type {
   Message,
   Run,
   Artifact,
+  Moodboard,
+  MoodboardNode,
+  MoodboardAsset,
+  MoodboardMessage,
   MessageRole,
   QualityFinding,
   RunStatus,
   CreateProjectInput,
+  CreateMoodboardInput,
+  SaveMoodboardNodeInput,
   Settings,
 } from "./types.ts";
 
@@ -88,8 +94,58 @@ CREATE TABLE IF NOT EXISTS settings (
   image_api_base_url TEXT,
   image_api_key TEXT,
   image_model TEXT,
+  video_api_base_url TEXT,
+  video_api_key TEXT,
+  video_model TEXT,
+  ai_provider_id TEXT,
+  ai_provider_enabled INTEGER NOT NULL DEFAULT 0,
+  ai_provider_models TEXT,
+  ai_provider_organization TEXT,
   visual_qa_enabled INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS moodboards (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  archived_at INTEGER,
+  cover_asset_id TEXT
+);
+CREATE TABLE IF NOT EXISTS moodboard_nodes (
+  id TEXT PRIMARY KEY,
+  board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  x REAL NOT NULL,
+  y REAL NOT NULL,
+  width REAL NOT NULL,
+  height REAL NOT NULL,
+  rotation REAL NOT NULL DEFAULT 0,
+  z_index INTEGER NOT NULL DEFAULT 0,
+  data_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS moodboard_assets (
+  id TEXT PRIMARY KEY,
+  board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  width INTEGER,
+  height INTEGER,
+  source TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS moodboard_messages (
+  id TEXT PRIMARY KEY,
+  board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_moodboard_nodes_board ON moodboard_nodes(board_id);
+CREATE INDEX IF NOT EXISTS idx_moodboard_assets_board ON moodboard_assets(board_id);
+CREATE INDEX IF NOT EXISTS idx_moodboard_messages_board ON moodboard_messages(board_id);
 `;
 
 const DEFAULT_SETTINGS: Settings = {
@@ -102,6 +158,13 @@ const DEFAULT_SETTINGS: Settings = {
   imageApiBaseUrl: "",
   imageApiKey: "",
   imageModel: "",
+  videoApiBaseUrl: "",
+  videoApiKey: "",
+  videoModel: "",
+  aiProviderId: "openai",
+  aiProviderEnabled: false,
+  aiProviderModels: "gpt-image-1",
+  aiProviderOrganization: "",
   visualQaEnabled: false,
 };
 
@@ -191,6 +254,67 @@ function asArtifact(r: Row): Artifact {
     createdAt: Number(r.created_at),
   };
 }
+function asJsonObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== "string" || !value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+function asMoodboard(r: Row): Moodboard {
+  return {
+    id: r.id as string,
+    name: r.name as string,
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+    archivedAt: r.archived_at == null ? null : Number(r.archived_at),
+    coverAssetId: (r.cover_asset_id as string | null | undefined) ?? null,
+  };
+}
+function asMoodboardNode(r: Row): MoodboardNode {
+  const type =
+    r.type === "video" || r.type === "note" || r.type === "section" || r.type === "image-generator"
+      ? r.type
+      : "image";
+  return {
+    id: r.id as string,
+    boardId: r.board_id as string,
+    type,
+    x: Number(r.x),
+    y: Number(r.y),
+    width: Number(r.width),
+    height: Number(r.height),
+    rotation: Number(r.rotation ?? 0),
+    zIndex: Number(r.z_index ?? 0),
+    data: asJsonObject(r.data_json),
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+  };
+}
+function asMoodboardAsset(r: Row): MoodboardAsset {
+  return {
+    id: r.id as string,
+    boardId: r.board_id as string,
+    kind: r.kind === "video" ? "video" : "image",
+    fileName: r.file_name as string,
+    mimeType: r.mime_type as string,
+    width: r.width == null ? null : Number(r.width),
+    height: r.height == null ? null : Number(r.height),
+    source: r.source === "generated" ? "generated" : "upload",
+    createdAt: Number(r.created_at),
+  };
+}
+function asMoodboardMessage(r: Row): MoodboardMessage {
+  return {
+    id: r.id as string,
+    boardId: r.board_id as string,
+    role: r.role as MessageRole,
+    content: r.content as string,
+    createdAt: Number(r.created_at),
+  };
+}
 
 export interface StoreClock {
   now(): number;
@@ -226,6 +350,13 @@ export class Store {
     ensureColumn("settings", "image_api_base_url", "image_api_base_url TEXT");
     ensureColumn("settings", "image_api_key", "image_api_key TEXT");
     ensureColumn("settings", "image_model", "image_model TEXT");
+    ensureColumn("settings", "video_api_base_url", "video_api_base_url TEXT");
+    ensureColumn("settings", "video_api_key", "video_api_key TEXT");
+    ensureColumn("settings", "video_model", "video_model TEXT");
+    ensureColumn("settings", "ai_provider_id", "ai_provider_id TEXT");
+    ensureColumn("settings", "ai_provider_enabled", "ai_provider_enabled INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("settings", "ai_provider_models", "ai_provider_models TEXT");
+    ensureColumn("settings", "ai_provider_organization", "ai_provider_organization TEXT");
     ensureColumn("settings", "visual_qa_enabled", "visual_qa_enabled INTEGER NOT NULL DEFAULT 0");
     ensureColumn("projects", "archived_at", "archived_at INTEGER");
     ensureColumn("projects", "active_variant_id", "active_variant_id TEXT");
@@ -303,6 +434,150 @@ export class Store {
 
   deleteProject(id: string): void {
     this.db.prepare(`DELETE FROM projects WHERE id = ?`).run(id);
+  }
+
+  // ── moodboards ────────────────────────────────────────────────────────────
+  createMoodboard(input: CreateMoodboardInput): Moodboard {
+    const id = this.clock.id();
+    const now = this.clock.now();
+    this.db
+      .prepare(`INSERT INTO moodboards (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
+      .run(id, input.name, now, now);
+    return this.getMoodboard(id)!;
+  }
+
+  getMoodboard(id: string): Moodboard | null {
+    const r = this.db.prepare(`SELECT * FROM moodboards WHERE id = ?`).get(id) as Row | undefined;
+    return r ? asMoodboard(r) : null;
+  }
+
+  listMoodboards(): Moodboard[] {
+    const rows = this.db.prepare(`SELECT * FROM moodboards ORDER BY updated_at DESC, rowid DESC`).all() as Row[];
+    return rows.map(asMoodboard);
+  }
+
+  updateMoodboard(
+    id: string,
+    patch: Partial<Pick<Moodboard, "name" | "archivedAt" | "coverAssetId">>,
+  ): Moodboard {
+    const cur = this.getMoodboard(id);
+    if (!cur) throw new Error(`moodboard not found: ${id}`);
+    this.db
+      .prepare(`UPDATE moodboards SET name = ?, archived_at = ?, cover_asset_id = ?, updated_at = ? WHERE id = ?`)
+      .run(
+        patch.name ?? cur.name,
+        patch.archivedAt !== undefined ? patch.archivedAt : cur.archivedAt,
+        patch.coverAssetId !== undefined ? patch.coverAssetId : cur.coverAssetId,
+        this.clock.now(),
+        id,
+      );
+    return this.getMoodboard(id)!;
+  }
+
+  setMoodboardArchived(id: string, archived: boolean): Moodboard | null {
+    this.db
+      .prepare(`UPDATE moodboards SET archived_at = ?, updated_at = ? WHERE id = ?`)
+      .run(archived ? this.clock.now() : null, this.clock.now(), id);
+    return this.getMoodboard(id);
+  }
+
+  deleteMoodboard(id: string): void {
+    this.db.prepare(`DELETE FROM moodboards WHERE id = ?`).run(id);
+  }
+
+  listMoodboardNodes(boardId: string): MoodboardNode[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM moodboard_nodes WHERE board_id = ? ORDER BY z_index ASC, created_at ASC, rowid ASC`)
+      .all(boardId) as Row[];
+    return rows.map(asMoodboardNode);
+  }
+
+  replaceMoodboardNodes(boardId: string, nodes: SaveMoodboardNodeInput[]): MoodboardNode[] {
+    if (!this.getMoodboard(boardId)) throw new Error(`moodboard not found: ${boardId}`);
+    const now = this.clock.now();
+    const existingRows = this.db.prepare(`SELECT id, created_at FROM moodboard_nodes WHERE board_id = ?`).all(boardId) as Row[];
+    const existingCreatedAt = new Map(existingRows.map((r) => [r.id as string, Number(r.created_at)]));
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(`DELETE FROM moodboard_nodes WHERE board_id = ?`).run(boardId);
+      const stmt = this.db.prepare(
+        `INSERT INTO moodboard_nodes (
+           id, board_id, type, x, y, width, height, rotation, z_index, data_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const [index, node] of nodes.entries()) {
+        const id = node.id || this.clock.id();
+        const createdAt = existingCreatedAt.get(id) ?? now;
+        stmt.run(
+          id,
+          boardId,
+          node.type,
+          Number.isFinite(node.x) ? node.x : 0,
+          Number.isFinite(node.y) ? node.y : 0,
+          Number.isFinite(node.width) ? Math.max(32, node.width) : 240,
+          Number.isFinite(node.height) ? Math.max(32, node.height) : 180,
+          Number.isFinite(node.rotation ?? 0) ? (node.rotation ?? 0) : 0,
+          Number.isFinite(node.zIndex ?? index) ? (node.zIndex ?? index) : index,
+          JSON.stringify(node.data ?? {}),
+          createdAt,
+          now,
+        );
+      }
+      this.db.prepare(`UPDATE moodboards SET updated_at = ? WHERE id = ?`).run(now, boardId);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+    return this.listMoodboardNodes(boardId);
+  }
+
+  createMoodboardAsset(
+    boardId: string,
+    input: Pick<MoodboardAsset, "kind" | "fileName" | "mimeType" | "width" | "height" | "source">,
+  ): MoodboardAsset {
+    if (!this.getMoodboard(boardId)) throw new Error(`moodboard not found: ${boardId}`);
+    const id = this.clock.id();
+    const now = this.clock.now();
+    this.db
+      .prepare(
+        `INSERT INTO moodboard_assets (id, board_id, kind, file_name, mime_type, width, height, source, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, boardId, input.kind, input.fileName, input.mimeType, input.width, input.height, input.source, now);
+    this.db.prepare(`UPDATE moodboards SET updated_at = ?, cover_asset_id = COALESCE(cover_asset_id, ?) WHERE id = ?`).run(now, id, boardId);
+    return this.getMoodboardAsset(id)!;
+  }
+
+  getMoodboardAsset(id: string): MoodboardAsset | null {
+    const r = this.db.prepare(`SELECT * FROM moodboard_assets WHERE id = ?`).get(id) as Row | undefined;
+    return r ? asMoodboardAsset(r) : null;
+  }
+
+  listMoodboardAssets(boardId: string): MoodboardAsset[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM moodboard_assets WHERE board_id = ? ORDER BY created_at DESC, rowid DESC`)
+      .all(boardId) as Row[];
+    return rows.map(asMoodboardAsset);
+  }
+
+  addMoodboardMessage(boardId: string, role: MessageRole, content: string): MoodboardMessage {
+    if (!this.getMoodboard(boardId)) throw new Error(`moodboard not found: ${boardId}`);
+    const id = this.clock.id();
+    const now = this.clock.now();
+    this.db
+      .prepare(`INSERT INTO moodboard_messages (id, board_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(id, boardId, role, content, now);
+    this.db.prepare(`UPDATE moodboards SET updated_at = ? WHERE id = ?`).run(now, boardId);
+    const r = this.db.prepare(`SELECT * FROM moodboard_messages WHERE id = ?`).get(id) as Row;
+    return asMoodboardMessage(r);
+  }
+
+  listMoodboardMessages(boardId: string): MoodboardMessage[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM moodboard_messages WHERE board_id = ? ORDER BY created_at ASC, rowid ASC`)
+      .all(boardId) as Row[];
+    return rows.map(asMoodboardMessage);
   }
 
   // ── variants (design branches) ──────────────────────────────────────────────
@@ -653,6 +928,13 @@ export class Store {
       imageApiBaseUrl: str(r.image_api_base_url, DEFAULT_SETTINGS.imageApiBaseUrl),
       imageApiKey: str(r.image_api_key, DEFAULT_SETTINGS.imageApiKey),
       imageModel: str(r.image_model, DEFAULT_SETTINGS.imageModel),
+      videoApiBaseUrl: str(r.video_api_base_url, DEFAULT_SETTINGS.videoApiBaseUrl),
+      videoApiKey: str(r.video_api_key, DEFAULT_SETTINGS.videoApiKey),
+      videoModel: str(r.video_model, DEFAULT_SETTINGS.videoModel),
+      aiProviderId: str(r.ai_provider_id, DEFAULT_SETTINGS.aiProviderId),
+      aiProviderEnabled: Number(r.ai_provider_enabled ?? 0) === 1,
+      aiProviderModels: str(r.ai_provider_models, DEFAULT_SETTINGS.aiProviderModels),
+      aiProviderOrganization: str(r.ai_provider_organization, DEFAULT_SETTINGS.aiProviderOrganization),
       visualQaEnabled: Number(r.visual_qa_enabled ?? 0) === 1,
     };
   }
@@ -669,14 +951,23 @@ export class Store {
       imageApiBaseUrl: patch.imageApiBaseUrl ?? cur.imageApiBaseUrl,
       imageApiKey: patch.imageApiKey ?? cur.imageApiKey,
       imageModel: patch.imageModel ?? cur.imageModel,
+      videoApiBaseUrl: patch.videoApiBaseUrl ?? cur.videoApiBaseUrl,
+      videoApiKey: patch.videoApiKey ?? cur.videoApiKey,
+      videoModel: patch.videoModel ?? cur.videoModel,
+      aiProviderId: patch.aiProviderId ?? cur.aiProviderId,
+      aiProviderEnabled: patch.aiProviderEnabled ?? cur.aiProviderEnabled,
+      aiProviderModels: patch.aiProviderModels ?? cur.aiProviderModels,
+      aiProviderOrganization: patch.aiProviderOrganization ?? cur.aiProviderOrganization,
       visualQaEnabled: patch.visualQaEnabled ?? cur.visualQaEnabled,
     };
     this.db
       .prepare(
         `INSERT INTO settings (id, agent_command, model, api_base_url, api_key, default_design_system_id, custom_instructions,
                                image_api_base_url, image_api_key, image_model,
+                               video_api_base_url, video_api_key, video_model,
+                               ai_provider_id, ai_provider_enabled, ai_provider_models, ai_provider_organization,
                                visual_qa_enabled)
-         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            agent_command = excluded.agent_command,
            model = excluded.model,
@@ -687,6 +978,13 @@ export class Store {
            image_api_base_url = excluded.image_api_base_url,
            image_api_key = excluded.image_api_key,
            image_model = excluded.image_model,
+           video_api_base_url = excluded.video_api_base_url,
+           video_api_key = excluded.video_api_key,
+           video_model = excluded.video_model,
+           ai_provider_id = excluded.ai_provider_id,
+           ai_provider_enabled = excluded.ai_provider_enabled,
+           ai_provider_models = excluded.ai_provider_models,
+           ai_provider_organization = excluded.ai_provider_organization,
            visual_qa_enabled = excluded.visual_qa_enabled`,
       )
       .run(
@@ -699,6 +997,13 @@ export class Store {
         next.imageApiBaseUrl,
         next.imageApiKey,
         next.imageModel,
+        next.videoApiBaseUrl,
+        next.videoApiKey,
+        next.videoModel,
+        next.aiProviderId,
+        next.aiProviderEnabled ? 1 : 0,
+        next.aiProviderModels,
+        next.aiProviderOrganization,
         next.visualQaEnabled ? 1 : 0,
       );
     return next;

@@ -1,19 +1,21 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Check, Eye, Info, KeyRound, Palette, Puzzle, RotateCw, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
-import { Button, Field, Input, Picker, Textarea, Loading, Spinner, Badge, ScrollArea } from "../components/ui/index.ts";
+import { useEffect, useState } from "react";
+import { Eye, Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
+import { Button, Picker, Textarea, Loading, Badge, ScrollArea, Switch } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
-import { AgentLogo, agentLabel } from "../components/agent-logos.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import type { DesignSystemCard, Settings } from "../lib/api.ts";
+import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
+import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
+import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
 
-type SectionId = "appearance" | "provider" | "connection" | "quality" | "defaults" | "instructions" | "extension" | "about";
+type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
 const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "provider", label: "Provider", icon: Server },
-  { id: "connection", label: "Connection", icon: KeyRound },
+  { id: "models", label: "Models", icon: SlidersHorizontal },
   { id: "quality", label: "Quality", icon: Eye },
   { id: "defaults", label: "Defaults", icon: SlidersHorizontal },
   { id: "instructions", label: "Custom instructions", icon: Type },
@@ -32,8 +34,9 @@ export function SettingsScreen({
 }) {
   const api = useApi();
   const { toast } = useToast();
+  const normalizedInitialSection = initialSection === "connection" || initialSection === "media" ? "models" : initialSection;
   const [section, setSection] = useState<SectionId>(
-    SECTIONS.some((s) => s.id === initialSection) ? (initialSection as SectionId) : "appearance",
+    SECTIONS.some((s) => s.id === normalizedInitialSection) ? (normalizedInitialSection as SectionId) : "appearance",
   );
   const [settings, setSettings] = useState<Settings | null>(null);
   const { agents, loading: agentsInitial, scanning, status: scanStatus, rescan } = useAgents();
@@ -52,9 +55,14 @@ export function SettingsScreen({
   }, [api]);
 
   const setLocal = (key: keyof Settings, value: string | boolean) => setSettings((s) => (s ? { ...s, [key]: value } : s));
+  const setLocalPatch = (patch: Partial<Settings>) => setSettings((s) => (s ? { ...s, ...patch } : s));
   const save = (key: keyof Settings, value: string | boolean) => {
     setLocal(key, value);
     void api.updateSettings({ [key]: value } as Partial<Settings>).catch(() => toast("Couldn't save settings.", { variant: "error" }));
+  };
+  const savePatch = (patch: Partial<Settings>) => {
+    setLocalPatch(patch);
+    void api.updateSettings(patch).then((next) => setSettings(next)).catch(() => toast("Couldn't save settings.", { variant: "error" }));
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);
@@ -62,7 +70,7 @@ export function SettingsScreen({
   return (
     <div className="flex h-[clamp(460px,72vh,660px)]">
       {/* Sidebar */}
-      <nav aria-label="Settings sections" className="flex w-60 shrink-0 flex-col border-r border-border bg-muted/40 p-2.5">
+      <nav aria-label="Settings sections" className="flex w-52 shrink-0 flex-col border-r border-border bg-muted/40 p-2.5">
         <div className="px-2 py-2">
           <div className="truncate text-sm font-semibold leading-tight">Settings</div>
           <div className="truncate text-[11px] text-muted-foreground">Local workspace</div>
@@ -100,212 +108,54 @@ export function SettingsScreen({
         {settings === null ? (
           <Loading label="Loading settings…" />
         ) : (
-          <div className="mx-auto max-w-2xl p-8">
+          <div className={cn(section === "models" ? "h-full" : "mx-auto max-w-2xl p-8")}>
             {section === "appearance" && (
-              <Panel title="Appearance" desc="How Dezin looks. Monochrome surfaces, borders over shadows, one near-black accent.">
-                <Rows>
+              <SettingsPanel title="Appearance" desc="How Dezin looks. Monochrome surfaces, borders over shadows, one near-black accent.">
+                <SettingsRows>
                   <SettingRow label="Theme" desc="Switch between light and dark.">
                     <Button variant="outline" size="sm" onClick={onToggleDark} className="gap-2">
                       <Sun size={14} strokeWidth={1.75} />
                       {dark ? "Dark" : "Light"}
                     </Button>
                   </SettingRow>
-                </Rows>
-              </Panel>
+                </SettingsRows>
+              </SettingsPanel>
             )}
 
             {section === "provider" && (
-              <Panel title="Provider" desc="Bring your own key. Dezin drives your local coding-agent CLI.">
-                <div className="space-y-6">
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium">Agent</p>
-                        <p className="mt-0.5 text-xs text-muted-foreground">The CLI Dezin spawns. Pick one you have installed.</p>
-                      </div>
-                      {agentsLoading ? (
-                        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                          <Spinner size={13} />
-                          {scanStatus || "Scanning…"}
-                        </span>
-                      ) : (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void rescan().catch(() => toast("Couldn't rescan agents.", { variant: "error" }))}
-                        >
-                          <RotateCw size={13} strokeWidth={1.75} />
-                          Rescan
-                        </Button>
-                      )}
-                    </div>
-                    <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      {agentsLoading
-                        ? Array.from({ length: 6 }).map((_, i) => (
-                            <div key={i} className="h-[78px] animate-pulse rounded-xl border border-border bg-surface-2/50" />
-                          ))
-                        : (agents.length
-                            ? agents
-                            : [{ id: settings.agentCommand, command: settings.agentCommand, available: false, version: undefined, models: [] }]
-                          ).map((a) => {
-                            const selected = a.command === settings.agentCommand;
-                            return (
-                              <button
-                                key={a.id}
-                                type="button"
-                                aria-pressed={selected}
-                                disabled={!a.available}
-                                title={a.available ? undefined : `${agentLabel(a.id)} isn't installed`}
-                                onClick={() => save("agentCommand", a.command)}
-                                className={cn(
-                                  "relative flex flex-col gap-2 rounded-xl border p-3 text-left transition-all",
-                                  a.available && "active:scale-[0.99]",
-                                  selected
-                                    ? "border-ring bg-surface ring-2 ring-ring/25"
-                                    : a.available
-                                      ? "border-border hover:border-border-strong hover:bg-surface-2/50"
-                                      : "cursor-not-allowed border-border opacity-50",
-                                )}
-                              >
-                                {selected ? <Check size={14} strokeWidth={2.5} className="absolute right-2.5 top-2.5 text-foreground" /> : null}
-                                <span className="grid size-9 place-items-center rounded-lg bg-surface-2 text-foreground">
-                                  <AgentLogo id={a.id} />
-                                </span>
-                                <span className="min-w-0">
-                                  <span className="block truncate text-sm font-medium">{agentLabel(a.id)}</span>
-                                  <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                                    <span
-                                      className={cn("size-1.5 shrink-0 rounded-full", a.available ? "bg-[var(--success)]" : "bg-border-strong")}
-                                    />
-                                    <span className="truncate">{a.available ? (a.version?.slice(0, 16) ?? "Detected") : "Not found"}</span>
-                                  </span>
-                                </span>
-                              </button>
-                            );
-                          })}
-                    </div>
-                  </div>
-                  <SettingRow label="Model" desc="Optional. Blank uses the agent default.">
-                    {activeAgent && activeAgent.models.length > 0 ? (
-                      <Picker
-                        ariaLabel="Model"
-                        className="w-44"
-                        value={settings.model}
-                        onChange={(v) => save("model", v)}
-                        options={[{ value: "", label: "Default" }, ...activeAgent.models.map((m) => ({ value: m, label: m }))]}
-                      />
-                    ) : (
-                      <Input
-                        aria-label="Model"
-                        className="w-44"
-                        value={settings.model}
-                        placeholder="default"
-                        onChange={(e) => setLocal("model", e.target.value)}
-                        onBlur={(e) => save("model", e.target.value)}
-                      />
-                    )}
-                  </SettingRow>
-                </div>
-              </Panel>
+              <AgentProviderSettings
+                settings={settings}
+                agents={agents}
+                activeAgent={activeAgent}
+                agentsLoading={agentsLoading}
+                scanStatus={scanStatus}
+                onLocal={setLocal}
+                onSave={save}
+                onRescan={() => void rescan().catch(() => toast("Couldn't rescan agents.", { variant: "error" }))}
+              />
             )}
-
-            {section === "connection" && (
-              <Panel title="Connection" desc="Optional BYOK endpoint. Stored locally; never leaves your machine.">
-                <div className="space-y-4">
-                  <Field label="API base URL">
-                    <Input
-                      aria-label="API base URL"
-                      value={settings.apiBaseUrl}
-                      placeholder="https://…"
-                      onChange={(e) => setLocal("apiBaseUrl", e.target.value)}
-                      onBlur={(e) => save("apiBaseUrl", e.target.value)}
-                    />
-                  </Field>
-                  <Field label="API key">
-                    <Input
-                      aria-label="API key"
-                      type="password"
-                      value={settings.apiKey}
-                      placeholder="sk-…"
-                      onChange={(e) => setLocal("apiKey", e.target.value)}
-                      onBlur={(e) => save("apiKey", e.target.value)}
-                    />
-                  </Field>
-
-                  <div className="border-t border-border pt-4">
-                    <div className="text-sm font-medium">Image generation</div>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      Optional, OpenAI Images-compatible. The agent requests imagery; Dezin generates it into assets/.
-                    </p>
-                  </div>
-                  <Field label="Image API base URL">
-                    <Input
-                      aria-label="Image API base URL"
-                      value={settings.imageApiBaseUrl}
-                      placeholder="https://api.openai.com/v1"
-                      onChange={(e) => setLocal("imageApiBaseUrl", e.target.value)}
-                      onBlur={(e) => save("imageApiBaseUrl", e.target.value)}
-                    />
-                  </Field>
-                  <div className="grid grid-cols-2 gap-4">
-                    <Field label="Image API key">
-                      <Input
-                        aria-label="Image API key"
-                        type="password"
-                        value={settings.imageApiKey}
-                        placeholder="sk-…"
-                        onChange={(e) => setLocal("imageApiKey", e.target.value)}
-                        onBlur={(e) => save("imageApiKey", e.target.value)}
-                      />
-                    </Field>
-                    <Field label="Image model">
-                      <Input
-                        aria-label="Image model"
-                        value={settings.imageModel}
-                        placeholder="gpt-image-1"
-                        onChange={(e) => setLocal("imageModel", e.target.value)}
-                        onBlur={(e) => save("imageModel", e.target.value)}
-                      />
-                    </Field>
-                  </div>
-                </div>
-              </Panel>
-            )}
+            {section === "models" && <ModelProviderSettings settings={settings} onLocalPatch={setLocalPatch} onSavePatch={savePatch} />}
 
             {section === "quality" && (
-              <Panel title="Quality" desc="Checks the finished prototype against visible layout problems.">
-                <Rows>
+              <SettingsPanel title="Quality" desc="Checks the finished prototype against visible layout problems.">
+                <SettingsRows>
                   <SettingRow
                     label="Agent visual review"
                     desc="After generation, the selected Agent/model reviews the screenshot with the full current conversation context."
                   >
-                    <button
-                      type="button"
-                      role="switch"
+                    <Switch
                       aria-label="Agent visual review"
-                      aria-checked={settings.visualQaEnabled}
-                      onClick={() => save("visualQaEnabled", !settings.visualQaEnabled)}
-                      className={cn(
-                        "relative h-6 w-10 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                        settings.visualQaEnabled ? "border-primary bg-primary" : "border-border bg-surface-2",
-                      )}
-                    >
-                      <span
-                        aria-hidden
-                        className={cn(
-                          "absolute top-0.5 size-4 rounded-full bg-background shadow-sm transition-transform",
-                          settings.visualQaEnabled ? "left-[18px]" : "left-0.5",
-                        )}
-                      />
-                    </button>
+                      checked={settings.visualQaEnabled}
+                      onCheckedChange={(checked) => save("visualQaEnabled", checked)}
+                    />
                   </SettingRow>
-                </Rows>
-              </Panel>
+                </SettingsRows>
+              </SettingsPanel>
             )}
 
             {section === "defaults" && (
-              <Panel title="Defaults" desc="Applied when a project pins no design system.">
-                <Rows>
+              <SettingsPanel title="Defaults" desc="Applied when a project pins no design system.">
+                <SettingsRows>
                   <SettingRow label="Design system" desc="The brand new projects start from.">
                     <Picker
                       ariaLabel="Default design system"
@@ -318,12 +168,12 @@ export function SettingsScreen({
                       ).map((s) => ({ value: s.id, label: s.name }))}
                     />
                   </SettingRow>
-                </Rows>
-              </Panel>
+                </SettingsRows>
+              </SettingsPanel>
             )}
 
             {section === "instructions" && (
-              <Panel title="Custom instructions" desc="Project-agnostic guidance injected into every generation.">
+              <SettingsPanel title="Custom instructions" desc="Project-agnostic guidance injected into every generation.">
                 <Textarea
                   aria-label="Custom instructions"
                   rows={6}
@@ -332,11 +182,11 @@ export function SettingsScreen({
                   onChange={(e) => setLocal("customInstructions", e.target.value)}
                   onBlur={(e) => save("customInstructions", e.target.value)}
                 />
-              </Panel>
+              </SettingsPanel>
             )}
 
             {section === "extension" && (
-              <Panel title="Browser extension" desc="Capture cover art and shots from Pinterest, Behance & Dribbble straight into Dezin.">
+              <SettingsPanel title="Browser extension" desc="Capture cover art and shots from Pinterest, Behance & Dribbble straight into Dezin.">
                 <div className="space-y-4 text-sm leading-relaxed text-foreground-2">
                   <ol className="space-y-2.5">
                     {[
@@ -370,11 +220,11 @@ export function SettingsScreen({
                     <span className="text-xs text-muted-foreground">Pinterest · Behance · Dribbble</span>
                   </div>
                 </div>
-              </Panel>
+              </SettingsPanel>
             )}
 
             {section === "about" && (
-              <Panel title="About" desc="A tasteful, local-first design generator.">
+              <SettingsPanel title="About" desc="A tasteful, local-first design generator.">
                 <div className="space-y-3 text-sm leading-relaxed text-muted-foreground">
                   <p>
                     Dezin runs entirely on your machine — no telemetry, no analytics. It drives your own coding-agent CLI and
@@ -385,39 +235,11 @@ export function SettingsScreen({
                     <Badge variant="outline">Local-first</Badge>
                   </div>
                 </div>
-              </Panel>
+              </SettingsPanel>
             )}
           </div>
         )}
       </ScrollArea>
-    </div>
-  );
-}
-
-function Panel({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
-  return (
-    <div>
-      <div className="border-b border-border pb-5">
-        <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-        {desc ? <p className="mt-1 text-sm text-muted-foreground">{desc}</p> : null}
-      </div>
-      <div className="pt-5">{children}</div>
-    </div>
-  );
-}
-
-function Rows({ children }: { children: ReactNode }) {
-  return <div className="divide-y divide-border">{children}</div>;
-}
-
-function SettingRow({ label, desc, children }: { label: string; desc?: string; children: ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-6 py-4 first:pt-0 last:pb-0">
-      <div className="min-w-0">
-        <div className="text-sm font-medium">{label}</div>
-        {desc ? <div className="mt-0.5 text-xs text-muted-foreground">{desc}</div> : null}
-      </div>
-      <div className="shrink-0">{children}</div>
     </div>
   );
 }

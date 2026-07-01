@@ -208,6 +208,13 @@ test("settings + agents + health endpoints", async () => {
         imageApiBaseUrl: "",
         imageApiKey: "",
         imageModel: "",
+        videoApiBaseUrl: "",
+        videoApiKey: "",
+        videoModel: "",
+        aiProviderId: "openai",
+        aiProviderEnabled: false,
+        aiProviderModels: "gpt-image-1",
+        aiProviderOrganization: "",
         visualQaEnabled: false,
       });
     }
@@ -222,6 +229,13 @@ test("settings + agents + health endpoints", async () => {
         imageApiBaseUrl: "",
         imageApiKey: "",
         imageModel: "",
+        videoApiBaseUrl: "",
+        videoApiKey: "",
+        videoModel: "",
+        aiProviderId: "openai",
+        aiProviderEnabled: false,
+        aiProviderModels: "gpt-image-1",
+        aiProviderOrganization: "",
         visualQaEnabled: false,
       });
     }
@@ -233,6 +247,50 @@ test("settings + agents + health endpoints", async () => {
   assert.equal((await api.updateSettings({ agentCommand: "codex", model: "o3" })).model, "o3");
   assert.equal((await api.listAgents())[0]?.available, true);
   assert.equal((await api.getHealth()).version, "0.0.0");
+});
+
+test("moodboard client methods hit first-class board endpoints", async () => {
+  const board = { id: "b1", name: "Refs", createdAt: 1, updatedAt: 2, archivedAt: null, coverAssetId: null, coverUrl: null };
+  const node = {
+    id: "n1",
+    boardId: "b1",
+    type: "note" as const,
+    x: 0,
+    y: 0,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "x" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const fetchImpl = vi.fn<FetchLike>(async (url, init) => {
+    if (url.endsWith("/api/moodboards") && init?.method === "POST") return jsonResponse(board, 201);
+    if (url.endsWith("/api/moodboards")) return jsonResponse([board]);
+    if (url.endsWith("/api/moodboards/b1/nodes") && init?.method === "PUT") return jsonResponse([node]);
+    if (url.endsWith("/api/moodboards/b1/messages") && init?.method === "POST") return jsonResponse({ messages: [] }, 201);
+    if (url.endsWith("/api/moodboards/b1/generate-image")) {
+      return jsonResponse({ asset: { id: "a1", boardId: "b1", kind: "image", fileName: "generated.png", mimeType: "image/png", width: 1024, height: 1024, source: "generated", createdAt: 1, url: "/asset" }, nodes: [node], messages: [] }, 201);
+    }
+    return jsonResponse({ ...board, assets: [], nodes: [node], messages: [] });
+  });
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  await expect(api.listMoodboards()).resolves.toEqual([board]);
+  await expect(api.createMoodboard({ name: "Refs" })).resolves.toEqual(board);
+  await expect(api.getMoodboard("b1")).resolves.toMatchObject({ id: "b1", nodes: [node] });
+  await expect(api.saveMoodboardNodes("b1", [node])).resolves.toEqual([node]);
+  await expect(api.postMoodboardMessage("b1", "read the board", { agentCommand: "codex", model: "gpt-5" })).resolves.toEqual({ messages: [] });
+  await expect(api.generateMoodboardImage("b1", "soft glass")).resolves.toMatchObject({ nodes: [node] });
+
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/moodboards", undefined);
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/moodboards/b1/nodes", expect.objectContaining({ method: "PUT" }));
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/moodboards/b1/messages",
+    expect.objectContaining({ body: JSON.stringify({ content: "read the board", agentCommand: "codex", model: "gpt-5" }) }),
+  );
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/moodboards/b1/generate-image", expect.objectContaining({ method: "POST" }));
 });
 
 test("parseSseBlock ignores non-data noise", () => {

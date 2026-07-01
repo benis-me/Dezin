@@ -11,7 +11,6 @@ import {
   DropdownMenuTrigger,
   FadeIn,
   IconButton,
-  Loading,
   PanelBar,
   Segmented,
   Spinner,
@@ -1506,6 +1505,76 @@ function AssistantMessage({ message }: { message: Msg }) {
   );
 }
 
+function WorkspaceLoadingLayout({ conversationPercent }: { conversationPercent: number }) {
+  return (
+    <Group
+      id="dezin-workspace-layout-loading"
+      className="flex-1"
+      defaultLayout={twoPanelLayout(WORKSPACE_CONVERSATION_PANEL, conversationPercent, WORKSPACE_ARTIFACT_PANEL)}
+      onLayoutChanged={(layout) => savePanelFraction(SPLIT_KEY, layout, WORKSPACE_CONVERSATION_PANEL)}
+      resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
+    >
+      <Panel id={WORKSPACE_CONVERSATION_PANEL} minSize="320px" maxSize="55%">
+        <section aria-label="Conversation loading" className="relative flex h-full min-w-0 flex-col">
+          <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="h-5 w-5 rounded-md bg-surface-2" />
+              <div className="h-4 w-36 rounded bg-surface-2" />
+            </div>
+            <div className="h-8 w-8 rounded-lg bg-surface-2" />
+          </div>
+          <div className="min-h-0 flex-1 space-y-4 overflow-hidden px-4 pt-5">
+            <div className="h-16 w-4/5 rounded-2xl rounded-bl-md bg-surface-2" />
+            <div className="ml-auto h-10 w-2/3 rounded-2xl rounded-br-md bg-surface-2" />
+            <div className="h-24 w-[88%] rounded-xl bg-surface-2" />
+            <div className="h-14 w-3/4 rounded-2xl rounded-bl-md bg-surface-2/80" />
+          </div>
+          <div className="pointer-events-none absolute inset-x-0 bottom-0">
+            <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
+            <div className="bg-background px-3 pb-3">
+              <div className="rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5">
+                <div className="h-10 rounded-md bg-surface-2" />
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <div className="h-8 w-36 rounded-md bg-surface-2" />
+                  <div className="h-8 w-8 rounded-lg bg-surface-2" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </Panel>
+
+      <Separator aria-label="Resize panels" className={RESIZE_SEPARATOR_CLASS} />
+
+      <Panel id={WORKSPACE_ARTIFACT_PANEL} minSize="360px">
+        <section aria-label="Artifact loading" className="flex h-full min-w-0 flex-col">
+          <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
+            <div className="flex items-center gap-1.5 px-1.5">
+              <div className="h-7 w-20 rounded-md bg-surface-2" />
+              <div className="h-7 w-16 rounded-md bg-surface-2/80" />
+              <div className="h-7 w-20 rounded-md bg-surface-2/80" />
+            </div>
+            <div className="flex items-center gap-1">
+              <div className="h-8 w-8 rounded-lg bg-surface-2" />
+              <div className="h-8 w-8 rounded-lg bg-surface-2" />
+            </div>
+          </div>
+          <div className="dz-canvas relative flex-1 overflow-hidden">
+            <div className="absolute left-4 top-4 h-6 w-44 rounded bg-surface-2/80" />
+            <div className="absolute right-4 top-4 h-8 w-28 rounded-lg bg-surface-2/80" />
+            <div className="grid h-full place-items-center">
+              <div className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
+                <Spinner size={13} />
+                Loading project
+              </div>
+            </div>
+          </div>
+        </section>
+      </Panel>
+    </Group>
+  );
+}
+
 export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: string; onOpenSettings?: (section?: string) => void }) {
   const api = useApi();
   const { toast } = useToast();
@@ -2807,6 +2876,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     />
   );
 
+  if (loading) {
+    return <WorkspaceLoadingLayout conversationPercent={workspaceConversationPercent} />;
+  }
+
   return (
     <>
       <Group
@@ -2888,9 +2961,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           className="flex-1 space-y-4 overflow-auto px-4 pt-5"
           style={{ paddingBottom: composerH + 36 }}
         >
-          {loading ? (
-            <Loading />
-          ) : messages.length === 0 ? (
+          {messages.length === 0 ? (
             <div className="grid h-full place-items-center">
               <div className="flex max-w-[16rem] flex-col items-center gap-3 text-center">
                 <span className="grid h-11 w-11 place-items-center rounded-2xl border border-border bg-card text-foreground">
