@@ -194,13 +194,18 @@ export function rounded(value: unknown, fallback = 0): number {
 }
 
 export function sameFloatingRect(a: FloatingRect | null, b: FloatingRect | null, tolerance = 0.5): boolean {
+  const sameNumber = (left: number, right: number) => Math.abs(left - right) < tolerance;
+  const targetLeft = (rect: FloatingRect) => rect.targetLeft ?? rect.left;
+  const targetRight = (rect: FloatingRect) => rect.targetRight ?? rect.left;
   return (
     a === b ||
     (a != null &&
       b != null &&
-      Math.abs(a.left - b.left) < tolerance &&
-      Math.abs(a.top - b.top) < tolerance &&
-      Math.abs(a.bottom - b.bottom) < tolerance)
+      sameNumber(a.left, b.left) &&
+      sameNumber(a.top, b.top) &&
+      sameNumber(a.bottom, b.bottom) &&
+      sameNumber(targetLeft(a), targetLeft(b)) &&
+      sameNumber(targetRight(a), targetRight(b)))
   );
 }
 

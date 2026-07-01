@@ -443,6 +443,12 @@ test("Awen editor selection adapter prefers editor.select when Leafer exposes it
 test("sameFloatingRect ignores subpixel jitter during drag", () => {
   expect(sameFloatingRect({ left: 120, top: 80, bottom: 220 }, { left: 120.25, top: 80.2, bottom: 220.4 })).toBe(true);
   expect(sameFloatingRect({ left: 120, top: 80, bottom: 220 }, { left: 121, top: 80, bottom: 220 })).toBe(false);
+  expect(
+    sameFloatingRect(
+      { left: 120, top: 80, bottom: 220, targetLeft: 72, targetRight: 168 },
+      { left: 120, top: 80, bottom: 220, targetLeft: 88, targetRight: 152 },
+    ),
+  ).toBe(false);
 });
 
 test("sameIdList treats identical selection ids as stable", () => {

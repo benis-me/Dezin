@@ -183,7 +183,14 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
 
         <AnimatePresence initial={false}>
           {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady && !presentationMode ? (
-            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top" avoidOccluders={false}>
+            <FloatingCanvasSurface
+              appRef={canvas.appRef}
+              hostRef={canvas.hostRef}
+              selectedIds={canvas.selectedIds}
+              anchor={canvas.selectionRect}
+              placement="top"
+              avoidOccluders={false}
+            >
               <SelectionToolbar
                 node={canvas.selected}
                 onDuplicate={() => canvas.duplicateNode(canvas.selected!.id)}
@@ -197,7 +204,14 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
 
         <AnimatePresence initial={false}>
           {canvas.selectedNodes.length > 1 && canvas.runtimeReady && !presentationMode ? (
-            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top" avoidOccluders={false}>
+            <FloatingCanvasSurface
+              appRef={canvas.appRef}
+              hostRef={canvas.hostRef}
+              selectedIds={canvas.selectedIds}
+              anchor={canvas.selectionRect}
+              placement="top"
+              avoidOccluders={false}
+            >
               <MultiSelectionToolbar
                 nodes={canvas.selectedNodes}
                 onDuplicate={() => canvas.duplicateNodes(canvas.selectedIds)}
@@ -213,7 +227,13 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
 
         <AnimatePresence initial={false}>
           {canvas.selected?.type === "image-generator" && canvas.runtimeReady && !presentationMode ? (
-            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="bottom">
+            <FloatingCanvasSurface
+              appRef={canvas.appRef}
+              hostRef={canvas.hostRef}
+              selectedIds={canvas.selectedIds}
+              anchor={canvas.selectionRect}
+              placement="bottom"
+            >
               <GeneratorPromptToolbar
                 node={canvas.selected}
                 busy={busy}
@@ -235,7 +255,13 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
 
         <AnimatePresence initial={false}>
           {quickEditOpen && quickEditNode && canvas.runtimeReady && !presentationMode ? (
-            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="bottom">
+            <FloatingCanvasSurface
+              appRef={canvas.appRef}
+              hostRef={canvas.hostRef}
+              selectedIds={canvas.selectedIds}
+              anchor={canvas.selectionRect}
+              placement="bottom"
+            >
               <QuickEditPromptToolbar
                 busy={busy}
                 models={imageModels}
@@ -358,6 +384,7 @@ function FloatingCanvasSurface({
   appRef,
   hostRef,
   selectedIds,
+  anchor,
   placement,
   avoidOccluders = true,
   children,
@@ -365,15 +392,20 @@ function FloatingCanvasSurface({
   appRef: RefObject<any>;
   hostRef: RefObject<HTMLDivElement | null>;
   selectedIds: string[];
+  anchor?: FloatingRect | null;
   placement: "top" | "bottom";
   avoidOccluders?: boolean;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const selectedIdsRef = useRef(selectedIds);
+  const anchorRef = useRef(anchor);
   const layoutRef = useRef<FloatingLayoutSnapshot | null>(null);
+  const updateRef = useRef<((reason?: FloatingPositionReason) => void) | null>(null);
   const selectedKey = [...selectedIds].sort().join("\u0000");
+  const anchorKey = floatingRectKey(anchor);
   selectedIdsRef.current = selectedIds;
+  anchorRef.current = anchor;
 
   useLayoutEffect(() => {
     const element = ref.current;
@@ -398,8 +430,8 @@ function FloatingCanvasSurface({
     };
 
     const update = (reason: FloatingPositionReason = "viewport") => {
-      const anchor = resolveSelectedFloatingAnchor(app, container, selectedIdsRef.current);
-      if (!anchor) {
+      const nextAnchor = anchorRef.current ?? resolveSelectedFloatingAnchor(app, container, selectedIdsRef.current);
+      if (!nextAnchor) {
         element.style.display = "none";
         element.style.visibility = "hidden";
         return;
@@ -407,7 +439,7 @@ function FloatingCanvasSurface({
       element.style.display = "";
       const layout = readLayout(reason);
       const next = resolveFloatingChromeRect({
-        anchor,
+        anchor: nextAnchor,
         containerWidth: layout.containerWidth,
         containerHeight: layout.containerHeight,
         surfaceWidth: layout.surfaceWidth,
@@ -419,13 +451,19 @@ function FloatingCanvasSurface({
       if (element.style.transform !== transform) element.style.transform = transform;
       element.style.visibility = "visible";
     };
+    updateRef.current = update;
 
     const cleanup = bindFloatingCanvasSurfaceEvents(app, update, { container, toolbar: element, observeOccluders: avoidOccluders });
     update("layout");
     return () => {
+      updateRef.current = null;
       cleanup();
     };
   }, [appRef, avoidOccluders, hostRef, placement, selectedKey]);
+
+  useLayoutEffect(() => {
+    updateRef.current?.("viewport");
+  }, [anchorKey]);
 
   return (
     <div
@@ -436,6 +474,13 @@ function FloatingCanvasSurface({
       {children}
     </div>
   );
+}
+
+function floatingRectKey(rect: FloatingRect | null | undefined): string {
+  if (!rect) return "";
+  return [rect.left, rect.top, rect.bottom, rect.targetLeft ?? rect.left, rect.targetRight ?? rect.left]
+    .map((value) => Math.round(value * 10) / 10)
+    .join(":");
 }
 
 function getFloatingOccluders(container: HTMLElement, current: HTMLElement): CanvasRect[] {
