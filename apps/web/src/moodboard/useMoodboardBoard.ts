@@ -3,7 +3,7 @@ import type { AgentInfo, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveM
 import { useApi } from "../lib/api-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { MODEL_PROVIDERS } from "../settings/model-provider-registry.ts";
-import { inferCapabilities } from "../settings/model-provider-ui-utils.tsx";
+import { inferCapabilities, parseModelEntries } from "../settings/model-provider-ui-utils.tsx";
 import { toInput } from "./canvas-utils.ts";
 import {
   appendInputs,
@@ -149,7 +149,7 @@ export function useMoodboardBoard(boardId: string) {
   );
 
   const uploadFiles = useCallback(
-    async (files: FileList | null) => {
+    async (files: FileList | null, point?: { x: number; y: number }) => {
       if (!files?.length) return;
       setBusy(true);
       try {
@@ -164,7 +164,7 @@ export function useMoodboardBoard(boardId: string) {
             width: size.width,
             height: size.height,
           });
-          nextNodes.push(createImageNode(asset, nodes.length, index, size));
+          nextNodes.push(createImageNode(asset, nodes.length, index, size, point));
         }
         if (nextNodes.length) appendNodes(nextNodes);
       } catch {
@@ -261,25 +261,32 @@ export function useMoodboardBoard(boardId: string) {
   };
 }
 
-function imageModelOptions(settings: Settings): string[] {
+export function imageModelOptions(settings: Settings): string[] {
   const models = new Set<string>();
   const selectedProvider = MODEL_PROVIDERS.find((provider) => provider.id === settings.aiProviderId);
   const knownCapabilities = new Map<string, Set<string>>();
   for (const provider of MODEL_PROVIDERS) {
     for (const model of provider.models) knownCapabilities.set(model.id, new Set(model.capabilities));
   }
-  for (const model of selectedProvider?.models ?? []) {
-    if (model.capabilities.includes("Image")) models.add(model.id);
-  }
-  for (const raw of settings.aiProviderModels.split(/\r?\n|,/)) {
-    const model = raw.trim();
-    if (!model) continue;
-    const known = knownCapabilities.get(model);
-    const capabilities = known ? [...known] : inferCapabilities(model);
-    if (capabilities.includes("Image") && !capabilities.includes("Video")) models.add(model);
-  }
+
   const configuredImageModel = settings.imageModel.trim();
-  if (configuredImageModel) {
+  const hasLegacyImageEndpoint = Boolean(settings.imageApiBaseUrl.trim() && settings.imageApiKey.trim() && configuredImageModel);
+  if (!settings.aiProviderEnabled && !hasLegacyImageEndpoint) return [];
+
+  if (settings.aiProviderEnabled) {
+    for (const model of selectedProvider?.models ?? []) {
+      if (model.capabilities.includes("Image")) models.add(model.id);
+    }
+    for (const entry of parseModelEntries(settings.aiProviderModels)) {
+      const known = knownCapabilities.get(entry.id);
+      const capabilities = entry.capabilities ?? (known ? [...known] : inferCapabilities(entry.id));
+      if (capabilities.includes("Image") && !capabilities.includes("Video")) models.add(entry.id);
+    }
+  }
+
+  if (hasLegacyImageEndpoint) {
+    models.add(configuredImageModel);
+  } else if (settings.aiProviderEnabled && configuredImageModel) {
     const known = knownCapabilities.get(configuredImageModel);
     const capabilities = known ? [...known] : inferCapabilities(configuredImageModel);
     if (capabilities.includes("Image") && !capabilities.includes("Video")) models.add(configuredImageModel);

@@ -12,6 +12,7 @@ import {
   Copy,
   Eraser,
   Hand,
+  ImagePlus,
   LayoutGrid,
   Layers,
   Maximize2,
@@ -45,6 +46,8 @@ import {
 import { cn } from "../lib/utils.ts";
 import { generatorPrompt, type MoodboardAlignType, type MoodboardCanvasTool } from "./canvas-utils.ts";
 
+const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg-primary hover:!text-primary-foreground";
+
 export function ToolButton({
   label,
   active = false,
@@ -65,7 +68,7 @@ export function ToolButton({
           aria-label={label}
           onClick={disabled ? undefined : onClick}
           aria-disabled={disabled}
-          className={cn(active && "bg-accent text-foreground", disabled && "cursor-not-allowed opacity-45 hover:bg-transparent hover:text-muted-foreground")}
+          className={cn(active && ACTIVE_TOOL_BUTTON_CLASS, disabled && "cursor-not-allowed opacity-45 hover:bg-transparent hover:text-muted-foreground")}
         >
           {children}
         </IconButton>
@@ -119,18 +122,19 @@ export function SelectionToolbar({
   const imageLike = node.type === "image";
   return (
     <TooltipProvider delayDuration={120}>
-      <ToolbarChrome className="flex items-center gap-1 p-1">
+      <ToolbarChrome className="flex items-center gap-1 p-0.5">
         {imageLike ? (
           <>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button size="sm" variant="ghost" onClick={onQuickEdit} className="h-7 gap-1.5 px-2 text-xs font-medium">
+                <Button size="sm" variant="ghost" onClick={onQuickEdit} className="h-8 gap-1.5 px-2 text-xs font-medium">
                   Quick edit
                   <TabHint />
                 </Button>
               </TooltipTrigger>
               <TooltipContent sideOffset={2}>Quick edit</TooltipContent>
             </Tooltip>
+            <span className="mx-0.5 h-5 w-px bg-border" />
             <ToolButton label="Remove background" onClick={() => onImageAction?.("Remove background")}>
               <Eraser size={14} strokeWidth={1.75} />
             </ToolButton>
@@ -161,7 +165,6 @@ export function MultiSelectionToolbar({
   onArrange,
   onDelete,
   onImageAction,
-  onQuickEdit,
 }: {
   nodes: MoodboardNode[];
   onDuplicate: () => void;
@@ -169,27 +172,17 @@ export function MultiSelectionToolbar({
   onArrange: () => void;
   onDelete: () => void;
   onImageAction?: (action: string) => void;
-  onQuickEdit?: () => void;
 }) {
   const [alignOpen, setAlignOpen] = useState(false);
   const imageOnly = nodes.length > 0 && nodes.every((node) => node.type === "image");
 
   return (
     <TooltipProvider delayDuration={120}>
-      <ToolbarChrome className="flex items-center gap-1 p-1">
+      <ToolbarChrome className="flex items-center gap-1 p-0.5">
         <span className="px-2 text-xs font-medium text-muted-foreground">{nodes.length} selected</span>
         <span className="mx-0.5 h-5 w-px bg-border" />
         {imageOnly ? (
           <>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button size="sm" variant="ghost" onClick={onQuickEdit} className="h-7 gap-1.5 px-2 text-xs font-medium">
-                  Quick edit
-                  <TabHint />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent sideOffset={2}>Quick edit</TooltipContent>
-            </Tooltip>
             <ToolButton label="Remove backgrounds" onClick={() => onImageAction?.("Remove backgrounds")}>
               <Eraser size={14} strokeWidth={1.75} />
             </ToolButton>
@@ -312,7 +305,7 @@ export function CanvasActionBar({
     <TooltipProvider delayDuration={120}>
       <div
         data-moodboard-floating-occluder
-        className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
+        className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-card/95 p-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       >
         <ToolButton label="Select" active={tool === "select"} onClick={() => onToolChange("select")}>
           <MousePointer2 size={15} strokeWidth={1.75} />
@@ -329,7 +322,7 @@ export function CanvasActionBar({
         </ToolButton>
         <span className="mx-1 h-5 w-px bg-border" />
         <ToolButton label="Image generator" onClick={onAddImageGenerator}>
-          <WandSparkles size={15} strokeWidth={1.75} />
+          <ImagePlus size={15} strokeWidth={1.75} />
         </ToolButton>
       </div>
     </TooltipProvider>
@@ -351,7 +344,7 @@ export function CanvasViewBar({
     <TooltipProvider delayDuration={120}>
       <div
         data-moodboard-floating-occluder
-        className="app-no-drag absolute bottom-3 left-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
+        className="app-no-drag absolute bottom-3 left-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       >
         <ToolButton label="Layers" active={layersOpen} onClick={onToggleLayers}>
           <Layers size={15} strokeWidth={1.75} />
@@ -379,7 +372,7 @@ export function CanvasZoomBar({
     <TooltipProvider delayDuration={120}>
       <div
         data-moodboard-floating-occluder
-        className="app-no-drag absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
+        className="app-no-drag absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       >
         <ToolButton label="Zoom out" onClick={() => onChangeZoom(zoom * 0.88)}>
           <Minus size={15} strokeWidth={1.75} />

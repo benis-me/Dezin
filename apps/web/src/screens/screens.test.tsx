@@ -2,6 +2,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, vi } from "vitest";
 import { HomeScreen } from "./HomeScreen.tsx";
+import { MoodboardsScreen } from "./MoodboardsScreen.tsx";
 import { DesignSystemsScreen } from "./DesignSystemsScreen.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { SettingsScreen } from "./SettingsScreen.tsx";
@@ -140,6 +141,79 @@ test("HomeScreen Build passes the brief, skillId, and designSystemId", async () 
   expect(onNewProject).toHaveBeenCalledWith("a dashboard", "deck", "editorial", "prototype");
 });
 
+test("HomeScreen prompt accepts dropped image references", async () => {
+  renderWithApi(<HomeScreen projects={[]} />, {
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+  });
+
+  const file = new File(["image"], "reference.png", { type: "image/png" });
+  fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), { dataTransfer: { files: [file] } });
+
+  expect(await screen.findByAltText("reference.png")).toBeInTheDocument();
+});
+
+test("MoodboardsScreen uses a Home-like prompt to start a board with initial direction", async () => {
+  const onOpenBoard = vi.fn();
+  const board = moodboard("b1", "Warm editorial references");
+  const createMoodboard = vi.fn(async () => board);
+  const postMoodboardMessage = vi.fn(async () => ({ messages: [] }));
+  renderWithApi(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
+    listMoodboards: async () => [],
+    createMoodboard,
+    postMoodboardMessage,
+  });
+
+  const prompt = await screen.findByLabelText("Describe moodboard direction");
+  fireEvent.change(prompt, { target: { value: "Warm editorial references for a boutique hotel" } });
+  fireEvent.click(screen.getByRole("button", { name: "Start board" }));
+
+  await waitFor(() => expect(createMoodboard).toHaveBeenCalledWith({ name: "Warm editorial references" }));
+  expect(postMoodboardMessage).toHaveBeenCalledWith("b1", "Warm editorial references for a boutique hotel");
+  expect(onOpenBoard).toHaveBeenCalledWith("b1");
+  expect(screen.getByRole("button", { name: "New board" })).toBeInTheDocument();
+});
+
+test("MoodboardsScreen prompt creates image nodes from dropped references", async () => {
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:reference");
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const onOpenBoard = vi.fn();
+  const board = moodboard("b1", "Gallery wall");
+  const createMoodboard = vi.fn(async () => board);
+  const uploadMoodboardAsset = vi.fn(async () => ({
+    id: "asset-1",
+    boardId: "b1",
+    fileName: "material.png",
+    mimeType: "image/png",
+    width: undefined,
+    height: undefined,
+    createdAt: 1,
+    url: "/api/moodboards/b1/assets/asset-1",
+  }));
+  const saveMoodboardNodes = vi.fn(async () => []);
+  renderWithApi(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
+    listMoodboards: async () => [],
+    createMoodboard,
+    uploadMoodboardAsset,
+    saveMoodboardNodes,
+  });
+
+  const file = new File(["image"], "material.png", { type: "image/png" });
+  fireEvent.drop(await screen.findByLabelText("Moodboard prompt dropzone"), { dataTransfer: { files: [file] } });
+  expect(await screen.findByAltText("material.png")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Start board" }));
+
+  await waitFor(() => expect(uploadMoodboardAsset).toHaveBeenCalledWith("b1", expect.objectContaining({ name: "material.png", mimeType: "image/png" })));
+  await waitFor(() =>
+    expect(saveMoodboardNodes).toHaveBeenCalledWith(
+      "b1",
+      expect.arrayContaining([expect.objectContaining({ type: "image", data: expect.objectContaining({ assetId: "asset-1", source: "upload" }) })]),
+    ),
+  );
+  expect(onOpenBoard).toHaveBeenCalledWith("b1");
+});
+
 test("DesignSystemsScreen loads systems from the daemon", async () => {
   renderWithApi(<DesignSystemsScreen />, {
     listDesignSystems: async () => [
@@ -199,6 +273,10 @@ test("DesignSystemDetailScreen loads a system and sets it as default", async () 
 
 function project(id: string, name: string) {
   return { id, name, skillId: null, designSystemId: "modern-minimal", mode: "prototype" as const, createdAt: 1, updatedAt: 2 };
+}
+
+function moodboard(id: string, name: string) {
+  return { id, name, createdAt: 1, updatedAt: 2, archivedAt: null, coverUrl: null };
 }
 
 test("HomeScreen loads projects from the daemon and archives one", async () => {

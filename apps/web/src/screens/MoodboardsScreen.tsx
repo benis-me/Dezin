@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Archive, ArchiveRestore, Images, LayoutGrid, List, Pencil, Plus, Search, Trash2 } from "lucide-react";
-import type { Moodboard } from "../lib/api.ts";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { Archive, ArchiveRestore, ArrowRight, ImagePlus, Images, LayoutGrid, List, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import type { Moodboard, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import {
@@ -17,6 +17,14 @@ import {
   StaggerItem,
   Tabs,
 } from "../components/ui/index.ts";
+import { createImageNode, fileToBase64, imageSize } from "../moodboard/moodboard-board-utils.ts";
+
+interface PromptImage {
+  file: File;
+  name: string;
+  base64: string;
+  preview: string;
+}
 
 function formatUpdatedAt(ts: number): string {
   const d = new Date(ts);
@@ -51,6 +59,10 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<Moodboard | null>(null);
   const [draft, setDraft] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [promptImages, setPromptImages] = useState<PromptImage[]>([]);
+  const [starting, setStarting] = useState(false);
+  const promptImageInputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -87,6 +99,65 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
       onOpenBoard(board.id);
     } catch {
       toast("Couldn't create the moodboard.", { variant: "error" });
+    }
+  };
+
+  const addPromptImages = async (files: FileList | null): Promise<void> => {
+    if (!files) return;
+    const next: PromptImage[] = [];
+    for (const file of Array.from(files).filter((item) => item.type.startsWith("image/"))) {
+      try {
+        const base64 = await fileToBase64(file);
+        next.push({ file, name: file.name, base64, preview: `data:${file.type || "image/png"};base64,${base64}` });
+      } catch {
+        toast("Couldn't read that image.", { variant: "error" });
+      }
+    }
+    if (next.length) setPromptImages((current) => [...current, ...next]);
+  };
+
+  const handlePromptDragOver = (event: ReactDragEvent<HTMLDivElement>): void => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const handlePromptDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    void addPromptImages(event.dataTransfer.files);
+  };
+
+  const startBoard = async () => {
+    const text = prompt.trim();
+    if (!text && promptImages.length === 0) return;
+    setStarting(true);
+    try {
+      const board = await api.createMoodboard({ name: titleFromPrompt(text) || (promptImages.length ? "Visual references" : "Untitled moodboard") });
+      if (text) await api.postMoodboardMessage(board.id, text);
+      if (promptImages.length) {
+        const nodes: SaveMoodboardNodeInput[] = [];
+        for (const [index, image] of promptImages.entries()) {
+          const [asset, size] = await Promise.all([
+            api.uploadMoodboardAsset(board.id, {
+              name: image.name,
+              contentBase64: image.base64,
+              mimeType: image.file.type,
+            }),
+            imageSizeWithFallback(image.file),
+          ]);
+          nodes.push(createImageNode(asset, index, index, size));
+        }
+        if (nodes.length) await api.saveMoodboardNodes(board.id, nodes);
+      }
+      setPrompt("");
+      setPromptImages([]);
+      refresh();
+      onOpenBoard(board.id);
+    } catch {
+      toast("Couldn't create the moodboard.", { variant: "error" });
+    } finally {
+      setStarting(false);
     }
   };
 
@@ -151,14 +222,17 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
 
   return (
     <div className="relative h-full w-full overflow-auto">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-[38vh]"
+        style={{ background: "radial-gradient(65% 105% at 68% 0%, color-mix(in oklch, var(--primary) 10%, transparent), transparent 72%)" }}
+      />
       <div className="relative w-full px-7 pb-20 pt-10">
-        <div className="mx-auto max-w-6xl">
+        <div className="mx-auto max-w-5xl">
           <div className="flex items-start justify-between gap-4">
-            <div>
+            <div className="max-w-2xl">
               <h1 className="text-2xl font-semibold tracking-tight text-foreground">Moodboard</h1>
-              <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-                Collect references, generate visual material, and arrange design direction before a project starts.
-              </p>
+              <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">Collect references, generate visual material, and arrange design direction before a project starts.</p>
             </div>
             <Button
               className="gap-2"
@@ -172,7 +246,72 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
             </Button>
           </div>
 
-          <div className="mt-9 flex flex-wrap items-center gap-2">
+          <div
+            aria-label="Moodboard prompt dropzone"
+            className="mt-5 w-full rounded-2xl border border-input bg-card/80 p-2.5 transition-[color,border-color,box-shadow] duration-150 hover:border-border-strong focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring"
+            onDragEnter={handlePromptDragOver}
+            onDragOver={handlePromptDragOver}
+            onDrop={handlePromptDrop}
+          >
+            <input
+              ref={promptImageInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                void addPromptImages(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            {promptImages.length ? (
+              <div className="flex flex-wrap gap-2 px-2 pb-1 pt-1.5">
+                {promptImages.map((image, index) => (
+                  <span key={`${image.name}-${index}`} className="group relative overflow-hidden rounded-lg border border-border">
+                    <img src={image.preview} alt={image.name} className="h-16 w-16 object-cover" />
+                    <button
+                      type="button"
+                      aria-label={`Remove ${image.name}`}
+                      onClick={() => setPromptImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                      className="absolute right-0.5 top-0.5 grid size-5 place-items-center rounded-md bg-background/80 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                    >
+                      <X size={12} strokeWidth={2} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            <textarea
+              aria-label="Describe moodboard direction"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="Collect visual references for a calm hospitality brand with warm editorial photography..."
+              rows={3}
+              className="w-full resize-none bg-transparent px-3 py-2.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground"
+            />
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 px-1 pt-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <IconButton aria-label="Attach images" onClick={() => promptImageInputRef.current?.click()}>
+                  <ImagePlus size={15} strokeWidth={1.75} />
+                </IconButton>
+                <span className="label-mono">Images, references, and direction</span>
+              </div>
+              <Button
+                size="lg"
+                aria-label="Start board"
+                onClick={() => void startBoard()}
+                disabled={starting || (!prompt.trim() && promptImages.length === 0)}
+                className="rounded-xl px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_48%,transparent)]"
+              >
+                Start board
+                <ArrowRight size={16} strokeWidth={2} />
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-14">
+          <div className="flex flex-wrap items-center gap-2">
             <Tabs
               aria-label="Moodboard view"
               value={view}
@@ -304,4 +443,19 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
       </Dialog>
     </div>
   );
+}
+
+function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer.types ?? []).includes("Files") || event.dataTransfer.files.length > 0;
+}
+
+function titleFromPrompt(prompt: string): string {
+  return prompt.replace(/\s+/g, " ").trim().split(" ").slice(0, 3).join(" ");
+}
+
+async function imageSizeWithFallback(file: File): Promise<{ width: number | undefined; height: number | undefined }> {
+  return Promise.race([
+    imageSize(file),
+    new Promise<{ width: undefined; height: undefined }>((resolve) => window.setTimeout(() => resolve({ width: undefined, height: undefined }), 80)),
+  ]);
 }

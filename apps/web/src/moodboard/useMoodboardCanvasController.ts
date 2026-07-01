@@ -19,6 +19,7 @@ import {
   type MoodboardAlignType,
   type MoodboardCanvasTool,
 } from "./canvas-utils.ts";
+import type { MoodboardCanvasTopbarControls } from "./MoodboardCanvasTopbar.tsx";
 import {
   cloneMoodboardSnapshot,
   createMoodboardHistorySnapshot,
@@ -44,8 +45,9 @@ export interface MoodboardCanvasProps {
   onAddNote: (point?: { x: number; y: number }) => void;
   onAddSection: (point?: { x: number; y: number; width?: number; height?: number }) => void;
   onAddImageGenerator: (point?: { x: number; y: number }) => void;
-  onUploadFiles: (files: FileList | null) => void;
+  onUploadFiles: (files: FileList | null, point?: { x: number; y: number }) => void;
   onGenerateImage: (node: MoodboardNode, prompt: string) => Promise<void>;
+  onTopbarControlsChange?: (controls: MoodboardCanvasTopbarControls | null) => void;
 }
 
 export function useMoodboardCanvasController({
@@ -62,6 +64,7 @@ export function useMoodboardCanvasController({
   const [layersOpen, setLayersOpen] = useState(() => readInitialLayersOpen());
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [collapsedLayerIds, setCollapsedLayerIds] = useState<Set<string>>(() => new Set());
+  const [draftInputs, setDraftInputs] = useState<SaveMoodboardNodeInput[] | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const nodesRef = useRef(nodes);
   const currentInputsRef = useRef(nodes.map(toInput));
@@ -82,6 +85,7 @@ export function useMoodboardCanvasController({
   useEffect(() => {
     nodesRef.current = nodes;
     currentInputsRef.current = nodes.map(toInput);
+    setDraftInputs(null);
   }, [nodes]);
 
   useEffect(() => {
@@ -106,11 +110,12 @@ export function useMoodboardCanvasController({
   }, [onAddImageGenerator, onAddNote, onAddSection, onNodesChange, onSelectIds, onUploadFiles]);
 
   const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
-  const selected = useMemo(() => (selectedId ? nodes.find((node) => node.id === selectedId) ?? null : null), [nodes, selectedId]);
+  const displayNodes = useMemo(() => mergeDraftMoodboardNodes(nodes, draftInputs), [draftInputs, nodes]);
+  const selected = useMemo(() => (selectedId ? displayNodes.find((node) => node.id === selectedId) ?? null : null), [displayNodes, selectedId]);
   const selectedNodes = useMemo(() => {
-    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const byId = new Map(displayNodes.map((node) => [node.id, node]));
     return selectedIds.map((id) => byId.get(id)).filter((node): node is MoodboardNode => Boolean(node));
-  }, [nodes, selectedIds]);
+  }, [displayNodes, selectedIds]);
   const layerTree = useMemo(() => buildLayerTree(nodes), [nodes]);
 
   const currentSnapshot = useCallback(
@@ -561,9 +566,9 @@ export function useMoodboardCanvasController({
   );
 
   const uploadFiles = useCallback(
-    (files: FileList | null) => {
+    (files: FileList | null, point?: { x: number; y: number }) => {
       if (files?.length) recordHistory();
-      onUploadFilesRef.current(files);
+      onUploadFilesRef.current(files, point);
     },
     [recordHistory],
   );
@@ -596,6 +601,7 @@ export function useMoodboardCanvasController({
     onDoubleTap: (point) => addImageGeneratorAt(point),
     onContextMenu: setContextMenu,
     onFrameStateChange: saveInputs,
+    onFrameStateDraftChange: setDraftInputs,
   });
   syncNodeInputsInRuntimeRef.current = runtime.syncNodeInputsInRuntime;
   refreshSelectionInRuntimeRef.current = runtime.refreshSelectionInRuntime;
@@ -827,4 +833,22 @@ export function useMoodboardCanvasController({
 
 function affectsRuntimeGeometry(patch: Partial<SaveMoodboardNodeInput>): boolean {
   return "x" in patch || "y" in patch || "width" in patch || "height" in patch || "rotation" in patch || "zIndex" in patch;
+}
+
+export function mergeDraftMoodboardNodes(nodes: MoodboardNode[], draftInputs: SaveMoodboardNodeInput[] | null): MoodboardNode[] {
+  if (!draftInputs?.length) return nodes;
+  const draftById = new Map(draftInputs.filter((input) => input.id).map((input) => [input.id, input]));
+  return nodes.map((node) => {
+    const draft = draftById.get(node.id);
+    if (!draft) return node;
+    return {
+      ...node,
+      x: draft.x,
+      y: draft.y,
+      width: draft.width,
+      height: draft.height,
+      rotation: draft.rotation ?? 0,
+      zIndex: draft.zIndex ?? node.zIndex,
+    };
+  });
 }

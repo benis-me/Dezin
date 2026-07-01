@@ -24,6 +24,8 @@ import type { MoodboardNode } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
 import { isNodeLocked, isNodeVisible, type ContextMenuState } from "./canvas-utils.ts";
 
+const ESTIMATED_MENU_RECT = { width: 224, height: 320 };
+
 export function MoodboardContextMenu({
   menu,
   targetId,
@@ -72,21 +74,27 @@ export function MoodboardContextMenu({
   boundaryElement?: HTMLElement | null;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const [position, setPosition] = useState(() => ({ x: menu.x, y: menu.y }));
+  const getInitialPosition = useCallback(
+    () => resolveMenuPosition(menu.x, menu.y, ESTIMATED_MENU_RECT, boundaryElement?.getBoundingClientRect()),
+    [boundaryElement, menu.x, menu.y],
+  );
+  const [position, setPosition] = useState(getInitialPosition);
 
   const updatePosition = useCallback(() => {
     const element = menuRef.current;
     if (!element) {
-      setPosition({ x: menu.x, y: menu.y });
+      setPosition(getInitialPosition());
       return;
     }
 
-    const rect = element.getBoundingClientRect();
+    const measured = element.getBoundingClientRect();
+    const rect = measured.width > 0 && measured.height > 0 ? measured : ESTIMATED_MENU_RECT;
     setPosition(resolveMenuPosition(menu.x, menu.y, rect, boundaryElement?.getBoundingClientRect()));
-  }, [boundaryElement, menu.x, menu.y]);
+  }, [boundaryElement, getInitialPosition, menu.x, menu.y]);
 
   useLayoutEffect(() => {
-    setPosition({ x: menu.x, y: menu.y });
+    setPosition(getInitialPosition());
+    updatePosition();
     const frame = window.requestAnimationFrame(updatePosition);
     window.addEventListener("resize", updatePosition);
     const observer = boundaryElement && typeof ResizeObserver === "function" ? new ResizeObserver(updatePosition) : null;
@@ -96,7 +104,7 @@ export function MoodboardContextMenu({
       window.removeEventListener("resize", updatePosition);
       observer?.disconnect();
     };
-  }, [boundaryElement, menu.x, menu.y, updatePosition]);
+  }, [boundaryElement, getInitialPosition, updatePosition]);
 
   return (
     <>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Eye, Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
-import { Button, Picker, Textarea, Loading, Badge, ScrollArea } from "../components/ui/index.ts";
+import { Button, Picker, Textarea, Loading, Badge, ScrollArea, Switch } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
@@ -70,7 +70,7 @@ export function SettingsScreen({
   return (
     <div className="flex h-[clamp(460px,72vh,660px)]">
       {/* Sidebar */}
-      <nav aria-label="Settings sections" className="flex w-60 shrink-0 flex-col border-r border-border bg-muted/40 p-2.5">
+      <nav aria-label="Settings sections" className="flex w-52 shrink-0 flex-col border-r border-border bg-muted/40 p-2.5">
         <div className="px-2 py-2">
           <div className="truncate text-sm font-semibold leading-tight">Settings</div>
           <div className="truncate text-[11px] text-muted-foreground">Local workspace</div>
@@ -143,25 +143,11 @@ export function SettingsScreen({
                     label="Agent visual review"
                     desc="After generation, the selected Agent/model reviews the screenshot with the full current conversation context."
                   >
-                    <button
-                      type="button"
-                      role="switch"
+                    <Switch
                       aria-label="Agent visual review"
-                      aria-checked={settings.visualQaEnabled}
-                      onClick={() => save("visualQaEnabled", !settings.visualQaEnabled)}
-                      className={cn(
-                        "relative h-6 w-10 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                        settings.visualQaEnabled ? "border-primary bg-primary" : "border-border bg-surface-2",
-                      )}
-                    >
-                      <span
-                        aria-hidden
-                        className={cn(
-                          "absolute top-0.5 size-4 rounded-full bg-background shadow-sm transition-transform",
-                          settings.visualQaEnabled ? "left-[18px]" : "left-0.5",
-                        )}
-                      />
-                    </button>
+                      checked={settings.visualQaEnabled}
+                      onCheckedChange={(checked) => save("visualQaEnabled", checked)}
+                    />
                   </SettingRow>
                 </SettingsRows>
               </SettingsPanel>

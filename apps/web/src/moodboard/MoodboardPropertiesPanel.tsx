@@ -154,10 +154,22 @@ export function MoodboardMultiPropertiesPanel({
         <span className="label-mono shrink-0 text-muted-foreground">{typeCounts.length} types</span>
       </div>
       <PropertySection title="Selection">
-        <div className="space-y-1.5">
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <ReadonlyValue label="Layers" value={String(nodes.length)} />
+            <ReadonlyValue label="Types" value={String(typeCounts.length)} />
+          </div>
+          <div className="flex flex-wrap gap-1.5">
           {typeCounts.map(({ type, count }) => (
-            <ReadonlyValue key={type} label={formatNodeType(type)} value={String(count)} />
+            <span
+              key={type}
+              className="inline-flex h-6 items-center gap-1 rounded-md border border-border bg-surface-2 px-2 text-[11px] font-medium text-foreground"
+            >
+              <span className="text-muted-foreground">{formatNodeType(type)}</span>
+              <span>{count}</span>
+            </span>
           ))}
+          </div>
         </div>
       </PropertySection>
       <PropertySection title="Object">

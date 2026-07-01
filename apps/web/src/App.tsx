@@ -34,7 +34,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
       return <MoodboardsScreen onOpenBoard={(id) => navigate(`/moodboards/${id}`)} />;
     case "moodboard":
       return (
-        <Suspense fallback={<Loading label="Loading moodboard..." />}>
+        <Suspense fallback={<RouteLoading label="Loading moodboard..." />}>
           <MoodboardScreen boardId={route.id} onBack={() => navigate("/moodboards")} onOpenSettings={onOpenSettings} />
         </Suspense>
       );
@@ -65,6 +65,14 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
         />
       );
   }
+}
+
+function RouteLoading({ label }: { label: string }) {
+  return (
+    <div className="grid h-full min-h-0 w-full place-items-center">
+      <Loading label={label} />
+    </div>
+  );
 }
 
 export default function App() {
@@ -136,7 +144,7 @@ export default function App() {
         onToggleTheme={onToggleDark}
         onOpenSettings={() => openSettings()}
       />
-      <Dialog open={settingsOpen} onClose={() => setSettingsOpen(false)} label="Settings" className="sm:max-w-4xl" showClose>
+      <Dialog open={settingsOpen} onClose={() => setSettingsOpen(false)} label="Settings" className="sm:max-w-5xl" showClose>
         <SettingsScreen dark={dark} onToggleDark={onToggleDark} initialSection={settingsSection} />
       </Dialog>
     </Shell>

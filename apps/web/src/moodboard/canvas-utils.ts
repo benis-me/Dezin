@@ -47,6 +47,7 @@ export interface FloatingChromeInput {
   placement: "top" | "bottom";
   occluders?: CanvasRect[];
   padding?: number;
+  allowSidePlacement?: boolean;
 }
 
 interface FloatingRectBounds {
@@ -64,6 +65,15 @@ export interface FloatingRectInput {
   frame: FloatingRectBounds;
   tree?: { x?: number; y?: number; scale?: number; scaleX?: number };
   world?: FloatingRectBounds | null;
+}
+
+export interface CanvasFitTransformInput {
+  containerWidth: number;
+  containerHeight: number;
+  contentRect: CanvasRect;
+  occluders?: CanvasRect[];
+  padding?: number;
+  maxScale?: number;
 }
 
 export interface ClientPointFallback {
@@ -331,6 +341,7 @@ export function resolveFloatingChromeRect({
   placement,
   occluders = [],
   padding = 8,
+  allowSidePlacement = true,
 }: FloatingChromeInput): { left: number; top: number } {
   const containerRect = rectFromBounds(0, 0, containerWidth, containerHeight);
   const safeRect = getFloatingChromeSafeRect(containerRect, occluders, padding);
@@ -342,9 +353,11 @@ export function resolveFloatingChromeRect({
   const targetRight = anchor.targetRight ?? anchor.left;
   const targetRect = rectFromBounds(Math.min(targetLeft, targetRight), anchor.top, Math.max(targetLeft, targetRight), anchor.bottom);
   const anchorRect = intersectRects(targetRect, safeRect) ?? targetRect;
-  const placements = placement === "top" ? (["top", "bottom", "right", "left"] as const) : (["bottom", "top", "right", "left"] as const);
+  const placements = placement === "top" ? (["top", "bottom"] as const) : (["bottom", "top"] as const);
+  const sidePlacements = placement === "top" ? (["right", "left"] as const) : (["right", "left"] as const);
+  const placementCandidates = allowSidePlacement ? [...placements, ...sidePlacements] : placements;
 
-  for (const nextPlacement of placements) {
+  for (const nextPlacement of placementCandidates) {
     const rect = floatingChromePlacementRect(nextPlacement, anchorRect, width, height);
     if (rect.left >= safeRect.left && rect.right <= safeRect.right && rect.top >= safeRect.top && rect.bottom <= safeRect.bottom) {
       return { left: rect.left, top: rect.top };
@@ -439,6 +452,42 @@ export function getFloatingChromeSafeRect(containerRect: CanvasRect, occluders: 
   }
 
   return rectFromBounds(left, top, right, bottom);
+}
+
+export function resolveCanvasFitTransform({
+  containerWidth,
+  containerHeight,
+  contentRect,
+  occluders = [],
+  padding = 128,
+  maxScale = 2.4,
+}: CanvasFitTransformInput): { scale: number; x: number; y: number } {
+  const containerRect = rectFromBounds(0, 0, containerWidth, containerHeight);
+  const safeRect = getFloatingChromeSafeRect(containerRect, occluders, 8);
+  const availableWidth = Math.max(120, safeRect.width - padding * 2);
+  const availableHeight = Math.max(120, safeRect.height - padding * 2);
+  const contentWidth = Math.max(1, contentRect.width);
+  const contentHeight = Math.max(1, contentRect.height);
+  const scale = Math.max(0.1, Math.min(maxScale, Math.min(availableWidth / contentWidth, availableHeight / contentHeight)));
+  const contentCenterX = contentRect.left + contentRect.width / 2;
+  const contentCenterY = contentRect.top + contentRect.height / 2;
+  const viewportCenterX = safeRect.left + safeRect.width / 2;
+  const viewportCenterY = safeRect.top + safeRect.height / 2;
+  return {
+    scale,
+    x: Math.round(viewportCenterX - contentCenterX * scale),
+    y: Math.round(viewportCenterY - contentCenterY * scale),
+  };
+}
+
+export function collectFloatingOccluderRects(container: HTMLElement, root: ParentNode = container, current?: HTMLElement | null): CanvasRect[] {
+  const containerRect = container.getBoundingClientRect();
+  return Array.from(root.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]"))
+    .filter((element) => element !== current && !current?.contains(element) && !element.contains(current ?? container))
+    .map((element) => {
+      const rect = element.getBoundingClientRect();
+      return rectFromBounds(rect.left - containerRect.left, rect.top - containerRect.top, rect.right - containerRect.left, rect.bottom - containerRect.top);
+    });
 }
 
 function intersectRects(a: CanvasRect, b: CanvasRect): CanvasRect | null {
@@ -549,11 +598,17 @@ export function layerLabel(node: MoodboardNode): string {
   return nodeText(node) || "Note";
 }
 
-function centerInside(parent: MoodboardNode, child: MoodboardNode): boolean {
+export function nodeCenterInsideSection(parent: MoodboardNode, child: Pick<MoodboardNode, "id" | "x" | "y" | "width" | "height">): boolean {
   if (parent.id === child.id || parent.type !== "section") return false;
   const cx = child.x + child.width / 2;
   const cy = child.y + child.height / 2;
   return cx >= parent.x && cx <= parent.x + parent.width && cy >= parent.y && cy <= parent.y + parent.height;
+}
+
+export function containedNodeIdsForSection(nodes: MoodboardNode[], sectionId: string): string[] {
+  const section = nodes.find((node) => node.id === sectionId && node.type === "section");
+  if (!section) return [];
+  return nodes.filter((node) => node.type !== "section" && nodeCenterInsideSection(section, node)).map((node) => node.id);
 }
 
 export function moveContainedNodesWithSections(previous: MoodboardNode[], inputs: SaveMoodboardNodeInput[]): SaveMoodboardNodeInput[] {
@@ -579,7 +634,7 @@ export function moveContainedNodesWithSections(previous: MoodboardNode[], inputs
     const movedIndependently = Math.abs(input.x - previousNode.x) >= 0.5 || Math.abs(input.y - previousNode.y) >= 0.5;
     if (movedIndependently) return input;
 
-    const containingSection = movedSections.find(({ previousNode: section }) => centerInside(section, previousNode));
+    const containingSection = movedSections.find(({ previousNode: section }) => nodeCenterInsideSection(section, previousNode));
     if (!containingSection) return input;
     return {
       ...input,
@@ -607,7 +662,7 @@ export function buildLayerTree(nodes: MoodboardNode[]): LayerTreeItem[] {
   const sectionChildren = new Map<string, MoodboardNode[]>();
 
   for (const section of sections) {
-    const children = sorted.filter((node) => node.type !== "section" && centerInside(section, node));
+    const children = sorted.filter((node) => node.type !== "section" && nodeCenterInsideSection(section, node));
     children.forEach((child) => contained.add(child.id));
     sectionChildren.set(section.id, children);
   }

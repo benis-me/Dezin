@@ -77,7 +77,7 @@ export function createSectionNode(count: number, point?: { x: number; y: number;
     y: point?.y ?? 40 + count * 18,
     width: Math.max(80, point?.width ?? 460),
     height: Math.max(80, point?.height ?? 300),
-    zIndex: Math.max(0, count - 1),
+    zIndex: -1,
     data: { title: "Section" },
   };
 }
@@ -100,14 +100,16 @@ export function createImageNode(
   count: number,
   index: number,
   size: { width: number | undefined; height: number | undefined },
+  point?: { x: number; y: number },
 ): SaveMoodboardNodeInput {
+  const height = size.width && size.height ? Math.max(160, Math.round(320 * (size.height / size.width))) : 240;
   return {
     id: localId(),
     type: "image",
-    x: 80 + (count + index) * 24,
-    y: 80 + (count + index) * 24,
+    x: Math.round((point?.x ?? 80 + count * 24) + index * 24),
+    y: Math.round((point?.y ?? 80 + count * 24) + index * 24),
     width: 320,
-    height: size.width && size.height ? Math.max(160, Math.round(320 * (size.height / size.width))) : 240,
+    height,
     zIndex: count + index,
     data: { assetId: asset.id, url: asset.url, fileName: asset.fileName, source: "upload" },
   };

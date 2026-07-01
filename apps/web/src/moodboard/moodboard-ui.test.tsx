@@ -5,12 +5,15 @@ import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
 import { CanvasViewBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
+import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
+import { MoodboardSectionLabels } from "./MoodboardSectionLabels.tsx";
 import {
   allMoodboardNodeIds,
   clientPointToCanvasPoint,
+  containedNodeIdsForSection,
   contextTargetIdFromEvent,
   eventClientPoint,
   generatorModel,
@@ -25,7 +28,9 @@ import {
   nodeIdsFromTarget,
   nudgeNodeInputs,
   reorderLayerInputs,
+  collectFloatingOccluderRects,
   rectFromBounds,
+  resolveCanvasFitTransform,
   resolveFloatingChromeRect,
   resolveFloatingRect,
   sameFloatingRect,
@@ -42,6 +47,64 @@ import { createSnapLines, createSnapPointsFromBounds, resolveSnapDeltas } from "
 import { selectAppNodesByIds } from "./leafer-adapter/editor-selection.ts";
 import { MOODBOARD_LEAFER_EDITOR_CONFIG } from "./moodboard-canvas-config.ts";
 import { createSectionNode } from "./moodboard-board-utils.ts";
+import { MOODBOARD_SCROLLBAR_PADDING } from "./useLeaferMoodboardRuntime.ts";
+import { mergeDraftMoodboardNodes } from "./useMoodboardCanvasController.ts";
+
+const leaferDomProps = (props: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(props).map(([key, value]) => [key, typeof value === "boolean" ? String(value) : value]));
+
+vi.mock("@dezin/leafer-react", () => ({
+  Frame: ({ children, ...props }: any) => (
+    <div data-mock-frame {...leaferDomProps(props)}>
+      {children}
+    </div>
+  ),
+  Img: (props: any) => <image {...leaferDomProps(props)} />,
+  Leafer: ({ children, ...props }: any) => <div {...leaferDomProps(props)}>{children}</div>,
+  Rect: (props: any) => <rect {...leaferDomProps(props)} />,
+  Txt: ({ children, text, ...props }: any) => <text {...leaferDomProps(props)}>{text ?? children}</text>,
+  ViewportLighter: class {
+    destroy() {}
+    show() {}
+  },
+}));
+
+vi.mock("@leafer-in/resize", () => ({}));
+
+vi.mock("@leafer-in/scroll", () => ({
+  ScrollBar: class {
+    constructor() {}
+    destroy() {}
+    update() {}
+  },
+}));
+
+vi.mock("leafer-editor", () => {
+  class LeaferShape {
+    constructor(public props: Record<string, unknown> = {}) {}
+    destroy() {}
+    remove() {}
+  }
+
+  return {
+    Box: LeaferShape,
+    DragEvent: { START: "drag.start", DRAG: "drag", END: "drag.end" },
+    EditorEvent: { SELECT: "editor.select", HOVER: "editor.hover" },
+    EditorMoveEvent: { BEFORE_MOVE: "editor.before-move", MOVE: "editor.move" },
+    EditorRotateEvent: { ROTATE: "editor.rotate" },
+    EditorScaleEvent: { BEFORE_SCALE: "editor.before-scale", SCALE: "editor.scale" },
+    Group: LeaferShape,
+    KeyEvent: { DOWN: "key.down", UP: "key.up" },
+    Line: LeaferShape,
+    Platform: {
+      toURL: (source: string) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(source)}`,
+    },
+    PointerEvent: { TAP: "pointer.tap", DOWN: "pointer.down", DOUBLE_TAP: "pointer.double-tap", MENU: "pointer.menu", UP: "pointer.up" },
+    PropertyEvent: { LEAFER_CHANGE: "property.leafer-change" },
+    Text: LeaferShape,
+    ZoomEvent: { START: "zoom.start", ZOOM: "zoom", END: "zoom.end" },
+  };
+});
 
 beforeEach(() => {
   localStorage.clear();
@@ -167,6 +230,67 @@ test("MoodboardContextMenu clamps inside the canvas host bounds", async () => {
   expect(screen.getByRole("menu")).toHaveStyle({ left: "290px", top: "230px" });
 });
 
+test("MoodboardContextMenu starts clamped before the measurement frame", () => {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
+  Object.defineProperty(window, "innerHeight", { configurable: true, value: 400 });
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 1);
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+
+  render(
+    <MoodboardContextMenu
+      menu={{ x: 490, y: 390, canvasX: 240, canvasY: 260, targetId: null }}
+      targetId={null}
+      targetNode={null}
+      onClose={() => {}}
+      onAddNote={() => {}}
+      onAddSection={() => {}}
+      onGenerate={() => {}}
+      onZoomIn={() => {}}
+      onZoomOut={() => {}}
+      onFitView={() => {}}
+      onResetZoom={() => {}}
+    />,
+  );
+
+  expect(screen.getByRole("menu")).not.toHaveStyle({ left: "490px", top: "390px" });
+});
+
+test("MoodboardContextMenu measures before the animation frame so edge menus do not jump", () => {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
+  Object.defineProperty(window, "innerHeight", { configurable: true, value: 400 });
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 224,
+    bottom: 280,
+    width: 224,
+    height: 280,
+    toJSON: () => ({}),
+  });
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => 1);
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+
+  render(
+    <MoodboardContextMenu
+      menu={{ x: 490, y: 390, canvasX: 240, canvasY: 260, targetId: null }}
+      targetId={null}
+      targetNode={null}
+      onClose={() => {}}
+      onAddNote={() => {}}
+      onAddSection={() => {}}
+      onGenerate={() => {}}
+      onZoomIn={() => {}}
+      onZoomOut={() => {}}
+      onFitView={() => {}}
+      onResetZoom={() => {}}
+    />,
+  );
+
+  expect(screen.getByRole("menu")).toHaveStyle({ left: "266px", top: "110px" });
+});
+
 test("MoodboardContextMenu separates selection actions from blank-canvas creation actions", () => {
   const onCopy = vi.fn();
   const onPaste = vi.fn();
@@ -258,6 +382,51 @@ test("MoodboardContextMenu exposes paste on the blank canvas menu", () => {
   fireEvent.click(screen.getByText("Paste"));
   expect(onPaste).toHaveBeenCalledOnce();
   expect(screen.getByText("Add note here")).toBeInTheDocument();
+});
+
+test("resolveCanvasFitTransform centers nodes inside visible canvas chrome", () => {
+  const next = resolveCanvasFitTransform({
+    containerWidth: 1000,
+    containerHeight: 800,
+    contentRect: rectFromBounds(100, 120, 300, 280),
+    occluders: [rectFromBounds(720, 0, 1000, 800), rectFromBounds(0, 740, 1000, 800)],
+    padding: 100,
+    maxScale: 2,
+  });
+
+  expect(next).toEqual({ scale: 2, x: -40, y: -30 });
+});
+
+test("collectFloatingOccluderRects reads sibling panels relative to the canvas host", () => {
+  const root = document.createElement("div");
+  const host = document.createElement("div");
+  const panel = document.createElement("aside");
+  panel.setAttribute("data-moodboard-floating-occluder", "");
+  root.append(host, panel);
+  host.getBoundingClientRect = () => ({
+    x: 100,
+    y: 40,
+    left: 100,
+    top: 40,
+    right: 1100,
+    bottom: 840,
+    width: 1000,
+    height: 800,
+    toJSON: () => ({}),
+  });
+  panel.getBoundingClientRect = () => ({
+    x: 820,
+    y: 40,
+    left: 820,
+    top: 40,
+    right: 1100,
+    bottom: 840,
+    width: 280,
+    height: 800,
+    toJSON: () => ({}),
+  });
+
+  expect(collectFloatingOccluderRects(host, root)).toEqual([rectFromBounds(720, 0, 1000, 800)]);
 });
 
 test("eventClientPoint reads Leafer native event origins for context menus", () => {
@@ -468,6 +637,21 @@ test("resolveFloatingChromeRect falls back to a side placement when vertical spa
   ).toEqual({ left: 110, top: 10 });
 });
 
+test("resolveFloatingChromeRect can disable side placement for selection toolbars", () => {
+  expect(
+    resolveFloatingChromeRect({
+      anchor: { left: 100, targetLeft: 90, targetRight: 110, top: 48, bottom: 72 },
+      containerWidth: 220,
+      containerHeight: 120,
+      surfaceWidth: 80,
+      surfaceHeight: 100,
+      placement: "top",
+      padding: 8,
+      allowSidePlacement: false,
+    }),
+  ).toEqual({ left: 60, top: 8 });
+});
+
 test("normalizeCanvasRect turns drag endpoints into a positive drawing rect", () => {
   expect(normalizeCanvasRect({ x: 320, y: 220 }, { x: 120, y: 90 })).toEqual({ x: 120, y: 90, width: 200, height: 130 });
 });
@@ -585,7 +769,104 @@ test("createSectionNode keeps dragged section dimensions", () => {
     y: 90,
     width: 260,
     height: 180,
+    zIndex: -1,
   });
+});
+
+test("MoodboardCanvasNode keeps section labels out of the Leafer node body", () => {
+  const section: MoodboardNode = {
+    id: "section-1",
+    boardId: "b1",
+    type: "section",
+    x: 120,
+    y: 140,
+    width: 320,
+    height: 160,
+    rotation: 0,
+    zIndex: -1,
+    data: { title: "Direction" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  const { container } = render(<MoodboardCanvasNode node={section} />);
+
+  expect(container.querySelector('text[text="Direction"]')).toBeNull();
+  expect(container.querySelector("rect")).toHaveAttribute("hittable", "false");
+});
+
+test("MoodboardSectionLabels lets section titles be edited outside the canvas node", () => {
+  const onRename = vi.fn();
+  const onSelect = vi.fn();
+  const section: MoodboardNode = {
+    id: "section-1",
+    boardId: "b1",
+    type: "section",
+    x: 120,
+    y: 140,
+    width: 320,
+    height: 160,
+    rotation: 0,
+    zIndex: -1,
+    data: { title: "Direction" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <MoodboardSectionLabels
+      nodes={[section]}
+      appRef={{ current: { findId: () => ({ x: 120, y: 140 }) } }}
+      onRename={onRename}
+      onSelect={onSelect}
+    />,
+  );
+
+  fireEvent.click(screen.getByText("Direction"));
+  expect(onSelect).toHaveBeenCalledWith("section-1");
+  fireEvent.doubleClick(screen.getByText("Direction"));
+  fireEvent.change(screen.getByDisplayValue("Direction"), { target: { value: "Edited direction" } });
+  fireEvent.blur(screen.getByDisplayValue("Edited direction"));
+  expect(onRename).toHaveBeenCalledWith("section-1", "Edited direction");
+});
+
+test("moodboard scrollbars stay one pixel from the canvas edge", () => {
+  expect(MOODBOARD_SCROLLBAR_PADDING).toBe(1);
+});
+
+test("mergeDraftMoodboardNodes overlays live geometry without mutating persisted nodes", () => {
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "image",
+    x: 120,
+    y: 140,
+    width: 320,
+    height: 240,
+    rotation: 0,
+    zIndex: 2,
+    data: { fileName: "reference.png" },
+    createdAt: 1,
+    updatedAt: 2,
+  };
+
+  const merged = mergeDraftMoodboardNodes([node], [
+    {
+      id: "n1",
+      type: "image",
+      x: 188,
+      y: 212,
+      width: 360,
+      height: 260,
+      rotation: 4,
+      zIndex: 2,
+      data: { fileName: "reference.png" },
+    },
+  ]);
+
+  expect(merged[0]).toMatchObject({ x: 188, y: 212, width: 360, height: 260, rotation: 4, updatedAt: 2 });
+  expect(merged[0]?.data).toEqual(node.data);
+  expect(node).toMatchObject({ x: 120, y: 140, width: 320, height: 240, rotation: 0 });
 });
 
 test("MoodboardPropertiesPanel can be resized from its left edge", () => {
@@ -970,6 +1251,41 @@ test("moveContainedNodesWithSections moves geometrically contained nodes with a 
 
   expect(result.find((node) => node.id === "n1")).toMatchObject({ x: 120, y: 100 });
   expect(result.find((node) => node.id === "n2")).toMatchObject({ x: 420, y: 70 });
+});
+
+test("containedNodeIdsForSection returns only nodes centered inside the section", () => {
+  const section: MoodboardNode = {
+    id: "section",
+    boardId: "b1",
+    type: "section",
+    x: 100,
+    y: 100,
+    width: 320,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { title: "Group" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const inside: MoodboardNode = {
+    ...section,
+    id: "inside",
+    type: "image",
+    x: 140,
+    y: 160,
+    width: 80,
+    height: 80,
+    data: { url: "dezin://asset.png" },
+  };
+  const outside: MoodboardNode = {
+    ...inside,
+    id: "outside",
+    x: 12,
+    y: 12,
+  };
+
+  expect(containedNodeIdsForSection([section, inside, outside], "section")).toEqual(["inside"]);
 });
 
 test("moveContainedNodesWithSections does not double-move independently dragged children", () => {
@@ -1470,7 +1786,7 @@ test("SelectionToolbar surfaces image-edit actions for image nodes", () => {
     updatedAt: 1,
   };
 
-  render(<SelectionToolbar node={node} onDuplicate={() => {}} onDelete={() => {}} onImageAction={onImageAction} onQuickEdit={onQuickEdit} />);
+  const { container } = render(<SelectionToolbar node={node} onDuplicate={() => {}} onDelete={() => {}} onImageAction={onImageAction} onQuickEdit={onQuickEdit} />);
 
   fireEvent.click(screen.getByText("Quick edit"));
   fireEvent.click(screen.getByLabelText("Remove background"));
@@ -1481,6 +1797,7 @@ test("SelectionToolbar surfaces image-edit actions for image nodes", () => {
   expect(onImageAction).toHaveBeenCalledWith("Remove background");
   expect(onImageAction).toHaveBeenCalledWith("Edit region");
   expect(onImageAction).toHaveBeenCalledWith("Extract layer");
+  expect(container.querySelector(".h-5.w-px.bg-border")).not.toBeNull();
 });
 
 test("MultiSelectionToolbar exposes batch node actions", () => {
@@ -1532,6 +1849,37 @@ test("MultiSelectionToolbar exposes batch node actions", () => {
   expect(onDelete).toHaveBeenCalledOnce();
   expect(screen.queryByLabelText("Bring selected to front")).toBeNull();
   expect(screen.queryByLabelText("Hide selected")).toBeNull();
+});
+
+test("MultiSelectionToolbar does not expose quick edit for multi-image selections", () => {
+  const image: MoodboardNode = {
+    id: "img1",
+    boardId: "b1",
+    type: "image",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { url: "dezin://assets/reference.png" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <MultiSelectionToolbar
+      nodes={[image, { ...image, id: "img2" }]}
+      onDuplicate={() => {}}
+      onAlign={() => {}}
+      onArrange={() => {}}
+      onDelete={() => {}}
+      onImageAction={() => {}}
+    />,
+  );
+
+  expect(screen.queryByText("Quick edit")).toBeNull();
+  expect(screen.getByLabelText("Remove backgrounds")).toBeInTheDocument();
 });
 
 test("GeneratorPromptToolbar exposes a compact image model selector", () => {

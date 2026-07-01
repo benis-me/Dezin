@@ -3,7 +3,7 @@ import type { Settings } from "../lib/api.ts";
 import { ModelProviderDetail } from "./ModelProviderDetail.tsx";
 import { ModelProviderSidebar } from "./ModelProviderSidebar.tsx";
 import { MODEL_PROVIDERS, type ProviderPreset } from "./model-provider-registry.ts";
-import { modelTextToIds } from "./model-provider-ui-utils.tsx";
+import { serializeModelEntries } from "./model-provider-ui-utils.tsx";
 
 export function ModelProviderSettings({
   settings,
@@ -21,7 +21,7 @@ export function ModelProviderSettings({
     () => MODEL_PROVIDERS.filter((provider) => provider.name.toLowerCase().includes(query.trim().toLowerCase())),
     [query],
   );
-  const modelText = settings.aiProviderModels || selected.models.map((model) => model.id).join("\n");
+  const modelText = settings.aiProviderModels || serializeModelEntries(selected.models);
   const baseUrl = settings.imageApiBaseUrl || settings.apiBaseUrl || selected.baseUrl;
   const apiKey = settings.imageApiKey || settings.apiKey;
 
@@ -30,32 +30,11 @@ export function ModelProviderSettings({
     if (save) onSavePatch(patch);
   };
 
-  const saveSelectedProvider = () => {
-    const models = modelTextToIds(modelText);
-    const firstImageModel = models.find((model) => /image|flux|imagen|seedream|midjourney/i.test(model)) ?? models[0] ?? "";
-    const firstVideoModel = models.find((model) => /video|veo|wan|sora/i.test(model)) ?? "";
-    onSavePatch({
-      aiProviderId: selected.id,
-      aiProviderEnabled: settings.aiProviderEnabled,
-      aiProviderModels: models.join("\n"),
-      aiProviderOrganization: settings.aiProviderOrganization,
-      apiBaseUrl: baseUrl,
-      apiKey,
-      imageApiBaseUrl: baseUrl,
-      imageApiKey: apiKey,
-      imageModel: firstImageModel,
-      videoApiBaseUrl: baseUrl,
-      videoApiKey: apiKey,
-      videoModel: firstVideoModel || settings.videoModel,
-    });
-    setStatus("Configuration saved.");
-  };
-
   const selectProvider = (provider: ProviderPreset) => {
     setStatus(null);
     onSavePatch({
       aiProviderId: provider.id,
-      aiProviderModels: provider.models.map((model) => model.id).join("\n"),
+      aiProviderModels: serializeModelEntries(provider.models),
       apiBaseUrl: provider.baseUrl,
       imageApiBaseUrl: provider.baseUrl,
       videoApiBaseUrl: provider.baseUrl,
@@ -68,6 +47,7 @@ export function ModelProviderSettings({
         providers={providers}
         selectedId={selected.id}
         activeProviderId={settings.aiProviderId}
+        enabled={settings.aiProviderEnabled}
         apiKey={apiKey}
         query={query}
         onQueryChange={setQuery}
@@ -82,10 +62,9 @@ export function ModelProviderSettings({
         status={status}
         onToggleEnabled={() => onSavePatch({ aiProviderEnabled: !settings.aiProviderEnabled })}
         onPatchModelSettings={patchModelSettings}
-        onSaveSelectedProvider={saveSelectedProvider}
         onTestConnection={() => setStatus(apiKey || selected.id === "mock" || selected.id === "ollama" ? "Looks configured locally." : "Missing API key.")}
         onLoadPresetModels={() => {
-          const next = selected.models.map((model) => model.id).join("\n");
+          const next = serializeModelEntries(selected.models);
           patchModelSettings({ aiProviderModels: next }, true);
           setStatus(`Loaded ${selected.models.length} preset models.`);
         }}

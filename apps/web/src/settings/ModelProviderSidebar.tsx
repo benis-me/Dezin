@@ -9,6 +9,7 @@ export function ModelProviderSidebar({
   providers,
   selectedId,
   activeProviderId,
+  enabled,
   apiKey,
   query,
   onQueryChange,
@@ -17,13 +18,14 @@ export function ModelProviderSidebar({
   providers: ProviderPreset[];
   selectedId: string;
   activeProviderId: Settings["aiProviderId"];
+  enabled: boolean;
   apiKey: string;
   query: string;
   onQueryChange: (value: string) => void;
   onSelect: (provider: ProviderPreset) => void;
 }) {
   return (
-    <aside className="w-56 shrink-0 border-r border-border bg-muted/35 p-2.5">
+    <aside className="w-52 shrink-0 border-r border-border bg-muted/35 p-2.5">
       <label className="relative block">
         <Search size={14} strokeWidth={1.75} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
         <Input
@@ -37,7 +39,7 @@ export function ModelProviderSidebar({
       <div className="mt-2 space-y-1">
         {providers.map((provider) => {
           const active = provider.id === selectedId;
-          const configured = provider.id === activeProviderId && Boolean(apiKey || provider.id === "mock" || provider.id === "ollama");
+          const configured = provider.id === activeProviderId && enabled && Boolean(apiKey || provider.id === "mock" || provider.id === "ollama");
           return (
             <button
               key={provider.id}
@@ -45,7 +47,7 @@ export function ModelProviderSidebar({
               onClick={() => onSelect(provider)}
               className={cn(
                 "flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors",
-                active ? "border-border bg-background shadow-sm" : "border-transparent hover:bg-background/70",
+                active ? "border-border bg-background" : "border-transparent hover:bg-background/70",
               )}
             >
               <ProviderIcon id={provider.id} />
@@ -53,7 +55,10 @@ export function ModelProviderSidebar({
                 <span className="block truncate text-sm font-medium text-foreground">{provider.name}</span>
                 <span className="block truncate text-[11px] text-muted-foreground">{provider.protocol}</span>
               </span>
-              <span className={cn("size-1.5 shrink-0 rounded-full", configured ? "bg-[var(--success)]" : "bg-border-strong")} />
+              <span
+                aria-label={`${provider.name} ${configured ? "enabled" : "disabled"}`}
+                className={cn("size-1.5 shrink-0 rounded-full", configured ? "bg-[var(--success)]" : "bg-border-strong")}
+              />
             </button>
           );
         })}

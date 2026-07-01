@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -278,6 +278,18 @@ export function HomeScreen({
     }
   };
 
+  const handlePromptDragOver = (event: ReactDragEvent<HTMLDivElement>): void => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const handlePromptDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    void addImages(event.dataTransfer.files);
+  };
+
   const referenceProject = async (project: Project): Promise<void> => {
     if (refs.some((r) => r.id === project.id)) return;
     try {
@@ -428,7 +440,13 @@ export function HomeScreen({
             </p>
           </div>
 
-          <div className="mt-5 w-full rounded-2xl border border-input bg-card/80 p-2.5 transition-[color,border-color,box-shadow] duration-150 hover:border-border-strong focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring">
+          <div
+            aria-label="Design prompt dropzone"
+            className="mt-5 w-full rounded-2xl border border-input bg-card/80 p-2.5 transition-[color,border-color,box-shadow] duration-150 hover:border-border-strong focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring"
+            onDragEnter={handlePromptDragOver}
+            onDragOver={handlePromptDragOver}
+            onDrop={handlePromptDrop}
+          >
             <div className="rounded-xl">
               <input
                 ref={imgInputRef}
@@ -774,4 +792,8 @@ export function HomeScreen({
       </Dialog>
     </div>
   );
+}
+
+function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer.types ?? []).includes("Files") || event.dataTransfer.files.length > 0;
 }

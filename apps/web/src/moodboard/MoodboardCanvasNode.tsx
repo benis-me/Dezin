@@ -29,7 +29,7 @@ export function MoodboardCanvasNode({ node }: { node: MoodboardNode }) {
       width={node.width}
       height={node.height}
       rotation={node.rotation ?? 0}
-      zIndex={node.zIndex ?? 0}
+      zIndex={node.type === "section" ? Math.min(node.zIndex ?? -1, -1) : (node.zIndex ?? 0)}
       visible={visible}
       fill="transparent"
       strokeWidth={0}
@@ -88,18 +88,7 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
           strokeWidth={1}
           dashPattern={[8, 6]}
           cornerRadius={radius}
-          data={data}
-        />
-        <Txt
-          text={nodeTitle(node)}
-          x={12}
-          y={10}
-          width={Math.max(24, node.width - 24)}
-          fontSize={13}
-          fontWeight={600}
-          fill="#222222"
           hittable={false}
-          draggable={false}
           data={data}
         />
       </>

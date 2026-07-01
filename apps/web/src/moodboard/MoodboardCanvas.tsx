@@ -1,17 +1,30 @@
 import { ImagePlus, Loader2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { memo, useEffect, useLayoutEffect, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode, type RefObject } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode, type RefObject } from "react";
 import { Frame as LeaferFrame, Leafer } from "@dezin/leafer-react";
 import type { Frame } from "leafer-editor";
 import { useToast } from "../components/Toast.tsx";
 import type { MoodboardNode } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
 import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
-import { CanvasActionBar, CanvasViewBar, CanvasZoomBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
+import { CanvasActionBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { generatorModel, generatorPrompt, isEditableShortcutTarget, rectFromBounds, resolveFloatingChromeRect, resolveFloatingRect, type CanvasRect, type FloatingRect } from "./canvas-utils.ts";
+import { MoodboardSectionLabels } from "./MoodboardSectionLabels.tsx";
+import {
+  clientPointToCanvasPoint,
+  collectFloatingOccluderRects,
+  generatorModel,
+  generatorPrompt,
+  isEditableShortcutTarget,
+  rectFromBounds,
+  resolveFloatingChromeRect,
+  resolveFloatingRect,
+  type CanvasRect,
+  type FloatingRect,
+} from "./canvas-utils.ts";
+import type { MoodboardCanvasTopbarControls } from "./MoodboardCanvasTopbar.tsx";
 import { MOODBOARD_LEAFER_EDITOR_CONFIG } from "./moodboard-canvas-config.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
@@ -23,18 +36,78 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     imageModel = "",
     onImageModelChange = () => {},
     onGenerateImage,
+    onTopbarControlsChange,
   } = props;
   const { toast } = useToast();
   const canvas = useMoodboardCanvasController(props);
   const selectedGeneratorPrompt = canvas.selected ? generatorPrompt(canvas.selected) : "";
   const selectedGeneratorModel = canvas.selected ? generatorModel(canvas.selected) : "";
   const cursor = canvas.tool === "hand" ? "grab" : canvas.tool === "note" || canvas.tool === "section" ? "crosshair" : "default";
-  const [dragDepth, setDragDepth] = useState(0);
   const [presentationMode, setPresentationMode] = useState(false);
   const [quickEditOpen, setQuickEditOpen] = useState(false);
-  const dragActive = dragDepth > 0;
-  const quickEditNode = canvas.selectedNodes.find((node) => node.type === "image") ?? null;
+  const quickEditNode = canvas.selectedIds.length === 1 && canvas.selected?.type === "image" ? canvas.selected : null;
   const quickEditModel = quickEditNode ? generatorModel(quickEditNode) || imageModel : imageModel;
+
+  const openQuickEdit = useCallback(() => {
+    if (!quickEditNode) return;
+    canvas.fitNodes([quickEditNode.id], { padding: 140, maxScale: 2.2 });
+    window.requestAnimationFrame(() => setQuickEditOpen(true));
+  }, [canvas.fitNodes, quickEditNode]);
+
+  const handleTopbarZoomOut = useCallback(() => {
+    canvas.changeZoom(canvas.zoom * 0.88);
+  }, [canvas.changeZoom, canvas.zoom]);
+
+  const handleTopbarZoomIn = useCallback(() => {
+    canvas.changeZoom(canvas.zoom * 1.14);
+  }, [canvas.changeZoom, canvas.zoom]);
+
+  const handleToggleLayers = useCallback(() => {
+    if (presentationMode) {
+      setPresentationMode(false);
+      canvas.setLayersOpen(true);
+      return;
+    }
+    canvas.setLayersOpen((value) => !value);
+  }, [canvas.setLayersOpen, presentationMode]);
+
+  const handleTogglePresentation = useCallback(() => {
+    setQuickEditOpen(false);
+    setPresentationMode((value) => !value);
+  }, []);
+
+  const topbarControls = useMemo<MoodboardCanvasTopbarControls>(
+    () => ({
+      zoom: canvas.zoom,
+      layersOpen: canvas.layersOpen && !presentationMode,
+      presentationMode,
+      onZoomOut: handleTopbarZoomOut,
+      onZoomIn: handleTopbarZoomIn,
+      onFitView: canvas.fitView,
+      onSetZoom: canvas.changeZoom,
+      onToggleLayers: handleToggleLayers,
+      onTogglePresentation: handleTogglePresentation,
+    }),
+    [
+      canvas.changeZoom,
+      canvas.fitView,
+      canvas.layersOpen,
+      canvas.zoom,
+      handleToggleLayers,
+      handleTogglePresentation,
+      handleTopbarZoomIn,
+      handleTopbarZoomOut,
+      presentationMode,
+    ],
+  );
+
+  useEffect(() => {
+    onTopbarControlsChange?.(topbarControls);
+  }, [onTopbarControlsChange, topbarControls]);
+
+  useEffect(() => {
+    return () => onTopbarControlsChange?.(null);
+  }, [onTopbarControlsChange]);
 
   useEffect(() => {
     if (!quickEditNode) setQuickEditOpen(false);
@@ -45,16 +118,15 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
       if (event.key !== "Tab" || event.metaKey || event.ctrlKey || event.altKey || presentationMode || !quickEditNode || !canvas.runtimeReady) return;
       if (isEditableShortcutTarget(event.target)) return;
       event.preventDefault();
-      setQuickEditOpen(true);
+      openQuickEdit();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [canvas.runtimeReady, presentationMode, quickEditNode]);
+  }, [canvas.runtimeReady, openQuickEdit, presentationMode, quickEditNode]);
 
   const handleExternalDragEnter = (event: ReactDragEvent<HTMLDivElement>): void => {
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
-    setDragDepth((current) => current + 1);
   };
 
   const handleExternalDragOver = (event: ReactDragEvent<HTMLDivElement>): void => {
@@ -66,14 +138,22 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   const handleExternalDragLeave = (event: ReactDragEvent<HTMLDivElement>): void => {
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
-    setDragDepth((current) => Math.max(0, current - 1));
   };
 
   const handleExternalDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
-    setDragDepth(0);
-    canvas.uploadFiles(event.dataTransfer.files);
+    const containerRect = canvas.hostRef.current?.getBoundingClientRect();
+    const point = containerRect
+      ? clientPointToCanvasPoint({
+          clientX: event.clientX,
+          clientY: event.clientY,
+          containerLeft: containerRect.left,
+          containerTop: containerRect.top,
+          tree: (canvas.appRef.current as any)?.tree,
+        })
+      : canvas.getLastCanvasPoint() ?? undefined;
+    canvas.uploadFiles(event.dataTransfer.files, point);
   };
 
   const unavailableImageAction = (action: string): void => {
@@ -83,7 +163,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   return (
     <div className="relative min-h-0 flex-1 bg-surface">
       <div
-        className={cn("relative h-full min-w-0 overflow-hidden", dragActive && "ring-1 ring-inset ring-primary/35")}
+        data-moodboard-canvas-root
+        className="relative h-full min-w-0 overflow-hidden"
         onDragEnter={handleExternalDragEnter}
         onDragOver={handleExternalDragOver}
         onDragLeave={handleExternalDragLeave}
@@ -122,6 +203,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             <MoodboardNodeLayer nodes={nodes} onLayerCreated={canvas.handleLayerCreated} />
           </Leafer>
         </div>
+
+        <MoodboardSectionLabels nodes={nodes} appRef={canvas.appRef} onSelect={canvas.selectLayer} onRename={canvas.renameNode} />
 
         <AnimatePresence initial={false}>
           {!canvas.runtimeReady ? (
@@ -168,23 +251,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         ) : null}
 
         <AnimatePresence initial={false}>
-          {dragActive ? (
-            <motion.div
-              className="pointer-events-none absolute inset-0 z-40 grid place-items-center bg-background/20 backdrop-blur-[1px]"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.14 }}
-            >
-              <div className="rounded-lg border border-primary/30 bg-card/95 px-3 py-2 text-xs font-medium text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
-                Drop images to add them to the board
-              </div>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-
-        <AnimatePresence initial={false}>
-          {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady && !presentationMode ? (
+          {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -192,20 +259,21 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               anchor={canvas.selectionRect}
               placement="top"
               avoidOccluders={false}
+              allowSidePlacement={false}
             >
               <SelectionToolbar
                 node={canvas.selected}
                 onDuplicate={() => canvas.duplicateNode(canvas.selected!.id)}
                 onDelete={() => canvas.deleteNode(canvas.selected!.id)}
                 onImageAction={unavailableImageAction}
-                onQuickEdit={() => setQuickEditOpen(true)}
+                onQuickEdit={openQuickEdit}
               />
             </FloatingCanvasSurface>
           ) : null}
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selectedNodes.length > 1 && canvas.runtimeReady && !presentationMode ? (
+          {canvas.selectedNodes.length > 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -213,6 +281,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               anchor={canvas.selectionRect}
               placement="top"
               avoidOccluders={false}
+              allowSidePlacement={false}
             >
               <MultiSelectionToolbar
                 nodes={canvas.selectedNodes}
@@ -221,7 +290,6 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 onArrange={() => canvas.arrangeNodes(canvas.selectedIds)}
                 onDelete={() => canvas.deleteNodes(canvas.selectedIds)}
                 onImageAction={unavailableImageAction}
-                onQuickEdit={() => setQuickEditOpen(true)}
               />
             </FloatingCanvasSurface>
           ) : null}
@@ -285,23 +353,6 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         {!presentationMode ? (
           <CanvasActionBar tool={canvas.tool} onToolChange={canvas.setTool} onAddImageGenerator={() => canvas.addImageGeneratorAt()} />
         ) : null}
-        <CanvasViewBar
-          layersOpen={canvas.layersOpen && !presentationMode}
-          presentationMode={presentationMode}
-          onToggleLayers={() => {
-            if (presentationMode) {
-              setPresentationMode(false);
-              canvas.setLayersOpen(true);
-              return;
-            }
-            canvas.setLayersOpen((value) => !value);
-          }}
-          onTogglePresentation={() => {
-            setQuickEditOpen(false);
-            setPresentationMode((value) => !value);
-          }}
-        />
-        <CanvasZoomBar zoom={canvas.zoom} onChangeZoom={canvas.changeZoom} onFitView={canvas.fitView} />
 
         {canvas.contextMenu && !presentationMode ? (
           <MoodboardContextMenu
@@ -392,6 +443,7 @@ function FloatingCanvasSurface({
   anchor,
   placement,
   avoidOccluders = true,
+  allowSidePlacement = false,
   children,
 }: {
   appRef: RefObject<any>;
@@ -400,6 +452,7 @@ function FloatingCanvasSurface({
   anchor?: FloatingRect | null;
   placement: "top" | "bottom";
   avoidOccluders?: boolean;
+  allowSidePlacement?: boolean;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -443,6 +496,11 @@ function FloatingCanvasSurface({
       }
       element.style.display = "";
       const layout = readLayout(reason);
+      if (!isFloatingAnchorVisible(nextAnchor, layout.containerWidth, layout.containerHeight)) {
+        element.style.display = "none";
+        element.style.visibility = "hidden";
+        return;
+      }
       const next = resolveFloatingChromeRect({
         anchor: nextAnchor,
         containerWidth: layout.containerWidth,
@@ -451,6 +509,7 @@ function FloatingCanvasSurface({
         surfaceHeight: layout.surfaceHeight,
         placement,
         occluders: layout.occluders,
+        allowSidePlacement,
       });
       const transform = `translate3d(${Math.round(next.left)}px, ${Math.round(next.top)}px, 0)`;
       if (element.style.transform !== transform) element.style.transform = transform;
@@ -464,7 +523,7 @@ function FloatingCanvasSurface({
       updateRef.current = null;
       cleanup();
     };
-  }, [appRef, avoidOccluders, hostRef, placement]);
+  }, [allowSidePlacement, appRef, avoidOccluders, hostRef, placement]);
 
   useLayoutEffect(() => {
     updateRef.current?.("viewport");
@@ -473,12 +532,20 @@ function FloatingCanvasSurface({
   return (
     <div
       ref={ref}
-      className="pointer-events-none absolute left-0 top-0 z-30 will-change-transform"
+      className="pointer-events-none absolute left-0 top-0 z-10 will-change-transform"
       style={{ visibility: "hidden" }}
     >
       {children}
     </div>
   );
+}
+
+function isFloatingAnchorVisible(anchor: FloatingRect, containerWidth: number, containerHeight: number): boolean {
+  const targetLeft = anchor.targetLeft ?? anchor.left;
+  const targetRight = anchor.targetRight ?? anchor.left;
+  const left = Math.min(targetLeft, targetRight);
+  const right = Math.max(targetLeft, targetRight);
+  return right > 0 && left < containerWidth && anchor.bottom > 0 && anchor.top < containerHeight;
 }
 
 function floatingRectKey(rect: FloatingRect | null | undefined): string {
@@ -489,13 +556,7 @@ function floatingRectKey(rect: FloatingRect | null | undefined): string {
 }
 
 function getFloatingOccluders(container: HTMLElement, current: HTMLElement): CanvasRect[] {
-  const containerRect = container.getBoundingClientRect();
-  return Array.from(container.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]"))
-    .filter((element) => element !== current && !current.contains(element) && !element.contains(current))
-    .map((element) => {
-      const rect = element.getBoundingClientRect();
-      return rectFromBounds(rect.left - containerRect.left, rect.top - containerRect.top, rect.right - containerRect.left, rect.bottom - containerRect.top);
-    });
+  return collectFloatingOccluderRects(container, container.closest("[data-moodboard-canvas-root]") ?? container, current);
 }
 
 type FloatingEventTarget = {
@@ -747,10 +808,14 @@ const MoodboardNodeLayer = memo(function MoodboardNodeLayer({
   return (
     <LeaferFrame id="moodboard-node-layer" name="nodes" fill="transparent" hitSelf={false} isSnap={false} onCreated={onLayerCreated}>
       {[...nodes]
-        .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))
+        .sort((a, b) => renderZIndex(a) - renderZIndex(b))
         .map((node) => (
           <MoodboardCanvasNode key={node.id} node={node} />
         ))}
     </LeaferFrame>
   );
 });
+
+function renderZIndex(node: MoodboardNode): number {
+  return node.type === "section" ? Math.min(node.zIndex ?? -1, -1) : (node.zIndex ?? 0);
+}

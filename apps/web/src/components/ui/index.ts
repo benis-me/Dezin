@@ -13,6 +13,7 @@ export {
 export { Input, SearchInput } from "./input.tsx";
 export { Textarea } from "./textarea.tsx";
 export { Label } from "./label.tsx";
+export { Switch } from "./switch.tsx";
 export { Separator } from "./separator.tsx";
 export { ScrollArea, ScrollBar } from "./scroll-area.tsx";
 export {

@@ -8,6 +8,8 @@ import { selectAppNodesByIds } from "./leafer-adapter/editor-selection.ts";
 import { CanvasSnap } from "./leafer-adapter/snap.ts";
 import {
   clientPointToCanvasPoint,
+  collectFloatingOccluderRects,
+  containedNodeIdsForSection,
   contextTargetIdFromEvent,
   eventCanvasPoint,
   eventClientPoint,
@@ -16,6 +18,7 @@ import {
   nodeIdFromTarget,
   nodeIdsFromTarget,
   rectFromBounds,
+  resolveCanvasFitTransform,
   resolveFloatingRect,
   rounded,
   sameFloatingRect,
@@ -39,9 +42,11 @@ interface UseLeaferMoodboardRuntimeOptions {
   onDoubleTap: (point: { x: number; y: number }) => void;
   onContextMenu: (menu: ContextMenuState) => void;
   onFrameStateChange: (nodes: SaveMoodboardNodeInput[]) => void;
+  onFrameStateDraftChange: (nodes: SaveMoodboardNodeInput[] | null) => void;
 }
 
 const FLOATING_TRACK_MS = 420;
+export const MOODBOARD_SCROLLBAR_PADDING = 1;
 
 export function useLeaferMoodboardRuntime({
   nodes,
@@ -53,6 +58,7 @@ export function useLeaferMoodboardRuntime({
   onDoubleTap,
   onContextMenu,
   onFrameStateChange,
+  onFrameStateDraftChange,
 }: UseLeaferMoodboardRuntimeOptions) {
   const [runtimeReady, setRuntimeReady] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -69,6 +75,7 @@ export function useLeaferMoodboardRuntime({
   const selectedIdsRef = useRef(selectedIds);
   const toolRef = useRef(tool);
   const sectionDragStartRef = useRef<CanvasPoint | null>(null);
+  const sectionChildrenDragRef = useRef<SectionChildrenDragState | null>(null);
   const sectionDragHandledRef = useRef(false);
   const pointerSelectionHandledRef = useRef(false);
   const lastCanvasPointRef = useRef<CanvasPoint | null>(null);
@@ -76,8 +83,9 @@ export function useLeaferMoodboardRuntime({
   const floatingRectRef = useRef<FloatingRect | null>(null);
   const floatingRafRef = useRef<number | null>(null);
   const floatingTrackRafRef = useRef<number | null>(null);
+  const frameDraftRafRef = useRef<number | null>(null);
   const floatingTrackUntilRef = useRef(0);
-  const callbacksRef = useRef({ onSelectIds, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange });
+  const callbacksRef = useRef({ onSelectIds, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange, onFrameStateDraftChange });
 
   useEffect(() => {
     nodesRef.current = nodes;
@@ -92,8 +100,8 @@ export function useLeaferMoodboardRuntime({
   }, [tool]);
 
   useEffect(() => {
-    callbacksRef.current = { onSelectIds, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange };
-  }, [onBlankTap, onContextMenu, onDoubleTap, onFrameStateChange, onSectionDraw, onSelectIds]);
+    callbacksRef.current = { onSelectIds, onBlankTap, onSectionDraw, onDoubleTap, onContextMenu, onFrameStateChange, onFrameStateDraftChange };
+  }, [onBlankTap, onContextMenu, onDoubleTap, onFrameStateChange, onFrameStateDraftChange, onSectionDraw, onSelectIds]);
 
   const commitSelectionRect = useCallback((next: FloatingRect | null) => {
     const prev = floatingRectRef.current;
@@ -318,7 +326,7 @@ export function useLeaferMoodboardRuntime({
     [findFrame],
   );
 
-  const flushFrameState = useCallback(() => {
+  const readFrameStateInputs = useCallback((): SaveMoodboardNodeInput[] => {
     const next = nodesRef.current.map((node) => {
       const frame = findFrame(node.id);
       if (!frame) return toInput(node);
@@ -332,7 +340,68 @@ export function useLeaferMoodboardRuntime({
         zIndex: rounded(frame.zIndex, node.zIndex ?? 0),
       };
     });
-    callbacksRef.current.onFrameStateChange(moveContainedNodesWithSections(nodesRef.current, next));
+    return moveContainedNodesWithSections(nodesRef.current, next);
+  }, [findFrame]);
+
+  const publishFrameStateDraft = useCallback(() => {
+    if (frameDraftRafRef.current != null) return;
+    frameDraftRafRef.current = window.requestAnimationFrame(() => {
+      frameDraftRafRef.current = null;
+      callbacksRef.current.onFrameStateDraftChange(readFrameStateInputs());
+    });
+  }, [readFrameStateInputs]);
+
+  const flushFrameState = useCallback(() => {
+    callbacksRef.current.onFrameStateChange(readFrameStateInputs());
+  }, [readFrameStateInputs]);
+
+  const beginSectionChildrenDrag = useCallback(
+    (event: any) => {
+      const targetId = nodeIdFromTarget(event?.target);
+      const selected = selectedIdsRef.current;
+      const candidateIds = selected.length === 1 ? selected : targetId ? [targetId] : [];
+      const sectionId = candidateIds.find((id) => nodesRef.current.find((node) => node.id === id)?.type === "section");
+      if (!sectionId) {
+        sectionChildrenDragRef.current = null;
+        return;
+      }
+      const frame = findFrame(sectionId);
+      if (!frame) {
+        sectionChildrenDragRef.current = null;
+        return;
+      }
+      const childIds = containedNodeIdsForSection(nodesRef.current, sectionId).filter((id) => !selected.includes(id));
+      sectionChildrenDragRef.current = {
+        sectionId,
+        childIds,
+        lastX: Number(frame.x ?? 0),
+        lastY: Number(frame.y ?? 0),
+      };
+    },
+    [findFrame],
+  );
+
+  const syncSectionChildrenDuringDrag = useCallback(() => {
+    const state = sectionChildrenDragRef.current;
+    if (!state || state.childIds.length === 0) return;
+    const sectionFrame = findFrame(state.sectionId);
+    if (!sectionFrame) return;
+    const nextX = Number(sectionFrame.x ?? state.lastX);
+    const nextY = Number(sectionFrame.y ?? state.lastY);
+    const dx = nextX - state.lastX;
+    const dy = nextY - state.lastY;
+    if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
+
+    state.childIds.forEach((id) => {
+      const frame = findFrame(id);
+      if (!frame) return;
+      setFramePosition(frame, Number(frame.x ?? 0) + dx, Number(frame.y ?? 0) + dy);
+    });
+    state.lastX = nextX;
+    state.lastY = nextY;
+    const app: any = appRef.current;
+    app?.tree?.forceUpdate?.();
+    app?.forceUpdate?.();
   }, [findFrame]);
 
   const handleAppReady = useCallback((app: App) => {
@@ -341,7 +410,7 @@ export function useLeaferMoodboardRuntime({
       scrollBarRef.current?.destroy();
       scrollBarRef.current = new ScrollBar(app as any, {
         theme: { fill: "rgba(35,35,32,0.32)", stroke: "rgba(255,255,255,0.78)" },
-        padding: 8,
+        padding: MOODBOARD_SCROLLBAR_PADDING,
         minSize: 18,
       });
     } catch {
@@ -401,6 +470,11 @@ export function useLeaferMoodboardRuntime({
         window.cancelAnimationFrame(floatingTrackRafRef.current);
         floatingTrackRafRef.current = null;
       }
+      if (frameDraftRafRef.current != null) {
+        window.cancelAnimationFrame(frameDraftRafRef.current);
+        frameDraftRafRef.current = null;
+      }
+      callbacksRef.current.onFrameStateDraftChange(null);
     };
   }, []);
 
@@ -509,6 +583,8 @@ export function useLeaferMoodboardRuntime({
         return;
       }
       startTransforming();
+      syncSectionChildrenDuringDrag();
+      publishFrameStateDraft();
       trackFloatingSelection();
     };
     const handleDragEnd = (event: any) => {
@@ -526,9 +602,11 @@ export function useLeaferMoodboardRuntime({
         return;
       }
       syncAfterNodeTransform();
+      sectionChildrenDragRef.current = null;
     };
-    const handleDragStart = () => {
+    const handleDragStart = (event: any) => {
       if (toolRef.current === "section" && sectionDragStartRef.current) return;
+      beginSectionChildrenDrag(event);
       startTransforming();
     };
     const handleZoomStart = () => {
@@ -537,6 +615,7 @@ export function useLeaferMoodboardRuntime({
     };
     const handleEditorTransform = () => {
       startTransforming();
+      publishFrameStateDraft();
       trackFloatingSelection();
     };
 
@@ -579,7 +658,7 @@ export function useLeaferMoodboardRuntime({
       editor.off(EditorScaleEvent.SCALE, handleEditorTransform);
       editor.off(EditorRotateEvent.ROTATE, handleEditorTransform);
     };
-  }, [commitSelectedIdsFromRuntime, finishTransforming, flushFrameState, runtimeReady, scheduleFloatingSelection, selectIdsInRuntime, startTransforming, toViewportDraftRect, trackFloatingSelection]);
+  }, [beginSectionChildrenDrag, commitSelectedIdsFromRuntime, finishTransforming, flushFrameState, publishFrameStateDraft, runtimeReady, scheduleFloatingSelection, selectIdsInRuntime, startTransforming, syncSectionChildrenDuringDrag, toViewportDraftRect, trackFloatingSelection]);
 
   useEffect(() => {
     selectIdsInRuntime(selectedIds);
@@ -664,6 +743,44 @@ export function useLeaferMoodboardRuntime({
     trackFloatingSelection();
   }, [changeZoom, trackFloatingSelection]);
 
+  const fitNodes = useCallback(
+    (ids: string[], options: { padding?: number; maxScale?: number } = {}) => {
+      const app: any = appRef.current;
+      const container = hostRef.current;
+      const tree = app?.tree;
+      const targetIds = new Set(ids);
+      const currentNodes = nodesRef.current.filter((node) => targetIds.has(node.id));
+      if (!tree || !container || currentNodes.length === 0) return false;
+
+      const left = Math.min(...currentNodes.map((node) => node.x));
+      const top = Math.min(...currentNodes.map((node) => node.y));
+      const right = Math.max(...currentNodes.map((node) => node.x + node.width));
+      const bottom = Math.max(...currentNodes.map((node) => node.y + node.height));
+      const width = Math.max(1, right - left);
+      const height = Math.max(1, bottom - top);
+      const padding = options.padding ?? 128;
+      const maxScale = options.maxScale ?? 2.4;
+      const transform = resolveCanvasFitTransform({
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+        contentRect: rectFromBounds(left, top, left + width, top + height),
+        occluders: collectFloatingOccluderRects(container, container.closest("[data-moodboard-canvas-root]") ?? container),
+        padding,
+        maxScale,
+      });
+
+      tree.scaleX = transform.scale;
+      tree.scaleY = transform.scale;
+      tree.x = transform.x;
+      tree.y = transform.y;
+      tree.forceUpdate?.();
+      setZoom(transform.scale);
+      trackFloatingSelection();
+      return true;
+    },
+    [trackFloatingSelection],
+  );
+
   return {
     appRef,
     hostRef,
@@ -674,6 +791,7 @@ export function useLeaferMoodboardRuntime({
     zoom,
     changeZoom,
     fitView,
+    fitNodes,
     handleAppReady,
     handleLayerCreated,
     selectInRuntime,
@@ -683,6 +801,24 @@ export function useLeaferMoodboardRuntime({
     hoverInRuntime,
     getLastCanvasPoint,
   };
+}
+
+interface SectionChildrenDragState {
+  sectionId: string;
+  childIds: string[];
+  lastX: number;
+  lastY: number;
+}
+
+function setFramePosition(frame: any, x: number, y: number): void {
+  try {
+    if (typeof frame.set === "function") frame.set({ x, y });
+    else Object.assign(frame, { x, y });
+    frame.forceUpdate?.();
+    frame.updateLayout?.();
+  } catch {
+    Object.assign(frame, { x, y });
+  }
 }
 
 function nowMs(): number {
