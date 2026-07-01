@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, ChevronLeft, Loader2, Sparkles } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
-import { IconButton, Textarea } from "../components/ui/index.ts";
+import { IconButton, Textarea, TooltipProvider } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 
 export function MoodboardAgentPanel({
@@ -33,7 +34,18 @@ export function MoodboardAgentPanel({
   onSend: (content: string) => Promise<void>;
 }) {
   const [text, setText] = useState("");
+  const [composerH, setComposerH] = useState(92);
+  const composerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const element = composerRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() => setComposerH(element.offsetHeight));
+    observer.observe(element);
+    setComposerH(element.offsetHeight);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
@@ -57,12 +69,23 @@ export function MoodboardAgentPanel({
           className="app-no-drag flex min-w-0 items-center gap-1 rounded-lg py-1 pl-1 pr-2 text-foreground transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <ChevronLeft size={16} strokeWidth={2} className="shrink-0 text-muted-foreground" />
-          <span className="truncate text-sm font-medium">{boardName}</span>
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.span
+              key={boardName || "Moodboard"}
+              initial={{ opacity: 0, y: 3 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -3 }}
+              transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
+              className="truncate text-sm font-medium"
+            >
+              {boardName || "Moodboard"}
+            </motion.span>
+          </AnimatePresence>
         </button>
         <span className="label-mono shrink-0 text-muted-foreground">{status}</span>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-auto px-4 pt-5">
+      <div className="min-h-0 flex-1 space-y-4 overflow-auto px-4 pt-5" style={{ paddingBottom: composerH + 36 }}>
         {messages.length === 0 ? (
           <div className="grid h-full place-items-center">
             <div className="flex max-w-[16rem] flex-col items-center gap-3 text-center">
@@ -105,39 +128,42 @@ export function MoodboardAgentPanel({
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0">
         <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
-        <div className="bg-background px-3 pb-3">
-        <div className="pointer-events-auto rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 hover:border-border-strong">
-          <Textarea
-            aria-label="Moodboard prompt"
-            rows={1}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Generate a tactile product shot with soft daylight..."
-            className="field-sizing-content max-h-40 min-h-[36px] border-0 bg-transparent px-1 py-0.5 text-sm leading-relaxed shadow-none focus-visible:ring-0"
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void submit();
-              }
-            }}
-          />
-          <div className="mt-1 flex items-center justify-end gap-2">
-            <div className="flex min-w-0 items-center gap-1">
-              <AgentModelSelect
-                agents={agents}
-                agent={agent}
-                model={model}
-                dropUp
-                onAgentChange={onAgentChange}
-                onModelChange={onModelChange}
-                onRescan={onRescanAgents}
-              />
-              <IconButton aria-label="Send message" disabled={busy || text.trim().length === 0} onClick={() => void submit()} className="rounded-lg">
-                <ArrowUp size={15} strokeWidth={2} />
-              </IconButton>
+        <div ref={composerRef} className="bg-background px-3 pb-3">
+          <div className="pointer-events-auto rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 hover:border-border-strong">
+            <Textarea
+              aria-label="Moodboard prompt"
+              rows={1}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Ask for visual direction or generate material..."
+              className="field-sizing-content max-h-40 min-h-[36px] w-full border-0 bg-transparent px-1 py-0.5 text-sm leading-relaxed shadow-none outline-none focus-visible:ring-0"
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void submit();
+                }
+              }}
+            />
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-0.5" />
+              <TooltipProvider delayDuration={120}>
+                <div className="flex min-w-0 items-center gap-1">
+                  <AgentModelSelect
+                    agents={agents}
+                    agent={agent}
+                    model={model}
+                    dropUp
+                    onAgentChange={onAgentChange}
+                    onModelChange={onModelChange}
+                    onRescan={onRescanAgents}
+                  />
+                  <IconButton aria-label="Send message" disabled={busy || text.trim().length === 0} onClick={() => void submit()} className="rounded-lg">
+                    <ArrowUp size={15} strokeWidth={2} />
+                  </IconButton>
+                </div>
+              </TooltipProvider>
             </div>
           </div>
-        </div>
         </div>
       </div>
     </aside>
