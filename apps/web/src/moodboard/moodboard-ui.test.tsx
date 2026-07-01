@@ -151,7 +151,7 @@ test("MoodboardPropertiesPanel can be resized from its left edge", () => {
   fireEvent.mouseMove(document, { clientX: 320 });
   fireEvent.mouseUp(document);
 
-  expect(screen.getByText("Properties").closest("aside")).toHaveStyle({ width: "360px" });
+  expect(separator.closest("aside")).toHaveStyle({ width: "360px" });
   expect(localStorage.getItem("dezin:moodboard:properties-width")).toBe("360");
 });
 
@@ -288,6 +288,58 @@ test("MoodboardPropertiesPanel edits node appearance data", () => {
   fireEvent.change(screen.getByDisplayValue("#fff8c7"), { target: { value: "#ffeeaa" } });
 
   expect(onPatchData).toHaveBeenCalledWith({ fill: "#ffeeaa" });
+});
+
+test("MoodboardPropertiesPanel exposes object identity and state controls", () => {
+  const onPatchData = vi.fn();
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 4,
+    data: { content: "Reference tone", name: "Mood note" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(<MoodboardPropertiesPanel node={node} onPatch={() => {}} onPatchData={onPatchData} onGenerate={() => {}} />);
+
+  expect(screen.getByText("Mood note")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Layer name"), { target: { value: "Material cue" } });
+  fireEvent.click(screen.getByText("Visible"));
+  fireEvent.click(screen.getByText("Unlocked"));
+
+  expect(onPatchData).toHaveBeenCalledWith({ name: "Material cue" });
+  expect(onPatchData).toHaveBeenCalledWith({ visible: false });
+  expect(onPatchData).toHaveBeenCalledWith({ locked: true });
+});
+
+test("MoodboardPropertiesPanel shows concrete layout values", () => {
+  const node: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "section",
+    x: 120,
+    y: 140,
+    width: 320,
+    height: 160,
+    rotation: 15,
+    zIndex: 7,
+    data: { title: "Section" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(<MoodboardPropertiesPanel node={node} onPatch={() => {}} onPatchData={() => {}} onGenerate={() => {}} />);
+
+  expect(screen.getByText("320 x 160")).toBeInTheDocument();
+  expect(screen.getByText("2.00:1")).toBeInTheDocument();
+  expect(screen.getByText("15 deg")).toBeInTheDocument();
 });
 
 test("SelectionToolbar exposes object visibility and lock actions", () => {

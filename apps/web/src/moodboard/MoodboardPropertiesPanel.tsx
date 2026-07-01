@@ -1,8 +1,23 @@
 import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { WandSparkles } from "lucide-react";
+import { Eye, EyeOff, Lock, LockOpen, WandSparkles } from "lucide-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { Button, Input, Textarea } from "../components/ui/index.ts";
-import { assetUrl, fileName, generatorPrompt, generatorStatus, nodeFill, nodeStroke, nodeText, nodeTitle, numberFromEvent, promptText } from "./canvas-utils.ts";
+import {
+  assetUrl,
+  dataName,
+  fileName,
+  generatorPrompt,
+  generatorStatus,
+  isNodeLocked,
+  isNodeVisible,
+  layerLabel,
+  nodeFill,
+  nodeStroke,
+  nodeText,
+  nodeTitle,
+  numberFromEvent,
+  promptText,
+} from "./canvas-utils.ts";
 
 const PANEL_WIDTH_KEY = "dezin:moodboard:properties-width";
 const DEFAULT_PANEL_WIDTH = 280;
@@ -64,10 +79,35 @@ export function MoodboardPropertiesPanel({
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize"
         onMouseDown={startResize}
       />
-      <div className="flex h-9 items-center justify-between border-b border-border px-3">
-        <span className="text-xs font-medium">Properties</span>
-        <span className="label-mono">{node.type}</span>
+      <div className="flex h-10 items-center justify-between gap-3 border-b border-border px-3">
+        <div className="min-w-0">
+          <p className="truncate text-xs font-medium text-foreground">{layerLabel(node)}</p>
+          <p className="label-mono text-muted-foreground">{formatNodeType(node.type)}</p>
+        </div>
+        <span className="label-mono shrink-0 text-muted-foreground">#{Math.round(node.zIndex ?? 0)}</span>
       </div>
+      <PropertySection title="Object">
+        <div className="space-y-2">
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-muted-foreground">Name</span>
+            <Input
+              aria-label="Layer name"
+              value={dataName(node)}
+              placeholder={layerLabel(node)}
+              onChange={(event) => onPatchData({ name: event.target.value })}
+              className="h-8 text-xs"
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <StateButton active={isNodeVisible(node)} label={isNodeVisible(node) ? "Visible" : "Hidden"} onClick={() => onPatchData({ visible: !isNodeVisible(node) })}>
+              {isNodeVisible(node) ? <Eye size={13} strokeWidth={1.75} /> : <EyeOff size={13} strokeWidth={1.75} />}
+            </StateButton>
+            <StateButton active={isNodeLocked(node)} label={isNodeLocked(node) ? "Locked" : "Unlocked"} onClick={() => onPatchData({ locked: !isNodeLocked(node) })}>
+              {isNodeLocked(node) ? <Lock size={13} strokeWidth={1.75} /> : <LockOpen size={13} strokeWidth={1.75} />}
+            </StateButton>
+          </div>
+        </div>
+      </PropertySection>
       <PropertySection title="Position">
         <div className="grid grid-cols-2 gap-2">
           <NumberField label="X" value={node.x} onChange={(value) => onPatch({ x: value })} />
@@ -76,6 +116,14 @@ export function MoodboardPropertiesPanel({
           <NumberField label="H" value={node.height} onChange={(value) => onPatch({ height: Math.max(40, value) })} />
           <NumberField label="R" value={node.rotation ?? 0} onChange={(value) => onPatch({ rotation: value })} />
           <NumberField label="Z" value={node.zIndex ?? 0} onChange={(value) => onPatch({ zIndex: value })} />
+        </div>
+      </PropertySection>
+      <PropertySection title="Layout">
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <ReadonlyValue label="Size" value={`${Math.round(node.width)} x ${Math.round(node.height)}`} />
+          <ReadonlyValue label="Ratio" value={formatRatio(node.width, node.height)} />
+          <ReadonlyValue label="Rotation" value={`${Math.round(node.rotation ?? 0)} deg`} />
+          <ReadonlyValue label="Layer" value={String(Math.round(node.zIndex ?? 0))} />
         </div>
       </PropertySection>
       <PropertySection title="Content">
@@ -112,10 +160,28 @@ export function MoodboardPropertiesPanel({
           <ColorValue label="Fill" value={nodeFill(node)} onChange={(value) => onPatchData({ fill: value })} />
           <ColorValue label="Stroke" value={nodeStroke(node)} onChange={(value) => onPatchData({ stroke: value })} />
           {node.type === "image-generator" ? <ReadonlyValue label="Status" value={generatorStatus(node) || "ready"} /> : null}
+          <ReadonlyValue label="Updated" value={formatDate(node.updatedAt)} />
         </div>
       </PropertySection>
     </aside>
   );
+}
+
+function formatNodeType(type: MoodboardNode["type"]): string {
+  if (type === "image-generator") return "Image generator";
+  return type.charAt(0).toUpperCase() + type.slice(1);
+}
+
+function formatRatio(width: number, height: number): string {
+  if (!width || !height) return "Free";
+  const ratio = width / height;
+  if (!Number.isFinite(ratio)) return "Free";
+  return `${ratio.toFixed(2)}:1`;
+}
+
+function formatDate(value: number): string {
+  if (!value) return "Unknown";
+  return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function PropertySection({ title, children }: { title: string; children: ReactNode }) {
@@ -157,5 +223,19 @@ function ReadonlyValue({ label, value }: { label: string; value: string }) {
       <span className="w-12 shrink-0 text-muted-foreground">{label}</span>
       <span className="truncate font-mono text-[11px]">{value}</span>
     </div>
+  );
+}
+
+function StateButton({ active, label, children, onClick }: { active: boolean; label: string; children: ReactNode; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 text-xs text-foreground transition-colors hover:bg-accent/60"
+      aria-pressed={active}
+    >
+      {children}
+      <span className="truncate">{label}</span>
+    </button>
   );
 }
