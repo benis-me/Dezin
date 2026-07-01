@@ -77,6 +77,10 @@ const ASSET_PROMPT_MAX_LINES = 18;
 const ASSET_PROMPT_MAX_CHARS = 2200;
 const HISTORY_PROMPT_MAX_MESSAGES = 18;
 const HISTORY_PROMPT_MAX_CHARS = 5200;
+const CONTEXT_RELEVANT_NODE_LIMIT = 36;
+const CONTEXT_NODE_INDEX_LIMIT = 240;
+const CONTEXT_RECENT_ASSET_LIMIT = 40;
+const CONTEXT_RECENT_MESSAGE_LIMIT = 24;
 
 function dataString(data: Record<string, unknown>, key: string): string {
   const value = data[key];
@@ -203,6 +207,123 @@ function budgetHistory(messages: MoodboardMessage[]): string {
   )}`;
 }
 
+function countBy<T extends string>(items: T[]): Record<string, number> {
+  return items.reduce<Record<string, number>>((acc, item) => {
+    acc[item] = (acc[item] ?? 0) + 1;
+    return acc;
+  }, {});
+}
+
+function compactNode(node: MoodboardNode, assetsById: Map<string, MoodboardAsset>) {
+  const assetId = dataString(node.data, "assetId") || dataString(node.data, "resultAssetId");
+  const asset = assetId ? assetsById.get(assetId) : undefined;
+  return {
+    id: node.id,
+    type: node.type,
+    label: clipped(nodeLabel(node), 160),
+    frame: {
+      x: Math.round(node.x),
+      y: Math.round(node.y),
+      width: Math.round(node.width),
+      height: Math.round(node.height),
+      rotation: Math.round(node.rotation ?? 0),
+      zIndex: Math.round(node.zIndex ?? 0),
+    },
+    visible: node.data.visible !== false,
+    locked: node.data.locked === true,
+    asset: asset ? { id: asset.id, fileName: asset.fileName, source: asset.source, kind: asset.kind } : undefined,
+    content: node.type === "note" ? clipped(dataString(node.data, "content"), 700) : undefined,
+    title: node.type === "section" ? clipped(dataString(node.data, "title"), 240) : undefined,
+    prompt: clipped(dataString(node.data, "prompt"), 700) || undefined,
+    generatorPrompt: clipped(dataString(node.data, "generatorPrompt"), 700) || undefined,
+    generatorStatus: dataString(node.data, "generatorStatus") || undefined,
+    updatedAt: node.updatedAt,
+  };
+}
+
+function compactNodeIndex(node: MoodboardNode) {
+  return {
+    id: node.id,
+    type: node.type,
+    label: clipped(nodeLabel(node), 140),
+    frame: `${Math.round(node.x)},${Math.round(node.y)} ${Math.round(node.width)}x${Math.round(node.height)}`,
+    zIndex: Math.round(node.zIndex ?? 0),
+    updatedAt: node.updatedAt,
+  };
+}
+
+function compactAsset(asset: MoodboardAsset) {
+  return {
+    id: asset.id,
+    kind: asset.kind,
+    fileName: asset.fileName,
+    mimeType: asset.mimeType,
+    source: asset.source,
+    size: asset.width && asset.height ? `${asset.width}x${asset.height}` : null,
+    createdAt: asset.createdAt,
+  };
+}
+
+function compactMessage(message: MoodboardMessage) {
+  return {
+    id: message.id,
+    role: message.role,
+    content: clipped(message.content, 900),
+    createdAt: message.createdAt,
+  };
+}
+
+export function buildMoodboardAgentContext(input: {
+  board: Moodboard;
+  nodes: MoodboardNode[];
+  assets: MoodboardAsset[];
+  messages: MoodboardMessage[];
+  content: string;
+}) {
+  const assetsById = new Map(input.assets.map((asset) => [asset.id, asset]));
+  const rankedNodes = rankNodesForRequest(input.nodes, input.content);
+  const relevantNodes = rankedNodes.slice(0, CONTEXT_RELEVANT_NODE_LIMIT).map((node) => compactNode(node, assetsById));
+  const nodeIndex = [...input.nodes]
+    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+    .slice(0, CONTEXT_NODE_INDEX_LIMIT)
+    .map(compactNodeIndex);
+  const recentAssets = [...input.assets]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, CONTEXT_RECENT_ASSET_LIMIT)
+    .map(compactAsset);
+  const recentMessages = input.messages.slice(-CONTEXT_RECENT_MESSAGE_LIMIT).map(compactMessage);
+
+  return {
+    version: 1,
+    note: "Budgeted Dezin Moodboard context. This is not a raw full-canvas dump; use node ids in relevantNodes/nodeIndex for operations.",
+    board: {
+      id: input.board.id,
+      name: input.board.name,
+      createdAt: input.board.createdAt,
+      updatedAt: input.board.updatedAt,
+      coverAssetId: input.board.coverAssetId ?? null,
+    },
+    latestUserRequest: input.content,
+    summary: {
+      nodeCount: input.nodes.length,
+      assetCount: input.assets.length,
+      messageCount: input.messages.length,
+      nodeTypes: countBy(input.nodes.map((node) => node.type)),
+      assetSources: countBy(input.assets.map((asset) => asset.source)),
+    },
+    relevantNodes,
+    nodeIndex,
+    recentAssets,
+    recentMessages,
+    omitted: {
+      relevantNodes: Math.max(0, input.nodes.length - relevantNodes.length),
+      nodeIndex: Math.max(0, input.nodes.length - nodeIndex.length),
+      assets: Math.max(0, input.assets.length - recentAssets.length),
+      messages: Math.max(0, input.messages.length - recentMessages.length),
+    },
+  };
+}
+
 export function localMoodboardReply(nodes: MoodboardNode[], assets: MoodboardAsset[]): string {
   const typeCounts = nodes.reduce<Record<string, number>>((acc, node) => {
     acc[node.type] = (acc[node.type] ?? 0) + 1;
@@ -253,10 +374,10 @@ export function buildMoodboardAgentPrompt(input: {
     'Allowed operations: [{"type":"add_note","content":"...","x":120,"y":140}, {"type":"add_section","title":"...","x":80,"y":80,"width":520,"height":320}, {"type":"add_image_generator","prompt":"...","x":160,"y":160}, {"type":"update_node","id":"existing-node-id","data":{"content":"..."}}].',
     "Use at most 12 operations. Keep user-visible assistant text concise and separate from the operation block.",
     "If the user asks for new image/video material, suggest using an image generator node with a specific prompt. Do not fake photographic assets with SVG or DOM.",
-    "The prompt includes a budgeted working set, not the full canvas. If the shown summaries are insufficient, read the structured context file before answering.",
+    "The prompt includes a budgeted working set, not the full canvas. The structured context file is also budgeted and includes a lightweight node index; request clarification if needed.",
     `Board: ${input.board.name} (${input.board.id})`,
     `Board summary: ${boardStats(input.nodes, input.assets)}`,
-    `Structured context file: ${input.contextPath}`,
+    `Budgeted structured context file: ${input.contextPath}`,
     "",
     "Canvas working set:",
     nodes,

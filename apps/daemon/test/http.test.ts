@@ -1,13 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, matchPath, safeJoin } from "../src/index.ts";
 import type { AppDeps } from "../src/index.ts";
-import { buildMoodboardAgentPrompt, parseMoodboardAgentOutput } from "../src/moodboard-agent.ts";
+import { buildMoodboardAgentContext, buildMoodboardAgentPrompt, parseMoodboardAgentOutput } from "../src/moodboard-agent.ts";
 import { injectSelectBridge } from "../src/serve-static.ts";
 
 interface Ctx {
@@ -15,6 +15,18 @@ interface Ctx {
   dataDir: string;
   store: Store;
 }
+
+type BudgetedMoodboardAgentContext = {
+  board: { name: string };
+  latestUserRequest: string;
+  summary: { nodeCount: number; messageCount: number };
+  relevantNodes: Array<{ id?: string }>;
+  nodeIndex: unknown[];
+  recentMessages: unknown[];
+  omitted: { relevantNodes: number; messages: number };
+  nodes?: unknown;
+  messages?: unknown;
+};
 
 async function withServer(fn: (ctx: Ctx) => Promise<void>, extraDeps: Partial<AppDeps> = {}): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-test-"));
@@ -152,6 +164,54 @@ test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
   });
 });
 
+test("moodboard agent structured context is budgeted instead of a raw full-canvas dump", () => {
+  const board = { id: "b1", name: "Large board", createdAt: 1, updatedAt: 2, archivedAt: null, coverAssetId: null };
+  const nodes = Array.from({ length: 80 }, (_, index) => ({
+    id: `n${index}`,
+    boardId: board.id,
+    type: index % 5 === 0 ? ("image-generator" as const) : ("note" as const),
+    x: index * 12,
+    y: index * 8,
+    width: 240,
+    height: 160,
+    rotation: 0,
+    zIndex: index,
+    data: {
+      content: `Long note ${index} ${"warm editorial material ".repeat(80)}`,
+      generatorPrompt: index % 5 === 0 ? `Generate warm editorial still life ${index}` : "",
+      name: `Reference ${index}`,
+    },
+    createdAt: index + 1,
+    updatedAt: index + 2,
+  }));
+  const messages = Array.from({ length: 40 }, (_, index) => ({
+    id: `m${index}`,
+    boardId: board.id,
+    role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+    content: `Message ${index} ${"context ".repeat(500)}`,
+    createdAt: index + 1,
+  }));
+
+  const context = buildMoodboardAgentContext({
+    board,
+    nodes,
+    assets: [],
+    messages,
+    content: "Use the hero editorial generator and warm material notes",
+  }) as BudgetedMoodboardAgentContext;
+
+  assert.equal(context.summary.nodeCount, 80);
+  assert.equal(context.summary.messageCount, 40);
+  assert.ok(context.relevantNodes.length <= 36);
+  assert.ok(context.nodeIndex.length <= 240);
+  assert.ok(context.recentMessages.length <= 24);
+  assert.equal(context.nodes, undefined);
+  assert.equal(context.messages, undefined);
+  assert.ok(JSON.stringify(context).length < 80_000);
+  assert.ok(context.omitted.relevantNodes > 0);
+  assert.ok(context.omitted.messages > 0);
+});
+
 test("moodboard messages invoke the selected agent with canvas context", async () => {
   const captures: Array<Parameters<NonNullable<AppDeps["moodboardAgentText"]>>[0]> = [];
   await withServer(
@@ -213,6 +273,16 @@ test("moodboard messages invoke the selected agent with canvas context", async (
   assert.match(captured.prompt, /Previous direction/);
   assert.match(captured.prompt, /Latest user request:\nUse warmer references/);
   assert.equal((captured.prompt.match(/Use warmer references/g) ?? []).length, 1);
+  assert.match(captured.prompt, /Budgeted structured context file:/);
+  const context = JSON.parse(readFileSync(join(captured.cwd, "moodboard-context.json"), "utf8")) as BudgetedMoodboardAgentContext;
+  assert.equal(context.board.name, "Editorial references");
+  assert.equal(context.latestUserRequest, "Use warmer references");
+  assert.equal(context.summary.nodeCount, 2);
+  assert.equal(context.nodes, undefined);
+  assert.equal(context.messages, undefined);
+  assert.ok(Array.isArray(context.relevantNodes));
+  assert.ok(Array.isArray(context.nodeIndex));
+  assert.ok(context.relevantNodes.some((node) => node.id));
 });
 
 test("moodboard agent output parser strips canvas operation blocks", () => {
@@ -264,7 +334,7 @@ test("moodboard messages apply agent canvas operations", async () => {
   );
 });
 
-test("moodboard agent prompt uses a budgeted working set with full context path", () => {
+test("moodboard agent prompt uses a budgeted working set with a budgeted context path", () => {
   const now = Date.now();
   const nodes = Array.from({ length: 36 }, (_, index) => ({
     id: `n${index}`,
@@ -291,7 +361,7 @@ test("moodboard agent prompt uses a budgeted working set with full context path"
   });
 
   assert.match(prompt, /budgeted working set/);
-  assert.match(prompt, /Structured context file: \/tmp\/dezin\/moodboard-context\.json/);
+  assert.match(prompt, /Budgeted structured context file: \/tmp\/dezin\/moodboard-context\.json/);
   assert.match(prompt, /warm hero reference/);
   assert.match(prompt, /more canvas nodes omitted/);
 });

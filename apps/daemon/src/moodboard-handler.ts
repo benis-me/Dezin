@@ -4,6 +4,7 @@ import { extname, join } from "node:path";
 import type { Moodboard, MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
 import { requestImage } from "./image-gen.ts";
 import {
+  buildMoodboardAgentContext,
   buildMoodboardAgentPrompt,
   clippedBlock,
   localMoodboardReply,
@@ -278,7 +279,7 @@ export async function handlePostMoodboardMessage(
   const cwd = moodboardDir(dataDir, id!);
   mkdirSync(cwd, { recursive: true });
   const contextPath = join(cwd, "moodboard-context.json");
-  writeFileSync(contextPath, JSON.stringify({ board, nodes, assets, messages }, null, 2));
+  writeFileSync(contextPath, JSON.stringify(buildMoodboardAgentContext({ board, nodes, assets, messages: previousMessages, content }), null, 2));
 
   let assistantText = localMoodboardReply(nodes, assets);
   if (agentCommand) {
