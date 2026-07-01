@@ -1,6 +1,11 @@
-import { ImagePlus, Plus } from "lucide-react";
+import { ImagePlus, Loader2, Plus } from "lucide-react";
+import { memo } from "react";
+import { Frame as LeaferFrame, Leafer } from "@dezin/leafer-react";
+import type { Frame } from "leafer-editor";
 import { Button } from "../components/ui/index.ts";
+import type { MoodboardNode } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
+import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
 import { CanvasActionBar, CanvasZoomBar, GeneratorPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
@@ -12,6 +17,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   const { nodes, busy = false, onAddNote, onAddSection, onAddImageGenerator, onGenerateImage } = props;
   const canvas = useMoodboardCanvasController(props);
   const selectedGeneratorPrompt = canvas.selected ? generatorPrompt(canvas.selected) : "";
+  const cursor = canvas.tool === "hand" ? "grab" : canvas.tool === "note" || canvas.tool === "section" ? "crosshair" : "default";
 
   return (
     <div className="relative min-h-0 flex-1 bg-surface">
@@ -32,18 +38,38 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           />
         ) : null}
 
-        <div
-          ref={canvas.containerRef}
-          data-testid="moodboard-leafer-canvas"
-          className={cn(
-            "h-full w-full overflow-hidden",
-            canvas.tool === "hand" && "cursor-grab active:cursor-grabbing",
-            (canvas.tool === "note" || canvas.tool === "section") && "cursor-crosshair",
-          )}
-        />
+        <div ref={canvas.hostRef} data-testid="moodboard-leafer-canvas" className="h-full w-full overflow-hidden">
+          <Leafer
+            fill="#f7f7f5"
+            editor={{
+              hideOnMove: true,
+              skewable: false,
+              flipable: false,
+              bright: true,
+              stroke: "#0d99ff",
+              strokeWidth: 1,
+              pointFill: "#ffffff",
+              pointRadius: 2,
+              pointSize: 8,
+            }}
+            wheel={{ preventDefault: true }}
+            move={{ dragEmpty: false }}
+            zoom={{ min: 0.1, max: 4 }}
+            onAppReady={canvas.handleAppReady}
+            className={cn("h-full w-full overflow-hidden", canvas.tool === "hand" && "active:cursor-grabbing")}
+            style={{ cursor }}
+          >
+            <MoodboardNodeLayer nodes={nodes} onSelect={canvas.selectLayer} onLayerCreated={canvas.handleLayerCreated} />
+          </Leafer>
+        </div>
 
         {!canvas.runtimeReady ? (
-          <div className="pointer-events-none absolute inset-0 grid place-items-center text-xs text-muted-foreground">Loading canvas...</div>
+          <div className="pointer-events-none absolute inset-0 grid place-items-center">
+            <div className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
+              <Loader2 size={13} className="animate-spin" />
+              Loading canvas
+            </div>
+          </div>
         ) : null}
 
         {nodes.length === 0 ? (
@@ -160,3 +186,23 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     </div>
   );
 }
+
+const MoodboardNodeLayer = memo(function MoodboardNodeLayer({
+  nodes,
+  onSelect,
+  onLayerCreated,
+}: {
+  nodes: MoodboardNode[];
+  onSelect: (id: string) => void;
+  onLayerCreated: (frame: Frame) => void;
+}) {
+  return (
+    <LeaferFrame id="moodboard-node-layer" name="nodes" fill="transparent" hitSelf={false} isSnap={false} onCreated={onLayerCreated}>
+      {[...nodes]
+        .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))
+        .map((node) => (
+          <MoodboardCanvasNode key={node.id} node={node} onSelect={onSelect} />
+        ))}
+    </LeaferFrame>
+  );
+});

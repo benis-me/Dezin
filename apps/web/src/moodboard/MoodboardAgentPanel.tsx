@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { Markdown } from "../components/Markdown.tsx";
-import { IconButton, Textarea, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
+import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 
 export function MoodboardAgentPanel({
   boardName,
@@ -123,14 +123,14 @@ export function MoodboardAgentPanel({
       <div className="pointer-events-none absolute inset-x-0 bottom-0">
         <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
         <div ref={composerRef} className="bg-background px-3 pb-3">
-          <div className="pointer-events-auto rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring hover:border-border-strong">
-            <Textarea
+          <div className="pointer-events-auto relative rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring hover:border-border-strong">
+            <textarea
               aria-label="Moodboard prompt"
               rows={1}
               value={text}
               onChange={(e) => setText(e.target.value)}
               placeholder="Ask for visual direction or generate material..."
-              className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none border-0 bg-transparent px-1 py-0.5 text-sm leading-relaxed shadow-none outline-none placeholder:text-muted-foreground focus-visible:ring-0"
+              className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none bg-transparent px-1 py-0.5 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
@@ -151,9 +151,9 @@ export function MoodboardAgentPanel({
                     onModelChange={onModelChange}
                     onRescan={onRescanAgents}
                   />
-                  <IconButton aria-label="Send message" disabled={busy || text.trim().length === 0} onClick={() => void submit()} className="rounded-lg">
+                  <Button aria-label="Send message" size="icon-sm" disabled={busy || text.trim().length === 0} onClick={() => void submit()} className="ml-0.5 rounded-lg">
                     <ArrowUp size={15} strokeWidth={2} />
-                  </IconButton>
+                  </Button>
                 </div>
               </TooltipProvider>
             </div>

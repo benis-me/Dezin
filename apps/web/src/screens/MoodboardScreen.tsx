@@ -24,14 +24,28 @@ export function MoodboardScreen({
 
   if (board.loading) {
     return (
-      <div className="flex h-full w-full flex-col bg-background">
-        <div className="app-drag h-10 shrink-0 border-b border-border" />
-        <div className="grid min-h-0 flex-1 place-items-center">
-          <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-muted-foreground">
-            <Loader2 size={15} className="animate-spin" />
-            Loading moodboard
+      <div className="flex h-full w-full bg-background">
+        <aside className="flex h-full w-[400px] shrink-0 flex-col border-r border-border bg-sidebar">
+          <div className="app-drag titlebar-pad-left h-10 shrink-0 border-b border-border" />
+          <div className="flex min-h-0 flex-1 flex-col justify-end px-3 pb-3">
+            <div className="rounded-2xl border border-input bg-card px-2.5 pb-2 pt-2.5">
+              <div className="h-9 rounded-md bg-surface-2" />
+              <div className="mt-2 flex items-center justify-between">
+                <div className="h-8 w-24 rounded-md bg-surface-2" />
+                <div className="h-8 w-8 rounded-lg bg-surface-2" />
+              </div>
+            </div>
           </div>
-        </div>
+        </aside>
+        <section className="flex min-w-0 flex-1 flex-col">
+          <div className="app-drag h-10 shrink-0 border-b border-border" />
+          <div className="grid min-h-0 flex-1 place-items-center bg-surface">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 size={15} className="animate-spin" />
+              Loading moodboard
+            </div>
+          </div>
+        </section>
       </div>
     );
   }

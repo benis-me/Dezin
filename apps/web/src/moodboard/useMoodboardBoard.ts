@@ -26,7 +26,6 @@ export function useMoodboardBoard(boardId: string) {
   const [runModel, setRunModel] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [, setSaveState] = useState<"saved" | "saving" | "error">("saved");
   const saveTimer = useRef<number | null>(null);
 
   const load = useCallback(() => {
@@ -69,16 +68,13 @@ export function useMoodboardBoard(boardId: string) {
   const persistNodes = useCallback(
     (inputs: SaveMoodboardNodeInput[]) => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      setSaveState("saving");
       saveTimer.current = window.setTimeout(() => {
         void api
           .saveMoodboardNodes(boardId, inputs)
           .then((saved) => {
             setNodes(saved);
-            setSaveState("saved");
           })
           .catch(() => {
-            setSaveState("error");
             toast("Couldn't save the board.", { variant: "error" });
           });
       }, 350);
@@ -177,7 +173,6 @@ export function useMoodboardBoard(boardId: string) {
         });
         setNodes(result.nodes);
         setMessages((cur) => [...cur, ...result.messages]);
-        setSaveState("saved");
       } catch {
         toast("Couldn't generate an image. Check Models settings.", { variant: "error" });
       } finally {

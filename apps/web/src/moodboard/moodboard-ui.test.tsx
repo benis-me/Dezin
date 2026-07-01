@@ -6,7 +6,7 @@ import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { eventClientPoint, reorderLayerInputs, resolveFloatingRect, sameFloatingRect } from "./canvas-utils.ts";
+import { eventClientPoint, nodeIdFromTarget, reorderLayerInputs, resolveFloatingRect, sameFloatingRect } from "./canvas-utils.ts";
 
 beforeEach(() => {
   localStorage.clear();
@@ -109,6 +109,11 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
 
 test("eventClientPoint reads Leafer native event origins for context menus", () => {
   expect(eventClientPoint({ origin: { clientX: 260, clientY: 144 }, clientX: 0, clientY: 0 })).toEqual({ x: 260, y: 144 });
+});
+
+test("nodeIdFromTarget reads reconciler node ids from parent data", () => {
+  expect(nodeIdFromTarget({ data: { id: "n1" } })).toBe("n1");
+  expect(nodeIdFromTarget({ parent: { data: { nodeId: "n2" } } })).toBe("n2");
 });
 
 test("resolveFloatingRect follows world bounds and clamps within the canvas", () => {

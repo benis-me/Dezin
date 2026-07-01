@@ -49,7 +49,7 @@ export function MoodboardLayerPanel({
   }, [selectedId, items]);
 
   return (
-    <aside className="app-no-drag absolute left-3 top-3 z-20 flex max-h-[calc(100%-5rem)] w-60 select-none flex-col overflow-hidden rounded-md border border-border bg-card/95 text-popover-foreground shadow-sm shadow-black/[0.04] backdrop-blur-xl">
+    <aside className="app-no-drag absolute left-3 top-3 z-20 flex max-h-[calc(100%-5rem)] w-60 select-none flex-col overflow-hidden rounded-md border border-border bg-card/95 text-popover-foreground shadow-none backdrop-blur-xl">
       <div className="flex h-9 items-center gap-2 border-b border-border px-3 text-xs font-medium">
         <Layers size={14} strokeWidth={1.75} />
         Layers

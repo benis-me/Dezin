@@ -12,7 +12,9 @@
   },
   "dependencies": {
     "@fontsource/space-grotesk": "^5.2.10",
+    "@dezin/leafer-react": "workspace:*",
     "@leafer-in/editor": "2.0.8",
+    "@leafer-in/flow": "2.0.8",
     "@leafer-in/resize": "2.0.8",
     "@leafer-in/scroll": "2.0.8",
     "class-variance-authority": "^0.7.1",

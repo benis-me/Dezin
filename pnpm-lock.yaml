@@ -35,12 +35,18 @@ importers:
 
   apps/web:
     dependencies:
+      '@dezin/leafer-react':
+        specifier: workspace:*
+        version: link:../../packages/leafer-react
       '@fontsource/space-grotesk':
         specifier: ^5.2.10
         version: 5.2.10
       '@leafer-in/editor':
         specifier: 2.0.8
         version: 2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-in/resize@2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8))(@leafer-ui/core@2.0.8)(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8)
+      '@leafer-in/flow':
+        specifier: 2.0.8
+        version: 2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-in/resize@2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8)
       '@leafer-in/resize':
         specifier: 2.0.8
         version: 2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8)
@@ -140,6 +146,34 @@ importers:
   packages/craft: {}
 
   packages/design: {}
+
+  packages/leafer-react:
+    dependencies:
+      react:
+        specifier: ^19.0.0
+        version: 19.2.7
+      react-reconciler:
+        specifier: ^0.33.0
+        version: 0.33.0(react@19.2.7)
+    devDependencies:
+      '@leafer-in/editor':
+        specifier: 2.0.8
+        version: 2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-in/resize@2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8))(@leafer-ui/core@2.0.8)(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8)
+      '@leafer-in/flow':
+        specifier: 2.0.8
+        version: 2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-in/resize@2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8)
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.17
+      '@types/react-reconciler':
+        specifier: ^0.33.0
+        version: 0.33.0(@types/react@19.2.17)
+      leafer-editor:
+        specifier: 2.0.8
+        version: 2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
 
   packages/prompt: {}
 
@@ -282,6 +316,14 @@ packages:
     resolution: {integrity: sha512-TExYnehYfEkm/6R5I2VL42dcm1WpdOPnwUZtMfjMUb5VXiyuD0/jF1Y0JQJ8/+FHX1qXWdjez9c6uDEUcb585Q==}
     peerDependencies:
       '@leafer-in/interface': ^2.0.8
+      '@leafer-ui/draw': ^2.0.8
+      '@leafer-ui/interface': ^2.0.8
+
+  '@leafer-in/flow@2.0.8':
+    resolution: {integrity: sha512-DLPzGOfRyUgfq2YvXUfU9y+nZ2y2DsbVmse3vsKCtPxBIa9Xln8dZNvb6L0dBNVpBVbjKF2plKgp6vpDoOIISg==}
+    peerDependencies:
+      '@leafer-in/interface': ^2.0.8
+      '@leafer-in/resize': ^2.0.8
       '@leafer-ui/draw': ^2.0.8
       '@leafer-ui/interface': ^2.0.8
 
@@ -1473,6 +1515,11 @@ packages:
     peerDependencies:
       '@types/react': ^19.2.0
 
+  '@types/react-reconciler@0.33.0':
+    resolution: {integrity: sha512-HZOXsKT0tGI9LlUw2LuedXsVeB88wFa536vVL0M6vE8zN63nI+sSr1ByxmPToP5K5bukaVscyeCJcF9guVNJ1g==}
+    peerDependencies:
+      '@types/react': '*'
+
   '@types/react@19.2.17':
     resolution: {integrity: sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw==}
 
@@ -2390,6 +2437,12 @@ packages:
       '@types/react': '>=18'
       react: '>=18'
 
+  react-reconciler@0.33.0:
+    resolution: {integrity: sha512-KetWRytFv1epdpJc3J4G75I4WrplZE5jOL7Yq0p34+OVOKF4Se7WrdIdVC45XsSSmUTlht2FM/fM1FZb1mfQeA==}
+    engines: {node: '>=0.10.0'}
+    peerDependencies:
+      react: ^19.2.0
+
   react-remove-scroll-bar@2.3.8:
     resolution: {integrity: sha512-9r+yi9+mgU33AKcj6IbT9oRCO78WriSj6t/cF8DWBZJ9aOGPOTEDvdUDz1FwKim7QXWwmHqtdHnRJfhAxEG46Q==}
     engines: {node: '>=10'}
@@ -3004,6 +3057,13 @@ snapshots:
   '@leafer-in/find@2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8)':
     dependencies:
       '@leafer-in/interface': 2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8)
+      '@leafer-ui/draw': 2.0.8
+      '@leafer-ui/interface': 2.0.8
+
+  '@leafer-in/flow@2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-in/resize@2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8)':
+    dependencies:
+      '@leafer-in/interface': 2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8)
+      '@leafer-in/resize': 2.0.8(@leafer-in/interface@2.0.8(@leafer-ui/interface@2.0.8)(@leafer/interface@2.0.8))(@leafer-ui/draw@2.0.8)(@leafer-ui/interface@2.0.8)
       '@leafer-ui/draw': 2.0.8
       '@leafer-ui/interface': 2.0.8
 
@@ -4315,6 +4375,10 @@ snapshots:
     dependencies:
       '@types/react': 19.2.17
 
+  '@types/react-reconciler@0.33.0(@types/react@19.2.17)':
+    dependencies:
+      '@types/react': 19.2.17
+
   '@types/react@19.2.17':
     dependencies:
       csstype: 3.2.3
@@ -5502,6 +5566,11 @@ snapshots:
       vfile: 6.0.3
     transitivePeerDependencies:
       - supports-color
+
+  react-reconciler@0.33.0(react@19.2.7):
+    dependencies:
+      react: 19.2.7
+      scheduler: 0.27.0
 
   react-remove-scroll-bar@2.3.8(@types/react@19.2.17)(react@19.2.7):
     dependencies:

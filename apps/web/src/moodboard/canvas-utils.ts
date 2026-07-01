@@ -189,7 +189,7 @@ export function nodeIdFromTarget(target: any): string | null {
   const first = Array.isArray(target) ? target[0] : target;
   let cur = first;
   while (cur) {
-    const nodeId = cur.data?.nodeId;
+    const nodeId = cur.data?.nodeId ?? cur.data?.id;
     if (typeof nodeId === "string") return nodeId;
     cur = cur.parent;
   }
