@@ -5,7 +5,7 @@ import { SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
-import { eventClientPoint, resolveFloatingRect, sameFloatingRect } from "./canvas-utils.ts";
+import { eventClientPoint, reorderLayerInputs, resolveFloatingRect, sameFloatingRect } from "./canvas-utils.ts";
 
 beforeEach(() => {
   localStorage.clear();
@@ -184,6 +184,7 @@ test("MoodboardLayerPanel selects rows without letting inline actions bubble", (
       onRename={() => {}}
       onToggleVisible={onToggleVisible}
       onToggleLocked={() => {}}
+      onReorder={() => {}}
     />,
   );
 
@@ -194,6 +195,76 @@ test("MoodboardLayerPanel selects rows without letting inline actions bubble", (
   fireEvent.click(screen.getByLabelText("Hide layer"));
   expect(onToggleVisible).toHaveBeenCalledWith("n1");
   expect(onSelect).not.toHaveBeenCalled();
+});
+
+test("MoodboardLayerPanel supports drag reordering rows", () => {
+  const onReorder = vi.fn();
+  const first: MoodboardNode = {
+    id: "n1",
+    boardId: "b1",
+    type: "note",
+    x: 40,
+    y: 50,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 2,
+    data: { content: "First" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const second: MoodboardNode = { ...first, id: "n2", zIndex: 1, data: { content: "Second" } };
+  const dataTransfer = {
+    effectAllowed: "",
+    dropEffect: "",
+    setData: vi.fn(),
+    getData: vi.fn(),
+  };
+
+  render(
+    <MoodboardLayerPanel
+      items={[
+        { node: first, children: [] },
+        { node: second, children: [] },
+      ]}
+      selectedId={null}
+      collapsedIds={new Set()}
+      onToggleCollapsed={() => {}}
+      onSelect={() => {}}
+      onHover={() => {}}
+      onRename={() => {}}
+      onToggleVisible={() => {}}
+      onToggleLocked={() => {}}
+      onReorder={onReorder}
+    />,
+  );
+
+  fireEvent.dragStart(screen.getByText("First").closest("[data-moodboard-layer-id]")!, { dataTransfer });
+  fireEvent.dragOver(screen.getByText("Second").closest("[data-moodboard-layer-id]")!, { dataTransfer });
+  fireEvent.drop(screen.getByText("Second").closest("[data-moodboard-layer-id]")!, { dataTransfer });
+
+  expect(onReorder).toHaveBeenCalledWith("n1", "n2");
+});
+
+test("reorderLayerInputs normalizes z-index after a layer drop", () => {
+  const a: MoodboardNode = {
+    id: "a",
+    boardId: "b1",
+    type: "note",
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+    rotation: 0,
+    zIndex: 3,
+    data: { content: "A" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const b: MoodboardNode = { ...a, id: "b", zIndex: 2, data: { content: "B" } };
+  const c: MoodboardNode = { ...a, id: "c", zIndex: 1, data: { content: "C" } };
+
+  expect(reorderLayerInputs([a, b, c], "c", "a").map((node) => `${node.id}:${node.zIndex}`)).toEqual(["c:3", "a:2", "b:1"]);
 });
 
 test("MoodboardPropertiesPanel edits node appearance data", () => {

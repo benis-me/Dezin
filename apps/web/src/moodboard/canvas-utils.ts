@@ -261,3 +261,18 @@ export function buildLayerTree(nodes: MoodboardNode[]): LayerTreeItem[] {
       children: (sectionChildren.get(node.id) ?? []).map((child) => ({ node: child, children: [] })),
     }));
 }
+
+export function reorderLayerInputs(nodes: MoodboardNode[], sourceId: string, targetId: string): SaveMoodboardNodeInput[] {
+  if (sourceId === targetId) return nodes.map(toInput);
+  const order = [...nodes].sort(sortByLayer);
+  const sourceIndex = order.findIndex((node) => node.id === sourceId);
+  if (sourceIndex < 0) return nodes.map(toInput);
+  const [source] = order.splice(sourceIndex, 1);
+  const targetIndex = order.findIndex((node) => node.id === targetId);
+  if (!source || targetIndex < 0) return nodes.map(toInput);
+  order.splice(targetIndex, 0, source);
+  return order.map((node, index) => ({
+    ...toInput(node),
+    zIndex: order.length - index,
+  }));
+}

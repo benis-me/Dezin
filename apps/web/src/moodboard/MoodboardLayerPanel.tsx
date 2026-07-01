@@ -25,6 +25,7 @@ export function MoodboardLayerPanel({
   onRename,
   onToggleVisible,
   onToggleLocked,
+  onReorder,
 }: {
   items: LayerTreeItem[];
   selectedId: string | null;
@@ -35,8 +36,10 @@ export function MoodboardLayerPanel({
   onRename: (id: string, name: string) => void;
   onToggleVisible: (id: string) => void;
   onToggleLocked: (id: string) => void;
+  onReorder: (sourceId: string, targetId: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -68,6 +71,13 @@ export function MoodboardLayerPanel({
               onRename={onRename}
               onToggleVisible={onToggleVisible}
               onToggleLocked={onToggleLocked}
+              draggingId={draggingId}
+              onDragStart={setDraggingId}
+              onDragEnd={() => setDraggingId(null)}
+              onDropOn={(targetId) => {
+                if (draggingId && draggingId !== targetId) onReorder(draggingId, targetId);
+                setDraggingId(null);
+              }}
             />
           ))
         )}
@@ -87,6 +97,10 @@ function LayerItem({
   onRename,
   onToggleVisible,
   onToggleLocked,
+  draggingId,
+  onDragStart,
+  onDragEnd,
+  onDropOn,
 }: {
   item: LayerTreeItem;
   depth: number;
@@ -98,6 +112,10 @@ function LayerItem({
   onRename: (id: string, name: string) => void;
   onToggleVisible: (id: string) => void;
   onToggleLocked: (id: string) => void;
+  draggingId: string | null;
+  onDragStart: (id: string) => void;
+  onDragEnd: () => void;
+  onDropOn: (targetId: string) => void;
 }) {
   const { node, children } = item;
   const [editing, setEditing] = useState(false);
@@ -120,9 +138,27 @@ function LayerItem({
       <div
         role="button"
         tabIndex={0}
+        draggable={!editing}
         data-moodboard-layer-id={node.id}
         onClick={() => onSelect(node.id)}
         onDoubleClick={() => setEditing(true)}
+        onDragStart={(event) => {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("application/x-dezin-moodboard-layer", node.id);
+          event.dataTransfer.setData("text/plain", node.id);
+          onDragStart(node.id);
+        }}
+        onDragEnd={onDragEnd}
+        onDragOver={(event) => {
+          if (!draggingId || draggingId === node.id) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onDropOn(node.id);
+        }}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
@@ -132,7 +168,10 @@ function LayerItem({
         className={cn(
           "group flex h-8 min-w-0 items-center gap-1 px-1.5 text-left text-xs transition-colors",
           selected ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+          draggingId === node.id && "opacity-45",
+          draggingId && draggingId !== node.id && "data-[drop-target=true]:bg-accent/70",
         )}
+        data-drop-target={draggingId && draggingId !== node.id ? "true" : undefined}
         style={{ paddingLeft: 6 + depth * 14 }}
       >
         <button
@@ -212,6 +251,10 @@ function LayerItem({
               onRename={onRename}
               onToggleVisible={onToggleVisible}
               onToggleLocked={onToggleLocked}
+              draggingId={draggingId}
+              onDragStart={onDragStart}
+              onDragEnd={onDragEnd}
+              onDropOn={onDropOn}
             />
           ))
         : null}

@@ -28,6 +28,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             onRename={canvas.renameNode}
             onToggleVisible={canvas.toggleNodeVisible}
             onToggleLocked={canvas.toggleNodeLocked}
+            onReorder={canvas.reorderLayer}
           />
         ) : null}
 

@@ -5,6 +5,7 @@ import {
   isNodeLocked,
   isNodeVisible,
   localId,
+  reorderLayerInputs,
   toInput,
   type ContextMenuState,
   type MoodboardCanvasTool,
@@ -236,6 +237,14 @@ export function useMoodboardCanvasController({
     [handleSelect, selectInRuntime],
   );
 
+  const reorderLayer = useCallback(
+    (sourceId: string, targetId: string) => {
+      saveInputs(reorderLayerInputs(nodesRef.current, sourceId, targetId));
+      setContextMenu(null);
+    },
+    [saveInputs],
+  );
+
   const hoverLayer = useCallback(
     (id: string | null) => {
       hoverInRuntime(id);
@@ -327,5 +336,6 @@ export function useMoodboardCanvasController({
     toggleNodeLocked,
     toggleLayerCollapsed,
     selectLayer,
+    reorderLayer,
   };
 }
