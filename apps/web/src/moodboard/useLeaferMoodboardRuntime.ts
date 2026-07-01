@@ -191,17 +191,22 @@ export function useLeaferMoodboardRuntime({
       const editor = app?.editor;
       if (!editor) return;
       const nextIds = ids.filter((id) => findFrame(id));
-      const frames = nextIds.map((id) => findFrame(id)).filter((frame): frame is NonNullable<typeof frame> => Boolean(frame));
       const refresh = () => {
         try {
-          editor.cancel?.();
-          if (typeof editor.select === "function") editor.select(frames);
-          else selectAppNodesByIds(appRef.current, nextIds);
+          selectAppNodesByIds(appRef.current, nextIds);
         } catch {
           selectAppNodesByIds(appRef.current, nextIds);
         }
+        try {
+          editor.update?.();
+          editor.selector?.update?.();
+          editor.selector?.forceUpdate?.();
+        } catch {
+          /* Editor selector internals vary between Leafer builds. */
+        }
         scheduleFloatingSelection();
       };
+      refresh();
       window.requestAnimationFrame(() => {
         refresh();
         window.setTimeout(refresh, 80);
@@ -232,11 +237,14 @@ export function useLeaferMoodboardRuntime({
           } else {
             Object.assign(frame, patch);
           }
+          frame.forceUpdate?.();
+          frame.updateLayout?.();
         } catch {
           Object.assign(frame, patch);
         }
       });
       app.tree?.forceUpdate?.();
+      app.forceUpdate?.();
       refreshSelectionInRuntime(idsToReselect);
     },
     [findFrame, refreshSelectionInRuntime],

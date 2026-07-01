@@ -19,17 +19,13 @@ export function selectAppNodesByIds(app: App | null | undefined, nodeIds: readon
   if (!app?.editor || nodeIds.length === 0) {
     const editor = app?.editor as (IEditorBase & { select?: (target: IUI[]) => void }) | null | undefined;
     if (typeof editor?.select === "function") editor.select([]);
-    else clearEditorSelection(editor);
+    clearEditorSelection(editor);
     return;
   }
 
   const selectedNodes = nodeIds.map((id) => app.findId(id)).filter((node): node is IUI => Boolean(node));
 
   const editor = app.editor as IEditorBase & { select?: (target: IUI[]) => void };
-  if (typeof editor.select === "function") {
-    editor.select(selectedNodes);
-    return;
-  }
-
+  if (typeof editor.select === "function") editor.select(selectedNodes);
   setEditorSelection(editor, selectedNodes.length === 1 ? selectedNodes[0] : selectedNodes.length > 1 ? selectedNodes : undefined);
 }

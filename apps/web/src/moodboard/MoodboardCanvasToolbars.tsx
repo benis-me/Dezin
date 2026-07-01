@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   AlignCenterHorizontal,
   AlignCenterVertical,
@@ -83,8 +83,8 @@ function ToolbarChrome({ children, className }: { children: ReactNode; className
   return (
     <div
       className={cn("pointer-events-auto app-no-drag rounded-lg border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl", className)}
-      onPointerDownCapture={stopToolbarEvent}
-      onMouseDownCapture={stopToolbarEvent}
+      onPointerDown={stopToolbarEvent}
+      onMouseDown={stopToolbarEvent}
     >
       {children}
     </div>
@@ -164,7 +164,6 @@ export function MultiSelectionToolbar({
   onQuickEdit?: () => void;
 }) {
   const [alignOpen, setAlignOpen] = useState(false);
-  const pointerToggledAlignRef = useRef(false);
   const imageOnly = nodes.length > 0 && nodes.every((node) => node.type === "image");
 
   return (
@@ -201,22 +200,8 @@ export function MultiSelectionToolbar({
               <DropdownMenuTrigger asChild>
                 <IconButton
                   aria-label="Align selected"
-                  onPointerDown={(event) => {
-                    if (event.button !== 0 || event.ctrlKey) return;
-                    event.preventDefault();
-                    pointerToggledAlignRef.current = true;
-                    setAlignOpen((open) => !open);
-                  }}
-                  onClick={() => {
-                    if (pointerToggledAlignRef.current) {
-                      pointerToggledAlignRef.current = false;
-                      return;
-                    }
-                    setAlignOpen((open) => !open);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return;
-                    event.preventDefault();
+                  onClick={(event) => {
+                    if (event.detail !== 0) return;
                     setAlignOpen((open) => !open);
                   }}
                 >
@@ -226,7 +211,7 @@ export function MultiSelectionToolbar({
             </TooltipTrigger>
             <TooltipContent sideOffset={2}>Align selected</TooltipContent>
           </Tooltip>
-          <DropdownMenuContent side="top" align="center" className="w-44" onPointerDownCapture={stopToolbarEvent} onMouseDownCapture={stopToolbarEvent}>
+          <DropdownMenuContent side="top" align="center" className="w-44" onPointerDown={stopToolbarEvent} onMouseDown={stopToolbarEvent}>
             <DropdownMenuItem
               onClick={() => {
                 onAlign("left");
@@ -438,8 +423,8 @@ export function GeneratorPromptToolbar({
   const modelOptions = models.length ? models : [model].filter(Boolean);
 
   return (
-    <div className="pointer-events-auto app-no-drag w-[min(600px,calc(100vw-3rem))] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
-      <div className="px-2.5 pb-2.5 pt-2">
+    <div className="pointer-events-auto app-no-drag flex min-h-[132px] w-[min(600px,calc(100vw-3rem))] flex-col overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+      <div className="min-h-0 flex-1 px-2.5 pb-2.5 pt-2">
         <Textarea
           aria-label="Image generator prompt"
           rows={2}
@@ -456,10 +441,10 @@ export function GeneratorPromptToolbar({
               void submit();
             }
           }}
-          className="min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
+          className="h-full min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
         />
       </div>
-      <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
+      <div className="mt-auto flex h-10 shrink-0 items-center justify-between gap-2 border-t border-border/70 px-2">
         <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
         <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
           Generate
@@ -491,8 +476,8 @@ export function QuickEditPromptToolbar({
     setPrompt("");
   };
   return (
-    <div className="pointer-events-auto app-no-drag w-[min(520px,calc(100vw-3rem))] overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
-      <div className="px-2.5 pb-2.5 pt-2">
+    <div className="pointer-events-auto app-no-drag flex min-h-[124px] w-[min(520px,calc(100vw-3rem))] flex-col overflow-hidden rounded-xl border border-border bg-card/95 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl">
+      <div className="min-h-0 flex-1 px-2.5 pb-2.5 pt-2">
         <Textarea
           aria-label="Quick edit prompt"
           rows={2}
@@ -509,10 +494,10 @@ export function QuickEditPromptToolbar({
               event.currentTarget.blur();
             }
           }}
-          className="min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
+          className="h-full min-h-14 resize-none border-0 bg-transparent px-0.5 py-0 text-sm shadow-none focus-visible:ring-0"
         />
       </div>
-      <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
+      <div className="mt-auto flex h-10 shrink-0 items-center justify-between gap-2 border-t border-border/70 px-2">
         <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
         <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
           Generate

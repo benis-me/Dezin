@@ -195,7 +195,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
 
         <AnimatePresence initial={false}>
           {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady && !presentationMode ? (
-            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top">
+            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top" avoidOccluders={false}>
               <SelectionToolbar
                 node={canvas.selected}
                 onDuplicate={() => canvas.duplicateNode(canvas.selected!.id)}
@@ -209,7 +209,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
 
         <AnimatePresence initial={false}>
           {canvas.selectedNodes.length > 1 && canvas.runtimeReady && !presentationMode ? (
-            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top">
+            <FloatingCanvasSurface appRef={canvas.appRef} hostRef={canvas.hostRef} selectedIds={canvas.selectedIds} placement="top" avoidOccluders={false}>
               <MultiSelectionToolbar
                 nodes={canvas.selectedNodes}
                 onDuplicate={() => canvas.duplicateNodes(canvas.selectedIds)}
@@ -353,20 +353,19 @@ function FloatingCanvasSurface({
   hostRef,
   selectedIds,
   placement,
+  avoidOccluders = true,
   children,
 }: {
   appRef: RefObject<any>;
   hostRef: RefObject<HTMLDivElement | null>;
   selectedIds: string[];
   placement: "top" | "bottom";
+  avoidOccluders?: boolean;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
   const selectedIdsRef = useRef(selectedIds);
-  const readyRef = useRef(false);
   const layoutRef = useRef<FloatingLayoutSnapshot | null>(null);
-  const [ready, setReady] = useState(false);
   const selectedKey = selectedIds.join("\u0000");
   selectedIdsRef.current = selectedIds;
 
@@ -375,9 +374,7 @@ function FloatingCanvasSurface({
     const container = hostRef.current;
     const app = appRef.current;
     if (!element || !container || !app) return;
-    readyRef.current = false;
     layoutRef.current = null;
-    setReady(false);
 
     const readLayout = (reason: FloatingPositionReason): FloatingLayoutSnapshot => {
       if (reason === "layout" || layoutRef.current == null) {
@@ -386,7 +383,7 @@ function FloatingCanvasSurface({
           containerHeight: container.clientHeight,
           surfaceWidth: element.offsetWidth,
           surfaceHeight: element.offsetHeight,
-          occluders: getFloatingOccluders(container, element),
+          occluders: avoidOccluders ? getFloatingOccluders(container, element) : [],
         };
       }
       return layoutRef.current;
@@ -411,34 +408,21 @@ function FloatingCanvasSurface({
       });
       const transform = `translate3d(${Math.round(next.left)}px, ${Math.round(next.top)}px, 0)`;
       if (element.style.transform !== transform) element.style.transform = transform;
-      if (!readyRef.current) {
-        readyRef.current = true;
-        setReady(true);
-      }
     };
 
-    const cleanup = bindFloatingCanvasSurfaceEvents(app, update, { container, toolbar: element });
+    const cleanup = bindFloatingCanvasSurfaceEvents(app, update, { container, toolbar: element, observeOccluders: avoidOccluders });
     update("layout");
     return () => {
       cleanup();
     };
-  }, [appRef, hostRef, placement, selectedKey]);
+  }, [appRef, avoidOccluders, hostRef, placement, selectedKey]);
 
   return (
     <div
       ref={ref}
       className="pointer-events-none absolute left-0 top-0 z-30 will-change-transform"
-      style={{ opacity: ready ? 1 : 0 }}
     >
-      <motion.div
-        ref={contentRef}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
-      >
-        {children}
-      </motion.div>
+      {children}
     </div>
   );
 }
@@ -489,7 +473,7 @@ const FLOATING_EDITOR_EVENTS = ["editor.select", "editor.move", "editor.scale", 
 function bindFloatingCanvasSurfaceEvents(
   app: FloatingEventApp,
   updatePosition: (reason: FloatingPositionReason) => void,
-  options: { container: HTMLElement; toolbar: HTMLElement },
+  options: { container: HTMLElement; toolbar: HTMLElement; observeOccluders: boolean },
 ): () => void {
   let frame: number | null = null;
   let pendingReason: FloatingPositionReason = "viewport";
@@ -511,7 +495,7 @@ function bindFloatingCanvasSurfaceEvents(
     bindFloatingEvents(app.tree, FLOATING_VIEWPORT_END_EVENTS, scheduleViewport),
     bindFloatingEvents(app, FLOATING_VIEWPORT_END_EVENTS, scheduleViewport),
     bindFloatingEvents(app.editor, FLOATING_EDITOR_EVENTS, scheduleViewport),
-    bindFloatingDomEvents(options.container, options.toolbar, scheduleLayout),
+    bindFloatingDomEvents(options.container, options.toolbar, scheduleLayout, options.observeOccluders),
   ];
   return () => {
     cleanups.forEach((cleanup) => cleanup());
@@ -525,11 +509,13 @@ function bindFloatingEvents(target: FloatingEventTarget | undefined, events: rea
   return () => events.forEach((event) => target.off?.(event, handler));
 }
 
-function bindFloatingDomEvents(container: HTMLElement, toolbar: HTMLElement, schedule: () => void): () => void {
+function bindFloatingDomEvents(container: HTMLElement, toolbar: HTMLElement, schedule: () => void, observeOccluders: boolean): () => void {
   const resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : null;
+  const attributeObserver = typeof MutationObserver === "function" ? new MutationObserver(schedule) : null;
   const mutationObserver =
     typeof MutationObserver === "function"
       ? new MutationObserver((mutations) => {
+          if (!observeOccluders) return;
           for (const mutation of mutations) {
             if (containsFloatingOccluder(mutation.addedNodes) || containsFloatingOccluder(mutation.removedNodes)) {
               refreshTargets();
@@ -542,15 +528,28 @@ function bindFloatingDomEvents(container: HTMLElement, toolbar: HTMLElement, sch
 
   const refreshTargets = () => {
     resizeObserver?.disconnect();
+    attributeObserver?.disconnect();
     resizeObserver?.observe(container);
     resizeObserver?.observe(toolbar);
-    container.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]").forEach((element) => resizeObserver?.observe(element));
+    if (!observeOccluders) return;
+    container.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]").forEach((element) => {
+      resizeObserver?.observe(element);
+      attributeObserver?.observe(element, { attributes: true, attributeFilter: ["class", "style", "data-moodboard-floating-occluder"] });
+    });
+  };
+  const handleTransitionEnd = (event: Event) => {
+    if (observeOccluders && event.target instanceof HTMLElement && event.target.matches("[data-moodboard-floating-occluder]")) schedule();
   };
   refreshTargets();
   mutationObserver?.observe(container, { childList: true, subtree: true });
+  container.addEventListener("transitionend", handleTransitionEnd, true);
+  container.addEventListener("animationend", handleTransitionEnd, true);
   return () => {
     resizeObserver?.disconnect();
+    attributeObserver?.disconnect();
     mutationObserver?.disconnect();
+    container.removeEventListener("transitionend", handleTransitionEnd, true);
+    container.removeEventListener("animationend", handleTransitionEnd, true);
   };
 }
 

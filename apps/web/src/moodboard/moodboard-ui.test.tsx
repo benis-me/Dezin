@@ -314,15 +314,17 @@ test("Awen editor selection adapter prefers editor.select when Leafer exposes it
   ]);
   const select = vi.fn();
   const app = {
-    editor: { select },
+    editor: { select, target: undefined as unknown },
     findId: (id: string) => nodes.get(id),
   };
 
   selectAppNodesByIds(app as any, ["a", "b"]);
   expect(select).toHaveBeenCalledWith([nodes.get("a"), nodes.get("b")]);
+  expect(app.editor.target).toEqual([nodes.get("a"), nodes.get("b")]);
 
   selectAppNodesByIds(app as any, []);
   expect(select).toHaveBeenCalledWith([]);
+  expect(app.editor.target).toBeUndefined();
 });
 
 test("sameFloatingRect ignores subpixel jitter during drag", () => {
