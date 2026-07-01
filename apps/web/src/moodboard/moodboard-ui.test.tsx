@@ -1417,6 +1417,10 @@ test("GeneratorPromptToolbar exposes a compact image model selector", () => {
   expect(screen.getByLabelText("Image generation model")).toHaveTextContent(/^Image/);
   expect(screen.queryByText("Prompt required")).toBeNull();
   expect(screen.getByRole("button", { name: "Generate" }).querySelector("svg")).toBeNull();
+
+  fireEvent.click(screen.getByLabelText("Image generation model"));
+  fireEvent.click(screen.getByRole("button", { name: /gpt-image-2/ }));
+  expect(onModelChange).toHaveBeenCalledWith("gpt-image-2");
 });
 
 test("QuickEditPromptToolbar submits image variations with the selected model", async () => {

@@ -55,11 +55,10 @@ export function MoodboardScreen({
             <section aria-label="Moodboard canvas" className="flex h-full min-w-0 flex-col">
               <MoodboardCanvasTopbar loading />
               <div className="relative min-h-0 flex-1 overflow-hidden bg-surface">
-                <div className="absolute left-4 top-4 h-7 w-24 rounded-lg bg-surface-2/70" />
-                <div className="absolute bottom-3 left-1/2 h-10 w-56 -translate-x-1/2 rounded-lg border border-border bg-card/80" />
-                <div className="absolute bottom-3 right-3 h-10 w-32 rounded-lg border border-border bg-card/80" />
-                <div className="grid h-full place-items-center">
-                  <div className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
+                <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(0,0,0,0.025)_1px,transparent_1px)] bg-[length:24px_24px] opacity-70" />
+                <LoadingCanvasChrome />
+                <div className="absolute inset-0 grid place-items-center">
+                  <div role="status" className="flex items-center gap-2 rounded-md border border-border bg-card/90 px-2.5 py-1.5 text-xs text-muted-foreground">
                     <Spinner size={13} />
                     Loading moodboard
                   </div>
@@ -138,5 +137,39 @@ export function MoodboardScreen({
         </Panel>
       </Group>
     </div>
+  );
+}
+
+function LoadingCanvasChrome() {
+  return (
+    <>
+      <div
+        aria-hidden
+        className="absolute bottom-3 left-3 z-10 flex items-center gap-1 rounded-lg border border-border bg-card/85 p-1 backdrop-blur-xl"
+      >
+        <div className="h-8 w-8 rounded-md bg-surface-2/80" />
+        <div className="h-8 w-8 rounded-md bg-surface-2/80" />
+      </div>
+      <div
+        aria-hidden
+        className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-card/85 p-1 backdrop-blur-xl"
+      >
+        <div className="h-8 w-8 rounded-md bg-surface-2/80" />
+        <div className="h-8 w-8 rounded-md bg-surface-2/80" />
+        <div className="mx-1 h-5 w-px bg-border" />
+        <div className="h-8 w-8 rounded-md bg-surface-2/80" />
+        <div className="h-8 w-8 rounded-md bg-surface-2/80" />
+        <div className="mx-1 h-5 w-px bg-border" />
+        <div className="h-8 w-8 rounded-md bg-surface-2/80" />
+      </div>
+      <div
+        aria-hidden
+        className="absolute bottom-3 right-3 z-10 flex items-center gap-1 rounded-lg border border-border bg-card/85 p-1 backdrop-blur-xl"
+      >
+        <div className="h-8 w-8 rounded-md bg-surface-2/80" />
+        <div className="h-8 w-12 rounded-md bg-surface-2/80" />
+        <div className="h-8 w-8 rounded-md bg-surface-2/80" />
+      </div>
+    </>
   );
 }
