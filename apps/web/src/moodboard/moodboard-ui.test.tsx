@@ -12,6 +12,7 @@ import {
   contextTargetIdFromEvent,
   eventClientPoint,
   getFloatingChromeSafeRect,
+  moveContainedNodesWithSections,
   nodeIdFromTarget,
   reorderLayerInputs,
   rectFromBounds,
@@ -337,6 +338,84 @@ test("reorderLayerInputs normalizes z-index after a layer drop", () => {
   const c: MoodboardNode = { ...a, id: "c", zIndex: 1, data: { content: "C" } };
 
   expect(reorderLayerInputs([a, b, c], "c", "a").map((node) => `${node.id}:${node.zIndex}`)).toEqual(["c:3", "a:2", "b:1"]);
+});
+
+test("moveContainedNodesWithSections moves geometrically contained nodes with a dragged section", () => {
+  const section: MoodboardNode = {
+    id: "s1",
+    boardId: "b1",
+    type: "section",
+    x: 0,
+    y: 0,
+    width: 300,
+    height: 220,
+    rotation: 0,
+    zIndex: 0,
+    data: { title: "Group" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const inside: MoodboardNode = {
+    ...section,
+    id: "n1",
+    type: "note",
+    x: 80,
+    y: 70,
+    width: 80,
+    height: 60,
+    zIndex: 1,
+    data: { content: "Inside" },
+  };
+  const outside: MoodboardNode = {
+    ...inside,
+    id: "n2",
+    x: 420,
+    data: { content: "Outside" },
+  };
+
+  const result = moveContainedNodesWithSections([section, inside, outside], [
+    { id: "s1", type: "section", x: 40, y: 30, width: 300, height: 220, rotation: 0, zIndex: 0, data: { title: "Group" } },
+    { id: "n1", type: "note", x: 80, y: 70, width: 80, height: 60, rotation: 0, zIndex: 1, data: { content: "Inside" } },
+    { id: "n2", type: "note", x: 420, y: 70, width: 80, height: 60, rotation: 0, zIndex: 2, data: { content: "Outside" } },
+  ]);
+
+  expect(result.find((node) => node.id === "n1")).toMatchObject({ x: 120, y: 100 });
+  expect(result.find((node) => node.id === "n2")).toMatchObject({ x: 420, y: 70 });
+});
+
+test("moveContainedNodesWithSections does not double-move independently dragged children", () => {
+  const section: MoodboardNode = {
+    id: "s1",
+    boardId: "b1",
+    type: "section",
+    x: 0,
+    y: 0,
+    width: 300,
+    height: 220,
+    rotation: 0,
+    zIndex: 0,
+    data: { title: "Group" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const inside: MoodboardNode = {
+    ...section,
+    id: "n1",
+    type: "note",
+    x: 80,
+    y: 70,
+    width: 80,
+    height: 60,
+    zIndex: 1,
+    data: { content: "Inside" },
+  };
+
+  const result = moveContainedNodesWithSections([section, inside], [
+    { id: "s1", type: "section", x: 40, y: 30, width: 300, height: 220, rotation: 0, zIndex: 0, data: { title: "Group" } },
+    { id: "n1", type: "note", x: 90, y: 75, width: 80, height: 60, rotation: 0, zIndex: 1, data: { content: "Inside" } },
+  ]);
+
+  expect(result.find((node) => node.id === "n1")).toMatchObject({ x: 90, y: 75 });
 });
 
 test("MoodboardPropertiesPanel edits node appearance data", () => {

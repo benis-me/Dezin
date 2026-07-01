@@ -7,6 +7,7 @@ import {
   contextTargetIdFromEvent,
   eventCanvasPoint,
   eventClientPoint,
+  moveContainedNodesWithSections,
   nodeIdFromTarget,
   resolveFloatingRect,
   rounded,
@@ -154,7 +155,7 @@ export function useLeaferMoodboardRuntime({
         zIndex: rounded(frame.zIndex, node.zIndex ?? 0),
       };
     });
-    callbacksRef.current.onFrameStateChange(next);
+    callbacksRef.current.onFrameStateChange(moveContainedNodesWithSections(nodesRef.current, next));
   }, [findFrame]);
 
   const handleAppReady = useCallback((app: App) => {

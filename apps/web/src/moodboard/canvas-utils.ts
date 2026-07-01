@@ -371,6 +371,39 @@ function centerInside(parent: MoodboardNode, child: MoodboardNode): boolean {
   return cx >= parent.x && cx <= parent.x + parent.width && cy >= parent.y && cy <= parent.y + parent.height;
 }
 
+export function moveContainedNodesWithSections(previous: MoodboardNode[], inputs: SaveMoodboardNodeInput[]): SaveMoodboardNodeInput[] {
+  const previousById = new Map(previous.map((node) => [node.id, node]));
+  const movedSections = inputs
+    .map((input) => {
+      if (!input.id) return null;
+      const previousNode = previousById.get(input.id);
+      if (!previousNode || previousNode.type !== "section") return null;
+      const dx = input.x - previousNode.x;
+      const dy = input.y - previousNode.y;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return null;
+      return { previousNode, dx, dy };
+    })
+    .filter((item): item is { previousNode: MoodboardNode; dx: number; dy: number } => Boolean(item));
+
+  if (!movedSections.length) return inputs;
+
+  return inputs.map((input) => {
+    if (!input.id) return input;
+    const previousNode = previousById.get(input.id);
+    if (!previousNode || previousNode.type === "section") return input;
+    const movedIndependently = Math.abs(input.x - previousNode.x) >= 0.5 || Math.abs(input.y - previousNode.y) >= 0.5;
+    if (movedIndependently) return input;
+
+    const containingSection = movedSections.find(({ previousNode: section }) => centerInside(section, previousNode));
+    if (!containingSection) return input;
+    return {
+      ...input,
+      x: input.x + containingSection.dx,
+      y: input.y + containingSection.dy,
+    };
+  });
+}
+
 function sortByLayer(a: MoodboardNode, b: MoodboardNode): number {
   return (b.zIndex ?? 0) - (a.zIndex ?? 0);
 }
