@@ -76,6 +76,15 @@ export interface CanvasFitTransformInput {
   maxScale?: number;
 }
 
+export interface AnchoredZoomTransformInput {
+  currentX: number;
+  currentY: number;
+  currentScale: number;
+  nextScale: number;
+  anchorX: number;
+  anchorY: number;
+}
+
 export interface ClientPointFallback {
   containerLeft: number;
   containerTop: number;
@@ -480,6 +489,25 @@ export function resolveCanvasFitTransform({
   };
 }
 
+export function resolveAnchoredZoomTransform({
+  currentX,
+  currentY,
+  currentScale,
+  nextScale,
+  anchorX,
+  anchorY,
+}: AnchoredZoomTransformInput): { scale: number; x: number; y: number } {
+  const fromScale = Number.isFinite(currentScale) && currentScale > 0 ? currentScale : 1;
+  const toScale = Number.isFinite(nextScale) && nextScale > 0 ? nextScale : fromScale;
+  const worldX = (anchorX - currentX) / fromScale;
+  const worldY = (anchorY - currentY) / fromScale;
+  return {
+    scale: toScale,
+    x: anchorX - worldX * toScale,
+    y: anchorY - worldY * toScale,
+  };
+}
+
 export function collectFloatingOccluderRects(container: HTMLElement, root: ParentNode = container, current?: HTMLElement | null): CanvasRect[] {
   const containerRect = container.getBoundingClientRect();
   return Array.from(root.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]"))
@@ -651,8 +679,12 @@ export function nudgeNodeInputs(nodes: MoodboardNode[], ids: string[], delta: Ca
   return moveContainedNodesWithSections(nodes, inputs);
 }
 
+export function effectiveLayerZIndex(node: MoodboardNode): number {
+  return node.type === "section" ? Math.min(node.zIndex ?? -1, -1) : (node.zIndex ?? 0);
+}
+
 function sortByLayer(a: MoodboardNode, b: MoodboardNode): number {
-  return (b.zIndex ?? 0) - (a.zIndex ?? 0);
+  return effectiveLayerZIndex(b) - effectiveLayerZIndex(a);
 }
 
 export function buildLayerTree(nodes: MoodboardNode[]): LayerTreeItem[] {

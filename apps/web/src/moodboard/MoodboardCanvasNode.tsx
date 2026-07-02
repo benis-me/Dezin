@@ -3,6 +3,7 @@ import { Platform } from "leafer-editor";
 import type { MoodboardNode } from "../lib/api.ts";
 import {
   assetUrl,
+  effectiveLayerZIndex,
   generatorPrompt,
   isNodeLocked,
   isNodeVisible,
@@ -29,7 +30,7 @@ export function MoodboardCanvasNode({ node }: { node: MoodboardNode }) {
       width={node.width}
       height={node.height}
       rotation={node.rotation ?? 0}
-      zIndex={node.type === "section" ? Math.min(node.zIndex ?? -1, -1) : (node.zIndex ?? 0)}
+      zIndex={effectiveLayerZIndex(node)}
       visible={visible}
       fill="transparent"
       strokeWidth={0}

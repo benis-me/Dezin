@@ -12,6 +12,7 @@ import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./Moodb
 import { MoodboardSectionLabels } from "./MoodboardSectionLabels.tsx";
 import {
   allMoodboardNodeIds,
+  buildLayerTree,
   clientPointToCanvasPoint,
   containedNodeIdsForSection,
   contextTargetIdFromEvent,
@@ -30,6 +31,7 @@ import {
   reorderLayerInputs,
   collectFloatingOccluderRects,
   rectFromBounds,
+  resolveAnchoredZoomTransform,
   resolveCanvasFitTransform,
   resolveFloatingChromeRect,
   resolveFloatingRect,
@@ -228,6 +230,60 @@ test("MoodboardContextMenu clamps inside the canvas host bounds", async () => {
   });
 
   expect(screen.getByRole("menu")).toHaveStyle({ left: "290px", top: "230px" });
+});
+
+test("resolveAnchoredZoomTransform keeps the viewport anchor on the same canvas point", () => {
+  const transform = resolveAnchoredZoomTransform({
+    currentX: -200,
+    currentY: -120,
+    currentScale: 1,
+    nextScale: 2,
+    anchorX: 400,
+    anchorY: 300,
+  });
+
+  expect(transform).toEqual({ scale: 2, x: -800, y: -540 });
+  expect((400 - transform.x) / transform.scale).toBe(600);
+  expect((300 - transform.y) / transform.scale).toBe(420);
+});
+
+test("buildLayerTree sorts sections by the same effective z-index used on canvas", () => {
+  const section: MoodboardNode = {
+    id: "section",
+    boardId: "b",
+    type: "section",
+    x: 0,
+    y: 0,
+    width: 400,
+    height: 300,
+    rotation: 0,
+    zIndex: 99,
+    data: {},
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const note: MoodboardNode = {
+    ...section,
+    id: "note",
+    type: "note",
+    x: 500,
+    y: 0,
+    width: 120,
+    height: 80,
+    zIndex: 0,
+  };
+  const child: MoodboardNode = {
+    ...note,
+    id: "child",
+    x: 40,
+    y: 40,
+    zIndex: 10,
+  };
+
+  const tree = buildLayerTree([section, note, child]);
+
+  expect(tree.map((item) => item.node.id)).toEqual(["note", "section"]);
+  expect(tree[1]?.children.map((item) => item.node.id)).toEqual(["child"]);
 });
 
 test("MoodboardContextMenu starts clamped before the measurement frame", () => {

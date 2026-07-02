@@ -762,18 +762,29 @@ export function useMoodboardCanvasController({
         if (key === "[") sendNodesToBack(selectedIdsRef.current);
       }
     };
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (!isTemporaryHandShortcut(event) || temporaryHandToolRef.current == null) return;
-      event.preventDefault();
+    const releaseTemporaryHand = () => {
+      if (temporaryHandToolRef.current == null) return;
       const restoreTool = temporaryHandToolRef.current;
       temporaryHandToolRef.current = null;
       if (toolRef.current === "hand") setTool(restoreTool);
     };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (!isTemporaryHandShortcut(event) || temporaryHandToolRef.current == null) return;
+      event.preventDefault();
+      releaseTemporaryHand();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") releaseTemporaryHand();
+    };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", releaseTemporaryHand);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", releaseTemporaryHand);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, getLastCanvasPoint, moveNodesLayerStep, nudgeNodes, pasteCopiedNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
 

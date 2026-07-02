@@ -31,6 +31,7 @@ export function useMoodboardBoard(boardId: string) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const saveTimer = useRef<number | null>(null);
+  const pendingSaveInputs = useRef<SaveMoodboardNodeInput[] | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -86,21 +87,34 @@ export function useMoodboardBoard(boardId: string) {
     };
   }, []);
 
+  const flushPendingNodes = useCallback(async (): Promise<boolean> => {
+    const inputs = pendingSaveInputs.current;
+    if (!inputs) return true;
+    pendingSaveInputs.current = null;
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    try {
+      const saved = await api.saveMoodboardNodes(boardId, inputs);
+      setNodes(saved);
+      return true;
+    } catch {
+      toast("Couldn't save the board.", { variant: "error" });
+      return false;
+    }
+  }, [api, boardId, toast]);
+
   const persistNodes = useCallback(
     (inputs: SaveMoodboardNodeInput[]) => {
+      pendingSaveInputs.current = inputs;
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
-        void api
-          .saveMoodboardNodes(boardId, inputs)
-          .then((saved) => {
-            setNodes(saved);
-          })
-          .catch(() => {
-            toast("Couldn't save the board.", { variant: "error" });
-          });
+        saveTimer.current = null;
+        void flushPendingNodes();
       }, 350);
     },
-    [api, boardId, toast],
+    [flushPendingNodes],
   );
 
   const updateNodes = useCallback(
@@ -210,6 +224,7 @@ export function useMoodboardBoard(boardId: string) {
     async (content: string) => {
       setBusy(true);
       try {
+        if (!(await flushPendingNodes())) return;
         const result = await api.postMoodboardMessage(boardId, content, { agentCommand: runAgent || undefined, model: runModel || undefined });
         if (result.nodes) setNodes(result.nodes);
         setMessages((cur) => [...cur, ...result.messages]);
@@ -219,7 +234,7 @@ export function useMoodboardBoard(boardId: string) {
         setBusy(false);
       }
     },
-    [api, boardId, runAgent, runModel, toast],
+    [api, boardId, flushPendingNodes, runAgent, runModel, toast],
   );
 
   const rescanAgents = useCallback(async () => {
