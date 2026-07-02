@@ -276,6 +276,20 @@ async function safeText(res: Response): Promise<string> {
   }
 }
 
+async function safeErrorText(res: Response): Promise<string> {
+  const text = await safeText(res);
+  if ((res.headers.get("content-type") ?? "").includes("application/json")) {
+    try {
+      const body = JSON.parse(text) as { error?: unknown; message?: unknown };
+      if (typeof body.error === "string" && body.error.trim()) return body.error.trim();
+      if (typeof body.message === "string" && body.message.trim()) return body.message.trim();
+    } catch {
+      // Keep the raw response text if the JSON body is malformed.
+    }
+  }
+  return text;
+}
+
 function jsonInit(method: string, body?: unknown): RequestInit {
   return {
     method,
@@ -427,7 +441,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
 
   async function json<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await f(baseUrl + path, initWithDaemonToken(init));
-    if (!res.ok) throw new ApiError(res.status, await safeText(res));
+    if (!res.ok) throw new ApiError(res.status, await safeErrorText(res));
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   }

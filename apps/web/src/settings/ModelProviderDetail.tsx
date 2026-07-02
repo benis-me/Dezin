@@ -1,5 +1,5 @@
 import { ExternalLink, KeyRound, Pencil, Plus, RotateCw, TestTube2, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Settings } from "../lib/api.ts";
 import { Badge, Button, Field, Input, Switch } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
@@ -13,6 +13,7 @@ import {
 } from "./model-provider-ui-utils.tsx";
 
 const CAPABILITY_OPTIONS: ModelCapability[] = ["Stream", "Tools", "Vision", "Image", "Video", "Reasoning", "JSON", "Local"];
+const CONFIGURED_SECRET_VALUE = "configured";
 
 export function ModelProviderDetail({
   selected,
@@ -141,12 +142,14 @@ export function ModelProviderDetail({
             {selected.fields.map((field, index) => (
               <FieldRow key={field.key} last={index === selected.fields.length - 1}>
                 <Field label={`${field.label}${field.required ? " *" : ""}`}>
-                  <Input
-                    type={field.secret ? "password" : "text"}
+                  <ProviderFieldInput
+                    field={field}
                     value={providerFieldValue(field.key, { apiKey, baseUrl, organization: settings.aiProviderOrganization })}
-                    placeholder={field.placeholder}
-                    aria-label={field.label}
-                    onChange={(event) => setProviderField(field.key, event.target.value)}
+                    configured={
+                      field.key === "apiKey" &&
+                      Boolean(apiKey || settings.apiKeyConfigured || settings.imageApiKeyConfigured || settings.videoApiKeyConfigured)
+                    }
+                    onChange={(value) => setProviderField(field.key, value)}
                   />
                   {field.help ? <p className="mt-1 text-xs text-muted-foreground">{field.help}</p> : null}
                 </Field>
@@ -297,6 +300,83 @@ function emptyDraft(): ModelDraft {
 
 function FieldRow({ children, last }: { children: ReactNode; last: boolean }) {
   return <div className={cn("px-3 py-3", !last && "border-b border-border")}>{children}</div>;
+}
+
+function ProviderFieldInput({
+  field,
+  value,
+  configured,
+  onChange,
+}: {
+  field: ProviderPreset["fields"][number];
+  value: string;
+  configured: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [secretFocused, setSecretFocused] = useState(false);
+  const [secretDraft, setSecretDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const secretDisplayValue = value || (configured ? CONFIGURED_SECRET_VALUE : "");
+  const isSecret = Boolean(field.secret);
+  const startSecretEdit = () => {
+    if (secretFocused) return;
+    setSecretFocused(true);
+    setSecretDraft("");
+  };
+  const stopSecretEdit = () => {
+    setSecretFocused(false);
+    setSecretDraft("");
+  };
+
+  useEffect(() => {
+    if (!isSecret) return;
+    const input = inputRef.current;
+    if (!input) return;
+    input.addEventListener("focus", startSecretEdit);
+    input.addEventListener("blur", stopSecretEdit);
+    return () => {
+      input.removeEventListener("focus", startSecretEdit);
+      input.removeEventListener("blur", stopSecretEdit);
+    };
+  });
+
+  useEffect(() => {
+    if (!isSecret || !secretFocused) return;
+    const input = inputRef.current;
+    const doc = input?.ownerDocument;
+    if (!input || !doc) return;
+    const stopWhenLeavingInput = (event: Event) => {
+      if (event.target !== input) stopSecretEdit();
+    };
+    doc.addEventListener("pointerdown", stopWhenLeavingInput, true);
+    doc.addEventListener("focusin", stopWhenLeavingInput, true);
+    return () => {
+      doc.removeEventListener("pointerdown", stopWhenLeavingInput, true);
+      doc.removeEventListener("focusin", stopWhenLeavingInput, true);
+    };
+  }, [isSecret, secretFocused]);
+
+  if (!isSecret) {
+    return <Input type="text" value={value} placeholder={field.placeholder} aria-label={field.label} onChange={(event) => onChange(event.target.value)} />;
+  }
+
+  return (
+    <Input
+      ref={inputRef}
+      type="password"
+      value={secretFocused ? secretDraft : secretDisplayValue}
+      placeholder={field.placeholder}
+      aria-label={field.label}
+      onPointerDown={startSecretEdit}
+      onFocus={startSecretEdit}
+      onBlur={stopSecretEdit}
+      onChange={(event) => {
+        const next = event.target.value;
+        setSecretDraft(next);
+        if (next) onChange(next);
+      }}
+    />
+  );
 }
 
 function providerFieldValue(

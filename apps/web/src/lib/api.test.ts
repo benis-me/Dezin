@@ -183,6 +183,16 @@ test("non-ok responses throw ApiError with the status", async () => {
   await expect(api.getProject("x")).rejects.toBeInstanceOf(ApiError);
 });
 
+test("non-ok JSON responses throw ApiError with the daemon error message", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ error: "WaveSpeed rejected credentials." }, 401));
+  const api = createApiClient({ fetchImpl });
+  await expect(api.testModelProvider("wavespeed")).rejects.toMatchObject({
+    name: "ApiError",
+    status: 401,
+    message: "WaveSpeed rejected credentials.",
+  });
+});
+
 test("previewUrl and exportUrl build the right paths", () => {
   const api = createApiClient({ baseUrl: "http://d" });
   expect(api.previewUrl("p1")).toBe("http://d/projects/p1/preview/");

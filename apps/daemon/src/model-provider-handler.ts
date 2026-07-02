@@ -8,6 +8,10 @@ type ProviderModel = {
   name?: string;
 };
 
+type ConnectionResult = {
+  modelsFound?: number;
+};
+
 const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",
   "azure-openai": "Azure OpenAI",
@@ -26,14 +30,18 @@ const PROVIDER_LABELS: Record<string, string> = {
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
+  "azure-openai": "https://{resource}.openai.azure.com/openai/v1",
   anthropic: "https://api.anthropic.com/v1",
   gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://127.0.0.1:11434/v1",
+  "vertex-ai": "https://aiplatform.googleapis.com/v1",
+  fal: "https://fal.run",
+  wavespeed: "https://api.wavespeed.ai/api/v3",
   volcengine: "https://ark.cn-beijing.volces.com/api/v3",
 };
 
-const OPENAI_COMPATIBLE_PROVIDERS = new Set(["openai", "gemini", "openrouter", "ollama", "openai-compatible", "volcengine"]);
+const OPENAI_COMPATIBLE_PROVIDERS = new Set(["openai", "openrouter", "ollama", "openai-compatible", "volcengine"]);
 
 function providerLabel(providerId: string): string {
   return PROVIDER_LABELS[providerId] ?? providerId;
@@ -60,6 +68,104 @@ function modelsEndpoint(baseUrl: string): string {
   return url.toString();
 }
 
+function appendPath(baseUrl: string, path: string): string {
+  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  const basePath = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${basePath}/${path.replace(/^\/+/, "")}`;
+  return url.toString();
+}
+
+function geminiModelsEndpoint(baseUrl: string, apiKey: string): string {
+  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  const path = url.pathname.replace(/\/+$/, "").replace(/\/openai$/, "");
+  url.pathname = path.endsWith("/models") ? path : `${path}/models`;
+  url.search = "";
+  url.searchParams.set("key", apiKey);
+  return url.toString();
+}
+
+function azureModelsEndpoint(baseUrl: string, settings: Settings): string {
+  const url = new URL(modelsEndpoint(baseUrl));
+  const apiVersion = settings.aiProviderOrganization.trim();
+  if (apiVersion && !url.pathname.includes("/v1/")) url.searchParams.set("api-version", apiVersion);
+  return url.toString();
+}
+
+function vertexModelsEndpoint(baseUrl: string, settings: Settings): string {
+  const [project, location] = settings.aiProviderOrganization
+    .split(/[:/]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!project || !location) throw new Error("Missing Vertex AI project/location. Use project-id:location.");
+  return appendPath(
+    baseUrl,
+    `projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models`,
+  );
+}
+
+function firstConfiguredModelId(settings: Settings, fallback: string): string {
+  for (const line of settings.aiProviderModels.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as { id?: unknown };
+      if (typeof parsed.id === "string" && parsed.id.trim()) return parsed.id.trim();
+    } catch {
+      return trimmed;
+    }
+  }
+  return fallback;
+}
+
+function encodedModelPath(modelId: string): string {
+  return modelId
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+}
+
+function falProbeEndpoint(baseUrl: string, settings: Settings): string {
+  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  if (url.hostname === "fal.run") url.hostname = "queue.fal.run";
+  url.pathname = `/${encodedModelPath(firstConfiguredModelId(settings, "fal-ai/flux-pro"))}/requests/dezin-connection-test/status`;
+  url.search = "";
+  return url.toString();
+}
+
+function midjourneyProbeEndpoint(baseUrl: string): string {
+  const url = new URL(appendPath(baseUrl, "/midjourney/v1/fetch"));
+  url.searchParams.set("jobId", "dezin-connection-test");
+  return url.toString();
+}
+
+function stringField(item: unknown, fields: string[]): string {
+  if (typeof item !== "object" || item === null) return "";
+  for (const field of fields) {
+    const value = (item as Record<string, unknown>)[field];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function normalizeModelId(id: string): string {
+  return id.trim().replace(/^models\//, "").replace(/^publishers\/[^/]+\/models\//, "");
+}
+
+function providerErrorDetail(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  try {
+    const body = JSON.parse(trimmed) as { error?: unknown; message?: unknown; detail?: unknown };
+    if (typeof body.message === "string" && body.message.trim()) return body.message.trim();
+    if (typeof body.error === "string" && body.error.trim()) return body.error.trim();
+    if (typeof body.detail === "string" && body.detail.trim()) return body.detail.trim();
+  } catch {
+    // Use the original provider text when it is not JSON.
+  }
+  return trimmed.slice(0, 240);
+}
+
 function parseModels(body: unknown): ProviderModel[] {
   const source = Array.isArray(body)
     ? body
@@ -67,21 +173,17 @@ function parseModels(body: unknown): ProviderModel[] {
       ? (body as { data: unknown[] }).data
       : Array.isArray((body as { models?: unknown })?.models)
         ? (body as { models: unknown[] }).models
-        : [];
+        : Array.isArray((body as { publisherModels?: unknown })?.publisherModels)
+          ? (body as { publisherModels: unknown[] }).publisherModels
+          : [];
   const seen = new Set<string>();
   const models: ProviderModel[] = [];
   for (const item of source) {
-    const id = typeof item === "string" ? item : typeof (item as { id?: unknown })?.id === "string" ? (item as { id: string }).id : "";
-    const trimmed = id.trim();
+    const id = typeof item === "string" ? item : stringField(item, ["id", "model_id", "name"]);
+    const trimmed = normalizeModelId(id);
     if (!trimmed || seen.has(trimmed)) continue;
     seen.add(trimmed);
-    const rawName =
-      typeof (item as { name?: unknown })?.name === "string"
-        ? (item as { name: string }).name
-        : typeof (item as { display_name?: unknown })?.display_name === "string"
-          ? (item as { display_name: string }).display_name
-          : "";
-    const name = rawName.trim();
+    const name = stringField(item, ["display_name", "displayName", "name"]);
     models.push(name && name !== trimmed ? { id: trimmed, name } : { id: trimmed });
   }
   return models;
@@ -91,7 +193,8 @@ async function fetchJsonModels(url: string, headers: Record<string, string>, pro
   const res = await fetchImpl(url, { headers });
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
-    throw new Error(`${providerLabel(providerId)} model list request failed (${res.status})${detail ? `: ${detail.slice(0, 240)}` : ""}`);
+    const message = providerErrorDetail(detail);
+    throw new Error(`${providerLabel(providerId)} model list request failed (${res.status})${message ? `: ${message}` : ""}`);
   }
   const models = parseModels(await res.json());
   if (models.length === 0) throw new Error(`${providerLabel(providerId)} returned no models.`);
@@ -119,6 +222,26 @@ async function fetchProviderModels(settings: Settings, providerId: string, fetch
     );
   }
 
+  if (providerId === "azure-openai") {
+    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
+    return fetchJsonModels(azureModelsEndpoint(baseUrl, settings), { accept: "application/json", "api-key": apiKey }, providerId, fetchImpl);
+  }
+
+  if (providerId === "gemini") {
+    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
+    return fetchJsonModels(geminiModelsEndpoint(baseUrl, apiKey), { accept: "application/json" }, providerId, fetchImpl);
+  }
+
+  if (providerId === "vertex-ai") {
+    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
+    return fetchJsonModels(modelsEndpoint(vertexModelsEndpoint(baseUrl, settings)), { accept: "application/json", authorization: `Bearer ${apiKey}` }, providerId, fetchImpl);
+  }
+
+  if (providerId === "wavespeed") {
+    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
+    return fetchJsonModels(modelsEndpoint(baseUrl), { accept: "application/json", authorization: `Bearer ${apiKey}` }, providerId, fetchImpl);
+  }
+
   if (!OPENAI_COMPATIBLE_PROVIDERS.has(providerId)) {
     throw new Error(`${providerLabel(providerId)} does not support live model discovery yet.`);
   }
@@ -130,15 +253,49 @@ async function fetchProviderModels(settings: Settings, providerId: string, fetch
   return fetchJsonModels(modelsEndpoint(baseUrl), headers, providerId, fetchImpl);
 }
 
+async function probeEndpoint(url: string, headers: Record<string, string>, providerId: string, fetchImpl: typeof fetch): Promise<void> {
+  const res = await fetchImpl(url, { headers });
+  if (res.status === 401 || res.status === 403) {
+    const detail = await res.text().catch(() => "");
+    const message = providerErrorDetail(detail);
+    throw new Error(`${providerLabel(providerId)} rejected credentials (${res.status})${message ? `: ${message}` : ""}`);
+  }
+  if (res.status >= 500) {
+    const detail = await res.text().catch(() => "");
+    const message = providerErrorDetail(detail);
+    throw new Error(`${providerLabel(providerId)} connection probe failed (${res.status})${message ? `: ${message}` : ""}`);
+  }
+}
+
+async function testProviderConnection(settings: Settings, providerId: string, fetchImpl: typeof fetch): Promise<ConnectionResult> {
+  if (providerId === "fal") {
+    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
+    await probeEndpoint(falProbeEndpoint(baseUrl, settings), { accept: "application/json", authorization: `Key ${apiKey}` }, providerId, fetchImpl);
+    return {};
+  }
+
+  if (providerId === "midjourney-gateway") {
+    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
+    await probeEndpoint(midjourneyProbeEndpoint(baseUrl), { accept: "application/json", "tt-api-key": apiKey }, providerId, fetchImpl);
+    return {};
+  }
+
+  const models = await fetchProviderModels(settings, providerId, fetchImpl);
+  return { modelsFound: models.length };
+}
+
 export async function handleTestModelProvider(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
   const body = await readJsonBody(req);
   const settings = deps.store.getSettings();
   const providerId = selectedProviderId(body, settings);
   try {
-    const models = await fetchProviderModels(settings, providerId, deps.modelProviderFetch ?? fetch);
+    const result = await testProviderConnection(settings, providerId, deps.modelProviderFetch ?? fetch);
     sendJson(res, 200, {
       ok: true,
-      message: `Connected to ${providerLabel(providerId)}. Found ${models.length} ${models.length === 1 ? "model" : "models"}.`,
+      message:
+        result.modelsFound == null
+          ? `Connected to ${providerLabel(providerId)}.`
+          : `Connected to ${providerLabel(providerId)}. Found ${result.modelsFound} ${result.modelsFound === 1 ? "model" : "models"}.`,
     });
   } catch (err) {
     sendError(res, 502, err instanceof Error ? err.message : "model provider test failed");
