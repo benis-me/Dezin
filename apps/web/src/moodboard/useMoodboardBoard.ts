@@ -18,6 +18,27 @@ import {
   materializeInputs,
 } from "./moodboard-board-utils.ts";
 
+function optimisticMoodboardMessage(boardId: string, content: string): MoodboardMessage {
+  return {
+    id: `pending-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    boardId,
+    role: "user",
+    content,
+    createdAt: Date.now(),
+  };
+}
+
+function appendUniqueMessages(current: MoodboardMessage[], next: MoodboardMessage[]): MoodboardMessage[] {
+  const seen = new Set(current.map((message) => message.id));
+  const merged = [...current];
+  for (const message of next) {
+    if (seen.has(message.id)) continue;
+    seen.add(message.id);
+    merged.push(message);
+  }
+  return merged;
+}
+
 export function useMoodboardBoard(boardId: string) {
   const api = useApi();
   const { toast } = useToast();
@@ -240,13 +261,24 @@ export function useMoodboardBoard(boardId: string) {
 
   const sendMessage = useCallback(
     async (content: string) => {
+      const optimistic = optimisticMoodboardMessage(boardId, content);
       setBusy(true);
+      setMessages((cur) => [...cur, optimistic]);
       try {
-        if (!(await flushPendingNodes())) return;
+        if (!(await flushPendingNodes())) {
+          setMessages((cur) => cur.filter((message) => message.id !== optimistic.id));
+          return;
+        }
         const result = await api.postMoodboardMessage(boardId, content, { agentCommand: runAgent || undefined, model: runModel || undefined });
         if (result.nodes) setNodes(result.nodes);
-        setMessages((cur) => [...cur, ...result.messages]);
+        setMessages((cur) => {
+          const withoutOptimistic = cur.filter((message) => message.id !== optimistic.id);
+          const serverReturnedUser = result.messages.some((message) => message.role === "user" && message.content === content);
+          const replacementMessages = serverReturnedUser ? result.messages : [optimistic, ...result.messages];
+          return appendUniqueMessages(withoutOptimistic, replacementMessages);
+        });
       } catch {
+        setMessages((cur) => cur.filter((message) => message.id !== optimistic.id));
         toast("Couldn't send that message.", { variant: "error" });
       } finally {
         setBusy(false);

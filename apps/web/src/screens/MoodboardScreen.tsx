@@ -115,6 +115,7 @@ export function MoodboardScreen({
               onOpenModelSettings={() => onOpenSettings("models")}
             />
             <MoodboardCanvas
+              viewKey={boardId}
               nodes={board.nodes}
               selectedIds={board.selectedIds}
               imageModels={board.imageModels}

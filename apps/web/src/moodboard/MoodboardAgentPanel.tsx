@@ -52,6 +52,7 @@ export function MoodboardAgentPanel({
   const composerOverlayH = composerH + FLOATING_COMPOSER_FADE_PX;
   const messageBottomPadding = composerOverlayH + MESSAGE_BOTTOM_CLEARANCE_PX;
   const scrollToBottomBottom = composerOverlayH + SCROLL_TO_BOTTOM_GAP_PX;
+  const hasConversationContent = !loading && (messages.length > 0 || busy);
 
   useEffect(() => {
     const element = composerRef.current;
@@ -153,8 +154,8 @@ export function MoodboardAgentPanel({
         ref={messagesRef}
         data-testid="moodboard-agent-messages"
         onScroll={updateBottomState}
-        className={cn("min-h-0 flex-1 px-4 pt-5", messages.length > 0 ? "space-y-4 overflow-auto" : "overflow-hidden")}
-        style={messages.length > 0 ? { paddingBottom: messageBottomPadding } : undefined}
+        className={cn("min-h-0 flex-1 px-4 pt-5", hasConversationContent ? "space-y-4 overflow-auto" : "overflow-hidden")}
+        style={hasConversationContent ? { paddingBottom: messageBottomPadding } : undefined}
       >
         {loading ? (
           <div className="flex h-full flex-col justify-end pb-8">
@@ -175,7 +176,7 @@ export function MoodboardAgentPanel({
               </div>
             </div>
           </div>
-        ) : messages.length === 0 ? (
+        ) : !hasConversationContent ? (
           <div className="grid h-full place-items-center">
             <div className="flex max-w-[16rem] flex-col items-center gap-3 text-center">
               <span className="grid h-11 w-11 place-items-center rounded-2xl border border-border bg-card text-foreground">
@@ -188,16 +189,33 @@ export function MoodboardAgentPanel({
           </div>
         ) : (
           <div className="space-y-3">
-            {messages.map((message) => (
-              <MoodboardMessageRow key={message.id} message={message} busy={busy} onCopy={(content) => void copyMessage(content)} />
-            ))}
+            <AnimatePresence initial={false}>
+              {messages.map((message) => (
+                <motion.div
+                  key={message.id}
+                  layout
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
+                >
+                  <MoodboardMessageRow message={message} busy={busy} onCopy={(content) => void copyMessage(content)} />
+                </motion.div>
+              ))}
+            </AnimatePresence>
             {busy ? (
-              <div className="flex justify-start">
+              <motion.div
+                className="flex justify-start"
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.14, ease: [0.25, 1, 0.5, 1] }}
+              >
                 <div className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted-foreground">
                   <Loader2 size={14} className="animate-spin" />
                   Working...
                 </div>
-              </div>
+              </motion.div>
             ) : null}
           </div>
         )}

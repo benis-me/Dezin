@@ -34,6 +34,7 @@ import {
 import { useLeaferMoodboardRuntime } from "./useLeaferMoodboardRuntime.ts";
 
 export interface MoodboardCanvasProps {
+  viewKey?: string;
   nodes: MoodboardNode[];
   selectedIds: string[];
   busy?: boolean;
@@ -59,6 +60,7 @@ export function useMoodboardCanvasController({
   onAddSection,
   onAddImageGenerator,
   onUploadFiles,
+  viewKey,
 }: MoodboardCanvasProps) {
   const [tool, setTool] = useState<MoodboardCanvasTool>("select");
   const [layersOpen, setLayersOpen] = useState(() => readInitialLayersOpen());
@@ -79,6 +81,7 @@ export function useMoodboardCanvasController({
   const clipboardRef = useRef<SaveMoodboardNodeInput[]>([]);
   const historyRef = useRef<MoodboardHistoryState>({ undoStack: [], redoStack: [] });
   const temporaryHandToolRef = useRef<MoodboardCanvasTool | null>(null);
+  const initialFitViewKeyRef = useRef<string | null>(null);
   const syncNodeInputsInRuntimeRef = useRef<(inputs: SaveMoodboardNodeInput[], idsToReselect?: string[]) => void>(() => {});
   const refreshSelectionInRuntimeRef = useRef<(ids?: string[]) => void>(() => {});
 
@@ -605,7 +608,17 @@ export function useMoodboardCanvasController({
   });
   syncNodeInputsInRuntimeRef.current = runtime.syncNodeInputsInRuntime;
   refreshSelectionInRuntimeRef.current = runtime.refreshSelectionInRuntime;
-  const { changeZoom, fitView, getLastCanvasPoint, hoverInRuntime, selectIdsInRuntime, selectInRuntime, zoom } = runtime;
+  const { changeZoom, fitView, getLastCanvasPoint, hoverInRuntime, runtimeReady, selectIdsInRuntime, selectInRuntime, zoom } = runtime;
+  const initialFitViewKey = viewKey ?? "default";
+
+  useEffect(() => {
+    if (!runtimeReady || nodes.length === 0 || initialFitViewKeyRef.current === initialFitViewKey) return;
+    const frame = window.requestAnimationFrame(() => {
+      initialFitViewKeyRef.current = initialFitViewKey;
+      fitView();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [fitView, initialFitViewKey, nodes.length, runtimeReady]);
 
   const upload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     uploadFiles(event.target.files);

@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
-import type { MoodboardNode, Settings } from "../lib/api.ts";
+import type { MoodboardMessage, MoodboardNode, Settings } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { imageModelOptions, useMoodboardBoard } from "./useMoodboardBoard.ts";
@@ -206,4 +206,65 @@ test("sendMessage flushes pending node saves before posting to the agent", async
   });
 
   expect(calls).toEqual(["save:42", "post"]);
+});
+
+test("sendMessage shows the submitted prompt while the agent is still responding", async () => {
+  let resolvePost!: (value: { messages: MoodboardMessage[] }) => void;
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [],
+      assets: [],
+      messages: [],
+    }),
+    postMoodboardMessage: async () =>
+      new Promise<{ messages: MoodboardMessage[] }>((resolve) => {
+        resolvePost = resolve;
+      }),
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+
+  let sendPromise!: Promise<void>;
+  await act(async () => {
+    sendPromise = board.sendMessage("collect warm reference images");
+  });
+
+  expect(board.busy).toBe(true);
+  expect(board.messages).toEqual([
+    expect.objectContaining({
+      boardId: "board-1",
+      role: "user",
+      content: "collect warm reference images",
+    }),
+  ]);
+
+  await act(async () => {
+    resolvePost({
+      messages: [
+        { id: "server-user", boardId: "board-1", role: "user", content: "collect warm reference images", createdAt: 10 },
+        { id: "server-assistant", boardId: "board-1", role: "assistant", content: "Use warmer editorial texture.", createdAt: 11 },
+      ],
+    });
+    await sendPromise;
+  });
+
+  expect(board.busy).toBe(false);
+  expect(board.messages.map((message) => message.id)).toEqual(["server-user", "server-assistant"]);
 });

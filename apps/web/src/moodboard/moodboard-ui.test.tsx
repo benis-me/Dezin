@@ -1578,6 +1578,30 @@ test("MoodboardAgentPanel keeps the real shell while loading", () => {
   expect(screen.getByTestId("moodboard-agent-messages")).not.toHaveClass("overflow-auto");
 });
 
+test("MoodboardAgentPanel shows progress immediately for an empty active conversation", () => {
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <MoodboardAgentPanel
+        boardName="Material board"
+        messages={[]}
+        busy
+        agents={[]}
+        agent=""
+        model=""
+        onBack={() => {}}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => {}}
+        onSend={async () => {}}
+      />
+    </ApiProvider>,
+  );
+
+  expect(screen.getByText("Working...")).toBeInTheDocument();
+  expect(screen.queryByText(/Ask for visual direction/)).toBeNull();
+  expect(screen.getByTestId("moodboard-agent-messages")).toHaveClass("overflow-auto");
+});
+
 test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
   const onUploadFiles = vi.fn();
   const files = [new File(["image"], "reference.png", { type: "image/png" })] as unknown as FileList;
