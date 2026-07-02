@@ -58,6 +58,18 @@ test("blue→cyan trust gradient is caught even with no indigo", () => {
   assert.ok(has(lintArtifact(html), "trust-gradient"));
 });
 
+test("color checks normalize equivalent CSS color syntaxes and Tailwind classes", () => {
+  assert.ok(has(lintArtifact(`<style>.hero { color: rgb(99, 102, 241); }</style>`), "ai-default-indigo"));
+  assert.ok(has(lintArtifact(`<style>.hero { color: hsl(239 84% 67%); }</style>`), "ai-default-indigo"));
+  assert.ok(has(lintArtifact(`<style>.hero { color: oklch(0.585 0.233 277.117); }</style>`), "ai-default-indigo"));
+  assert.ok(has(lintArtifact(`<div class="bg-indigo-500 text-white">Launch</div>`), "ai-default-indigo"));
+});
+
+test("gradient checks cover nested colors plus radial and conic gradients", () => {
+  assert.ok(has(lintArtifact(`<style>.hero { background: radial-gradient(circle, rgb(99, 102, 241), white); }</style>`), "purple-gradient"));
+  assert.ok(has(lintArtifact(`<style>.hero { background: conic-gradient(from 90deg, #3b82f6, #06b6d4); }</style>`), "trust-gradient"));
+});
+
 test("emoji only flagged in structural context, not body prose", () => {
   const inHeading = `<h2>🚀 Launch</h2>`;
   assert.ok(has(lintArtifact(inHeading), "emoji-icon"));

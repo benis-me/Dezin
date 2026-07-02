@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { renderAntiSlopMarkdown, defaultCraftDocPath } from "../src/index.ts";
-import { AI_DEFAULT_INDIGO, SLOP_EMOJI } from "../../quality/src/slop-rules.ts";
+import { ACCENT_OVERUSE_CAP, AI_DEFAULT_INDIGO, ALL_CAPS_TRACKING_FLOOR_EM, SLOP_EMOJI } from "../../quality/src/slop-rules.ts";
 
 test("the rendered doc inlines every banned indigo hex (generated from the constants)", () => {
   const md = renderAntiSlopMarkdown();
@@ -21,7 +21,8 @@ test("the rendered doc inlines every slop emoji", () => {
 test("the rendered doc states the Dezin taste rules", () => {
   const md = renderAntiSlopMarkdown();
   assert.match(md, /Borders over shadows/);
-  assert.match(md, /more than 3 times/);
+  assert.match(md, new RegExp(`more than ${ACCENT_OVERUSE_CAP} times`));
+  assert.match(md, new RegExp(`≥${ALL_CAPS_TRACKING_FLOOR_EM}em letter-spacing`));
   assert.match(md, /No gradient-clipped text/);
 });
 

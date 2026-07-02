@@ -839,6 +839,43 @@ test("standard run succeeds only after project files change", async () => {
   });
 });
 
+test("standard run persists deterministic anti-slop findings from source files", async () => {
+  const runner: AgentRunner = {
+    id: "standard-static-quality",
+    async runTurn(input) {
+      mkdirSync(join(input.projectDir, "src"), { recursive: true });
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main><h1>Launch</h1><p style={{ color: "rgb(99, 102, 241)" }}>Bad accent</p></main> }`);
+      writeFileSync(join(input.projectDir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Std", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(dir, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "package.json"), "{}");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+    });
+    const events = parseSse(await res.text());
+    const done = events.find((e) => e.type === "run-done")!;
+    assert.equal(done.mode, "standard");
+    assert.equal(done.passed, false);
+    assert.equal(done.score, 75);
+    assert.equal((done.findings as Array<{ id: string }>)[0]?.id, "ai-default-indigo");
+    const run = store.getRun(done.runId as string)!;
+    assert.equal(run.lintPassed, false);
+    assert.equal(run.score, 75);
+    assert.equal(run.findings[0]?.id, "ai-default-indigo");
+  });
+});
+
 test("standard run captures the gallery cover from the dev server URL", async () => {
   let captured: { url: string; outPath: string } | null = null;
   const runner: AgentRunner = {

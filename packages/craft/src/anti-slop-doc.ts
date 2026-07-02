@@ -14,6 +14,8 @@ import {
   INVENTED_METRIC_PATTERNS,
   FILLER_PATTERNS,
   EXTERNAL_IMAGE_HOSTS,
+  ACCENT_OVERUSE_CAP,
+  ALL_CAPS_TRACKING_FLOOR_EM,
 } from "../../quality/src/slop-rules.ts";
 
 export function defaultCraftDocPath(): string {
@@ -57,15 +59,15 @@ so the prompt and the linter never disagree.
 
 - External placeholder image CDNs: ${hosts}.
 - More than 12 raw hex values outside \`:root\` — tokens were not honoured.
-- \`var(--accent)\` used more than 3 times in the rendered body. Dezin caps the
-  accent at 3 visible uses per screen (a deliberately strict cap).
-- ALL-CAPS text without ≥0.06em letter-spacing.
+- \`var(--accent)\` used more than ${ACCENT_OVERUSE_CAP} times in the rendered body. Dezin caps the
+  accent at ${ACCENT_OVERUSE_CAP} visible uses per screen (a deliberately strict cap).
+- ALL-CAPS text without ≥${ALL_CAPS_TRACKING_FLOOR_EM}em letter-spacing.
 
 ## Dezin taste (enforced)
 
 - **Borders over shadows.** Reserve \`box-shadow\` for true overlays (dropdowns,
   modals, popovers); in-page cards use a 1px hairline border.
-- **Neutral grayscale** carries 80–90% of every surface; one accent, ≤3 uses.
+- **Neutral grayscale** carries 80–90% of every surface; one accent, ≤${ACCENT_OVERUSE_CAP} uses.
 - **No gradient-clipped text** (\`background-clip: text\`) — a stock AI flourish.
 - **Radius on the scale.** Keep \`border-radius\` on the brand's radius tokens; no
   oversized non-pill corners.

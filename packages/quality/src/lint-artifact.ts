@@ -22,6 +22,8 @@ import {
   EXTERNAL_IMAGE_HOSTS,
   DISPLAY_SANS_RE,
   ALL_CAPS_TRACKING_FLOOR_EM,
+  ACCENT_OVERUSE_CAP,
+  MAX_RADIUS_PX,
   GLOBAL_THEME_SELECTOR_RE,
 } from "./slop-rules.ts";
 import {
@@ -35,9 +37,6 @@ import {
   letterSpacingToEm,
   fontSizeToPx,
 } from "./css.ts";
-
-const DEFAULT_ACCENT_OVERUSE_CAP = 3; // a deliberately strict cap.
-const DEFAULT_MAX_RADIUS_PX = 28;
 
 function checkEmptyArtifact(html: string): Finding[] {
   const trimmed = html.trim();
@@ -74,9 +73,99 @@ function checkEmptyArtifact(html: string): Finding[] {
   return [];
 }
 
-function hexInValue(value: string, hexes: readonly string[]): boolean {
-  const lower = value.toLowerCase();
-  return hexes.some((h) => lower.includes(h.toLowerCase()));
+function clampByte(n: number): number {
+  return Math.max(0, Math.min(255, Math.round(n)));
+}
+
+function toHexByte(n: number): string {
+  return clampByte(n).toString(16).padStart(2, "0");
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  return `#${toHexByte(r)}${toHexByte(g)}${toHexByte(b)}`;
+}
+
+function normalizeHex(hex: string): string {
+  const lower = hex.toLowerCase();
+  if (/^#[0-9a-f]{3}$/.test(lower)) {
+    return `#${lower[1]}${lower[1]}${lower[2]}${lower[2]}${lower[3]}${lower[3]}`;
+  }
+  return lower;
+}
+
+function parseCssNumber(raw: string, percentScale = 1): number {
+  const value = parseFloat(raw);
+  return raw.trim().endsWith("%") ? (value / 100) * percentScale : value;
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const hue = (((h % 360) + 360) % 360) / 360;
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const channel = (t0: number): number => {
+    let t = t0;
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  return rgbToHex(channel(hue + 1 / 3) * 255, channel(hue) * 255, channel(hue - 1 / 3) * 255);
+}
+
+function normalizedHexes(value: string): Set<string> {
+  const out = new Set<string>();
+  for (const match of value.matchAll(/#[0-9a-f]{3,8}\b/gi)) {
+    const raw = match[0];
+    if (raw.length === 4 || raw.length === 7) out.add(normalizeHex(raw));
+  }
+  for (const match of value.matchAll(/rgba?\(\s*([0-9.]+%?)\s*(?:,|\s)\s*([0-9.]+%?)\s*(?:,|\s)\s*([0-9.]+%?)/gi)) {
+    out.add(rgbToHex(parseCssNumber(match[1] ?? "0", 255), parseCssNumber(match[2] ?? "0", 255), parseCssNumber(match[3] ?? "0", 255)));
+  }
+  for (const match of value.matchAll(/hsla?\(\s*([0-9.]+)(?:deg)?\s*(?:,|\s)\s*([0-9.]+%)\s*(?:,|\s)\s*([0-9.]+%)/gi)) {
+    out.add(hslToHex(parseFloat(match[1] ?? "0"), parseCssNumber(match[2] ?? "0%"), parseCssNumber(match[3] ?? "0%")));
+  }
+  return out;
+}
+
+function hueInRange(hue: number, min: number, max: number): boolean {
+  const h = ((hue % 360) + 360) % 360;
+  return min <= max ? h >= min && h <= max : h >= min || h <= max;
+}
+
+function oklchFamilyInValue(value: string, family: "blue" | "cyan" | "purple"): boolean {
+  for (const match of value.matchAll(/oklch\(\s*([0-9.]+%?)\s+([0-9.]+)\s+([0-9.]+)/gi)) {
+    const lightness = parseCssNumber(match[1] ?? "0%", 1);
+    const chroma = parseFloat(match[2] ?? "0");
+    const hue = parseFloat(match[3] ?? "0");
+    if (lightness < 0.25 || lightness > 0.85 || chroma < 0.08) continue;
+    if (family === "purple" && hueInRange(hue, 260, 315)) return true;
+    if (family === "blue" && hueInRange(hue, 235, 270)) return true;
+    if (family === "cyan" && hueInRange(hue, 190, 235)) return true;
+  }
+  return false;
+}
+
+function hslFamilyInValue(value: string, family: "blue" | "cyan" | "purple"): boolean {
+  for (const match of value.matchAll(/hsla?\(\s*([0-9.]+)(?:deg)?\s*(?:,|\s)\s*([0-9.]+%)\s*(?:,|\s)\s*([0-9.]+%)/gi)) {
+    const hue = parseFloat(match[1] ?? "0");
+    const saturation = parseCssNumber(match[2] ?? "0%");
+    const lightness = parseCssNumber(match[3] ?? "0%");
+    if (saturation < 0.35 || lightness < 0.25 || lightness > 0.85) continue;
+    if (family === "purple" && hueInRange(hue, 235, 315)) return true;
+    if (family === "blue" && hueInRange(hue, 210, 265)) return true;
+    if (family === "cyan" && hueInRange(hue, 175, 210)) return true;
+  }
+  return false;
+}
+
+function colorInValue(value: string, hexes: readonly string[], family?: "blue" | "cyan" | "purple"): boolean {
+  const wanted = new Set(hexes.map((hex) => normalizeHex(hex)));
+  for (const hex of normalizedHexes(value)) {
+    if (wanted.has(hex)) return true;
+  }
+  return family ? hslFamilyInValue(value, family) || oklchFamilyInValue(value, family) : false;
 }
 
 /**
@@ -95,7 +184,7 @@ function stripTokenBlocks(css: string): string {
     for (const [name, value] of props) {
       if (name === "--accent") continue;
       // A non-accent token laundering indigo → keep the rule visible to the scan.
-      if (hexInValue(value, AI_DEFAULT_INDIGO)) return full;
+      if (colorInValue(value, AI_DEFAULT_INDIGO, "purple")) return full;
     }
     return ""; // intentional accent only → safe to strip from the indigo scan
   });
@@ -109,33 +198,44 @@ function checkIndigo(html: string, banned: readonly string[]): Finding[] {
   const nonStyle = html.replace(/<style[\s\S]*?<\/style>/gi, " ");
   const scan = `${stripTokenBlocks(css)}\n${nonStyle}`;
   const all = [...AI_DEFAULT_INDIGO, ...banned];
-  for (const hex of all) {
-    const re = new RegExp(escapeRe(hex), "i");
-    const m = scan.match(re);
-    if (m) {
-      return [{
-        severity: "P0",
-        id: "ai-default-indigo",
-        message: `Default AI-tell indigo "${hex}" used as a solid color outside the :root --accent token.`,
-        fix: "Use the active design system's --accent. If you truly want this hue, declare it only as :root{ --accent: … }.",
-        snippet: hex,
-      }];
-    }
+  const tailwindClass = scan.match(/\b(?:bg|border|decoration|from|outline|ring|text|to|via)-(?:indigo|purple|violet)-(?:50|[1-9]00|950)\b/i)?.[0];
+  const matchedHex = all.find((hex) => new RegExp(escapeRe(hex), "i").test(scan));
+  if (tailwindClass || colorInValue(scan, all, "purple")) {
+    return [{
+      severity: "P0",
+      id: "ai-default-indigo",
+      message: `Default AI-tell indigo "${matchedHex ?? tailwindClass ?? "equivalent color"}" used as a solid color outside the :root --accent token.`,
+      fix: "Use the active design system's --accent. If you truly want this hue, declare it only as :root{ --accent: … }.",
+      snippet: matchedHex ?? tailwindClass ?? "indigo equivalent",
+    }];
   }
   return [];
 }
 
 function eachGradient(html: string): string[] {
   const out: string[] = [];
-  const re = /linear-gradient\(([^)]*)\)/gi;
+  const re = /\b(?:linear|radial|conic)-gradient\s*\(/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) out.push(m[0]);
+  while ((m = re.exec(html)) !== null) {
+    let depth = 1;
+    let i = re.lastIndex;
+    while (i < html.length && depth > 0) {
+      const ch = html[i];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") depth -= 1;
+      i += 1;
+    }
+    if (depth === 0) {
+      out.push(html.slice(m.index, i));
+      re.lastIndex = i;
+    }
+  }
   return out;
 }
 
 function checkPurpleGradient(html: string): Finding[] {
   for (const grad of eachGradient(html)) {
-    if (hexInValue(grad, PURPLE_HEXES) || /\b(purple|violet)\b/i.test(grad)) {
+    if (colorInValue(grad, PURPLE_HEXES, "purple") || /\b(indigo|purple|violet)\b/i.test(grad)) {
       return [{
         severity: "P0",
         id: "purple-gradient",
@@ -150,8 +250,8 @@ function checkPurpleGradient(html: string): Finding[] {
 
 function checkTrustGradient(html: string): Finding[] {
   for (const grad of eachGradient(html)) {
-    const hasBlue = hexInValue(grad, TRUST_GRADIENT_BLUE_HEXES) || /\bblue\b/i.test(grad);
-    const hasCyan = hexInValue(grad, TRUST_GRADIENT_CYAN_HEXES) || /\bcyan\b/i.test(grad);
+    const hasBlue = colorInValue(grad, TRUST_GRADIENT_BLUE_HEXES, "blue") || /\bblue\b/i.test(grad);
+    const hasCyan = colorInValue(grad, TRUST_GRADIENT_CYAN_HEXES, "cyan") || /\bcyan\b/i.test(grad);
     if (hasBlue && hasCyan) {
       return [{
         severity: "P0",
@@ -185,17 +285,18 @@ function checkEmojiIcons(html: string): Finding[] {
 }
 
 function checkLeftAccentCard(html: string): Finding[] {
-  const re =
-    /\.[a-z-]+\s*\{[^}]*border-left\s*:\s*\d+px\s+solid\s+[^;]+;[^}]*border-radius\s*:\s*[1-9]/i;
-  const m = html.match(re);
-  if (m) {
-    return [{
-      severity: "P0",
-      id: "left-accent-card",
-      message: "Rounded card with a colored left-border accent — the canonical 'AI dashboard tile'.",
-      fix: "Drop either the radius or the left-border. Differentiate cards with weight/spacing instead.",
-      snippet: m[0].slice(0, 120),
-    }];
+  for (const rule of iterateRules(extractStyleBlocks(html))) {
+    const borderLeft = readProp(rule.body, "border-left");
+    const radius = readProp(rule.body, "border-radius");
+    if (borderLeft && /\b\d+px\b[^;]*\bsolid\b/i.test(borderLeft) && radius && /^[1-9]/.test(radius.trim())) {
+      return [{
+        severity: "P0",
+        id: "left-accent-card",
+        message: "Rounded card with a colored left-border accent — the canonical 'AI dashboard tile'.",
+        fix: "Drop either the radius or the left-border. Differentiate cards with weight/spacing instead.",
+        snippet: rule.selector,
+      }];
+    }
   }
   return [];
 }
@@ -521,8 +622,8 @@ const SEVERITY_ORDER: Record<string, number> = { P0: 0, P1: 1, P2: 2 };
  * Findings are returned sorted P0-first. Pure function — no I/O.
  */
 export function lintArtifact(html: string, options: LintOptions = {}): Finding[] {
-  const accentCap = options.accentOveruseCap ?? DEFAULT_ACCENT_OVERUSE_CAP;
-  const maxRadius = options.maxRadiusPx ?? DEFAULT_MAX_RADIUS_PX;
+  const accentCap = options.accentOveruseCap ?? ACCENT_OVERUSE_CAP;
+  const maxRadius = options.maxRadiusPx ?? MAX_RADIUS_PX;
   const banned = options.bannedAccentHexes ?? [];
 
   const findings: Finding[] = [

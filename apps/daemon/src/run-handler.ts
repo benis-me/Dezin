@@ -5,8 +5,8 @@
  * (@dezin/core Store) → write the artifact to disk so /projects/:id/preview/ serves it.
  */
 
-import { mkdir, writeFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, readFile, writeFile, stat } from "node:fs/promises";
+import { join, relative } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { composeSystemPrompt } from "../../../packages/prompt/src/index.ts";
 import {
@@ -23,7 +23,7 @@ import {
 import { defaultRegistry } from "../../../packages/design/src/index.ts";
 import { loadSkills, findSkill, type SkillInfo } from "../../../packages/skills/src/index.ts";
 import { loadCraftSections } from "../../../packages/craft/src/index.ts";
-import { lintScore } from "../../../packages/quality/src/index.ts";
+import { lintArtifact, lintScore } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
@@ -83,6 +83,37 @@ function startPreviewPoller(file: string, onChange: (mtimeMs: number) => void): 
   return () => {
     active = false;
   };
+}
+
+const STANDARD_LINT_EXTENSIONS = new Set([".css", ".html", ".js", ".jsx", ".ts", ".tsx"]);
+const STANDARD_LINT_SKIP_DIRS = new Set([".git", "dist", "node_modules", "version-worktrees"]);
+
+async function collectStandardLintSurface(root: string, maxBytes = 2_000_000): Promise<string> {
+  const chunks: string[] = [];
+  let used = 0;
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (used >= maxBytes) return;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!STANDARD_LINT_SKIP_DIRS.has(entry.name)) await walk(path);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const ext = entry.name.slice(entry.name.lastIndexOf("."));
+      if (!STANDARD_LINT_EXTENSIONS.has(ext)) continue;
+      const text = await readFile(path, "utf8").catch(() => "");
+      if (!text) continue;
+      const budget = maxBytes - used;
+      const clipped = text.slice(0, budget);
+      used += clipped.length;
+      chunks.push(`\n/* file: ${relative(root, path)} */\n${clipped}`);
+    }
+  };
+  await walk(root);
+  return chunks.join("\n");
 }
 
 interface RunBody {
@@ -355,6 +386,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         { role: "user" as const, content: visibleBrief },
         ...(final.summaryText ? [{ role: "assistant" as const, content: final.summaryText }] : []),
       ];
+      const staticSurface = await collectStandardLintSurface(dir);
+      const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface) : []) as QualityFinding[];
+      if (staticFindings.length) sse({ type: "static-quality", findings: staticFindings });
       let visualFindings: QualityFinding[] = [];
       if (settings.visualQaEnabled) {
         let renderUrl: string | undefined;
@@ -380,12 +414,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         }
         sse({ type: "visual-qa", enabled: settings.visualQaEnabled, findings: visualFindings });
       }
-      const score = settings.visualQaEnabled ? lintScore(visualFindings) : null;
-      const passed = !visualFindings.some((f) => f.severity === "P0");
+      const findings = [...staticFindings, ...visualFindings];
+      const score = lintScore(findings);
+      const passed = !findings.some((f) => f.severity === "P0");
       persistProcess();
       const assistantMessage = store.addMessage(conversation.id, "assistant", final.summaryText);
       persistSteps();
-      const quality = score !== null ? `, quality ${score}/100` : "";
+      const quality = `, quality ${score}/100`;
       const message = passed ? `Done${quality}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
       store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: 0 }));
       store.updateRun(run.id, {
@@ -393,12 +428,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         repairRounds: 0,
         lintPassed: passed,
         score,
-        findings: visualFindings,
+        findings,
         assistantMessageId: assistantMessage.id,
         commitHash: commit.commitHash,
         finishedAt: Date.now(),
       });
-      sse({ type: "run-done", runId: run.id, passed, rounds: 0, score, mode: "standard", findings: visualFindings });
+      sse({ type: "run-done", runId: run.id, passed, rounds: 0, score, mode: "standard", findings });
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
         void (async () => {

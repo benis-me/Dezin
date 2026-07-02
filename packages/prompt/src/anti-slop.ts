@@ -31,9 +31,8 @@ choice. Avoid all of them:
 Dezin taste, also enforced:
 - Borders over shadows. Reserve box-shadow for true overlays (dropdowns, modals); in-page
   cards use a 1px hairline border, never a shadow.
-- Neutral grayscale carries 80–90% of the surface; the single --accent appears at most
-  twice per screen.
-- ALL-CAPS text always gets ≥0.06em letter-spacing. No gradient-clipped text. Keep
+- Neutral grayscale carries 80–90% of the surface; --accent appears at most ${slopRules.ACCENT_OVERUSE_CAP} times per screen.
+- ALL-CAPS text always gets ≥${slopRules.ALL_CAPS_TRACKING_FLOOR_EM}em letter-spacing. No gradient-clipped text. Keep
   border-radius on the brand's radius scale.
 
 Add soul the right way: ~80% proven patterns + ~20% one distinctive move (a type choice,
