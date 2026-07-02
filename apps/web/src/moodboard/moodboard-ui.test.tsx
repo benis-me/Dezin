@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import type { MoodboardConversation, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
@@ -1551,6 +1551,58 @@ test("MoodboardAgentPanel renders project-style assistant messages with copy act
 
   fireEvent.click(screen.getByLabelText("Copy message"));
   expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
+});
+
+test("MoodboardAgentPanel exposes moodboard conversations in the project conversation control", () => {
+  const conversations: MoodboardConversation[] = [
+    { id: "c1", boardId: "b1", title: "Conversation 1", createdAt: 1, turns: 2 },
+    { id: "c2", boardId: "b1", title: "Alternate direction", createdAt: 2, turns: 0 },
+  ];
+  const onConversationChange = vi.fn();
+  const onCreateConversation = vi.fn();
+  const onRenameConversation = vi.fn();
+  const onDeleteConversation = vi.fn();
+
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <MoodboardAgentPanel
+        boardName="Material board"
+        messages={[]}
+        conversations={conversations}
+        activeConversationId="c1"
+        busy={false}
+        agents={[]}
+        agent=""
+        model=""
+        onBack={() => {}}
+        onConversationChange={onConversationChange}
+        onCreateConversation={onCreateConversation}
+        onRenameConversation={onRenameConversation}
+        onDeleteConversation={onDeleteConversation}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => {}}
+        onSend={async () => {}}
+      />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(screen.getByLabelText("Conversations"));
+  fireEvent.click(screen.getByText("Alternate direction").closest("button")!);
+  expect(onConversationChange).toHaveBeenCalledWith("c2");
+
+  fireEvent.click(screen.getByLabelText("Conversations"));
+  fireEvent.click(screen.getByLabelText("New conversation"));
+  expect(onCreateConversation).toHaveBeenCalledOnce();
+
+  fireEvent.click(screen.getByLabelText("Conversations"));
+  fireEvent.click(screen.getByLabelText("Rename Conversation 1"));
+  fireEvent.change(screen.getByLabelText("Conversation name"), { target: { value: "Warm direction" } });
+  fireEvent.blur(screen.getByLabelText("Conversation name"));
+  expect(onRenameConversation).toHaveBeenCalledWith("c1", "Warm direction");
+
+  fireEvent.click(screen.getByLabelText("Delete Conversation 1"));
+  expect(onDeleteConversation).toHaveBeenCalledWith("c1");
 });
 
 test("MoodboardAgentPanel keeps the real shell while loading", () => {

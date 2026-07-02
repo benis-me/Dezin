@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
+import type { AgentInfo, MoodboardConversation, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
+import { ConversationSelect } from "../components/ConversationSelect.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
@@ -15,11 +16,17 @@ const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
 export function MoodboardAgentPanel({
   boardName,
   messages,
+  conversations = [],
+  activeConversationId = null,
   busy,
   agents,
   agent,
   model,
   onBack,
+  onConversationChange,
+  onCreateConversation,
+  onRenameConversation,
+  onDeleteConversation,
   onAgentChange,
   onModelChange,
   onRescanAgents,
@@ -29,11 +36,17 @@ export function MoodboardAgentPanel({
 }: {
   boardName: string;
   messages: MoodboardMessage[];
+  conversations?: MoodboardConversation[];
+  activeConversationId?: string | null;
   busy: boolean;
   agents: AgentInfo[];
   agent: string;
   model: string;
   onBack: () => void;
+  onConversationChange?: (id: string) => void;
+  onCreateConversation?: () => void;
+  onRenameConversation?: (id: string, title: string) => void;
+  onDeleteConversation?: (id: string) => void;
   onAgentChange: (command: string) => void;
   onModelChange: (model: string) => void;
   onRescanAgents: () => Promise<void>;
@@ -148,6 +161,19 @@ export function MoodboardAgentPanel({
             </motion.span>
           </AnimatePresence>
         </button>
+        {conversations.length ? (
+          <div className="app-no-drag shrink-0">
+            <ConversationSelect
+              conversations={conversations}
+              activeId={activeConversationId}
+              onSwitch={(id) => onConversationChange?.(id)}
+              onCreate={onCreateConversation}
+              onRename={(id, title) => onRenameConversation?.(id, title)}
+              onDelete={(id) => onDeleteConversation?.(id)}
+              label={(conversation, index) => conversation.title || `Conversation ${index + 1}`}
+            />
+          </div>
+        ) : null}
       </div>
 
       <div
@@ -193,10 +219,8 @@ export function MoodboardAgentPanel({
               {messages.map((message) => (
                 <motion.div
                   key={message.id}
-                  layout
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
                   transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
                 >
                   <MoodboardMessageRow message={message} busy={busy} onCopy={(content) => void copyMessage(content)} />

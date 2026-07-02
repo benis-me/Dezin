@@ -279,12 +279,42 @@ test("moodboards persist nodes, assets, and messages", () => {
   const msg = s.addMoodboardMessage(board.id, "user", "Collect softer references");
   assert.equal(msg.content, "Collect softer references");
   assert.equal(s.listMoodboardMessages(board.id).length, 1);
+  assert.equal(s.listMoodboardConversations(board.id).length, 1);
 
   s.setMoodboardArchived(board.id, true);
   assert.ok(s.getMoodboard(board.id)?.archivedAt);
   s.deleteMoodboard(board.id);
   assert.equal(s.getMoodboard(board.id), null);
   assert.equal(s.listMoodboardNodes(board.id).length, 0);
+  s.close();
+});
+
+test("moodboard conversations isolate messages per board conversation", () => {
+  const s = freshStore();
+  const board = s.createMoodboard({ name: "Material board" });
+  const first = s.ensureMoodboardConversation(board.id);
+  const second = s.createMoodboardConversation(board.id, "Alternate direction");
+
+  s.addMoodboardMessage(board.id, "user", "Explore warm references", first.id);
+  s.addMoodboardMessage(board.id, "assistant", "Use amber lighting.", first.id);
+  s.addMoodboardMessage(board.id, "user", "Explore cooler references", second.id);
+
+  assert.deepEqual(
+    s.listMoodboardMessages(board.id, first.id).map((message) => message.content),
+    ["Explore warm references", "Use amber lighting."],
+  );
+  assert.deepEqual(
+    s.listMoodboardMessages(board.id, second.id).map((message) => message.content),
+    ["Explore cooler references"],
+  );
+  assert.deepEqual(
+    s.listMoodboardConversations(board.id).map((conversation) => [conversation.title, conversation.turns]),
+    [
+      ["Conversation 1", 1],
+      ["Alternate direction", 1],
+    ],
+  );
+  assert.throws(() => s.addMoodboardMessage(board.id, "user", "wrong board", "missing"), /moodboard conversation not found/);
   s.close();
 });
 

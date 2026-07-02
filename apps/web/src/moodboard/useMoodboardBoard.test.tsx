@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
-import type { MoodboardMessage, MoodboardNode, Settings } from "../lib/api.ts";
+import type { MoodboardConversation, MoodboardMessage, MoodboardNode, Settings } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { imageModelOptions, useMoodboardBoard } from "./useMoodboardBoard.ts";
@@ -267,4 +267,226 @@ test("sendMessage shows the submitted prompt while the agent is still responding
 
   expect(board.busy).toBe(false);
   expect(board.messages.map((message) => message.id)).toEqual(["server-user", "server-assistant"]);
+});
+
+test("generateImage keeps canvas generation out of the agent loading state and conversation", async () => {
+  let resolveGenerate!: (value: Awaited<ReturnType<ReturnType<typeof makeFakeApi>["generateMoodboardImage"]>>) => void;
+  const generator: MoodboardNode = {
+    id: "gen-1",
+    boardId: "board-1",
+    type: "image-generator",
+    x: 10,
+    y: 20,
+    width: 240,
+    height: 180,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [generator],
+      assets: [],
+      messages: [],
+    }),
+    generateMoodboardImage: async () =>
+      new Promise((resolve) => {
+        resolveGenerate = resolve;
+      }),
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+
+  let generatePromise!: Promise<void>;
+  await act(async () => {
+    generatePromise = board.generateImage(generator, "soft light");
+  });
+
+  expect(board.agentBusy).toBe(false);
+  expect(board.imageBusy).toBe(true);
+  expect(board.busy).toBe(true);
+  expect(board.messages).toEqual([]);
+
+  await act(async () => {
+    resolveGenerate({
+      asset: {
+        id: "asset-1",
+        boardId: "board-1",
+        kind: "image",
+        fileName: "generated.png",
+        mimeType: "image/png",
+        width: 1024,
+        height: 1024,
+        source: "generated",
+        createdAt: 2,
+        url: "/api/moodboards/board-1/assets/asset-1",
+      },
+      nodes: [{ ...generator, data: { ...generator.data, generatorStatus: "done", resultAssetId: "asset-1" }, updatedAt: 3 }],
+      messages: [
+        { id: "agent-status", boardId: "board-1", conversationId: "conversation-1", role: "assistant", content: "Generated an image.", createdAt: 4 },
+      ],
+    });
+    await generatePromise;
+  });
+
+  expect(board.agentBusy).toBe(false);
+  expect(board.imageBusy).toBe(false);
+  expect(board.messages).toEqual([]);
+});
+
+test("generateImage notifies the active agent conversation for agent-created generators", async () => {
+  let capturedConversationId = "";
+  const generator: MoodboardNode = {
+    id: "gen-1",
+    boardId: "board-1",
+    type: "image-generator",
+    x: 10,
+    y: 20,
+    width: 240,
+    height: 180,
+    rotation: 0,
+    zIndex: 0,
+    data: { agentConversationId: "conversation-1", generatorPrompt: "soft light" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [generator],
+      assets: [],
+      conversations: [{ id: "conversation-1", boardId: "board-1", title: "Conversation 1", createdAt: 1, turns: 1 }],
+      activeConversationId: "conversation-1",
+      messages: [{ id: "a0", boardId: "board-1", conversationId: "conversation-1", role: "assistant", content: "Ready", createdAt: 1 }],
+    }),
+    generateMoodboardImage: async (_id, _prompt, options) => {
+      capturedConversationId = options?.conversationId ?? "";
+      return {
+        asset: {
+          id: "asset-1",
+          boardId: "board-1",
+          kind: "image",
+          fileName: "generated.png",
+          mimeType: "image/png",
+          width: 1024,
+          height: 1024,
+          source: "generated",
+          createdAt: 2,
+          url: "/api/moodboards/board-1/assets/asset-1",
+        },
+        nodes: [{ ...generator, data: { ...generator.data, generatorStatus: "done", resultAssetId: "asset-1" }, updatedAt: 3 }],
+        messages: [
+          { id: "agent-status", boardId: "board-1", conversationId: "conversation-1", role: "assistant", content: "Generated an image.", createdAt: 4 },
+        ],
+      };
+    },
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+
+  await act(async () => {
+    await board.generateImage(generator, "soft light");
+  });
+
+  expect(capturedConversationId).toBe("conversation-1");
+  expect(board.agentBusy).toBe(false);
+  expect(board.imageBusy).toBe(false);
+  expect(board.messages.map((message) => message.content)).toEqual(["Ready", "Generated an image."]);
+});
+
+test("useMoodboardBoard switches moodboard conversations independently", async () => {
+  const conversations: MoodboardConversation[] = [
+    { id: "conversation-1", boardId: "board-1", title: "Conversation 1", createdAt: 1, turns: 1 },
+    { id: "conversation-2", boardId: "board-1", title: "Alternate direction", createdAt: 2, turns: 0 },
+  ];
+  let postedConversationId = "";
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [],
+      assets: [],
+      conversations,
+      activeConversationId: "conversation-1",
+      messages: [{ id: "u1", boardId: "board-1", conversationId: "conversation-1", role: "user", content: "First", createdAt: 1 }],
+    }),
+    listMoodboardMessages: async (_id, conversationId) =>
+      conversationId === "conversation-2"
+        ? [{ id: "u2", boardId: "board-1", conversationId: "conversation-2", role: "user", content: "Second", createdAt: 2 }]
+        : [{ id: "u1", boardId: "board-1", conversationId: "conversation-1", role: "user", content: "First", createdAt: 1 }],
+    postMoodboardMessage: async (_id, content, options) => {
+      postedConversationId = options?.conversationId ?? "";
+      return {
+        messages: [
+          { id: "u3", boardId: "board-1", conversationId: postedConversationId, role: "user", content, createdAt: 3 },
+          { id: "a3", boardId: "board-1", conversationId: postedConversationId, role: "assistant", content: "Done", createdAt: 4 },
+        ],
+      };
+    },
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+  expect(board.conversationId).toBe("conversation-1");
+  expect(board.messages.map((message) => message.content)).toEqual(["First"]);
+
+  await act(async () => {
+    await board.switchConversation("conversation-2");
+  });
+  expect(board.conversationId).toBe("conversation-2");
+  expect(board.messages.map((message) => message.content)).toEqual(["Second"]);
+
+  await act(async () => {
+    await board.sendMessage("Continue");
+  });
+  expect(postedConversationId).toBe("conversation-2");
 });

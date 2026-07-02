@@ -3,6 +3,8 @@ import { Check, ChevronDown, MessageSquare, Pencil, Plus, Trash2 } from "lucide-
 import type { Conversation } from "../lib/api.ts";
 import { Input, Popover, PopoverContent, PopoverTrigger, ScrollArea } from "./ui/index.ts";
 
+type ConversationOption = Pick<Conversation, "id" | "title" | "createdAt" | "turns">;
+
 function relTime(ts: number): string {
   const diff = Date.now() - ts;
   if (diff < 60_000) return "just now";
@@ -21,19 +23,19 @@ export function ConversationSelect({
   onCreate,
   label,
 }: {
-  conversations: Conversation[];
+  conversations: ConversationOption[];
   activeId: string | null;
   onSwitch: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
   onCreate?: () => void;
-  label: (c: Conversation, i: number) => string;
+  label: (c: ConversationOption, i: number) => string;
 }) {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
 
-  const commitRename = (c: Conversation, i: number): void => {
+  const commitRename = (c: ConversationOption, i: number): void => {
     onRename(c.id, draft.trim() || label(c, i));
     setEditingId(null);
   };

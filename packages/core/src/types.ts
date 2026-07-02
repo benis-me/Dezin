@@ -136,9 +136,19 @@ export interface MoodboardAsset {
   createdAt: number;
 }
 
+export interface MoodboardConversation {
+  id: string;
+  boardId: string;
+  title: string;
+  createdAt: number;
+  /** Number of user turns (populated by listMoodboardConversations). */
+  turns?: number;
+}
+
 export interface MoodboardMessage {
   id: string;
   boardId: string;
+  conversationId?: string;
   role: MessageRole;
   content: string;
   createdAt: number;

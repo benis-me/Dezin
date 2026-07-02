@@ -12,6 +12,7 @@ export type {
   MoodboardNode,
   MoodboardNodeType,
   MoodboardAsset,
+  MoodboardConversation,
   MoodboardMessage,
   MessageRole,
   RunStatus,

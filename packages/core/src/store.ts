@@ -17,6 +17,7 @@ import type {
   Moodboard,
   MoodboardNode,
   MoodboardAsset,
+  MoodboardConversation,
   MoodboardMessage,
   MessageRole,
   QualityFinding,
@@ -141,15 +142,23 @@ CREATE TABLE IF NOT EXISTS moodboard_assets (
   source TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS moodboard_conversations (
+  id TEXT PRIMARY KEY,
+  board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS moodboard_messages (
   id TEXT PRIMARY KEY,
   board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES moodboard_conversations(id) ON DELETE CASCADE,
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_moodboard_nodes_board ON moodboard_nodes(board_id);
 CREATE INDEX IF NOT EXISTS idx_moodboard_assets_board ON moodboard_assets(board_id);
+CREATE INDEX IF NOT EXISTS idx_moodboard_conversations_board ON moodboard_conversations(board_id);
 CREATE INDEX IF NOT EXISTS idx_moodboard_messages_board ON moodboard_messages(board_id);
 `;
 
@@ -312,10 +321,20 @@ function asMoodboardAsset(r: Row): MoodboardAsset {
     createdAt: Number(r.created_at),
   };
 }
+function asMoodboardConversation(r: Row): MoodboardConversation {
+  return {
+    id: r.id as string,
+    boardId: r.board_id as string,
+    title: r.title as string,
+    createdAt: Number(r.created_at),
+    ...(r.turns == null ? {} : { turns: Number(r.turns) }),
+  };
+}
 function asMoodboardMessage(r: Row): MoodboardMessage {
   return {
     id: r.id as string,
     boardId: r.board_id as string,
+    conversationId: (r.conversation_id as string | null) ?? undefined,
     role: r.role as MessageRole,
     content: r.content as string,
     createdAt: Number(r.created_at),
@@ -373,7 +392,16 @@ export class Store {
     ensureColumn("runs", "assistant_message_id", "assistant_message_id TEXT");
     ensureColumn("runs", "commit_hash", "commit_hash TEXT");
     ensureColumn("runs", "owner_id", "owner_id TEXT");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS moodboard_conversations (
+      id TEXT PRIMARY KEY,
+      board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );`);
+    ensureColumn("moodboard_messages", "conversation_id", "conversation_id TEXT REFERENCES moodboard_conversations(id) ON DELETE CASCADE");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_runs_project_variant_status ON runs(project_id, variant_id, status);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_moodboard_conversations_board ON moodboard_conversations(board_id);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_moodboard_messages_conversation ON moodboard_messages(conversation_id);");
   }
 
   close(): void {
@@ -571,22 +599,81 @@ export class Store {
     return rows.map(asMoodboardAsset);
   }
 
-  addMoodboardMessage(boardId: string, role: MessageRole, content: string): MoodboardMessage {
+  private adoptMoodboardLegacyMessages(boardId: string, conversationId: string): void {
+    this.db
+      .prepare(`UPDATE moodboard_messages SET conversation_id = ? WHERE board_id = ? AND conversation_id IS NULL`)
+      .run(conversationId, boardId);
+  }
+
+  ensureMoodboardConversation(boardId: string): MoodboardConversation {
+    if (!this.getMoodboard(boardId)) throw new Error(`moodboard not found: ${boardId}`);
+    const existing = this.db
+      .prepare(`SELECT * FROM moodboard_conversations WHERE board_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1`)
+      .get(boardId) as Row | undefined;
+    const conversation = existing ? asMoodboardConversation(existing) : this.createMoodboardConversation(boardId, "Conversation 1");
+    this.adoptMoodboardLegacyMessages(boardId, conversation.id);
+    return conversation;
+  }
+
+  createMoodboardConversation(boardId: string, title = "Conversation 1"): MoodboardConversation {
     if (!this.getMoodboard(boardId)) throw new Error(`moodboard not found: ${boardId}`);
     const id = this.clock.id();
     const now = this.clock.now();
     this.db
-      .prepare(`INSERT INTO moodboard_messages (id, board_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(id, boardId, role, content, now);
+      .prepare(`INSERT INTO moodboard_conversations (id, board_id, title, created_at) VALUES (?, ?, ?, ?)`)
+      .run(id, boardId, title.trim() || "Conversation 1", now);
+    this.db.prepare(`UPDATE moodboards SET updated_at = ? WHERE id = ?`).run(now, boardId);
+    const r = this.db.prepare(`SELECT * FROM moodboard_conversations WHERE id = ?`).get(id) as Row;
+    return asMoodboardConversation(r);
+  }
+
+  getMoodboardConversation(id: string): MoodboardConversation | null {
+    const r = this.db.prepare(`SELECT * FROM moodboard_conversations WHERE id = ?`).get(id) as Row | undefined;
+    return r ? asMoodboardConversation(r) : null;
+  }
+
+  listMoodboardConversations(boardId: string): MoodboardConversation[] {
+    this.ensureMoodboardConversation(boardId);
+    const rows = this.db
+      .prepare(
+        `SELECT c.*, (SELECT COUNT(*) FROM moodboard_messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS turns
+         FROM moodboard_conversations c WHERE c.board_id = ? ORDER BY c.created_at ASC, c.rowid ASC`,
+      )
+      .all(boardId) as Row[];
+    return rows.map(asMoodboardConversation);
+  }
+
+  renameMoodboardConversation(id: string, title: string): MoodboardConversation | null {
+    this.db.prepare(`UPDATE moodboard_conversations SET title = ? WHERE id = ?`).run(title.trim() || "Conversation 1", id);
+    return this.getMoodboardConversation(id);
+  }
+
+  deleteMoodboardConversation(id: string): void {
+    const conversation = this.getMoodboardConversation(id);
+    this.db.prepare(`DELETE FROM moodboard_conversations WHERE id = ?`).run(id);
+    if (conversation) this.ensureMoodboardConversation(conversation.boardId);
+  }
+
+  addMoodboardMessage(boardId: string, role: MessageRole, content: string, conversationId?: string): MoodboardMessage {
+    if (!this.getMoodboard(boardId)) throw new Error(`moodboard not found: ${boardId}`);
+    const conversation = conversationId ? this.getMoodboardConversation(conversationId) : this.ensureMoodboardConversation(boardId);
+    if (!conversation || conversation.boardId !== boardId) throw new Error(`moodboard conversation not found: ${conversationId}`);
+    const id = this.clock.id();
+    const now = this.clock.now();
+    this.db
+      .prepare(`INSERT INTO moodboard_messages (id, board_id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(id, boardId, conversation.id, role, content, now);
     this.db.prepare(`UPDATE moodboards SET updated_at = ? WHERE id = ?`).run(now, boardId);
     const r = this.db.prepare(`SELECT * FROM moodboard_messages WHERE id = ?`).get(id) as Row;
     return asMoodboardMessage(r);
   }
 
-  listMoodboardMessages(boardId: string): MoodboardMessage[] {
+  listMoodboardMessages(boardId: string, conversationId?: string): MoodboardMessage[] {
+    const conversation = conversationId ? this.getMoodboardConversation(conversationId) : this.ensureMoodboardConversation(boardId);
+    if (!conversation || conversation.boardId !== boardId) throw new Error(`moodboard conversation not found: ${conversationId}`);
     const rows = this.db
-      .prepare(`SELECT * FROM moodboard_messages WHERE board_id = ? ORDER BY created_at ASC, rowid ASC`)
-      .all(boardId) as Row[];
+      .prepare(`SELECT * FROM moodboard_messages WHERE board_id = ? AND conversation_id = ? ORDER BY created_at ASC, rowid ASC`)
+      .all(boardId, conversation.id) as Row[];
     return rows.map(asMoodboardMessage);
   }
 

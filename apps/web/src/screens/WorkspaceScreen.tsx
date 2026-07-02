@@ -538,7 +538,7 @@ function briefToName(brief: string): string {
   return t.length === 0 ? "Untitled" : t.length > 48 ? `${t.slice(0, 48)}…` : t;
 }
 
-function convLabel(c: Conversation, i: number): string {
+function convLabel(c: Pick<Conversation, "title">, i: number): string {
   return c.title && c.title !== "Untitled" ? c.title : `Conversation ${i + 1}`;
 }
 

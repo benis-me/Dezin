@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentInfo, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
+import type { AgentInfo, MoodboardConversation, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { useToast } from "../components/Toast.tsx";
@@ -18,10 +18,11 @@ import {
   materializeInputs,
 } from "./moodboard-board-utils.ts";
 
-function optimisticMoodboardMessage(boardId: string, content: string): MoodboardMessage {
+function optimisticMoodboardMessage(boardId: string, conversationId: string, content: string): MoodboardMessage {
   return {
     id: `pending-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     boardId,
+    ...(conversationId ? { conversationId } : {}),
     role: "user",
     content,
     createdAt: Date.now(),
@@ -44,6 +45,8 @@ export function useMoodboardBoard(boardId: string) {
   const { toast } = useToast();
   const [detail, setDetail] = useState<MoodboardDetail | null>(null);
   const [nodes, setNodes] = useState<MoodboardNode[]>([]);
+  const [conversations, setConversations] = useState<MoodboardConversation[]>([]);
+  const [conversationId, setConversationId] = useState("");
   const [messages, setMessages] = useState<MoodboardMessage[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -52,7 +55,9 @@ export function useMoodboardBoard(boardId: string) {
   const [imageModels, setImageModels] = useState<string[]>([]);
   const [imageModel, setImageModel] = useState("");
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [imageBusy, setImageBusy] = useState(false);
+  const busy = agentBusy || imageBusy;
   const saveTimer = useRef<number | null>(null);
   const pendingSaveInputs = useRef<SaveMoodboardNodeInput[] | null>(null);
 
@@ -63,6 +68,8 @@ export function useMoodboardBoard(boardId: string) {
       .then((next) => {
         setDetail(next);
         setNodes(next.nodes);
+        setConversations(next.conversations ?? []);
+        setConversationId(next.activeConversationId ?? next.conversations?.[0]?.id ?? "");
         setMessages(next.messages);
       })
       .catch(() => toast("Couldn't load the moodboard.", { variant: "error" }))
@@ -203,7 +210,7 @@ export function useMoodboardBoard(boardId: string) {
   const uploadFiles = useCallback(
     async (files: FileList | null, point?: { x: number; y: number }) => {
       if (!files?.length) return;
-      setBusy(true);
+      setImageBusy(true);
       try {
         const nextNodes: SaveMoodboardNodeInput[] = [];
         for (const [index, file] of Array.from(files).entries()) {
@@ -222,7 +229,7 @@ export function useMoodboardBoard(boardId: string) {
       } catch {
         toast("Couldn't upload those images.", { variant: "error" });
       } finally {
-        setBusy(false);
+        setImageBusy(false);
       }
     },
     [api, appendNodes, boardId, nodes.length, toast],
@@ -232,7 +239,11 @@ export function useMoodboardBoard(boardId: string) {
     async (node: MoodboardNode, prompt: string, options: { sourceAssetId?: string } = {}) => {
       const selectedModel =
         typeof node.data.generatorModel === "string" && node.data.generatorModel.trim() ? node.data.generatorModel.trim() : imageModel;
-      setBusy(true);
+      const agentConversationId =
+        typeof node.data.agentConversationId === "string" && node.data.agentConversationId.trim()
+          ? node.data.agentConversationId.trim()
+          : "";
+      setImageBusy(true);
       setNodes((prev) =>
         prev.map((item) =>
           item.id === node.id
@@ -244,32 +255,43 @@ export function useMoodboardBoard(boardId: string) {
         const result = await api.generateMoodboardImage(boardId, prompt, {
           generatorId: node.id,
           model: selectedModel || undefined,
+          conversationId: agentConversationId || undefined,
           sourceAssetId: options.sourceAssetId,
           x: node.x + node.width + 24,
           y: node.y,
         });
         setNodes(result.nodes);
-        setMessages((cur) => [...cur, ...result.messages]);
+        if (agentConversationId && agentConversationId === conversationId && result.messages.length) {
+          setMessages((current) => appendUniqueMessages(current, result.messages));
+        }
       } catch {
+        setNodes((prev) =>
+          prev.map((item) => (item.id === node.id ? { ...item, data: { ...item.data, generatorStatus: "error" } } : item)),
+        );
         toast("Couldn't generate an image. Check Models settings.", { variant: "error" });
       } finally {
-        setBusy(false);
+        setImageBusy(false);
       }
     },
-    [api, boardId, imageModel, toast],
+    [api, boardId, conversationId, imageModel, toast],
   );
 
   const sendMessage = useCallback(
     async (content: string) => {
-      const optimistic = optimisticMoodboardMessage(boardId, content);
-      setBusy(true);
+      const activeConversationId = conversationId;
+      const optimistic = optimisticMoodboardMessage(boardId, activeConversationId, content);
+      setAgentBusy(true);
       setMessages((cur) => [...cur, optimistic]);
       try {
         if (!(await flushPendingNodes())) {
           setMessages((cur) => cur.filter((message) => message.id !== optimistic.id));
           return;
         }
-        const result = await api.postMoodboardMessage(boardId, content, { agentCommand: runAgent || undefined, model: runModel || undefined });
+        const result = await api.postMoodboardMessage(boardId, content, {
+          agentCommand: runAgent || undefined,
+          model: runModel || undefined,
+          conversationId: activeConversationId || undefined,
+        });
         if (result.nodes) setNodes(result.nodes);
         setMessages((cur) => {
           const withoutOptimistic = cur.filter((message) => message.id !== optimistic.id);
@@ -281,10 +303,64 @@ export function useMoodboardBoard(boardId: string) {
         setMessages((cur) => cur.filter((message) => message.id !== optimistic.id));
         toast("Couldn't send that message.", { variant: "error" });
       } finally {
-        setBusy(false);
+        setAgentBusy(false);
       }
     },
-    [api, boardId, flushPendingNodes, runAgent, runModel, toast],
+    [api, boardId, conversationId, flushPendingNodes, runAgent, runModel, toast],
+  );
+
+  const switchConversation = useCallback(
+    async (nextConversationId: string) => {
+      if (!nextConversationId || nextConversationId === conversationId) return;
+      try {
+        const nextMessages = await api.listMoodboardMessages(boardId, nextConversationId);
+        setConversationId(nextConversationId);
+        setMessages(nextMessages);
+      } catch {
+        toast("Couldn't load that conversation.", { variant: "error" });
+      }
+    },
+    [api, boardId, conversationId, toast],
+  );
+
+  const createConversation = useCallback(async () => {
+    try {
+      const conversation = await api.createMoodboardConversation(boardId, `Conversation ${conversations.length + 1}`);
+      setConversations((current) => [...current, conversation]);
+      setConversationId(conversation.id);
+      setMessages([]);
+    } catch {
+      toast("Couldn't create a conversation.", { variant: "error" });
+    }
+  }, [api, boardId, conversations.length, toast]);
+
+  const renameConversation = useCallback(
+    async (id: string, title: string) => {
+      try {
+        const conversation = await api.renameMoodboardConversation(boardId, id, title);
+        setConversations((current) => current.map((item) => (item.id === id ? { ...item, ...conversation } : item)));
+      } catch {
+        toast("Couldn't rename that conversation.", { variant: "error" });
+      }
+    },
+    [api, boardId, toast],
+  );
+
+  const deleteConversation = useCallback(
+    async (id: string) => {
+      try {
+        const result = await api.deleteMoodboardConversation(boardId, id);
+        setConversations(result.conversations);
+        if (id === conversationId) {
+          const next = result.conversations[0]?.id ?? "";
+          setConversationId(next);
+          setMessages(next ? await api.listMoodboardMessages(boardId, next) : []);
+        }
+      } catch {
+        toast("Couldn't delete that conversation.", { variant: "error" });
+      }
+    },
+    [api, boardId, conversationId, toast],
   );
 
   const rescanAgents = useCallback(async () => {
@@ -300,6 +376,8 @@ export function useMoodboardBoard(boardId: string) {
   return {
     detail,
     nodes,
+    conversations,
+    conversationId,
     messages,
     selectedId,
     selectedIds,
@@ -309,12 +387,18 @@ export function useMoodboardBoard(boardId: string) {
     imageModels,
     imageModel,
     loading,
+    agentBusy,
+    imageBusy,
     busy,
     setSelectedId,
     setSelectedIds,
     setRunAgent,
     setRunModel,
     setImageModel,
+    switchConversation,
+    createConversation,
+    renameConversation,
+    deleteConversation,
     updateNodes,
     addNote,
     addSection,

@@ -92,11 +92,17 @@ export function MoodboardScreen({
           <MoodboardAgentPanel
             boardName={board.detail.name}
             messages={board.messages}
-            busy={board.busy}
+            conversations={board.conversations}
+            activeConversationId={board.conversationId}
+            busy={board.agentBusy}
             agents={board.agents}
             agent={board.runAgent}
             model={board.runModel}
             onBack={onBack}
+            onConversationChange={(value) => void board.switchConversation(value)}
+            onCreateConversation={() => void board.createConversation()}
+            onRenameConversation={(id, title) => void board.renameConversation(id, title)}
+            onDeleteConversation={(id) => void board.deleteConversation(id)}
             onAgentChange={(value) => {
               board.setRunAgent(value);
               board.setRunModel("");
@@ -117,6 +123,7 @@ export function MoodboardScreen({
             <MoodboardCanvas
               viewKey={boardId}
               nodes={board.nodes}
+              busy={board.imageBusy}
               selectedIds={board.selectedIds}
               imageModels={board.imageModels}
               imageModel={board.imageModel}

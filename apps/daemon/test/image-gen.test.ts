@@ -33,7 +33,7 @@ test("generateImages is a no-op without an API key", async () => {
   assert.equal(out, html);
 });
 
-test("requestImage routes Azure images through a deployment endpoint with api-key auth", async () => {
+test("requestImage routes Azure v1 image generation with the deployment model in the body", async () => {
   const calls: Array<{ url: string; init?: Parameters<FetchLike>[1] }> = [];
   const fetcher: FetchLike = async (input, init) => {
     calls.push({ url: String(input), init });
@@ -57,12 +57,12 @@ test("requestImage routes Azure images through a deployment endpoint with api-ke
   assert.ok(call);
   assert.equal(
     call.url,
-    "https://dezin-resource.openai.azure.com/openai/deployments/gpt-image-2/images/generations?api-version=2025-04-01-preview",
+    "https://dezin-resource.openai.azure.com/openai/v1/images/generations?api-version=preview",
   );
   const headers = new Headers(call.init?.headers);
   assert.equal(headers.get("api-key"), "azure-key");
   assert.equal(headers.get("authorization"), null);
-  assert.deepEqual(JSON.parse(String(call.init?.body)), { prompt: "a desk lamp", n: 1, size: "1024x1024" });
+  assert.deepEqual(JSON.parse(String(call.init?.body)), { model: "gpt-image-2", prompt: "a desk lamp", n: 1, size: "1024x1024" });
 });
 
 test("requestImageEdit sends the source image as multipart form data", async () => {
@@ -98,7 +98,8 @@ test("requestImageEdit sends the source image as multipart form data", async () 
   const form = call.init?.body as FormData;
   assert.equal(form.get("prompt"), "make it warmer");
   assert.equal(form.get("size"), "1024x1024");
-  const image = form.get("image") as File;
+  assert.equal(form.get("model"), "gpt-image-2-deployment");
+  const image = form.get("image[]") as File;
   assert.equal(image.name, "source.png");
   assert.equal(image.type, "image/png");
   assert.equal(await image.text(), "PNGDATA");

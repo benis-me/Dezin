@@ -65,6 +65,7 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
     models: [
       { id: "gpt-4o", name: "GPT-4o deployment", capabilities: ["Stream", "Tools", "Vision", "JSON"] },
       { id: "gpt-image-1", name: "GPT Image deployment", capabilities: ["Image"] },
+      { id: "gpt-image-2", name: "GPT Image 2 deployment", capabilities: ["Image"] },
     ],
   },
   {

@@ -440,21 +440,71 @@ test("moodboard messages apply agent canvas operations", async () => {
       };
       assert.equal(body.messages[1]?.content, "Added a note.");
       assert.doesNotMatch(body.messages[1]?.content ?? "", /dezin_moodboard_ops/);
-      assert.equal(body.nodes?.length, 1);
+      assert.equal(body.nodes?.length, 2);
       assert.equal(body.nodes?.[0]?.type, "note");
       assert.equal(body.nodes?.[0]?.x, 120);
       assert.equal(body.nodes?.[0]?.y, 140);
       assert.equal(body.nodes?.[0]?.data.content, "Warm material cue");
-      assert.equal(store.listMoodboardNodes(board.id).length, 1);
+      assert.equal(body.nodes?.[1]?.type, "image-generator");
+      assert.equal(body.nodes?.[1]?.data.generatorPrompt, "Layered glass product shot");
+      assert.equal(typeof body.nodes?.[1]?.data.agentConversationId, "string");
+      assert.ok(body.nodes?.[1]?.data.agentConversationId);
+      assert.equal(store.listMoodboardNodes(board.id).length, 2);
     },
     {
       moodboardAgentText: async () => `Added a note.
 
 \`\`\`dezin_moodboard_ops
-[{"type":"add_note","content":"Warm material cue","x":120,"y":140}]
+[{"type":"add_note","content":"Warm material cue","x":120,"y":140},{"type":"add_image_generator","prompt":"Layered glass product shot","x":380,"y":140}]
 \`\`\``,
     },
   );
+});
+
+test("moodboard conversations isolate agent messages", async () => {
+  await withServer(async ({ base, store }) => {
+    const board = store.createMoodboard({ name: "Material board" });
+
+    const detail = (await (await fetch(`${base}/api/moodboards/${board.id}`)).json()) as {
+      activeConversationId: string;
+      conversations: Array<{ id: string; title: string; turns: number }>;
+      messages: unknown[];
+    };
+    assert.equal(detail.conversations.length, 1);
+    assert.equal(detail.conversations[0]?.title, "Conversation 1");
+    assert.equal(detail.messages.length, 0);
+
+    const created = (await (
+      await fetch(`${base}/api/moodboards/${board.id}/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Alternate direction" }),
+      })
+    ).json()) as { id: string; title: string };
+    assert.equal(created.title, "Alternate direction");
+
+    const posted = await fetch(`${base}/api/moodboards/${board.id}/conversations/${created.id}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "Explore cooler references" }),
+    });
+    assert.equal(posted.status, 201);
+
+    const firstMessages = (await (await fetch(`${base}/api/moodboards/${board.id}/conversations/${detail.activeConversationId}/messages`)).json()) as unknown[];
+    const secondMessages = (await (await fetch(`${base}/api/moodboards/${board.id}/conversations/${created.id}/messages`)).json()) as Array<{
+      role: string;
+      content: string;
+      conversationId: string;
+    }>;
+
+    assert.equal(firstMessages.length, 0);
+    assert.equal(secondMessages.length, 2);
+    assert.equal(secondMessages[0]?.conversationId, created.id);
+    assert.equal(secondMessages[0]?.content, "Explore cooler references");
+
+    const conversations = (await (await fetch(`${base}/api/moodboards/${board.id}/conversations`)).json()) as Array<{ id: string; turns: number }>;
+    assert.equal(conversations.find((conversation) => conversation.id === created.id)?.turns, 1);
+  });
 });
 
 test("moodboard agent prompt uses a budgeted working set with a budgeted context path", () => {

@@ -43,15 +43,20 @@ import type { VisualQaRunner } from "./visual-qa.ts";
 import { handleGenerateProjectTitle, type TitleGenerator } from "./title-handler.ts";
 import {
   handleCreateMoodboard,
+  handleCreateMoodboardConversation,
   handleDeleteMoodboard,
+  handleDeleteMoodboardConversation,
   handleGenerateMoodboardImage,
   handleGetMoodboard,
+  handleListMoodboardConversationMessages,
+  handleListMoodboardConversations,
   handleListMoodboardMessages,
   handleListMoodboardNodes,
   handleListMoodboards,
   handlePatchMoodboard,
   handlePostMoodboardMessage,
   handlePutMoodboardNodes,
+  handleRenameMoodboardConversation,
   handleServeMoodboardAsset,
   handleUploadMoodboardAsset,
 } from "./moodboard-handler.ts";
@@ -343,6 +348,36 @@ const routes: Route[] = [
     method: "PUT",
     pattern: "/api/moodboards/:id/nodes",
     handler: (req, res, params, deps) => handlePutMoodboardNodes(req, res, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/moodboards/:id/conversations",
+    handler: (_req, res, params, deps) => handleListMoodboardConversations(res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/moodboards/:id/conversations",
+    handler: (req, res, params, deps) => handleCreateMoodboardConversation(req, res, params, deps),
+  },
+  {
+    method: "PATCH",
+    pattern: "/api/moodboards/:id/conversations/:cid",
+    handler: (req, res, params, deps) => handleRenameMoodboardConversation(req, res, params, deps),
+  },
+  {
+    method: "DELETE",
+    pattern: "/api/moodboards/:id/conversations/:cid",
+    handler: (_req, res, params, deps) => handleDeleteMoodboardConversation(res, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/moodboards/:id/conversations/:cid/messages",
+    handler: (_req, res, params, deps) => handleListMoodboardConversationMessages(res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/moodboards/:id/conversations/:cid/messages",
+    handler: (req, res, params, deps) => handlePostMoodboardMessage(req, res, params, deps),
   },
   {
     method: "GET",

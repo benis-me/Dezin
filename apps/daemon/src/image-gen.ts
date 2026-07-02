@@ -50,6 +50,23 @@ function azureApiVersion(opts: ImageGenOpts): string {
   return opts.apiVersion?.trim() || "preview";
 }
 
+function azureResourceUrl(opts: ImageGenOpts): URL {
+  const url = new URL(opts.baseUrl.endsWith("/") ? opts.baseUrl : `${opts.baseUrl}/`);
+  const path = url.pathname.replace(/\/+$/, "");
+  const openaiIndex = path.indexOf("/openai");
+  url.pathname = openaiIndex >= 0 ? path.slice(0, openaiIndex) || "/" : path || "/";
+  url.search = "";
+  return url;
+}
+
+function azureV1ImageGenerationEndpoint(opts: ImageGenOpts): string {
+  const url = azureResourceUrl(opts);
+  const basePath = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${basePath}/openai/v1/images/generations`;
+  url.searchParams.set("api-version", "preview");
+  return url.toString();
+}
+
 function azureDeploymentEndpoint(opts: ImageGenOpts, operation: "images/generations" | "images/edits"): string {
   const deployment = (opts.model || "gpt-image-1").trim();
   const url = new URL(opts.baseUrl.endsWith("/") ? opts.baseUrl : `${opts.baseUrl}/`);
@@ -68,7 +85,7 @@ function azureDeploymentEndpoint(opts: ImageGenOpts, operation: "images/generati
 }
 
 function imageGenerationEndpoint(opts: ImageGenOpts): string {
-  if (isAzureOpenAi(opts)) return azureDeploymentEndpoint(opts, "images/generations");
+  if (isAzureOpenAi(opts)) return azureV1ImageGenerationEndpoint(opts);
   return `${opts.baseUrl.replace(/\/$/, "")}/images/generations`;
 }
 
@@ -88,7 +105,7 @@ function multipartHeaders(opts: ImageGenOpts): Record<string, string> {
 }
 
 function imagePayload(opts: ImageGenOpts, prompt: string): Record<string, unknown> {
-  if (isAzureOpenAi(opts)) return { prompt, n: 1, size: "1024x1024" };
+  if (isAzureOpenAi(opts)) return { model: opts.model || "gpt-image-1", prompt, n: 1, size: "1024x1024" };
   return { model: opts.model || "gpt-image-1", prompt, n: 1, size: "1024x1024", response_format: "b64_json" };
 }
 
@@ -120,13 +137,13 @@ export async function requestImageEdit(
   form.append("prompt", prompt);
   form.append("n", "1");
   form.append("size", "1024x1024");
+  form.append("model", opts.model || "gpt-image-1");
   if (!isAzureOpenAi(opts)) {
-    form.append("model", opts.model || "gpt-image-1");
     form.append("response_format", "b64_json");
   }
   const imageBytes = new Uint8Array(image.data.length);
   imageBytes.set(image.data);
-  form.append("image", new Blob([imageBytes], { type: image.mimeType }), image.fileName);
+  form.append(isAzureOpenAi(opts) ? "image[]" : "image", new Blob([imageBytes], { type: image.mimeType }), image.fileName);
   const res = await fetchImpl(imageEditEndpoint(opts), {
     method: "POST",
     headers: multipartHeaders(opts),

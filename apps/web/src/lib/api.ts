@@ -121,14 +121,25 @@ export interface SaveMoodboardNodeInput {
 export interface MoodboardMessage {
   id: string;
   boardId: string;
+  conversationId?: string;
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: number;
 }
 
+export interface MoodboardConversation {
+  id: string;
+  boardId: string;
+  title: string;
+  createdAt: number;
+  turns?: number;
+}
+
 export interface MoodboardDetail extends Moodboard {
   assets: MoodboardAsset[];
   nodes: MoodboardNode[];
+  conversations?: MoodboardConversation[];
+  activeConversationId?: string;
   messages: MoodboardMessage[];
 }
 
@@ -404,8 +415,16 @@ export interface ApiClient {
   deleteMoodboard(id: string): Promise<void>;
   listMoodboardNodes(id: string): Promise<MoodboardNode[]>;
   saveMoodboardNodes(id: string, nodes: SaveMoodboardNodeInput[]): Promise<MoodboardNode[]>;
-  listMoodboardMessages(id: string): Promise<MoodboardMessage[]>;
-  postMoodboardMessage(id: string, content: string, options?: { agentCommand?: string; model?: string }): Promise<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>;
+  listMoodboardConversations(id: string): Promise<MoodboardConversation[]>;
+  createMoodboardConversation(id: string, title?: string): Promise<MoodboardConversation>;
+  renameMoodboardConversation(id: string, conversationId: string, title: string): Promise<MoodboardConversation>;
+  deleteMoodboardConversation(id: string, conversationId: string): Promise<{ ok: boolean; conversations: MoodboardConversation[] }>;
+  listMoodboardMessages(id: string, conversationId?: string): Promise<MoodboardMessage[]>;
+  postMoodboardMessage(
+    id: string,
+    content: string,
+    options?: { agentCommand?: string; model?: string; conversationId?: string },
+  ): Promise<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>;
   uploadMoodboardAsset(
     id: string,
     input: { name: string; contentBase64: string; mimeType?: string; width?: number; height?: number },
@@ -413,7 +432,7 @@ export interface ApiClient {
   generateMoodboardImage(
     id: string,
     prompt: string,
-    options?: { x?: number; y?: number; generatorId?: string; model?: string; sourceAssetId?: string },
+    options?: { x?: number; y?: number; generatorId?: string; model?: string; sourceAssetId?: string; conversationId?: string },
   ): Promise<{
     asset: MoodboardAsset & { url: string };
     nodes: MoodboardNode[];
@@ -634,9 +653,24 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     deleteMoodboard: (id) => json<void>(`/api/moodboards/${enc(id)}`, { method: "DELETE" }),
     listMoodboardNodes: (id) => json<MoodboardNode[]>(`/api/moodboards/${enc(id)}/nodes`),
     saveMoodboardNodes: (id, nodes) => json<MoodboardNode[]>(`/api/moodboards/${enc(id)}/nodes`, jsonInit("PUT", { nodes })),
-    listMoodboardMessages: (id) => json<MoodboardMessage[]>(`/api/moodboards/${enc(id)}/messages`),
-    postMoodboardMessage: (id, content, options) =>
-      json<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>(`/api/moodboards/${enc(id)}/messages`, jsonInit("POST", { content, ...options })),
+    listMoodboardConversations: (id) => json<MoodboardConversation[]>(`/api/moodboards/${enc(id)}/conversations`),
+    createMoodboardConversation: (id, title) =>
+      json<MoodboardConversation>(`/api/moodboards/${enc(id)}/conversations`, jsonInit("POST", { title })),
+    renameMoodboardConversation: (id, conversationId, title) =>
+      json<MoodboardConversation>(`/api/moodboards/${enc(id)}/conversations/${enc(conversationId)}`, jsonInit("PATCH", { title })),
+    deleteMoodboardConversation: (id, conversationId) =>
+      json<{ ok: boolean; conversations: MoodboardConversation[] }>(`/api/moodboards/${enc(id)}/conversations/${enc(conversationId)}`, { method: "DELETE" }),
+    listMoodboardMessages: (id, conversationId) =>
+      json<MoodboardMessage[]>(
+        conversationId ? `/api/moodboards/${enc(id)}/conversations/${enc(conversationId)}/messages` : `/api/moodboards/${enc(id)}/messages`,
+      ),
+    postMoodboardMessage: (id, content, options) => {
+      const { conversationId, ...bodyOptions } = options ?? {};
+      return json<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>(
+        conversationId ? `/api/moodboards/${enc(id)}/conversations/${enc(conversationId)}/messages` : `/api/moodboards/${enc(id)}/messages`,
+        jsonInit("POST", { content, ...bodyOptions }),
+      );
+    },
     uploadMoodboardAsset: (id, input) =>
       json<MoodboardAsset & { url: string }>(`/api/moodboards/${enc(id)}/assets`, jsonInit("POST", input)),
     generateMoodboardImage: (id, prompt, options) =>
