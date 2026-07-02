@@ -35,7 +35,7 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "openai",
     name: "OpenAI",
-    protocol: "OpenAI · AI SDK",
+    protocol: "OpenAI API",
     baseUrl: "https://api.openai.com/v1",
     imageRuntime: "openai-compatible",
     docsUrl: "https://platform.openai.com/docs",
@@ -55,16 +55,27 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "azure-openai",
     name: "Azure OpenAI",
-    protocol: "Azure OpenAI · AI SDK",
-    baseUrl: "https://{resource}.openai.azure.com/openai",
+    protocol: "Azure OpenAI",
+    baseUrl: "https://{resource}.openai.azure.com",
     imageRuntime: "azure-openai",
     keyPlaceholder: "Azure API key",
     fields: [
       { key: "apiKey", label: "API Key", placeholder: "Azure API key", required: true, secret: true },
-      { key: "baseUrl", label: "Endpoint", placeholder: "https://{resource}.openai.azure.com/openai", required: true },
-      { key: "organization", label: "API version", placeholder: "2025-04-01-preview", help: "Use deployment names as model IDs." },
+      {
+        key: "baseUrl",
+        label: "Resource endpoint",
+        placeholder: "https://{resource}.openai.azure.com",
+        required: true,
+        help: "Use the Azure resource endpoint from the Azure portal. Deployment names belong in Models below.",
+      },
+      {
+        key: "organization",
+        label: "API version",
+        placeholder: "2025-04-01-preview",
+        help: "Use 2025-04-01-preview for current image deployments unless your resource requires another version.",
+      },
     ],
-    modelHelp: "Use Azure deployment names as model IDs.",
+    modelHelp: "Enter Azure deployment names, not model catalog names.",
     models: [
       { id: "gpt-4o", name: "GPT-4o deployment", capabilities: ["Stream", "Tools", "Vision", "JSON"] },
       { id: "gpt-image-1", name: "GPT Image deployment", capabilities: ["Image"] },
@@ -74,7 +85,7 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "anthropic",
     name: "Anthropic",
-    protocol: "Anthropic Native",
+    protocol: "Anthropic API",
     baseUrl: "https://api.anthropic.com/v1",
     keyPlaceholder: "sk-ant-...",
     fields: [
@@ -89,7 +100,7 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "gemini",
     name: "Gemini",
-    protocol: "Gemini Native · AI SDK",
+    protocol: "Google AI Studio",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta",
     imageRuntime: "google",
     keyPlaceholder: "AIza...",
@@ -105,7 +116,7 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "openrouter",
     name: "OpenRouter",
-    protocol: "OpenAI Compatible · AI SDK",
+    protocol: "OpenAI compatible",
     baseUrl: "https://openrouter.ai/api/v1",
     keyPlaceholder: "sk-or-...",
     fields: [
@@ -121,7 +132,7 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "ollama",
     name: "Ollama",
-    protocol: "Local OpenAI Compatible · AI SDK",
+    protocol: "Local OpenAI compatible",
     baseUrl: "http://127.0.0.1:11434/v1",
     keyPlaceholder: "optional",
     fields: [
@@ -136,7 +147,7 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "openai-compatible",
     name: "OpenAI Compatible",
-    protocol: "OpenAI Compatible · AI SDK",
+    protocol: "OpenAI compatible",
     baseUrl: "",
     imageRuntime: "openai-compatible",
     keyPlaceholder: "API key",

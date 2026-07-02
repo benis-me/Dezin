@@ -628,7 +628,7 @@ test("SettingsScreen shows provider status per provider and hides unsupported pr
       },
       "azure-openai": {
         enabled: false,
-        baseUrl: "https://{resource}.openai.azure.com/openai",
+        baseUrl: "https://{resource}.openai.azure.com",
         models: JSON.stringify({ id: "azure-image-deployment", capabilities: ["Image"] }),
         organization: "preview",
       },
@@ -644,6 +644,8 @@ test("SettingsScreen shows provider status per provider and hides unsupported pr
 
   expect(await screen.findByLabelText("OpenAI enabled")).toHaveClass("bg-[var(--success)]");
   expect(screen.getByLabelText("Azure OpenAI disabled")).toHaveClass("bg-border-strong");
+  expect(screen.queryByText(/AI SDK|Native/)).toBeNull();
+  expect(screen.getByText("Google AI Studio")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Mock/ })).toBeNull();
   for (const removed of ["Midjourney", "Fal", "WaveSpeed", "Vertex AI"]) {
     expect(screen.queryByRole("button", { name: new RegExp(removed) })).toBeNull();
@@ -667,6 +669,19 @@ test("SettingsScreen shows provider status per provider and hides unsupported pr
       }),
     ),
   );
+});
+
+test("SettingsScreen shows Azure OpenAI fields as resource endpoint plus deployment names", async () => {
+  const user = userEvent.setup();
+  renderSettings();
+
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+  const azure = await screen.findByLabelText("Azure OpenAI disabled");
+  await user.click(azure.closest("button")!);
+
+  expect(await screen.findByLabelText("Resource endpoint")).toHaveAttribute("placeholder", "https://{resource}.openai.azure.com");
+  expect(screen.getByLabelText("API version")).toHaveAttribute("placeholder", "2025-04-01-preview");
+  expect(screen.getByText(/Enter Azure deployment names/)).toBeInTheDocument();
 });
 
 test("SettingsScreen clears image runtime when enabling a text-only provider", async () => {
@@ -777,7 +792,7 @@ test("SettingsScreen preserves edited provider endpoint and models when switchin
   expect(await screen.findByText("GPT Live Image")).toBeInTheDocument();
 
   await user.click(providerButton("Azure OpenAI"));
-  expect(await screen.findByLabelText("Endpoint")).toHaveValue("https://{resource}.openai.azure.com/openai");
+  expect(await screen.findByLabelText("Resource endpoint")).toHaveValue("https://{resource}.openai.azure.com");
   await user.click(providerButton("OpenAI"));
 
   expect(await screen.findByLabelText("Base URL")).toHaveValue("https://openai.local/v1");

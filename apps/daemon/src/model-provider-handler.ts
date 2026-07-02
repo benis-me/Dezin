@@ -9,6 +9,7 @@ type ProviderModel = {
 };
 
 type ConnectionResult = {
+  message?: string;
   modelsFound?: number;
 };
 
@@ -24,7 +25,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
-  "azure-openai": "https://{resource}.openai.azure.com/openai",
+  "azure-openai": "https://{resource}.openai.azure.com",
   anthropic: "https://api.anthropic.com/v1",
   gemini: "https://generativelanguage.googleapis.com/v1beta",
   openrouter: "https://openrouter.ai/api/v1",
@@ -67,10 +68,24 @@ function geminiModelsEndpoint(baseUrl: string, apiKey: string): string {
   return url.toString();
 }
 
+function azureOpenAiBaseUrl(baseUrl: string): URL {
+  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  const path = url.pathname.replace(/\/+$/, "");
+  const openaiIndex = path.indexOf("/openai");
+  url.pathname =
+    openaiIndex >= 0
+      ? path.slice(0, openaiIndex + "/openai".length)
+      : `${path}/openai`;
+  url.search = "";
+  return url;
+}
+
 function azureModelsEndpoint(baseUrl: string, settings: Settings): string {
-  const url = new URL(modelsEndpoint(baseUrl));
-  const apiVersion = settings.aiProviderOrganization.trim();
-  if (apiVersion && !url.pathname.includes("/v1/")) url.searchParams.set("api-version", apiVersion);
+  const url = azureOpenAiBaseUrl(baseUrl);
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${path}/models`;
+  url.search = "";
+  url.searchParams.set("api-version", settings.aiProviderOrganization.trim() || "2025-04-01-preview");
   return url.toString();
 }
 
@@ -178,7 +193,9 @@ async function fetchProviderModels(settings: Settings, providerId: string, fetch
 
 async function testProviderConnection(settings: Settings, providerId: string, fetchImpl: typeof fetch): Promise<ConnectionResult> {
   const models = await fetchProviderModels(settings, providerId, fetchImpl);
-  return providerId === "azure-openai" ? {} : { modelsFound: models.length };
+  return providerId === "azure-openai"
+    ? { message: "Connected to Azure OpenAI. Deployment names must be entered manually in Models." }
+    : { modelsFound: models.length };
 }
 
 export async function handleTestModelProvider(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
@@ -190,9 +207,10 @@ export async function handleTestModelProvider(req: IncomingMessage, res: ServerR
     sendJson(res, 200, {
       ok: true,
       message:
-        result.modelsFound == null
+        result.message ??
+        (result.modelsFound == null
           ? `Connected to ${providerLabel(providerId)}.`
-          : `Connected to ${providerLabel(providerId)}. Found ${result.modelsFound} ${result.modelsFound === 1 ? "model" : "models"}.`,
+          : `Connected to ${providerLabel(providerId)}. Found ${result.modelsFound} ${result.modelsFound === 1 ? "model" : "models"}.`),
     });
   } catch (err) {
     sendError(res, 502, err instanceof Error ? err.message : "model provider test failed");

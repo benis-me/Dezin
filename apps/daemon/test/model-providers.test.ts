@@ -134,6 +134,42 @@ test("POST /api/model-providers/models does not return the Azure model catalog a
   assert.equal(calls.length, 0);
 });
 
+test("POST /api/model-providers/test checks Azure through the resource openai endpoint", async () => {
+  const calls: FetchCall[] = [];
+  await withServer(
+    {
+      modelProviderFetch: async (input, init) => {
+        calls.push({ url: String(input), init });
+        return new Response(JSON.stringify({ data: [{ id: "gpt-4o" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+    async (base) => {
+      await putSettings(base, {
+        aiProviderId: "azure-openai",
+        apiBaseUrl: "https://dezin-resource.openai.azure.com",
+        apiKey: "azure-local",
+        aiProviderOrganization: "2025-04-01-preview",
+      });
+
+      const res = await fetch(`${base}/api/model-providers/test`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerId: "azure-openai" }),
+      });
+      await assertOk(res);
+      const body = (await res.json()) as { message: string };
+      assert.match(body.message, /Deployment names must be entered manually/);
+    },
+  );
+
+  assert.equal(calls[0]?.url, "https://dezin-resource.openai.azure.com/openai/models?api-version=2025-04-01-preview");
+  const headers = new Headers(calls[0]?.init?.headers);
+  assert.equal(headers.get("api-key"), "azure-local");
+});
+
 test("POST /api/model-providers/models uses Anthropic model-list headers", async () => {
   const calls: FetchCall[] = [];
   await withServer(
@@ -171,7 +207,7 @@ test("POST /api/model-providers/models uses Anthropic model-list headers", async
   assert.equal(headers.get("authorization"), null);
 });
 
-test("POST /api/model-providers/models uses the Gemini native list endpoint", async () => {
+test("POST /api/model-providers/models uses the Google AI Studio model list endpoint", async () => {
   const calls: FetchCall[] = [];
   await withServer(
     {
