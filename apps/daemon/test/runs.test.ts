@@ -102,6 +102,154 @@ test("clean run: streams SSE, persists, serves the artifact back", async () => {
   });
 });
 
+test("run injects referenced moodboard context into the agent message", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = await createProject(base);
+    const board = store.createMoodboard({ name: "Warm references" });
+    const asset = store.createMoodboardAsset(board.id, {
+      kind: "image",
+      fileName: "lobby.png",
+      mimeType: "image/png",
+      width: 1200,
+      height: 900,
+      source: "upload",
+    });
+    const assetDir = join(dataDir, "moodboards", board.id, "assets");
+    mkdirSync(assetDir, { recursive: true });
+    writeFileSync(join(assetDir, `${asset.id}.png`), "png");
+    store.replaceMoodboardNodes(board.id, [
+      {
+        type: "note",
+        x: 20,
+        y: 30,
+        width: 260,
+        height: 120,
+        data: { content: "Warm editorial lighting with quiet hospitality materials", name: "Tone note" },
+      },
+      {
+        type: "image",
+        x: 320,
+        y: 30,
+        width: 320,
+        height: 240,
+        data: { assetId: asset.id, name: "Lobby reference" },
+      },
+    ]);
+    store.addMoodboardMessage(board.id, "user", "Prefer warm wood, low contrast, and editorial restraint.");
+
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        brief: "Use this visual direction for the landing page",
+        moodboardRefs: [{ id: board.id, name: board.name }],
+      }),
+    });
+
+    const events = parseSse(await res.text());
+    assert.equal(res.status, 200);
+    assert.ok(events.some((event) => event.type === "run-done"));
+    const message = runner.calls[0]?.message ?? "";
+    assert.match(message, /Use this visual direction/);
+    assert.match(message, /Referenced Moodboards/);
+    assert.match(message, /Warm references/);
+    assert.match(message, /Manifest:/);
+    assert.match(message, /Read the moodboard files you need/i);
+    assert.doesNotMatch(message, /Warm editorial lighting/);
+    assert.doesNotMatch(message, new RegExp(`${asset.id}\\.png`));
+
+    const runId = events.find((event) => event.type === "run-start")!.runId as string;
+    const manifestPath = join(dataDir, ".runs", runId, "moodboards", "manifest.json");
+    assert.match(message, new RegExp(manifestPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+    const convId = events.find((event) => event.type === "run-start")!.conversationId as string;
+    const userMessage = store.listMessages(convId).find((message) => message.role === "user")!;
+    assert.match(userMessage.content, /Moodboard references/);
+    assert.match(userMessage.content, /Warm references/);
+  });
+});
+
+test("run writes a readable moodboard snapshot bundle for the agent", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = await createProject(base);
+    const board = store.createMoodboard({ name: "Snapshot references" });
+    const asset = store.createMoodboardAsset(board.id, {
+      kind: "image",
+      fileName: "hero-photo.png",
+      mimeType: "image/png",
+      width: 1600,
+      height: 1000,
+      source: "upload",
+    });
+    const assetDir = join(dataDir, "moodboards", board.id, "assets");
+    mkdirSync(assetDir, { recursive: true });
+    writeFileSync(join(assetDir, `${asset.id}.png`), "png");
+    const longNote = `Private board note ${"full context ".repeat(500)}`;
+    store.replaceMoodboardNodes(board.id, [
+      {
+        type: "note",
+        x: 10,
+        y: 20,
+        width: 320,
+        height: 140,
+        data: { name: "Long note", content: longNote },
+      },
+      {
+        type: "image",
+        x: 420,
+        y: 20,
+        width: 320,
+        height: 220,
+        data: { assetId: asset.id, name: "Hero photo" },
+      },
+    ]);
+    store.addMoodboardMessage(board.id, "user", "Use the uploaded hero photo as material.");
+
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        brief: "Use the referenced moodboard when designing",
+        moodboardRefs: [{ id: board.id, name: board.name }],
+      }),
+    });
+
+    const events = parseSse(await res.text());
+    assert.equal(res.status, 200);
+    const runId = events.find((event) => event.type === "run-start")!.runId as string;
+    const bundleRoot = join(dataDir, ".runs", runId, "moodboards");
+    const manifestPath = join(bundleRoot, "manifest.json");
+    assert.equal(existsSync(manifestPath), true);
+
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      boards: Array<{ id: string; files: { nodes: string; assets: string; messages: string; assetFiles: string } }>;
+    };
+    assert.equal(manifest.boards[0]?.id, board.id);
+    const boardFiles = manifest.boards[0]!.files;
+    const nodes = JSON.parse(readFileSync(join(bundleRoot, boardFiles.nodes), "utf8")) as Array<{ data?: { content?: string } }>;
+    const assets = JSON.parse(readFileSync(join(bundleRoot, boardFiles.assets), "utf8")) as Array<{ id: string; fileName: string }>;
+    const messages = JSON.parse(readFileSync(join(bundleRoot, boardFiles.messages), "utf8")) as Array<{ content: string }>;
+    const assetFiles = JSON.parse(readFileSync(join(bundleRoot, boardFiles.assetFiles), "utf8")) as Array<{ id: string; path: string; sourcePath: string; snapshotPath: string | null }>;
+    assert.equal(nodes[0]?.data?.content, longNote);
+    assert.equal(assets[0]?.fileName, "hero-photo.png");
+    assert.equal(messages[0]?.content, "Use the uploaded hero photo as material.");
+    assert.match(assetFiles[0]?.path ?? "", new RegExp(`${asset.id}\\.png$`));
+    assert.match(assetFiles[0]?.path ?? "", new RegExp(`\\.runs/${runId}/moodboards/boards/${board.id}/asset-files/`));
+    assert.match(assetFiles[0]?.sourcePath ?? "", new RegExp(`moodboards/${board.id}/assets/${asset.id}\\.png$`));
+    assert.equal(assetFiles[0]?.snapshotPath, `boards/${board.id}/asset-files/${asset.id}.png`);
+    assert.equal(existsSync(assetFiles[0]!.path), true);
+
+    const message = runner.calls[0]?.message ?? "";
+    assert.match(message, new RegExp(manifestPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(message, /read the moodboard files you need/i);
+    assert.doesNotMatch(message, /full context full context full context/);
+  });
+});
+
 test("prototype run folds visual QA findings into score, result, and persisted run", async () => {
   await withRunServer(
     new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }),

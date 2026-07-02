@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileUp, FolderGit2, FolderPlus, Layers, Paperclip, Plus } from "lucide-react";
+import { FileUp, FolderGit2, FolderPlus, Images, Layers, Paperclip, Plus } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,7 +14,7 @@ import {
 import { useToast } from "./Toast.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { native } from "../lib/native.ts";
-import type { Project } from "../lib/api.ts";
+import type { Moodboard, Project } from "../lib/api.ts";
 
 /**
  * The "+" add menu on a composer — Files / Code / Designs. In Electron, file/folder
@@ -27,19 +27,32 @@ export function AttachMenu({
   onPickPaths,
   onContext,
   onReference,
+  onReferenceMoodboard,
 }: {
   onAttachFile?: () => void;
   onPickPaths?: (paths: string[]) => void;
   onContext?: (text: string) => void;
   onReference?: (project: Project) => void;
+  onReferenceMoodboard?: (board: Moodboard) => void;
 }) {
   const { toast } = useToast();
   const api = useApi();
   const figInputRef = useRef<HTMLInputElement>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [moodboards, setMoodboards] = useState<Moodboard[]>([]);
   useEffect(() => {
     let alive = true;
     void api.listProjects().then((p) => alive && setProjects(p.filter((x) => !x.archivedAt))).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+  useEffect(() => {
+    let alive = true;
+    void api
+      .listMoodboards()
+      .then((boards) => alive && setMoodboards(boards.filter((board) => !board.archivedAt)))
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -112,6 +125,25 @@ export function AttachMenu({
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Designs</DropdownMenuLabel>
+        {onReferenceMoodboard ? (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger className="whitespace-nowrap">
+              <Images size={15} strokeWidth={1.75} />
+              Reference a moodboard
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto">
+              {moodboards.length === 0 ? (
+                <DropdownMenuItem disabled>No moodboards</DropdownMenuItem>
+              ) : (
+                moodboards.map((board) => (
+                  <DropdownMenuItem key={board.id} onClick={() => onReferenceMoodboard(board)}>
+                    <span className="truncate">{board.name}</span>
+                  </DropdownMenuItem>
+                ))
+              )}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ) : null}
         <DropdownMenuItem onClick={() => figInputRef.current?.click()}>
           <FileUp size={15} strokeWidth={1.75} />
           Upload .fig file

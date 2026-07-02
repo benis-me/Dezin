@@ -52,12 +52,14 @@ export function ToolButton({
   onClick,
   children,
   disabled = false,
+  className,
 }: {
   label: string;
   active?: boolean;
   onClick: () => void;
   children: ReactNode;
   disabled?: boolean;
+  className?: string;
 }) {
   return (
     <Tooltip>
@@ -66,7 +68,7 @@ export function ToolButton({
           aria-label={label}
           onClick={disabled ? undefined : onClick}
           aria-disabled={disabled}
-          className={cn(active && ACTIVE_TOOL_BUTTON_CLASS, disabled && "cursor-not-allowed opacity-45 hover:bg-transparent hover:text-muted-foreground")}
+          className={cn(className, active && ACTIVE_TOOL_BUTTON_CLASS, disabled && "cursor-not-allowed opacity-45 hover:bg-transparent hover:text-muted-foreground")}
         >
           {children}
         </IconButton>
@@ -323,21 +325,21 @@ export function CanvasActionBar({
         data-moodboard-floating-occluder
         className="app-no-drag absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-card/95 p-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       >
-        <ToolButton label="Select" active={tool === "select"} onClick={() => onToolChange("select")}>
+        <ToolButton label="Select" active={tool === "select"} onClick={() => onToolChange("select")} className="rounded-md">
           <MousePointer2 size={15} strokeWidth={1.75} />
         </ToolButton>
-        <ToolButton label="Hand" active={tool === "hand"} onClick={() => onToolChange("hand")}>
+        <ToolButton label="Hand" active={tool === "hand"} onClick={() => onToolChange("hand")} className="rounded-md">
           <Hand size={15} strokeWidth={1.75} />
         </ToolButton>
         <span className="mx-1 h-5 w-px bg-border" />
-        <ToolButton label="Add note" active={tool === "note"} onClick={() => onToolChange("note")}>
+        <ToolButton label="Add note" active={tool === "note"} onClick={() => onToolChange("note")} className="rounded-md">
           <StickyNote size={15} strokeWidth={1.75} />
         </ToolButton>
-        <ToolButton label="Add section" active={tool === "section"} onClick={() => onToolChange("section")}>
+        <ToolButton label="Add section" active={tool === "section"} onClick={() => onToolChange("section")} className="rounded-md">
           <SquareDashedMousePointer size={15} strokeWidth={1.75} />
         </ToolButton>
         <span className="mx-1 h-5 w-px bg-border" />
-        <ToolButton label="Image generator" onClick={onAddImageGenerator}>
+        <ToolButton label="Image generator" onClick={onAddImageGenerator} className="rounded-md">
           <ImagePlus size={15} strokeWidth={1.75} />
         </ToolButton>
       </div>
@@ -362,10 +364,10 @@ export function CanvasViewBar({
         data-moodboard-floating-occluder
         className="app-no-drag absolute bottom-3 left-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       >
-        <ToolButton label="Layers" active={layersOpen} onClick={onToggleLayers}>
+        <ToolButton label="Layers" active={layersOpen} onClick={onToggleLayers} className="rounded-md">
           <Layers size={15} strokeWidth={1.75} />
         </ToolButton>
-        <ToolButton label="Presentation mode" active={presentationMode} onClick={onTogglePresentation}>
+        <ToolButton label="Presentation mode" active={presentationMode} onClick={onTogglePresentation} className="rounded-md">
           <Presentation size={15} strokeWidth={1.75} />
         </ToolButton>
       </div>
@@ -390,7 +392,7 @@ export function CanvasZoomBar({
         data-moodboard-floating-occluder
         className="app-no-drag absolute bottom-3 right-3 z-20 flex items-center gap-1 rounded-lg border border-border bg-card/95 p-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       >
-        <ToolButton label="Zoom out" onClick={() => onChangeZoom(zoom * 0.88)}>
+        <ToolButton label="Zoom out" onClick={() => onChangeZoom(zoom * 0.88)} className="rounded-md">
           <Minus size={15} strokeWidth={1.75} />
         </ToolButton>
         <DropdownMenu>
@@ -412,7 +414,7 @@ export function CanvasZoomBar({
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
-        <ToolButton label="Zoom in" onClick={() => onChangeZoom(zoom * 1.14)}>
+        <ToolButton label="Zoom in" onClick={() => onChangeZoom(zoom * 1.14)} className="rounded-md">
           <Plus size={15} strokeWidth={1.75} />
         </ToolButton>
       </div>

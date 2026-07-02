@@ -612,7 +612,7 @@ test("queued prompts can be edited, reordered, and removed before they run", asy
   fireEvent.click(screen.getByLabelText("Delete queued prompt 2"));
   expect(screen.getByLabelText("Queued prompt 1")).toHaveValue("third prompt");
   expect(screen.queryByDisplayValue("edited second prompt")).toBeNull();
-  expect(localStorage.getItem("dezin.workspace.queue.p1")).toBe(JSON.stringify(["third prompt"]));
+  expect(localStorage.getItem("dezin.workspace.queue.p1")).toBe(JSON.stringify([{ text: "third prompt" }]));
 
   releaseFirstRun();
   await waitFor(() => expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ brief: "third prompt" }), expect.anything()));
@@ -707,6 +707,107 @@ test("rehydrates the prior transcript and reuses the conversation on the next ru
   fireEvent.click(screen.getByLabelText("Send"));
   expect(await screen.findByText("Continued.")).toBeInTheDocument();
   expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "c1", brief: "tweak it" }), expect.anything());
+});
+
+test("composer references a moodboard for the next project run", async () => {
+  const user = userEvent.setup();
+  const streamRun = vi.fn((input: { brief?: string; moodboardRefs?: Array<{ id: string; name?: string }> }) =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-mood", conversationId: "c1" };
+      yield { type: "turn-end", round: 0, text: `Used ${input.moodboardRefs?.[0]?.name ?? "no moodboard"}.` };
+      yield { type: "run-done", runId: "r-mood", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+    })(),
+  );
+
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        listMoodboards: async () => [
+          { id: "mood-1", name: "Warm references", createdAt: 1, updatedAt: 2, archivedAt: null, coverAssetId: null, coverUrl: null },
+        ],
+        streamRun: streamRun as never,
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const addMenu = await screen.findByRole("button", { name: "Add files and context" });
+  addMenu.focus();
+  fireEvent.pointerDown(addMenu, { button: 0, ctrlKey: false });
+  fireEvent.keyDown(addMenu, { key: "Enter" });
+  await user.click(await screen.findByText("Reference a moodboard"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Warm references" }));
+
+  expect(await screen.findByLabelText("Remove moodboard Warm references")).toBeInTheDocument();
+
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "Use this visual direction" } });
+  await user.click(screen.getByLabelText("Send"));
+
+  await waitFor(() =>
+    expect(streamRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brief: expect.stringContaining("Use this visual direction"),
+        moodboardRefs: [{ id: "mood-1", name: "Warm references" }],
+      }),
+      expect.anything(),
+    ),
+  );
+  expect(screen.queryByLabelText("Remove moodboard Warm references")).toBeNull();
+});
+
+test("queued moodboard references are preserved for the next project run", async () => {
+  const user = userEvent.setup();
+  let releaseFirstRun!: () => void;
+  const firstRunGate = new Promise<void>((resolve) => {
+    releaseFirstRun = resolve;
+  });
+  const streamRun = vi.fn((input: { brief?: string; moodboardRefs?: Array<{ id: string; name?: string }> }) =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: `r-${streamRun.mock.calls.length}`, conversationId: "c1" };
+      if (streamRun.mock.calls.length === 1) await firstRunGate;
+      yield { type: "turn-end", round: 0, text: input.brief ?? "" };
+      yield { type: "run-done", runId: `r-${streamRun.mock.calls.length}`, passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+    })(),
+  );
+
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        listMoodboards: async () => [
+          { id: "mood-1", name: "Warm references", createdAt: 1, updatedAt: 2, archivedAt: null, coverAssetId: null, coverUrl: null },
+        ],
+        streamRun: streamRun as never,
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "First run" } });
+  await user.click(screen.getByLabelText("Send"));
+  await waitFor(() => expect(streamRun).toHaveBeenCalledTimes(1));
+
+  const addMenu = await screen.findByRole("button", { name: "Add files and context" });
+  addMenu.focus();
+  fireEvent.pointerDown(addMenu, { button: 0, ctrlKey: false });
+  fireEvent.keyDown(addMenu, { key: "Enter" });
+  await user.click(await screen.findByText("Reference a moodboard"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Warm references" }));
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "Use queued visual direction" } });
+  await user.click(screen.getByLabelText("Queue"));
+
+  const queuedPrompt = (await screen.findByLabelText("Queued prompt 1")) as HTMLTextAreaElement;
+  expect(queuedPrompt.value).toContain("Warm references");
+  releaseFirstRun();
+
+  await waitFor(() => expect(streamRun).toHaveBeenCalledTimes(2));
+  expect(streamRun.mock.calls[1]?.[0]).toEqual(
+    expect.objectContaining({
+      brief: expect.stringContaining("Use queued visual direction"),
+      moodboardRefs: [{ id: "mood-1", name: "Warm references" }],
+    }),
+  );
 });
 
 test("idle assistant messages expose copy and fork actions on hover", async () => {
@@ -1103,6 +1204,7 @@ test("conversation opens at the bottom and shows an icon-only jump button when s
     expect(jump.textContent).toBe("");
     expect(jump.className).not.toContain("shadow");
     expect(jump.className).not.toContain("before:animate-spin");
+    expect(jump.style.bottom).toBe("calc(100% + 12px)");
 
     fireEvent.click(jump);
     expect(scroll.scrollTop).toBe(1200);

@@ -220,6 +220,7 @@ test("full import/export v2 migrates variants, runs, artifacts, run logs, and ve
     mkdirSync(join(dir, ".variants", main.id), { recursive: true });
     mkdirSync(join(dir, ".versions"), { recursive: true });
     mkdirSync(join(dataDir, ".runs"), { recursive: true });
+    mkdirSync(join(dataDir, ".runs", run.id, "moodboards", "boards", "board-1", "asset-files"), { recursive: true });
     writeFileSync(join(dir, "index.html"), "<main>active variant</main>");
     writeFileSync(join(dir, ".variants", main.id, "index.html"), "<main>main variant</main>");
     writeFileSync(join(dir, ".versions", `${run.id}.html`), "<main>version snapshot</main>");
@@ -227,6 +228,26 @@ test("full import/export v2 migrates variants, runs, artifacts, run logs, and ve
       join(dataDir, ".runs", `${run.id}.jsonl`),
       `${JSON.stringify({ type: "run-start", runId: run.id, conversationId: conv.id, seq: 1 })}\n${JSON.stringify({ type: "run-done", runId: run.id, seq: 2 })}\n`,
     );
+    writeFileSync(
+      join(dataDir, ".runs", run.id, "moodboards", "manifest.json"),
+      JSON.stringify({ format: "dezin-moodboard-run-bundle", runId: run.id, boards: [{ id: "board-1" }] }),
+    );
+    writeFileSync(
+      join(dataDir, ".runs", run.id, "moodboards", "boards", "board-1", "nodes.json"),
+      JSON.stringify([{ type: "note", data: { content: "portable board snapshot" } }]),
+    );
+    writeFileSync(
+      join(dataDir, ".runs", run.id, "moodboards", "boards", "board-1", "asset-files.json"),
+      JSON.stringify([
+        {
+          id: "asset-1",
+          path: join(dataDir, ".runs", run.id, "moodboards", "boards", "board-1", "asset-files", "asset-1.png"),
+          sourcePath: join(dataDir, "moodboards", "board-1", "assets", "asset-1.png"),
+          snapshotPath: "boards/board-1/asset-files/asset-1.png",
+        },
+      ]),
+    );
+    writeFileSync(join(dataDir, ".runs", run.id, "moodboards", "boards", "board-1", "asset-files", "asset-1.png"), "png");
 
     const exported = await fetch(`${base}/api/projects/${project.id}/export?scope=full`);
     assert.equal(exported.status, 200);
@@ -252,6 +273,9 @@ test("full import/export v2 migrates variants, runs, artifacts, run logs, and ve
     assert.equal(exportedEntries.find((e) => e.path === `variants/${main.id}/index.html`)?.data.toString("utf8"), "<main>main variant</main>");
     assert.equal(exportedEntries.find((e) => e.path === `versions/${run.id}.html`)?.data.toString("utf8"), "<main>version snapshot</main>");
     assert.match(exportedEntries.find((e) => e.path === `runs/${run.id}.jsonl`)?.data.toString("utf8") ?? "", /run-start/);
+    assert.match(exportedEntries.find((e) => e.path === `runs/${run.id}/moodboards/manifest.json`)?.data.toString("utf8") ?? "", /dezin-moodboard-run-bundle/);
+    assert.match(exportedEntries.find((e) => e.path === `runs/${run.id}/moodboards/boards/board-1/nodes.json`)?.data.toString("utf8") ?? "", /portable board snapshot/);
+    assert.equal(exportedEntries.find((e) => e.path === `runs/${run.id}/moodboards/boards/board-1/asset-files/asset-1.png`)?.data.toString("utf8"), "png");
 
     const imported = await fetch(`${base}/api/projects/import`, {
       method: "POST",
@@ -284,6 +308,12 @@ test("full import/export v2 migrates variants, runs, artifacts, run logs, and ve
     const importedLog = readFileSync(join(dataDir, ".runs", `${importedRuns[0]!.id}.jsonl`), "utf8");
     assert.match(importedLog, new RegExp(importedRuns[0]!.id));
     assert.doesNotMatch(importedLog, new RegExp(run.id));
+    const importedBundle = JSON.parse(readFileSync(join(dataDir, ".runs", importedRuns[0]!.id, "moodboards", "manifest.json"), "utf8")) as { runId?: string };
+    assert.equal(importedBundle.runId, importedRuns[0]!.id);
+    assert.match(readFileSync(join(dataDir, ".runs", importedRuns[0]!.id, "moodboards", "boards", "board-1", "nodes.json"), "utf8"), /portable board snapshot/);
+    const importedAssetFiles = JSON.parse(readFileSync(join(dataDir, ".runs", importedRuns[0]!.id, "moodboards", "boards", "board-1", "asset-files.json"), "utf8")) as Array<{ path?: string }>;
+    assert.equal(importedAssetFiles[0]?.path, join(dataDir, ".runs", importedRuns[0]!.id, "moodboards", "boards", "board-1", "asset-files", "asset-1.png"));
+    assert.equal(readFileSync(importedAssetFiles[0]!.path!, "utf8"), "png");
   });
 });
 

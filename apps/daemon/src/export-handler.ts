@@ -215,6 +215,7 @@ async function fullProjectEntries(project: Project, files: FileRef[], deps: AppD
     } catch {
       /* run logs are optional for older projects */
     }
+    runEntries.push(...(await entriesFromFiles(`runs/${run.id}`, await walkFiles(join(deps.dataDir, ".runs", run.id)))));
   }
   const entries: ZipEntry[] = [
     { path: MANIFEST_PATH, data: JSON.stringify(manifest, null, 2) },
@@ -449,6 +450,20 @@ function rewriteMappedJson(value: unknown, maps: Record<string, Map<string, stri
   return out;
 }
 
+function rewriteSnapshotPaths(value: unknown, snapshotRoot: string): unknown {
+  if (Array.isArray(value)) return value.map((item) => rewriteSnapshotPaths(item, snapshotRoot));
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    out[key] = rewriteSnapshotPaths(item, snapshotRoot);
+  }
+  if (typeof out.snapshotPath === "string") {
+    const snapshotPath = safeArchivePath(out.snapshotPath);
+    if (snapshotPath) out.path = join(snapshotRoot, snapshotPath);
+  }
+  return out;
+}
+
 function rewriteRunLog(data: Buffer, maps: Record<string, Map<string, string>>): Buffer {
   const lines = data.toString("utf8").split("\n").filter(Boolean);
   const rewritten = lines.map((line) => {
@@ -459,6 +474,21 @@ function rewriteRunLog(data: Buffer, maps: Record<string, Map<string, string>>):
     }
   });
   return Buffer.from(`${rewritten.join("\n")}${rewritten.length ? "\n" : ""}`);
+}
+
+function rewriteRunBundleFile(
+  rel: string,
+  data: Buffer,
+  maps: Record<string, Map<string, string>>,
+  snapshotRoot: string,
+): Buffer {
+  if (!rel.endsWith(".json")) return data;
+  try {
+    const mapped = rewriteMappedJson(JSON.parse(data.toString("utf8")) as unknown, maps);
+    return Buffer.from(JSON.stringify(rewriteSnapshotPaths(mapped, snapshotRoot), null, 2));
+  } catch {
+    return data;
+  }
 }
 
 export async function handleImportProject(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
@@ -622,12 +652,25 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
     messageId: messageMap,
   };
   for (const file of runLogFiles) {
+    if (file.rel.includes("/") || !file.rel.endsWith(".jsonl")) continue;
     const oldRunId = file.rel.endsWith(".jsonl") ? file.rel.slice(0, -".jsonl".length) : file.rel;
     const newRunId = runMap.get(oldRunId);
     if (!newRunId) continue;
     const target = join(deps.dataDir, ".runs", `${newRunId}.jsonl`);
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, rewriteRunLog(file.data, rewriteMaps));
+  }
+
+  for (const file of runLogFiles) {
+    const [oldRunId, ...restParts] = file.rel.split("/");
+    if (!oldRunId || restParts.length === 0) continue;
+    const newRunId = runMap.get(oldRunId);
+    if (!newRunId) continue;
+    const rel = restParts.join("/");
+    const target = safeJoin(join(deps.dataDir, ".runs", newRunId), rel);
+    if (!target) return sendError(res, 422, "invalid source path");
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, rewriteRunBundleFile(rel, file.data, rewriteMaps, join(deps.dataDir, ".runs", newRunId, "moodboards")));
   }
 
   if (project.mode === "standard") void setupImportedStandardProject(project.id, root);

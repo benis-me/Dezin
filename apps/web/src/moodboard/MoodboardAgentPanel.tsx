@@ -8,6 +8,10 @@ import { Markdown } from "../components/Markdown.tsx";
 import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 
+const FLOATING_COMPOSER_FADE_PX = 48;
+const SCROLL_TO_BOTTOM_GAP_PX = 12;
+const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
+
 export function MoodboardAgentPanel({
   boardName,
   messages,
@@ -45,6 +49,9 @@ export function MoodboardAgentPanel({
   const messagesRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stickBottom = useRef(true);
+  const composerOverlayH = composerH + FLOATING_COMPOSER_FADE_PX;
+  const messageBottomPadding = composerOverlayH + MESSAGE_BOTTOM_CLEARANCE_PX;
+  const scrollToBottomBottom = composerOverlayH + SCROLL_TO_BOTTOM_GAP_PX;
 
   useEffect(() => {
     const element = composerRef.current;
@@ -147,7 +154,7 @@ export function MoodboardAgentPanel({
         data-testid="moodboard-agent-messages"
         onScroll={updateBottomState}
         className={cn("min-h-0 flex-1 px-4 pt-5", messages.length > 0 ? "space-y-4 overflow-auto" : "overflow-hidden")}
-        style={messages.length > 0 ? { paddingBottom: composerH + 36 } : undefined}
+        style={messages.length > 0 ? { paddingBottom: messageBottomPadding } : undefined}
       >
         {loading ? (
           <div className="flex h-full flex-col justify-end pb-8">
@@ -211,7 +218,7 @@ export function MoodboardAgentPanel({
               busy &&
                 "overflow-hidden before:absolute before:inset-[-1px] before:rounded-full before:border before:border-primary/20 before:border-t-primary/70 before:content-[''] before:animate-spin",
             )}
-            style={{ bottom: composerH + 16 }}
+            style={{ bottom: scrollToBottomBottom }}
           >
             <ArrowDown size={15} strokeWidth={1.8} aria-hidden />
           </motion.button>
@@ -219,7 +226,7 @@ export function MoodboardAgentPanel({
       </AnimatePresence>
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0">
-        <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
+        <div aria-hidden className="bg-gradient-to-t from-background via-background/90 to-transparent" style={{ height: FLOATING_COMPOSER_FADE_PX }} />
         <div ref={composerRef} className="bg-background px-3 pb-3">
           <div
             onDragOver={(event) => {
