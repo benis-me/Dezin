@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 
 import { cp } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp } from "../src/index.ts";
@@ -130,5 +130,16 @@ test("POST /api/projects/:id/refs saves a ref under .refs, hidden from Files", a
     // .refs is excluded from the Files listing
     const files = (await (await fetch(`${base}/api/projects/${project.id}/files`)).json()) as Array<{ path: string }>;
     assert.ok(!files.some((f) => f.path.includes(".refs")), ".refs is hidden from Files");
+  });
+});
+
+test("preview route rejects encoded traversal in project id", async () => {
+  await withServer(async ({ base, dataDir }) => {
+    const outsideName = `${basename(dataDir)}-outside-secret.txt`;
+    writeFileSync(join(dirname(dataDir), outsideName), "outside-secret");
+
+    const res = await fetch(`${base}/projects/%2e%2e%2f%2e%2e/preview/${outsideName}`);
+    assert.equal(res.status, 400);
+    assert.notEqual(await res.text(), "outside-secret");
   });
 });

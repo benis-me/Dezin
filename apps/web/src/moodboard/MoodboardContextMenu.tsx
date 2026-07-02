@@ -13,8 +13,10 @@ import {
   LockOpen,
   Maximize2,
   Minus,
+  PencilLine,
   Plus,
   RotateCcw,
+  SendHorizontal,
   SquareDashedMousePointer,
   StickyNote,
   Trash2,
@@ -37,6 +39,8 @@ export function MoodboardContextMenu({
   onCopy,
   onPaste,
   onDuplicate,
+  onQuickEdit,
+  onSendToAgent,
   onMoveForward,
   onMoveBackward,
   onBringToFront,
@@ -60,6 +64,8 @@ export function MoodboardContextMenu({
   onCopy?: () => void;
   onPaste?: () => void;
   onDuplicate?: () => void;
+  onQuickEdit?: () => void;
+  onSendToAgent?: () => void;
   onMoveForward?: () => void;
   onMoveBackward?: () => void;
   onBringToFront?: () => void;
@@ -124,6 +130,9 @@ export function MoodboardContextMenu({
         onContextMenu={(event) => event.preventDefault()}
       >
         {targetId ? <MenuLabel>Selection</MenuLabel> : null}
+        {targetId && onSendToAgent ? <MenuButton icon={<SendHorizontal size={14} strokeWidth={1.75} />} label="Send to Agent" shortcut="Enter" onClick={onSendToAgent} /> : null}
+        {targetNode?.type === "image" && onQuickEdit ? <MenuButton icon={<PencilLine size={14} strokeWidth={1.75} />} label="Quick Edit" onClick={onQuickEdit} /> : null}
+        {targetId && (onSendToAgent || onQuickEdit) ? <div className="my-1 h-px bg-border" /> : null}
         {targetId && onCopy ? <MenuButton icon={<ClipboardCopy size={14} strokeWidth={1.75} />} label="Copy" shortcut="Cmd C" onClick={onCopy} /> : null}
         {targetId && onPaste ? <MenuButton icon={<ClipboardPaste size={14} strokeWidth={1.75} />} label="Paste" shortcut="Cmd V" onClick={onPaste} /> : null}
         {targetId && onDuplicate ? <MenuButton icon={<Copy size={14} strokeWidth={1.75} />} label="Duplicate" shortcut="Cmd D" onClick={onDuplicate} /> : null}

@@ -6,16 +6,33 @@ import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import type { DesignSystemCard, Settings } from "../lib/api.ts";
+import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
 import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
 import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
 
 type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
+const SECRET_SETTING_KEYS = ["apiKey", "imageApiKey", "videoApiKey"] as const;
+
+function publishSettingsUpdate(settings: Settings): void {
+  queueMicrotask(() => {
+    window.dispatchEvent(new CustomEvent<Settings>(SETTINGS_UPDATED_EVENT, { detail: settings }));
+  });
+}
+
+function mergeSettingsSaveResponse(current: Settings | null, next: Settings): Settings {
+  const merged = { ...next };
+  for (const key of SECRET_SETTING_KEYS) {
+    if (current) merged[key] = current[key];
+  }
+  return merged;
+}
+
 const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
   { id: "appearance", label: "Appearance", icon: Palette },
-  { id: "provider", label: "Provider", icon: Server },
-  { id: "models", label: "Models", icon: SlidersHorizontal },
+  { id: "provider", label: "Agents", icon: Server },
+  { id: "models", label: "Providers", icon: SlidersHorizontal },
   { id: "quality", label: "Quality", icon: Eye },
   { id: "defaults", label: "Defaults", icon: SlidersHorizontal },
   { id: "instructions", label: "Custom instructions", icon: Type },
@@ -54,15 +71,36 @@ export function SettingsScreen({
     };
   }, [api]);
 
-  const setLocal = (key: keyof Settings, value: string | boolean) => setSettings((s) => (s ? { ...s, [key]: value } : s));
-  const setLocalPatch = (patch: Partial<Settings>) => setSettings((s) => (s ? { ...s, ...patch } : s));
+  const setLocal = (key: keyof Settings, value: string | boolean) =>
+    setSettings((s) => {
+      if (!s) return s;
+      const next = { ...s, [key]: value };
+      publishSettingsUpdate(next);
+      return next;
+    });
+  const setLocalPatch = (patch: Partial<Settings>) =>
+    setSettings((s) => {
+      if (!s) return s;
+      const next = { ...s, ...patch };
+      publishSettingsUpdate(next);
+      return next;
+    });
   const save = (key: keyof Settings, value: string | boolean) => {
     setLocal(key, value);
     void api.updateSettings({ [key]: value } as Partial<Settings>).catch(() => toast("Couldn't save settings.", { variant: "error" }));
   };
   const savePatch = (patch: Partial<Settings>) => {
     setLocalPatch(patch);
-    void api.updateSettings(patch).then((next) => setSettings(next)).catch(() => toast("Couldn't save settings.", { variant: "error" }));
+    void api
+      .updateSettings(patch)
+      .then((next) =>
+        setSettings((current) => {
+          const merged = mergeSettingsSaveResponse(current, next);
+          publishSettingsUpdate(merged);
+          return merged;
+        }),
+      )
+      .catch(() => toast("Couldn't save settings.", { variant: "error" }));
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);

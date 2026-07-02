@@ -1,7 +1,7 @@
 import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
-import { computeMarkupPosition, WorkspaceScreen } from "./WorkspaceScreen.tsx";
+import { computeMarkupPosition, isPreviewBridgeMessage, WorkspaceScreen } from "./WorkspaceScreen.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type { RunEvent } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
@@ -24,6 +24,17 @@ const AGENTS = [
   { id: "claude", command: "claude", available: true, version: "claude 1.2.3", models: ["opus", "sonnet"] },
   { id: "codex", command: "codex", available: true, version: "codex 1.0.0", models: ["gpt-5"] },
 ];
+
+function dispatchPreviewMessage(data: Record<string, unknown>): void {
+  const iframe = screen.getByTitle("Artifact preview") as HTMLIFrameElement;
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: { source: "dezin", ...data },
+      origin: "null",
+      source: iframe.contentWindow,
+    }),
+  );
+}
 
 test("workspace loading state preserves the project split layout", () => {
   render(
@@ -155,6 +166,53 @@ test("refreshing a standard preview revalidates the dev server lease", async () 
   expect(captureProjectCover).toHaveBeenCalledTimes(1);
 });
 
+test("prototype workspace preview iframe omits allow-same-origin", async () => {
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Prototype",
+          skillId: null,
+          designSystemId: "modern-minimal",
+          mode: "prototype",
+          createdAt: 1,
+          updatedAt: 1,
+        }),
+        listFiles: async () => [{ path: "index.html", size: 12 }],
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const iframe = await screen.findByTitle("Artifact preview");
+  await waitFor(() => expect(iframe.getAttribute("src")).toMatch(/^\/projects\/p1\/preview\//));
+  expect(iframe).toHaveAttribute("sandbox");
+  expect(iframe.getAttribute("sandbox") ?? "").not.toContain("allow-same-origin");
+});
+
+test("preview bridge messages must come from the current iframe window", () => {
+  const trustedWindow = window;
+  const iframe = { contentWindow: trustedWindow } as unknown as HTMLIFrameElement;
+
+  const accepted = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "null", source: trustedWindow });
+  expect(isPreviewBridgeMessage(accepted, iframe, "/projects/p1/preview/")).toBe(true);
+
+  const wrongSource = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "null", source: null });
+  expect(isPreviewBridgeMessage(wrongSource, iframe, "/projects/p1/preview/")).toBe(false);
+  expect(isPreviewBridgeMessage(accepted, null, "/projects/p1/preview/")).toBe(false);
+
+  const wrongOrigin = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "https://evil.example", source: trustedWindow });
+  expect(isPreviewBridgeMessage(wrongOrigin, iframe, "/projects/p1/preview/")).toBe(false);
+
+  const standardPreview = "http://127.0.0.1:5300/p1";
+  const standardAccepted = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "http://127.0.0.1:5300", source: trustedWindow });
+  expect(isPreviewBridgeMessage(standardAccepted, iframe, standardPreview)).toBe(true);
+  const standardWrongOrigin = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "null", source: trustedWindow });
+  expect(isPreviewBridgeMessage(standardWrongOrigin, iframe, standardPreview)).toBe(false);
+});
+
 test("standard workspace shows setup and dev-server logs in Standard Doctor", async () => {
   render(
     <ApiProvider
@@ -248,7 +306,7 @@ test("sending a brief streams events into the chat and shows the preview + expor
   // preview iframe gets the previewUrl src
   const iframe = await screen.findByTitle("Artifact preview");
   expect(iframe.getAttribute("src") ?? "").toMatch(/^\/projects\/p1\/preview\//);
-  expect(iframe.getAttribute("sandbox")).toBe("allow-scripts allow-same-origin allow-downloads");
+  expect(iframe.getAttribute("sandbox") ?? "").not.toContain("allow-same-origin");
 
   expect(screen.getByLabelText("Full screen preview")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("tab", { name: /Files/ }));
@@ -651,6 +709,7 @@ test("/projects/new preserves the selected agent and model for the first run", a
       aiProviderEnabled: false,
       aiProviderModels: "gpt-image-1",
       aiProviderOrganization: "",
+      aiProviderProfiles: "",
       visualQaEnabled: false,
     }),
   });
@@ -996,71 +1055,66 @@ test("inspect mode continuously captures real preview element attributes", async
   expect(await within(emptyInspect).findByText("#2563eb")).toBeInTheDocument();
   expect(within(emptyInspect).queryByText("Selection")).toBeNull();
 
-  window.dispatchEvent(
-    new MessageEvent("message", {
-      data: {
-        source: "dezin",
-        type: "selected",
-        selector: "section.hero > h1",
-        tag: "h1",
-        text: "Enterprise pricing made simple",
-        rect: { x: 24, y: 40, w: 320, h: 48 },
-        styles: {
-          display: "block",
-          position: "static",
-          zIndex: "auto",
-          overflow: "visible",
-          flexDirection: "row",
-          justifyContent: "center",
-          alignItems: "baseline",
-          gap: "24px",
-          padding: "12px 16px",
-          margin: "0px",
-          gridTemplateColumns: "none",
-          gridTemplateRows: "none",
-          background: "rgb(255, 255, 255)",
-          backgroundImage: "linear-gradient(rgb(255, 255, 255), rgb(245, 245, 245))",
-          color: "rgb(17, 17, 17)",
-          fontFamily: "Inter, sans-serif",
-          fontSize: "64px",
-          fontWeight: "700",
-          lineHeight: "72px",
-          letterSpacing: "0px",
-          textAlign: "center",
-          textTransform: "none",
-          borderRadius: "0px",
-          opacity: "1",
-          borderTopColor: "rgb(17, 17, 17)",
-          borderTopWidth: "2px",
-          borderTopStyle: "solid",
-          borderRightColor: "rgb(17, 17, 17)",
-          borderRightWidth: "2px",
-          borderRightStyle: "solid",
-          borderBottomColor: "rgb(17, 17, 17)",
-          borderBottomWidth: "2px",
-          borderBottomStyle: "solid",
-          borderLeftColor: "rgb(17, 17, 17)",
-          borderLeftWidth: "2px",
-          borderLeftStyle: "solid",
-          outlineColor: "rgb(0, 0, 0)",
-          outlineWidth: "0px",
-          outlineStyle: "none",
-          boxShadow: "rgba(0, 0, 0, 0.2) 0px 10px 30px",
-          filter: "none",
-          backdropFilter: "blur(12px)",
-          transform: "matrix(1, 0, 0, 1, 0, 0)",
-          mixBlendMode: "normal",
-        },
-        attrs: {
-          id: "hero-title",
-          className: "hero title",
-          role: "heading",
-          ariaLabel: "Hero title",
-          screenLabel: "Hero headline",
-        },
-      },
-    }),
-  );
+  dispatchPreviewMessage({
+    type: "selected",
+    selector: "section.hero > h1",
+    tag: "h1",
+    text: "Enterprise pricing made simple",
+    rect: { x: 24, y: 40, w: 320, h: 48 },
+    styles: {
+      display: "block",
+      position: "static",
+      zIndex: "auto",
+      overflow: "visible",
+      flexDirection: "row",
+      justifyContent: "center",
+      alignItems: "baseline",
+      gap: "24px",
+      padding: "12px 16px",
+      margin: "0px",
+      gridTemplateColumns: "none",
+      gridTemplateRows: "none",
+      background: "rgb(255, 255, 255)",
+      backgroundImage: "linear-gradient(rgb(255, 255, 255), rgb(245, 245, 245))",
+      color: "rgb(17, 17, 17)",
+      fontFamily: "Inter, sans-serif",
+      fontSize: "64px",
+      fontWeight: "700",
+      lineHeight: "72px",
+      letterSpacing: "0px",
+      textAlign: "center",
+      textTransform: "none",
+      borderRadius: "0px",
+      opacity: "1",
+      borderTopColor: "rgb(17, 17, 17)",
+      borderTopWidth: "2px",
+      borderTopStyle: "solid",
+      borderRightColor: "rgb(17, 17, 17)",
+      borderRightWidth: "2px",
+      borderRightStyle: "solid",
+      borderBottomColor: "rgb(17, 17, 17)",
+      borderBottomWidth: "2px",
+      borderBottomStyle: "solid",
+      borderLeftColor: "rgb(17, 17, 17)",
+      borderLeftWidth: "2px",
+      borderLeftStyle: "solid",
+      outlineColor: "rgb(0, 0, 0)",
+      outlineWidth: "0px",
+      outlineStyle: "none",
+      boxShadow: "rgba(0, 0, 0, 0.2) 0px 10px 30px",
+      filter: "none",
+      backdropFilter: "blur(12px)",
+      transform: "matrix(1, 0, 0, 1, 0, 0)",
+      mixBlendMode: "normal",
+    },
+    attrs: {
+      id: "hero-title",
+      className: "hero title",
+      role: "heading",
+      ariaLabel: "Hero title",
+      screenLabel: "Hero headline",
+    },
+  });
 
   await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("Hero headline")).toBeInTheDocument());
   await waitFor(() => {
@@ -1088,25 +1142,20 @@ test("inspect mode continuously captures real preview element attributes", async
   expect(within(inspect).queryByText("Auto layout")).toBeNull();
   expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
 
-  window.dispatchEvent(
-    new MessageEvent("message", {
-      data: {
-        source: "dezin",
-        type: "selected",
-        selector: "button.cta",
-        tag: "button",
-        text: "Start",
-        rect: { x: 64, y: 112, w: 120, h: 40 },
-        styles: {
-          display: "inline-flex",
-          position: "relative",
-          background: "rgb(17, 17, 17)",
-          color: "rgb(255, 255, 255)",
-          fontSize: "16px",
-        },
-      },
-    }),
-  );
+  dispatchPreviewMessage({
+    type: "selected",
+    selector: "button.cta",
+    tag: "button",
+    text: "Start",
+    rect: { x: 64, y: 112, w: 120, h: 40 },
+    styles: {
+      display: "inline-flex",
+      position: "relative",
+      background: "rgb(17, 17, 17)",
+      color: "rgb(255, 255, 255)",
+      fontSize: "16px",
+    },
+  });
 
   await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("BUTTON")).toBeInTheDocument());
   expect(within(screen.getByLabelText("Inspect panel")).getAllByText("button.cta").length).toBeGreaterThan(0);
@@ -1137,19 +1186,14 @@ test("inspect and selection modes keep the preview iframe mounted and use two-st
   await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "select-mode", on: true }, "*"));
   expect(screen.queryByText("Click an element to inspect · Esc to cancel")).toBeNull();
 
-  window.dispatchEvent(
-    new MessageEvent("message", {
-      data: {
-        source: "dezin",
-        type: "selected",
-        selector: "section.hero > h1",
-        tag: "h1",
-        text: "Title",
-        rect: { x: 24, y: 40, w: 320, h: 48 },
-        styles: { display: "block", position: "static" },
-      },
-    }),
-  );
+  dispatchPreviewMessage({
+    type: "selected",
+    selector: "section.hero > h1",
+    tag: "h1",
+    text: "Title",
+    rect: { x: 24, y: 40, w: 320, h: 48 },
+    styles: { display: "block", position: "static" },
+  });
   expect(await within(screen.getByLabelText("Inspect panel")).findByText("H1")).toBeInTheDocument();
 
   fireEvent.keyDown(window, { key: "Escape" });
@@ -1272,18 +1316,13 @@ test("markup prompts include selector, tag, geometry, text, and note for precise
 
   await screen.findByTitle("Artifact preview");
   fireEvent.click(screen.getByLabelText("Select an element"));
-  window.dispatchEvent(
-    new MessageEvent("message", {
-      data: {
-        source: "dezin",
-        type: "selected",
-        selector: "section.hero > h1",
-        tag: "h1",
-        text: "Enterprise pricing made simple",
-        rect: { x: 24, y: 40, w: 320, h: 48 },
-      },
-    }),
-  );
+  dispatchPreviewMessage({
+    type: "selected",
+    selector: "section.hero > h1",
+    tag: "h1",
+    text: "Enterprise pricing made simple",
+    rect: { x: 24, y: 40, w: 320, h: 48 },
+  });
   await user.type(await screen.findByPlaceholderText("Describe the change to this element…"), "Use fewer words");
   await user.click(screen.getByRole("button", { name: "Add" }));
   await user.click(screen.getByLabelText("Send"));

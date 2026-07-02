@@ -39,6 +39,7 @@ import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, 
 import type { Conversation, Variant, DesignSystemCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
+import { previewBridgeOriginForSrc, previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 import { cn } from "../lib/utils.ts";
 
 const TABS = ["Preview", "Files", "Quality", "Versions"] as const;
@@ -108,6 +109,29 @@ function readQueue(projectId: string): QueuedPrompt[] {
   } catch {
     return [];
   }
+}
+
+type PreviewBridgeMessage = {
+  source: "dezin";
+  type?: string;
+  selector?: string;
+  tag?: string;
+  text?: string;
+  rect?: { x: number; y: number; w: number; h: number };
+  styles?: MarkupStyles;
+  attrs?: MarkupAttributes;
+};
+
+export function isPreviewBridgeMessage(event: MessageEvent, iframe: HTMLIFrameElement | null, previewSrc?: string | null): event is MessageEvent<PreviewBridgeMessage> {
+  const data = event.data as Partial<PreviewBridgeMessage> | null;
+  return Boolean(
+    data &&
+      typeof data === "object" &&
+      data.source === "dezin" &&
+      iframe?.contentWindow &&
+      event.source === iframe.contentWindow &&
+      event.origin === previewBridgeOriginForSrc(previewSrc),
+  );
 }
 
 function moodboardReferenceLine(refs: MoodboardRunRef[]): string {
@@ -514,7 +538,7 @@ function briefToName(brief: string): string {
   return t.length === 0 ? "Untitled" : t.length > 48 ? `${t.slice(0, 48)}…` : t;
 }
 
-function convLabel(c: Conversation, i: number): string {
+function convLabel(c: Pick<Conversation, "title">, i: number): string {
   return c.title && c.title !== "Untitled" ? c.title : `Conversation ${i + 1}`;
 }
 
@@ -2508,19 +2532,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   // Element picker — receive the clicked element from the preview bridge.
   useEffect(() => {
     const onMessage = (e: MessageEvent): void => {
-      const d = e.data as
-        | {
-            source?: string;
-            type?: string;
-            selector?: string;
-            tag?: string;
-            text?: string;
-            rect?: { x: number; y: number; w: number; h: number };
-            styles?: MarkupStyles;
-            attrs?: MarkupAttributes;
-          }
-        | null;
-      if (!d || d.source !== "dezin") return;
+      if (!isPreviewBridgeMessage(e, previewIframeRef.current, previewSrc)) return;
+      const d = e.data;
       if (d.type === "selected" && d.selector) {
         const target = { selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: d.rect, styles: d.styles, attrs: d.attrs };
         setInspectedTarget(target);
@@ -2558,7 +2571,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [clearPreviewBridge, setPreviewPickMode]);
+  }, [clearPreviewBridge, previewSrc, setPreviewPickMode]);
 
   useEffect(() => {
     inspectedTargetRef.current = inspectedTarget;
@@ -2918,9 +2931,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       ref={previewIframeRef}
       title="Artifact preview"
       src={previewSrc ?? undefined}
-      // allow-same-origin keeps the preview in-process so the element-picker
-      // bridge receives pointer events (and dev-server modules load without CORS).
-      sandbox={previewSrc?.startsWith("http") ? "allow-scripts allow-same-origin allow-forms" : "allow-scripts allow-same-origin allow-downloads"}
+      sandbox={previewSandboxForSrc(previewSrc)}
       style={{ width: DEVICE_WIDTH[device], maxWidth: "100%" }}
       className={`h-full border-0 bg-white ${device === "desktop" ? "" : "my-3 rounded-lg border border-border"}`}
     />

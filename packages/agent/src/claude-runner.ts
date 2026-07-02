@@ -7,12 +7,11 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { AgentRunner, AgentTurnInput, AgentTurnResult } from "./types.ts";
 import { abortError } from "./types.ts";
 import { parseClaudeStream, parseClaudeLine } from "./claude-stream.ts";
 import { agentSpawnEnv } from "./providers/cli.ts";
+import { assertSuccessfulExit, readArtifactSnapshot, readUpdatedArtifactHtml } from "./runner-utils.ts";
 
 /**
  * A compact transcript of earlier turns, prepended to a turn's message so the agent has the
@@ -39,10 +38,14 @@ export interface SpawnInput {
   args: string[];
   cwd: string;
   stdin: string;
+  /** Optional wall-clock timeout for this spawned turn. Defaults to NodeSpawner's timeout. */
+  timeoutMs?: number;
   /** Called with each stdout chunk as it arrives (for live streaming). */
   onStdout?: (chunk: string) => void;
   /** Abort to terminate the child (a user "Stop"). */
   signal?: AbortSignal;
+  /** Extra environment variables for the spawned process. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface SpawnOutput {
@@ -55,20 +58,73 @@ export interface ProcessSpawner {
   run(input: SpawnInput): Promise<SpawnOutput>;
 }
 
+export interface NodeSpawnerOptions {
+  /** Max wall-clock runtime per process. Default 20 minutes. Set <=0 to disable. */
+  timeoutMs?: number;
+  /** Delay between SIGTERM and SIGKILL during abort/timeout. Default 2 seconds. */
+  killDelayMs?: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
+const DEFAULT_KILL_DELAY_MS = 2000;
+
 /** Real spawner backed by node:child_process. */
 export class NodeSpawner implements ProcessSpawner {
+  private options: NodeSpawnerOptions;
+
+  constructor(options: NodeSpawnerOptions = {}) {
+    this.options = options;
+  }
+
   run(input: SpawnInput): Promise<SpawnOutput> {
     return new Promise<SpawnOutput>((resolve, reject) => {
-      const env = agentSpawnEnv();
+      const env = agentSpawnEnv(input.env);
       if (input.signal?.aborted) return reject(abortError());
-      const child = spawn(input.command, input.args, { cwd: input.cwd, stdio: ["pipe", "pipe", "pipe"], env });
+      const child = spawn(input.command, input.args, {
+        cwd: input.cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+        env,
+        detached: process.platform !== "win32",
+        shell: process.platform === "win32",
+      });
       let stdout = "";
       let stderr = "";
-      const onAbort = (): void => {
-        child.kill("SIGTERM");
+      let timedOut = false;
+      let killTimer: ReturnType<typeof setTimeout> | null = null;
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+      const killChild = (signal: NodeJS.Signals): void => {
+        try {
+          if (child.pid && process.platform !== "win32") {
+            process.kill(-child.pid, signal);
+          } else {
+            child.kill(signal);
+          }
+        } catch {
+          try {
+            child.kill(signal);
+          } catch {
+            /* process already exited */
+          }
+        }
+      };
+      const terminate = (): void => {
+        killChild("SIGTERM");
+        killTimer ??= setTimeout(() => killChild("SIGKILL"), this.options.killDelayMs ?? DEFAULT_KILL_DELAY_MS);
+      };
+      const onAbort = (): void => terminate();
+      const cleanup = (): void => {
+        input.signal?.removeEventListener("abort", onAbort);
+        if (killTimer) clearTimeout(killTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
       };
       input.signal?.addEventListener("abort", onAbort, { once: true });
-      const cleanup = (): void => input.signal?.removeEventListener("abort", onAbort);
+      const timeoutMs = input.timeoutMs ?? this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        timeoutTimer = setTimeout(() => {
+          timedOut = true;
+          terminate();
+        }, timeoutMs);
+      }
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
       child.stdout.on("data", (d: string) => {
@@ -82,6 +138,7 @@ export class NodeSpawner implements ProcessSpawner {
       });
       child.on("close", (code) => {
         cleanup();
+        if (timedOut) return reject(new Error(`${input.command} timed out after ${timeoutMs}ms`));
         if (input.signal?.aborted) return reject(abortError());
         resolve({ stdout, stderr, exitCode: code ?? 0 });
       });
@@ -143,6 +200,7 @@ export class ClaudeCodeRunner implements AgentRunner {
     // turns are prepended as context so the agent follows the conversation, not just the file.
     const content = historyPreamble(input.history) + input.message;
     const stdin = JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
+    const beforeArtifact = await readArtifactSnapshot(input.projectDir, artifactPath);
 
     // Buffer stdout into whole lines and surface each as live activity as it streams.
     let buffer = "";
@@ -158,24 +216,22 @@ export class ClaudeCodeRunner implements AgentRunner {
         }
       : undefined;
 
-    const { stdout } = await spawner.run({
+    const output = await spawner.run({
       command,
       args: this.buildArgs(input.systemPrompt),
       cwd: input.projectDir,
       stdin,
       onStdout,
       signal: input.signal,
+      env: input.env,
     });
 
-    const parsed = parseClaudeStream(stdout);
-
-    // The artifact is whatever the agent wrote to disk in its cwd.
-    let artifactHtml = "";
-    try {
-      artifactHtml = await readFile(join(input.projectDir, artifactPath), "utf8");
-    } catch {
-      artifactHtml = ""; // agent wrote nothing (or a different file) — surface empty
+    assertSuccessfulExit(command, output);
+    const parsed = parseClaudeStream(output.stdout);
+    if (parsed.isError) {
+      throw new Error(`${command} returned an error result${parsed.result ? `: ${parsed.result}` : ""}`);
     }
+    const artifactHtml = await readUpdatedArtifactHtml(input.projectDir, artifactPath, beforeArtifact, command);
 
     return { text: parsed.text, artifactHtml, artifactPath };
   }

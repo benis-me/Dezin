@@ -25,7 +25,7 @@ export function AgentProviderSettings({
   onRescan: () => void;
 }) {
   return (
-    <SettingsPanel title="Provider" desc="Bring your own key. Dezin drives your local coding-agent CLI.">
+    <SettingsPanel title="Agents" desc="Bring your own key. Dezin drives your local coding-agent CLI.">
       <div className="space-y-6">
         <div>
           <div className="flex items-center justify-between">

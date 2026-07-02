@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import type { ImageGenerationParams, MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import {
   allMoodboardNodeIds,
   buildLayerTree,
@@ -34,19 +34,30 @@ import {
 import { useLeaferMoodboardRuntime } from "./useLeaferMoodboardRuntime.ts";
 
 export interface MoodboardCanvasProps {
+  viewKey?: string;
   nodes: MoodboardNode[];
   selectedIds: string[];
   busy?: boolean;
   imageModels?: string[];
   imageModel?: string;
+  imageProviderId?: string;
+  moodboardAssets?: MoodboardAsset[];
   onImageModelChange?: (model: string) => void;
   onSelectIds: (ids: string[]) => void;
   onNodesChange: (nodes: SaveMoodboardNodeInput[]) => void;
   onAddNote: (point?: { x: number; y: number }) => void;
   onAddSection: (point?: { x: number; y: number; width?: number; height?: number }) => void;
-  onAddImageGenerator: (point?: { x: number; y: number }) => void;
+  onAddImageGenerator: (point?: { x: number; y: number }, data?: Record<string, unknown>) => string | void;
   onUploadFiles: (files: FileList | null, point?: { x: number; y: number }) => void;
-  onGenerateImage: (node: MoodboardNode, prompt: string) => Promise<void>;
+  onUploadReferenceFiles?: (files: FileList | null) => Promise<MoodboardAsset[]>;
+  referencePickActive?: boolean;
+  onReferenceNodePick?: (node: MoodboardNode) => void;
+  onGenerateImage: (
+    node: MoodboardNode,
+    prompt: string,
+    options?: { sourceAssetId?: string; referenceAssetIds?: string[]; params?: ImageGenerationParams },
+  ) => Promise<void>;
+  onSendToAgent?: (nodes: MoodboardNode[]) => void;
   onTopbarControlsChange?: (controls: MoodboardCanvasTopbarControls | null) => void;
 }
 
@@ -59,6 +70,9 @@ export function useMoodboardCanvasController({
   onAddSection,
   onAddImageGenerator,
   onUploadFiles,
+  referencePickActive = false,
+  onReferenceNodePick,
+  viewKey,
 }: MoodboardCanvasProps) {
   const [tool, setTool] = useState<MoodboardCanvasTool>("select");
   const [layersOpen, setLayersOpen] = useState(() => readInitialLayersOpen());
@@ -76,11 +90,15 @@ export function useMoodboardCanvasController({
   const onAddSectionRef = useRef(onAddSection);
   const onAddImageGeneratorRef = useRef(onAddImageGenerator);
   const onUploadFilesRef = useRef(onUploadFiles);
+  const referencePickActiveRef = useRef(referencePickActive);
+  const onReferenceNodePickRef = useRef(onReferenceNodePick);
   const clipboardRef = useRef<SaveMoodboardNodeInput[]>([]);
   const historyRef = useRef<MoodboardHistoryState>({ undoStack: [], redoStack: [] });
   const temporaryHandToolRef = useRef<MoodboardCanvasTool | null>(null);
+  const initialFitViewKeyRef = useRef<string | null>(null);
   const syncNodeInputsInRuntimeRef = useRef<(inputs: SaveMoodboardNodeInput[], idsToReselect?: string[]) => void>(() => {});
   const refreshSelectionInRuntimeRef = useRef<(ids?: string[]) => void>(() => {});
+  const selectIdsInRuntimeRef = useRef<(ids: string[]) => void>(() => {});
 
   useEffect(() => {
     nodesRef.current = nodes;
@@ -107,7 +125,9 @@ export function useMoodboardCanvasController({
     onAddSectionRef.current = onAddSection;
     onAddImageGeneratorRef.current = onAddImageGenerator;
     onUploadFilesRef.current = onUploadFiles;
-  }, [onAddImageGenerator, onAddNote, onAddSection, onNodesChange, onSelectIds, onUploadFiles]);
+    referencePickActiveRef.current = referencePickActive;
+    onReferenceNodePickRef.current = onReferenceNodePick;
+  }, [onAddImageGenerator, onAddNote, onAddSection, onNodesChange, onReferenceNodePick, onSelectIds, onUploadFiles, referencePickActive]);
 
   const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
   const displayNodes = useMemo(() => mergeDraftMoodboardNodes(nodes, draftInputs), [draftInputs, nodes]);
@@ -209,12 +229,20 @@ export function useMoodboardCanvasController({
   );
 
   const handleSelectIds = useCallback((ids: string[]) => {
-    commitSelectionIds(ids);
+    if (referencePickActiveRef.current) {
+      setContextMenu(null);
+      const candidateId = ids.length === 1 ? ids[0] : null;
+      const candidate = candidateId ? nodesRef.current.find((node) => node.id === candidateId) : null;
+      if (candidate?.type === "image") onReferenceNodePickRef.current?.(candidate);
+      window.requestAnimationFrame(() => refreshSelectionInRuntimeRef.current(selectedIdsRef.current));
+      return selectedIdsRef.current;
+    }
+    return commitSelectionIds(ids);
   }, [commitSelectionIds]);
 
   const handleSelect = useCallback(
     (id: string | null) => {
-      handleSelectIds(id ? [id] : []);
+      return handleSelectIds(id ? [id] : []);
     },
     [handleSelectIds],
   );
@@ -557,12 +585,17 @@ export function useMoodboardCanvasController({
   );
 
   const addImageGeneratorAt = useCallback(
-    (point?: { x: number; y: number }) => {
+    (point?: { x: number; y: number }, data?: Record<string, unknown>) => {
       recordHistory();
-      onAddImageGeneratorRef.current(point);
+      const createdId = onAddImageGeneratorRef.current(point, data);
+      if (typeof createdId === "string" && createdId.trim()) {
+        const nextIds = commitSelectionIds([createdId], [...nodesRef.current.map((node) => node.id), createdId]);
+        selectIdsInRuntimeRef.current(nextIds);
+        window.requestAnimationFrame(() => refreshSelectionInRuntimeRef.current(nextIds));
+      }
       setContextMenu(null);
     },
-    [recordHistory],
+    [commitSelectionIds, recordHistory],
   );
 
   const uploadFiles = useCallback(
@@ -575,6 +608,10 @@ export function useMoodboardCanvasController({
 
   const handleBlankTap = useCallback((point: { x: number; y: number }) => {
     setContextMenu(null);
+    if (referencePickActiveRef.current) {
+      window.requestAnimationFrame(() => refreshSelectionInRuntimeRef.current(selectedIdsRef.current));
+      return;
+    }
     if (toolRef.current === "note") {
       addNoteAt(point);
       setTool("select");
@@ -605,7 +642,18 @@ export function useMoodboardCanvasController({
   });
   syncNodeInputsInRuntimeRef.current = runtime.syncNodeInputsInRuntime;
   refreshSelectionInRuntimeRef.current = runtime.refreshSelectionInRuntime;
-  const { changeZoom, fitView, getLastCanvasPoint, hoverInRuntime, selectIdsInRuntime, selectInRuntime, zoom } = runtime;
+  const { changeZoom, fitView, getLastCanvasPoint, hoverInRuntime, runtimeReady, selectIdsInRuntime, zoom } = runtime;
+  selectIdsInRuntimeRef.current = selectIdsInRuntime;
+  const initialFitViewKey = viewKey ?? "default";
+
+  useEffect(() => {
+    if (!runtimeReady || nodes.length === 0 || initialFitViewKeyRef.current === initialFitViewKey) return;
+    const frame = window.requestAnimationFrame(() => {
+      initialFitViewKeyRef.current = initialFitViewKey;
+      fitView();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [fitView, initialFitViewKey, nodes.length, runtimeReady]);
 
   const upload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     uploadFiles(event.target.files);
@@ -614,16 +662,16 @@ export function useMoodboardCanvasController({
 
   const selectLayer = useCallback(
     (id: string) => {
-      handleSelect(id);
-      selectInRuntime(id);
+      const nextIds = handleSelect(id);
+      selectIdsInRuntime(nextIds);
     },
-    [handleSelect, selectInRuntime],
+    [handleSelect, selectIdsInRuntime],
   );
 
   const selectLayers = useCallback(
     (ids: string[]) => {
-      handleSelectIds(ids);
-      selectIdsInRuntime(ids);
+      const nextIds = handleSelectIds(ids);
+      selectIdsInRuntime(nextIds);
     },
     [handleSelectIds, selectIdsInRuntime],
   );
@@ -762,18 +810,29 @@ export function useMoodboardCanvasController({
         if (key === "[") sendNodesToBack(selectedIdsRef.current);
       }
     };
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (!isTemporaryHandShortcut(event) || temporaryHandToolRef.current == null) return;
-      event.preventDefault();
+    const releaseTemporaryHand = () => {
+      if (temporaryHandToolRef.current == null) return;
       const restoreTool = temporaryHandToolRef.current;
       temporaryHandToolRef.current = null;
       if (toolRef.current === "hand") setTool(restoreTool);
     };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (!isTemporaryHandShortcut(event) || temporaryHandToolRef.current == null) return;
+      event.preventDefault();
+      releaseTemporaryHand();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") releaseTemporaryHand();
+    };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", releaseTemporaryHand);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", releaseTemporaryHand);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, getLastCanvasPoint, moveNodesLayerStep, nudgeNodes, pasteCopiedNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
 

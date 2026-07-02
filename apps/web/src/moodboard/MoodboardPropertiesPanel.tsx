@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { Eye, EyeOff, LayoutGrid, Lock, LockOpen, WandSparkles } from "lucide-react";
+import { CopyPlus, Eye, EyeOff, LayoutGrid, Lock, LockOpen, PencilLine, WandSparkles } from "lucide-react";
 import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { Button, Input, Textarea } from "../components/ui/index.ts";
+import { cn } from "../lib/utils.ts";
 import {
   assetUrl,
   dataName,
@@ -19,6 +20,7 @@ import {
   numberFromEvent,
   promptText,
 } from "./canvas-utils.ts";
+import { hasReusableImagePrompt, isGeneratedImageNode } from "./image-generation-params.ts";
 
 const PANEL_WIDTH_KEY = "dezin:moodboard:properties-width";
 const DEFAULT_PANEL_WIDTH = 280;
@@ -30,14 +32,18 @@ export function MoodboardPropertiesPanel({
   onPatch,
   onPatchData,
   onGenerate,
+  onEditImage,
+  onUsePrompt,
 }: {
   node: MoodboardNode;
   onPatch: (patch: Partial<SaveMoodboardNodeInput>) => void;
   onPatchData: (patch: Record<string, unknown>) => void;
   onGenerate: () => void;
+  onEditImage?: () => void;
+  onUsePrompt?: (node: MoodboardNode) => void;
 }) {
   return (
-    <PropertiesPanelFrame>
+    <PropertiesPanelFrame actions={<ImageActionDock node={node} onEditImage={onEditImage} onUsePrompt={onUsePrompt} />}>
       <div className="flex h-10 items-center justify-between gap-3 border-b border-border/70 px-3">
         <div className="min-w-0">
           <p className="truncate text-xs font-medium text-foreground">{layerLabel(node)}</p>
@@ -200,7 +206,7 @@ export function MoodboardMultiPropertiesPanel({
   );
 }
 
-function PropertiesPanelFrame({ children }: { children: ReactNode }) {
+function PropertiesPanelFrame({ children, actions }: { children: ReactNode; actions?: ReactNode }) {
   const reducedMotion = useReducedMotion();
   const [width, setWidth] = useState(() => {
     const storedValue = localStorage.getItem(PANEL_WIDTH_KEY);
@@ -236,9 +242,11 @@ function PropertiesPanelFrame({ children }: { children: ReactNode }) {
 
   return (
     <motion.aside
+      data-testid="moodboard-properties-panel"
       data-moodboard-floating-occluder
-      className="app-no-drag absolute right-3 top-3 z-20 max-h-[calc(100%-5rem)] select-none overflow-auto rounded-md border border-border bg-card/95 text-popover-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
+      className="app-no-drag absolute bottom-4 right-3 top-3 z-20 flex select-none flex-col overflow-hidden rounded-md border border-border bg-card/95 text-popover-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       style={{ width }}
+      onContextMenu={(event) => event.stopPropagation()}
       initial={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
       animate={reducedMotion ? { opacity: 1 } : { opacity: 1, x: 0 }}
       exit={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
@@ -251,8 +259,38 @@ function PropertiesPanelFrame({ children }: { children: ReactNode }) {
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize"
         onMouseDown={startResize}
       />
-      {children}
+      <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+      {actions}
     </motion.aside>
+  );
+}
+
+function ImageActionDock({
+  node,
+  onEditImage,
+  onUsePrompt,
+}: {
+  node: MoodboardNode;
+  onEditImage?: () => void;
+  onUsePrompt?: (node: MoodboardNode) => void;
+}) {
+  if (node.type !== "image" || !onEditImage) return null;
+  const canUsePrompt = Boolean(onUsePrompt) && isGeneratedImageNode(node) && hasReusableImagePrompt(node);
+  return (
+    <div data-testid="moodboard-properties-actions" className="sticky bottom-0 border-t border-border/70 bg-card/95 p-2 backdrop-blur-xl">
+      <div className={cn("grid gap-1.5", canUsePrompt ? "grid-cols-2" : "grid-cols-1")}>
+        <Button size="sm" variant="outline" aria-label="Edit image" className="h-8 gap-1.5 text-xs" onClick={onEditImage}>
+          <PencilLine size={13} strokeWidth={1.75} />
+          Edit
+        </Button>
+        {canUsePrompt ? (
+          <Button size="sm" variant="outline" aria-label="Reuse Prompt" className="h-8 gap-1.5 text-xs" onClick={() => onUsePrompt?.(node)}>
+            <CopyPlus size={13} strokeWidth={1.75} />
+            Reuse Prompt
+          </Button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 

@@ -1,0 +1,243 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Settings } from "../../../packages/core/src/index.ts";
+import { readJsonBody, sendError, sendJson } from "./http-util.ts";
+import type { AppDeps } from "./app.ts";
+import { providerRuntimeConfig } from "./provider-profile-config.ts";
+import { createProviderFetch } from "./provider-fetch.ts";
+
+type ProviderModel = {
+  id: string;
+  name?: string;
+};
+
+type ConnectionResult = {
+  message?: string;
+  modelsFound?: number;
+};
+
+const PROVIDER_LABELS: Record<string, string> = {
+  openai: "OpenAI",
+  "azure-openai": "Azure OpenAI",
+  anthropic: "Anthropic",
+  gemini: "Gemini",
+  fal: "fal",
+  vertex: "Vertex AI",
+  openrouter: "OpenRouter",
+  ollama: "Ollama",
+  "openai-compatible": "OpenAI Compatible",
+};
+
+const DEFAULT_BASE_URLS: Record<string, string> = {
+  openai: "https://api.openai.com/v1",
+  "azure-openai": "https://{resource}.openai.azure.com",
+  anthropic: "https://api.anthropic.com/v1",
+  gemini: "https://generativelanguage.googleapis.com/v1beta",
+  fal: "https://fal.run",
+  vertex: "",
+  openrouter: "https://openrouter.ai/api/v1",
+  ollama: "http://127.0.0.1:11434/v1",
+};
+
+const OPENAI_COMPATIBLE_PROVIDERS = new Set(["openai", "openrouter", "ollama", "openai-compatible"]);
+const MANUAL_MODEL_PROVIDERS = new Set(["fal", "vertex"]);
+
+function providerLabel(providerId: string): string {
+  return PROVIDER_LABELS[providerId] ?? providerId;
+}
+
+function selectedProviderId(body: unknown, settings: Settings): string {
+  return typeof body === "object" && body !== null && typeof (body as { providerId?: unknown }).providerId === "string"
+    ? (body as { providerId: string }).providerId
+    : settings.aiProviderId;
+}
+
+function modelsEndpoint(baseUrl: string): string {
+  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = path.endsWith("/models") ? path : `${path}/models`;
+  return url.toString();
+}
+
+function geminiModelsEndpoint(baseUrl: string, apiKey: string): string {
+  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  const path = url.pathname.replace(/\/+$/, "").replace(/\/openai$/, "");
+  url.pathname = path.endsWith("/models") ? path : `${path}/models`;
+  url.search = "";
+  url.searchParams.set("key", apiKey);
+  return url.toString();
+}
+
+function azureOpenAiBaseUrl(baseUrl: string): URL {
+  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  const path = url.pathname.replace(/\/+$/, "");
+  const openaiIndex = path.indexOf("/openai");
+  url.pathname =
+    openaiIndex >= 0
+      ? path.slice(0, openaiIndex + "/openai".length)
+      : `${path}/openai`;
+  url.search = "";
+  return url;
+}
+
+function azureModelsEndpoint(baseUrl: string, apiVersion: string): string {
+  const url = azureOpenAiBaseUrl(baseUrl);
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${path}/models`;
+  url.search = "";
+  url.searchParams.set("api-version", apiVersion.trim() || "2025-04-01-preview");
+  return url.toString();
+}
+
+function stringField(item: unknown, fields: string[]): string {
+  if (typeof item !== "object" || item === null) return "";
+  for (const field of fields) {
+    const value = (item as Record<string, unknown>)[field];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function normalizeModelId(id: string): string {
+  return id.trim().replace(/^models\//, "").replace(/^publishers\/[^/]+\/models\//, "");
+}
+
+function providerErrorDetail(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  try {
+    const body = JSON.parse(trimmed) as { error?: unknown; message?: unknown; detail?: unknown };
+    if (typeof body.message === "string" && body.message.trim()) return body.message.trim();
+    if (typeof body.error === "string" && body.error.trim()) return body.error.trim();
+    if (typeof body.detail === "string" && body.detail.trim()) return body.detail.trim();
+  } catch {
+    // Use the original provider text when it is not JSON.
+  }
+  return trimmed.slice(0, 240);
+}
+
+function parseModels(body: unknown): ProviderModel[] {
+  const source = Array.isArray(body)
+    ? body
+    : Array.isArray((body as { data?: unknown })?.data)
+      ? (body as { data: unknown[] }).data
+      : Array.isArray((body as { models?: unknown })?.models)
+        ? (body as { models: unknown[] }).models
+        : Array.isArray((body as { publisherModels?: unknown })?.publisherModels)
+          ? (body as { publisherModels: unknown[] }).publisherModels
+          : [];
+  const seen = new Set<string>();
+  const models: ProviderModel[] = [];
+  for (const item of source) {
+    const id = typeof item === "string" ? item : stringField(item, ["id", "model_id", "name"]);
+    const trimmed = normalizeModelId(id);
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    const name = stringField(item, ["display_name", "displayName", "name"]);
+    models.push(name && name !== trimmed ? { id: trimmed, name } : { id: trimmed });
+  }
+  return models;
+}
+
+async function fetchJsonModels(url: string, headers: Record<string, string>, providerId: string, fetchImpl: typeof fetch): Promise<ProviderModel[]> {
+  const res = await fetchImpl(url, { headers });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    const message = providerErrorDetail(detail);
+    throw new Error(`${providerLabel(providerId)} model list request failed (${res.status})${message ? `: ${message}` : ""}`);
+  }
+  const models = parseModels(await res.json());
+  if (models.length === 0) throw new Error(`${providerLabel(providerId)} returned no models.`);
+  return models.slice(0, 200);
+}
+
+function assertConnectionSettings(settings: Settings, providerId: string): { baseUrl: string; apiKey: string; organization: string } {
+  const runtime = providerRuntimeConfig(settings, providerId, DEFAULT_BASE_URLS[providerId] || "");
+  const baseUrl = runtime.baseUrl;
+  if (!baseUrl && providerId !== "vertex") throw new Error("Missing base URL.");
+  const apiKey = runtime.apiKey;
+  if (!apiKey && providerId !== "ollama") throw new Error("Missing API key.");
+  return { baseUrl, apiKey, organization: runtime.organization };
+}
+
+async function fetchProviderModels(settings: Settings, providerId: string, fetchImpl: typeof fetch): Promise<ProviderModel[]> {
+  if (MANUAL_MODEL_PROVIDERS.has(providerId)) {
+    assertConnectionSettings(settings, providerId);
+    throw new Error(`${providerLabel(providerId)} uses preset models in Dezin. Enter custom model IDs manually when needed.`);
+  }
+
+  if (providerId === "anthropic") {
+    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
+    return fetchJsonModels(
+      modelsEndpoint(baseUrl),
+      { accept: "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      providerId,
+      fetchImpl,
+    );
+  }
+
+  if (providerId === "azure-openai") {
+    const { baseUrl, apiKey, organization } = assertConnectionSettings(settings, providerId);
+    return fetchJsonModels(azureModelsEndpoint(baseUrl, organization), { accept: "application/json", "api-key": apiKey }, providerId, fetchImpl);
+  }
+
+  if (providerId === "gemini") {
+    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
+    return fetchJsonModels(geminiModelsEndpoint(baseUrl, apiKey), { accept: "application/json" }, providerId, fetchImpl);
+  }
+
+  if (!OPENAI_COMPATIBLE_PROVIDERS.has(providerId)) {
+    throw new Error(`${providerLabel(providerId)} does not support live model discovery yet.`);
+  }
+
+  const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
+
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+  return fetchJsonModels(modelsEndpoint(baseUrl), headers, providerId, fetchImpl);
+}
+
+async function testProviderConnection(settings: Settings, providerId: string, fetchImpl: typeof fetch): Promise<ConnectionResult> {
+  if (MANUAL_MODEL_PROVIDERS.has(providerId)) {
+    assertConnectionSettings(settings, providerId);
+    return { message: `Connected to ${providerLabel(providerId)}. Using preset models in Dezin.` };
+  }
+  const models = await fetchProviderModels(settings, providerId, fetchImpl);
+  return providerId === "azure-openai"
+    ? { message: "Connected to Azure OpenAI. Deployment names must be entered manually in Models." }
+    : { modelsFound: models.length };
+}
+
+export async function handleTestModelProvider(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
+  const body = await readJsonBody(req);
+  const settings = deps.store.getSettings();
+  const providerId = selectedProviderId(body, settings);
+  try {
+    const result = await testProviderConnection(settings, providerId, createProviderFetch(deps.modelProviderFetch ?? fetch));
+    sendJson(res, 200, {
+      ok: true,
+      message:
+        result.message ??
+        (result.modelsFound == null
+          ? `Connected to ${providerLabel(providerId)}.`
+          : `Connected to ${providerLabel(providerId)}. Found ${result.modelsFound} ${result.modelsFound === 1 ? "model" : "models"}.`),
+    });
+  } catch (err) {
+    sendError(res, 502, err instanceof Error ? err.message : "model provider test failed");
+  }
+}
+
+export async function handleListModelProviderModels(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
+  const body = await readJsonBody(req);
+  const settings = deps.store.getSettings();
+  const providerId = selectedProviderId(body, settings);
+  if (providerId === "azure-openai") {
+    sendError(res, 502, "Azure OpenAI deployment names must be entered manually. Azure's data-plane model list returns a catalog, not your deployed model IDs.");
+    return;
+  }
+  try {
+    const models = await fetchProviderModels(settings, providerId, createProviderFetch(deps.modelProviderFetch ?? fetch));
+    sendJson(res, 200, { models, source: "live" });
+  } catch (err) {
+    sendError(res, 502, err instanceof Error ? err.message : "model discovery failed");
+  }
+}

@@ -23,6 +23,7 @@ export interface ProviderPreset {
   name: string;
   protocol: string;
   baseUrl: string;
+  imageRuntime?: "openai-compatible" | "azure-openai" | "google" | "fal" | "vertex";
   docsUrl?: string;
   keyPlaceholder: string;
   fields: ProviderConfigField[];
@@ -34,8 +35,9 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "openai",
     name: "OpenAI",
-    protocol: "OpenAI Responses",
+    protocol: "OpenAI API",
     baseUrl: "https://api.openai.com/v1",
+    imageRuntime: "openai-compatible",
     docsUrl: "https://platform.openai.com/docs",
     keyPlaceholder: "sk-proj-...",
     fields: [
@@ -54,23 +56,36 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
     id: "azure-openai",
     name: "Azure OpenAI",
     protocol: "Azure OpenAI",
-    baseUrl: "https://{resource}.openai.azure.com/openai",
+    baseUrl: "https://{resource}.openai.azure.com",
+    imageRuntime: "azure-openai",
     keyPlaceholder: "Azure API key",
     fields: [
       { key: "apiKey", label: "API Key", placeholder: "Azure API key", required: true, secret: true },
-      { key: "baseUrl", label: "Endpoint", placeholder: "https://{resource}.openai.azure.com/openai/v1/", required: true },
-      { key: "organization", label: "API version", placeholder: "optional", help: "Use deployment names as model IDs." },
+      {
+        key: "baseUrl",
+        label: "Resource endpoint",
+        placeholder: "https://{resource}.openai.azure.com",
+        required: true,
+        help: "Use the Azure resource endpoint from the Azure portal. Deployment names belong in Models below.",
+      },
+      {
+        key: "organization",
+        label: "API version",
+        placeholder: "2025-04-01-preview",
+        help: "Use 2025-04-01-preview for current image deployments unless your resource requires another version.",
+      },
     ],
-    modelHelp: "Use Azure deployment names as model IDs.",
+    modelHelp: "Enter Azure deployment names, not model catalog names.",
     models: [
       { id: "gpt-4o", name: "GPT-4o deployment", capabilities: ["Stream", "Tools", "Vision", "JSON"] },
       { id: "gpt-image-1", name: "GPT Image deployment", capabilities: ["Image"] },
+      { id: "gpt-image-2", name: "GPT Image 2 deployment", capabilities: ["Image"] },
     ],
   },
   {
     id: "anthropic",
     name: "Anthropic",
-    protocol: "Anthropic Native",
+    protocol: "Anthropic API",
     baseUrl: "https://api.anthropic.com/v1",
     keyPlaceholder: "sk-ant-...",
     fields: [
@@ -85,12 +100,13 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "gemini",
     name: "Gemini",
-    protocol: "Gemini / OpenAI",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    protocol: "Google AI Studio",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    imageRuntime: "google",
     keyPlaceholder: "AIza...",
     fields: [
       { key: "apiKey", label: "API Key", placeholder: "AIza...", required: true, secret: true },
-      { key: "baseUrl", label: "OpenAI-compatible URL", placeholder: "https://generativelanguage.googleapis.com/v1beta/openai", required: true },
+      { key: "baseUrl", label: "API URL", placeholder: "https://generativelanguage.googleapis.com/v1beta", required: true },
     ],
     models: [
       { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", capabilities: ["Stream", "Tools", "Vision", "JSON", "Reasoning"] },
@@ -98,9 +114,54 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
     ],
   },
   {
+    id: "fal",
+    name: "fal",
+    protocol: "fal.ai",
+    baseUrl: "https://fal.run",
+    imageRuntime: "fal",
+    docsUrl: "https://fal.ai/docs",
+    keyPlaceholder: "fal_...",
+    fields: [
+      { key: "apiKey", label: "API Key", placeholder: "fal_...", required: true, secret: true },
+      { key: "baseUrl", label: "Base URL", placeholder: "https://fal.run", required: true },
+    ],
+    modelHelp: "Enter fal model IDs such as fal-ai/flux/dev.",
+    models: [
+      { id: "fal-ai/flux/dev", name: "FLUX.1 Dev", capabilities: ["Image", "Vision"] },
+      { id: "fal-ai/flux/schnell", name: "FLUX.1 Schnell", capabilities: ["Image"] },
+      { id: "fal-ai/flux-pro/v1.1-ultra", name: "FLUX Pro 1.1 Ultra", capabilities: ["Image"] },
+      { id: "fal-ai/imagen4/preview", name: "Imagen 4 Preview", capabilities: ["Image"] },
+    ],
+  },
+  {
+    id: "vertex",
+    name: "Vertex AI",
+    protocol: "Google Vertex AI",
+    baseUrl: "",
+    imageRuntime: "vertex",
+    docsUrl: "https://cloud.google.com/vertex-ai/generative-ai/docs",
+    keyPlaceholder: "Vertex Express API key",
+    fields: [
+      { key: "apiKey", label: "API Key", placeholder: "Vertex Express API key", required: true, secret: true },
+      {
+        key: "baseUrl",
+        label: "Base URL",
+        placeholder: "optional",
+        help: "Leave empty for Vertex Express Mode. Advanced deployments may override the API endpoint.",
+      },
+    ],
+    modelHelp: "Enter Vertex image model IDs. Express Mode uses the API key above.",
+    models: [
+      { id: "imagen-4.0-generate-001", name: "Imagen 4", capabilities: ["Image"] },
+      { id: "imagen-4.0-fast-generate-001", name: "Imagen 4 Fast", capabilities: ["Image"] },
+      { id: "imagen-4.0-ultra-generate-001", name: "Imagen 4 Ultra", capabilities: ["Image"] },
+      { id: "gemini-2.5-flash-image", name: "Gemini 2.5 Flash Image", capabilities: ["Image", "Vision"] },
+    ],
+  },
+  {
     id: "openrouter",
     name: "OpenRouter",
-    protocol: "OpenAI Compatible",
+    protocol: "OpenAI compatible",
     baseUrl: "https://openrouter.ai/api/v1",
     keyPlaceholder: "sk-or-...",
     fields: [
@@ -116,7 +177,7 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "ollama",
     name: "Ollama",
-    protocol: "Local OpenAI Compatible",
+    protocol: "Local OpenAI compatible",
     baseUrl: "http://127.0.0.1:11434/v1",
     keyPlaceholder: "optional",
     fields: [
@@ -131,92 +192,14 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
   {
     id: "openai-compatible",
     name: "OpenAI Compatible",
-    protocol: "OpenAI Compatible",
+    protocol: "OpenAI compatible",
     baseUrl: "",
+    imageRuntime: "openai-compatible",
     keyPlaceholder: "API key",
     fields: [
       { key: "apiKey", label: "API Key", placeholder: "API key", secret: true },
       { key: "baseUrl", label: "Base URL", placeholder: "https://your-gateway.example/v1", required: true },
     ],
     models: [{ id: "model-id", capabilities: ["Stream", "Tools", "Vision", "JSON"] }],
-  },
-  {
-    id: "vertex-ai",
-    name: "Vertex AI",
-    protocol: "Vertex AI",
-    baseUrl: "https://aiplatform.googleapis.com/v1",
-    keyPlaceholder: "OAuth / access token",
-    fields: [
-      { key: "apiKey", label: "Access Token", placeholder: "OAuth bearer token", required: true, secret: true },
-      { key: "baseUrl", label: "Service URL", placeholder: "https://aiplatform.googleapis.com/v1", required: true },
-      { key: "organization", label: "Project / Location", placeholder: "project-id:us-central1", required: true },
-    ],
-    models: [
-      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", capabilities: ["Stream", "Vision", "Reasoning"] },
-      { id: "imagen-4.0-generate", name: "Imagen 4", capabilities: ["Image"] },
-    ],
-  },
-  {
-    id: "fal",
-    name: "Fal",
-    protocol: "Fal",
-    baseUrl: "https://fal.run",
-    keyPlaceholder: "fal-...",
-    fields: [
-      { key: "apiKey", label: "API Key", placeholder: "fal-...", required: true, secret: true },
-      { key: "baseUrl", label: "Base URL", placeholder: "https://fal.run", required: true },
-    ],
-    models: [
-      { id: "fal-ai/flux-pro", name: "FLUX Pro", capabilities: ["Image"] },
-      { id: "fal-ai/veo3", name: "Veo 3", capabilities: ["Video"] },
-    ],
-  },
-  {
-    id: "wavespeed",
-    name: "WaveSpeed",
-    protocol: "WaveSpeed",
-    baseUrl: "https://api.wavespeed.ai/api/v3",
-    keyPlaceholder: "wavespeed key",
-    fields: [
-      { key: "apiKey", label: "API Key", placeholder: "WaveSpeed API key", required: true, secret: true },
-      { key: "baseUrl", label: "Base URL", placeholder: "https://api.wavespeed.ai/api/v3", required: true },
-    ],
-    models: [
-      { id: "wavespeed-ai/flux-kontext-pro", name: "FLUX Kontext Pro", capabilities: ["Image"] },
-      { id: "wavespeed-ai/wan-2.1", name: "WAN 2.1", capabilities: ["Video"] },
-    ],
-  },
-  {
-    id: "volcengine",
-    name: "Volcengine Ark",
-    protocol: "Volcengine Ark",
-    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-    keyPlaceholder: "ARK API key",
-    fields: [
-      { key: "apiKey", label: "ARK API Key", placeholder: "ARK API key", required: true, secret: true },
-      { key: "baseUrl", label: "Base URL", placeholder: "https://ark.cn-beijing.volces.com/api/v3", required: true },
-    ],
-    models: [{ id: "doubao-seedream-3-0-t2i", name: "Seedream 3.0 T2I", capabilities: ["Image"] }],
-  },
-  {
-    id: "midjourney-gateway",
-    name: "Midjourney Gateway",
-    protocol: "Gateway",
-    baseUrl: "",
-    keyPlaceholder: "Gateway key",
-    fields: [
-      { key: "apiKey", label: "Gateway Key", placeholder: "Gateway API key", required: true, secret: true },
-      { key: "baseUrl", label: "Gateway URL", placeholder: "https://api.ttapi.io or your gateway", required: true },
-    ],
-    models: [{ id: "midjourney", name: "Midjourney", capabilities: ["Image"] }],
-  },
-  {
-    id: "mock",
-    name: "Mock",
-    protocol: "Mock (Offline)",
-    baseUrl: "mock://local",
-    keyPlaceholder: "not required",
-    fields: [{ key: "baseUrl", label: "Local endpoint", placeholder: "mock://local", required: true }],
-    models: [{ id: "mock-image", name: "Mock Image", capabilities: ["Image", "Local"] }],
   },
 ];

@@ -132,13 +132,23 @@ export interface MoodboardAsset {
   mimeType: string;
   width: number | null;
   height: number | null;
-  source: "upload" | "generated";
+  source: "upload" | "generated" | "edited";
   createdAt: number;
+}
+
+export interface MoodboardConversation {
+  id: string;
+  boardId: string;
+  title: string;
+  createdAt: number;
+  /** Number of user turns (populated by listMoodboardConversations). */
+  turns?: number;
 }
 
 export interface MoodboardMessage {
   id: string;
   boardId: string;
+  conversationId?: string;
   role: MessageRole;
   content: string;
   createdAt: number;
@@ -177,6 +187,8 @@ export interface Settings {
   apiBaseUrl: string;
   /** Optional API key (BYOK). Stored locally; never leaves the machine. */
   apiKey: string;
+  /** Redacted API responses set this when a local API key exists. Not persisted as a separate setting. */
+  apiKeyConfigured?: boolean;
   /** Design system applied when a project pins none. */
   defaultDesignSystemId: string;
   /** Project-agnostic instructions injected into every generation. */
@@ -185,12 +197,16 @@ export interface Settings {
   imageApiBaseUrl: string;
   /** Optional image-generation API key. Stored locally; never leaves the machine. */
   imageApiKey: string;
+  /** Redacted API responses set this when a local image API key exists. Not persisted as a separate setting. */
+  imageApiKeyConfigured?: boolean;
   /** Optional image model, e.g. "gpt-image-1" / "dall-e-3". */
   imageModel: string;
   /** Optional video-generation endpoint. Reserved for Moodboard video generation. */
   videoApiBaseUrl: string;
   /** Optional video-generation API key. Stored locally; never leaves the machine. */
   videoApiKey: string;
+  /** Redacted API responses set this when a local video API key exists. Not persisted as a separate setting. */
+  videoApiKeyConfigured?: boolean;
   /** Optional video model, e.g. "sora". */
   videoModel: string;
   /** Selected AI provider in the model platform settings. */
@@ -201,6 +217,8 @@ export interface Settings {
   aiProviderModels: string;
   /** Optional organization/project id for providers that support it. */
   aiProviderOrganization: string;
+  /** Serialized per-provider endpoint/model metadata for the Providers settings panel. */
+  aiProviderProfiles: string;
   /** When enabled, the selected Agent/model reviews a rendered screenshot after prototype runs. */
   visualQaEnabled: boolean;
 }

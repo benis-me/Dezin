@@ -1,6 +1,7 @@
 import { useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Columns2, GripVertical, SlidersHorizontal } from "lucide-react";
 import { Dialog, Segmented } from "./ui/index.ts";
+import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 
 interface Side {
   url: string;
@@ -70,21 +71,22 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
             <div className="flex h-full">
               <div className="relative h-full flex-1 border-r border-border">
                 <span className={`${tag} left-2.5`}>{a.label}</span>
-                <iframe src={a.url} title={a.label} className="h-full w-full bg-white" />
+                <iframe src={a.url} title={a.label} sandbox={previewSandboxForSrc(a.url)} className="h-full w-full bg-white" />
               </div>
               <div className="relative h-full flex-1">
                 <span className={`${tag} left-2.5`}>{b.label}</span>
-                <iframe src={b.url} title={b.label} className="h-full w-full bg-white" />
+                <iframe src={b.url} title={b.label} sandbox={previewSandboxForSrc(b.url)} className="h-full w-full bg-white" />
               </div>
             </div>
           ) : (
             <>
               {/* A fills the pane; B is full-size too but clip-path reveals only its left portion */}
-              <iframe ref={aRef} src={a.url} title={a.label} className="absolute inset-0 h-full w-full bg-white" />
+              <iframe ref={aRef} src={a.url} title={a.label} sandbox={previewSandboxForSrc(a.url)} className="absolute inset-0 h-full w-full bg-white" />
               <iframe
                 ref={bRef}
                 src={b.url}
                 title={b.label}
+                sandbox={previewSandboxForSrc(b.url)}
                 className="absolute inset-0 h-full w-full bg-white"
                 style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}
               />

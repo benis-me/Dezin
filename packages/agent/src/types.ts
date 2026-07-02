@@ -37,6 +37,8 @@ export interface AgentTurnInput {
   onActivity?: (ev: AgentActivity) => void;
   /** Abort to cancel this turn (terminates the spawned CLI). */
   signal?: AbortSignal;
+  /** Extra environment variables for the spawned agent process. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface AgentTurnResult {

@@ -5,8 +5,8 @@
  * (@dezin/core Store) → write the artifact to disk so /projects/:id/preview/ serves it.
  */
 
-import { mkdir, writeFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, readFile, writeFile, stat } from "node:fs/promises";
+import { join, relative } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { composeSystemPrompt } from "../../../packages/prompt/src/index.ts";
 import {
@@ -23,7 +23,7 @@ import {
 import { defaultRegistry } from "../../../packages/design/src/index.ts";
 import { loadSkills, findSkill, type SkillInfo } from "../../../packages/skills/src/index.ts";
 import { loadCraftSections } from "../../../packages/craft/src/index.ts";
-import { lintScore } from "../../../packages/quality/src/index.ts";
+import { lintArtifact, lintScore } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
@@ -34,6 +34,9 @@ import { projectDir } from "./serve-static.ts";
 import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
+import { buildAgentEnv } from "./agent-env.ts";
+import { providerRuntimeConfig } from "./provider-profile-config.ts";
+import { createProviderFetch } from "./provider-fetch.ts";
 import type { AppDeps } from "./app.ts";
 
 // Skills are scanned once and cached for the daemon process.
@@ -53,7 +56,7 @@ export function buildRunner(settings: Settings, override: { agentCommand?: strin
   const provider = getProvider(command);
   if (provider) return provider.createRunner({ command, model });
 
-  const base = command.split("/").pop() ?? command;
+  const base = (command.split(/[\\/]/).pop() ?? command).replace(/\.(?:exe|cmd|bat|ps1)$/i, "");
   return new GenericCliRunner({ id: base, command, model, config: { buildArgs: (m, p) => [...(m ? ["--model", m] : []), p] } });
 }
 
@@ -83,6 +86,37 @@ function startPreviewPoller(file: string, onChange: (mtimeMs: number) => void): 
   return () => {
     active = false;
   };
+}
+
+const STANDARD_LINT_EXTENSIONS = new Set([".css", ".html", ".js", ".jsx", ".ts", ".tsx"]);
+const STANDARD_LINT_SKIP_DIRS = new Set([".git", "dist", "node_modules", "version-worktrees"]);
+
+async function collectStandardLintSurface(root: string, maxBytes = 2_000_000): Promise<string> {
+  const chunks: string[] = [];
+  let used = 0;
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (used >= maxBytes) return;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!STANDARD_LINT_SKIP_DIRS.has(entry.name)) await walk(path);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const ext = entry.name.slice(entry.name.lastIndexOf("."));
+      if (!STANDARD_LINT_EXTENSIONS.has(ext)) continue;
+      const text = await readFile(path, "utf8").catch(() => "");
+      if (!text) continue;
+      const budget = maxBytes - used;
+      const clipped = text.slice(0, budget);
+      used += clipped.length;
+      chunks.push(`\n/* file: ${relative(root, path)} */\n${clipped}`);
+    }
+  };
+  await walk(root);
+  return chunks.join("\n");
 }
 
 interface RunBody {
@@ -167,17 +201,19 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const settings = store.getSettings();
   const runAgentCommand = body.agentCommand || settings.agentCommand || "claude";
   const runModel = body.model || settings.model || undefined;
+  const agentEnv = buildAgentEnv(settings, runAgentCommand);
+  const imageRuntime = providerRuntimeConfig(settings, settings.aiProviderId);
+  const imageBaseUrl = imageRuntime.baseUrl || settings.imageApiBaseUrl;
+  const imageApiKey = imageRuntime.apiKey || settings.imageApiKey;
   // deps.runner is the test override; production builds from settings (live changes apply).
   const runner = deps.runner ?? buildRunner(settings, { agentCommand: body.agentCommand, model: body.model });
 
   const project = store.getProject(body.projectId);
   if (!project) return sendError(res, 404, "project not found");
 
-  const conversation = body.conversationId
-    ? store.getConversation(body.conversationId)
-    : store.createConversation(project.id);
-  if (!conversation) return sendError(res, 404, "conversation not found");
-  if (conversation.projectId !== project.id) return sendError(res, 400, "conversation does not belong to project");
+  let conversation = body.conversationId ? store.getConversation(body.conversationId) : null;
+  if (body.conversationId && !conversation) return sendError(res, 404, "conversation not found");
+  if (conversation && conversation.projectId !== project.id) return sendError(res, 400, "conversation does not belong to project");
 
   const mainVariant = store.ensureMainVariant(project.id);
   const targetVariantId = body.variantId ?? store.getActiveVariantId(project.id) ?? mainVariant.id;
@@ -186,6 +222,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   if (project.mode !== "standard" && body.variantId && body.variantId !== store.getActiveVariantId(project.id)) {
     return sendError(res, 409, "targeted variant runs are only supported in standard mode");
   }
+  const activeRun = store.findActiveRun(project.id, targetVariantId);
+  if (activeRun) return sendError(res, 409, "run already in progress for this project variant");
+  conversation ??= store.createConversation(project.id);
   let dir: string;
   try {
     dir = project.mode === "standard" ? await standardVariantArtifactDir(deps, project.id, targetVariantId) : projectDir(deps.dataDir, project.id);
@@ -211,7 +250,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     skill: skill ? { name: skill.name, body: skill.body, mode: skill.mode, libraries: skill.libraries } : undefined,
     userInstructions: settings.customInstructions || undefined,
     craft: craft || undefined,
-    imageGen: Boolean(settings.imageApiKey && settings.imageApiBaseUrl),
+    imageGen: Boolean(imageApiKey && imageBaseUrl),
     mode: project.mode,
   });
 
@@ -222,7 +261,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const history = store
     .listMessages(conversation.id)
     .flatMap(messageToAgentTurn);
-  const run = store.createRun(project.id, conversation.id, targetVariantId);
+  const run = store.createRun(project.id, conversation.id, targetVariantId, undefined, deps.daemonOwnerId);
   const moodboardContext = buildProjectMoodboardContext({
     store,
     dataDir: deps.dataDir,
@@ -325,6 +364,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             if (visible) sse({ type: "activity", round: 0, activity: visible });
           },
           signal: ctrl.signal,
+          env: agentEnv,
         },
         {
           onRetry: (attempt) =>
@@ -355,6 +395,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         { role: "user" as const, content: visibleBrief },
         ...(final.summaryText ? [{ role: "assistant" as const, content: final.summaryText }] : []),
       ];
+      const staticSurface = await collectStandardLintSurface(dir);
+      const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface) : []) as QualityFinding[];
+      if (staticFindings.length) sse({ type: "static-quality", findings: staticFindings });
       let visualFindings: QualityFinding[] = [];
       if (settings.visualQaEnabled) {
         let renderUrl: string | undefined;
@@ -380,12 +423,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         }
         sse({ type: "visual-qa", enabled: settings.visualQaEnabled, findings: visualFindings });
       }
-      const score = settings.visualQaEnabled ? lintScore(visualFindings) : null;
-      const passed = !visualFindings.some((f) => f.severity === "P0");
+      const findings = [...staticFindings, ...visualFindings];
+      const score = lintScore(findings);
+      const passed = !findings.some((f) => f.severity === "P0");
       persistProcess();
       const assistantMessage = store.addMessage(conversation.id, "assistant", final.summaryText);
       persistSteps();
-      const quality = score !== null ? `, quality ${score}/100` : "";
+      const quality = `, quality ${score}/100`;
       const message = passed ? `Done${quality}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
       store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: 0 }));
       store.updateRun(run.id, {
@@ -393,12 +437,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         repairRounds: 0,
         lintPassed: passed,
         score,
-        findings: visualFindings,
+        findings,
         assistantMessageId: assistantMessage.id,
         commitHash: commit.commitHash,
         finishedAt: Date.now(),
       });
-      sse({ type: "run-done", runId: run.id, passed, rounds: 0, score, mode: "standard", findings: visualFindings });
+      sse({ type: "run-done", runId: run.id, passed, rounds: 0, score, mode: "standard", findings });
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
         void (async () => {
@@ -441,6 +485,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       history,
       lint: { maxRounds: body.maxRounds ?? 2 },
       signal: ctrl.signal,
+      env: agentEnv,
       onEvent: (e: GenerateEvent) => {
         if (e.type === "activity") {
           const visible = recordActivity(e.activity);
@@ -478,9 +523,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     // Generate any media the agent requested (data-gen-prompt placeholders → assets/).
     const { html: finalHtml, generated } = await generateImages(
       result.html,
-      { baseUrl: settings.imageApiBaseUrl, apiKey: settings.imageApiKey, model: settings.imageModel },
+      {
+        baseUrl: imageBaseUrl,
+        apiKey: imageApiKey,
+        model: settings.imageModel,
+        providerId: settings.aiProviderId,
+        apiVersion: imageRuntime.organization || settings.aiProviderOrganization,
+      },
       join(dir, "assets"),
-      fetch,
+      createProviderFetch(),
     );
     if (generated > 0) sse({ type: "images", count: generated });
 

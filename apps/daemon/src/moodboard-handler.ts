@@ -1,8 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { extname, join } from "node:path";
-import type { Moodboard, MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
-import { requestImage } from "./image-gen.ts";
+import type { Moodboard, MoodboardAsset, MoodboardConversation, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
+import { requestImage, requestImageEdit, type ImageGenerationParams, type SourceImageInput } from "./image-gen.ts";
 import {
   buildMoodboardAgentContext,
   buildMoodboardAgentPrompt,
@@ -14,6 +15,9 @@ import {
 } from "./moodboard-agent.ts";
 import type { AppDeps } from "./app.ts";
 import { readJsonBody, send, sendError, sendJson } from "./http-util.ts";
+import { buildAgentEnv } from "./agent-env.ts";
+import { providerRuntimeConfig } from "./provider-profile-config.ts";
+import { createProviderFetch } from "./provider-fetch.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -34,8 +38,26 @@ function withCover(board: Moodboard, assets: MoodboardAsset[] = []): Moodboard &
   return { ...board, coverUrl: cover ? assetUrl(board.id, cover.id) : null };
 }
 
+function conversationForBoard(conversation: MoodboardConversation | null, boardId: string): MoodboardConversation | null {
+  return conversation && conversation.boardId === boardId ? conversation : null;
+}
+
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function stringArrayValue(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
 }
 
 function numberValue(value: unknown, fallback: number): number {
@@ -44,6 +66,42 @@ function numberValue(value: unknown, fallback: number): number {
 
 function asObject(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
+}
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value) ? (value as T) : undefined;
+}
+
+function normalizeImageParams(value: unknown): ImageGenerationParams {
+  const input = asObject(value);
+  const params: ImageGenerationParams = {};
+  const quality = enumValue(input.quality, ["auto", "low", "medium", "high"] as const);
+  const background = enumValue(input.background, ["auto", "transparent", "opaque"] as const);
+  const outputFormat = enumValue(input.outputFormat, ["png", "jpeg", "webp"] as const);
+  const moderation = enumValue(input.moderation, ["auto", "low"] as const);
+  const size = typeof input.size === "string" && /^\d{2,5}x\d{2,5}$/.test(input.size) ? (input.size as `${number}x${number}`) : undefined;
+  const aspectRatio =
+    typeof input.aspectRatio === "string" && /^\d{1,2}:\d{1,2}$/.test(input.aspectRatio)
+      ? (input.aspectRatio as `${number}:${number}`)
+      : undefined;
+  const outputCompression =
+    typeof input.outputCompression === "number" && Number.isFinite(input.outputCompression)
+      ? Math.max(0, Math.min(100, Math.round(input.outputCompression)))
+      : undefined;
+  const count = typeof input.count === "number" && Number.isFinite(input.count) ? Math.max(1, Math.min(4, Math.round(input.count))) : undefined;
+  if (quality) params.quality = quality;
+  if (size) params.size = size;
+  if (aspectRatio) params.aspectRatio = aspectRatio;
+  if (background) params.background = background;
+  if (outputFormat) params.outputFormat = outputFormat;
+  if (outputCompression !== undefined) params.outputCompression = outputCompression;
+  if (moderation) params.moderation = moderation;
+  if (count !== undefined) params.count = count;
+  return params;
+}
+
+function hasImageParams(params: ImageGenerationParams): boolean {
+  return Object.keys(params).length > 0;
 }
 
 function extForMime(mimeType: string): string {
@@ -115,7 +173,11 @@ function position(value: unknown, fallback: number): number {
   return Math.round(finiteNumber(value, fallback));
 }
 
-function applyMoodboardAgentOperations(nodes: MoodboardNode[], operations: MoodboardAgentCanvasOperation[]): SaveMoodboardNodeInput[] {
+function applyMoodboardAgentOperations(
+  nodes: MoodboardNode[],
+  operations: MoodboardAgentCanvasOperation[],
+  conversationId?: string,
+): SaveMoodboardNodeInput[] {
   if (!operations.length) return nodes.map(nodeInput);
   const inputs = nodes.map(nodeInput);
   const indexById = new Map(inputs.map((node, index) => [node.id, index]));
@@ -160,7 +222,12 @@ function applyMoodboardAgentOperations(nodes: MoodboardNode[], operations: Moodb
         width: sized(operation.width, 360),
         height: sized(operation.height, 240),
         zIndex: maxZ + addCount + 1,
-        data: { ...(operation.data ?? {}), generatorPrompt: prompt, generatorStatus: "ready" },
+        data: {
+          ...(conversationId ? { agentConversationId: conversationId } : {}),
+          ...(operation.data ?? {}),
+          generatorPrompt: prompt,
+          generatorStatus: "ready",
+        },
       });
       addCount++;
       continue;
@@ -201,11 +268,15 @@ export function handleGetMoodboard(res: ServerResponse, { id }: Record<string, s
   const board = store.getMoodboard(id!);
   if (!board) return sendError(res, 404, "moodboard not found");
   const assets = store.listMoodboardAssets(id!);
+  const conversations = store.listMoodboardConversations(id!);
+  const activeConversationId = conversations[0]?.id ?? store.ensureMoodboardConversation(id!).id;
   sendJson(res, 200, {
     ...withCover(board, assets),
     assets,
     nodes: store.listMoodboardNodes(id!),
-    messages: store.listMoodboardMessages(id!),
+    conversations,
+    activeConversationId,
+    messages: store.listMoodboardMessages(id!, activeConversationId),
   });
 }
 
@@ -227,8 +298,9 @@ export async function handlePatchMoodboard(
   sendJson(res, 200, withCover(store.updateMoodboard(id!, patch), store.listMoodboardAssets(id!)));
 }
 
-export function handleDeleteMoodboard(res: ServerResponse, { id }: Record<string, string>, { store }: AppDeps): void {
+export async function handleDeleteMoodboard(res: ServerResponse, { id }: Record<string, string>, { store, dataDir }: AppDeps): Promise<void> {
   store.deleteMoodboard(id!);
+  await rm(moodboardDir(dataDir, id!), { recursive: true, force: true });
   res.writeHead(204);
   res.end();
 }
@@ -258,10 +330,56 @@ export function handleListMoodboardMessages(res: ServerResponse, { id }: Record<
   sendJson(res, 200, store.listMoodboardMessages(id!));
 }
 
-export async function handlePostMoodboardMessage(
+export function handleListMoodboardConversations(res: ServerResponse, { id }: Record<string, string>, { store }: AppDeps): void {
+  if (!store.getMoodboard(id!)) return sendError(res, 404, "moodboard not found");
+  sendJson(res, 200, store.listMoodboardConversations(id!));
+}
+
+export async function handleCreateMoodboardConversation(
   req: IncomingMessage,
   res: ServerResponse,
   { id }: Record<string, string>,
+  { store }: AppDeps,
+): Promise<void> {
+  if (!store.getMoodboard(id!)) return sendError(res, 404, "moodboard not found");
+  const body = asObject(await readJsonBody(req));
+  sendJson(res, 201, store.createMoodboardConversation(id!, stringValue(body.title) || "Conversation 1"));
+}
+
+export async function handleRenameMoodboardConversation(
+  req: IncomingMessage,
+  res: ServerResponse,
+  { id, cid }: Record<string, string>,
+  { store }: AppDeps,
+): Promise<void> {
+  if (!store.getMoodboard(id!)) return sendError(res, 404, "moodboard not found");
+  const conversation = conversationForBoard(store.getMoodboardConversation(cid!), id!);
+  if (!conversation) return sendError(res, 404, "moodboard conversation not found");
+  const body = asObject(await readJsonBody(req));
+  const title = stringValue(body.title);
+  if (!title) return sendError(res, 400, "title is required");
+  sendJson(res, 200, store.renameMoodboardConversation(cid!, title));
+}
+
+export function handleDeleteMoodboardConversation(res: ServerResponse, { id, cid }: Record<string, string>, { store }: AppDeps): void {
+  if (!store.getMoodboard(id!)) return sendError(res, 404, "moodboard not found");
+  const conversation = conversationForBoard(store.getMoodboardConversation(cid!), id!);
+  if (!conversation) return sendError(res, 404, "moodboard conversation not found");
+  store.deleteMoodboardConversation(cid!);
+  sendJson(res, 200, { ok: true, conversations: store.listMoodboardConversations(id!) });
+}
+
+export function handleListMoodboardConversationMessages(res: ServerResponse, { id, cid }: Record<string, string>, { store }: AppDeps): void {
+  if (!store.getMoodboard(id!)) return sendError(res, 404, "moodboard not found");
+  const conversation = conversationForBoard(store.getMoodboardConversation(cid!), id!);
+  if (!conversation) return sendError(res, 404, "moodboard conversation not found");
+  sendJson(res, 200, store.listMoodboardMessages(id!, cid!));
+}
+
+export async function handlePostMoodboardMessage(
+  req: IncomingMessage,
+  res: ServerResponse,
+  { id, cid }: Record<string, string>,
   { store, dataDir, moodboardAgentText }: AppDeps,
 ): Promise<void> {
   const board = store.getMoodboard(id!);
@@ -271,11 +389,14 @@ export async function handlePostMoodboardMessage(
   if (!content) return sendError(res, 400, "content is required");
   const agentCommand = stringValue(body.agentCommand);
   const model = stringValue(body.model) || undefined;
-  const previousMessages = store.listMoodboardMessages(id!);
-  const user = store.addMoodboardMessage(id!, "user", content);
+  const conversationId = cid || stringValue(body.conversationId) || store.ensureMoodboardConversation(id!).id;
+  const conversation = conversationForBoard(store.getMoodboardConversation(conversationId), id!);
+  if (!conversation) return sendError(res, 404, "moodboard conversation not found");
+  const previousMessages = store.listMoodboardMessages(id!, conversation.id);
+  const user = store.addMoodboardMessage(id!, "user", content, conversation.id);
   const nodes = store.listMoodboardNodes(id!);
   const assets = store.listMoodboardAssets(id!);
-  const messages = store.listMoodboardMessages(id!);
+  const messages = store.listMoodboardMessages(id!, conversation.id);
   const cwd = moodboardDir(dataDir, id!);
   mkdirSync(cwd, { recursive: true });
   const contextPath = join(cwd, "moodboard-context.json");
@@ -284,9 +405,10 @@ export async function handlePostMoodboardMessage(
   let assistantText = localMoodboardReply(nodes, assets);
   if (agentCommand) {
     const prompt = buildMoodboardAgentPrompt({ board, nodes, assets, messages: previousMessages, content, contextPath });
+    const env = buildAgentEnv(store.getSettings(), agentCommand);
     try {
       assistantText = await runMoodboardAgentText(
-        { board, nodes, assets, messages, content, agentCommand, model, prompt, cwd },
+        { board, nodes, assets, messages, content, agentCommand, model, prompt, cwd, env },
         moodboardAgentText,
       );
     } catch (err) {
@@ -296,9 +418,9 @@ export async function handlePostMoodboardMessage(
   }
   const parsed = parseMoodboardAgentOutput(assistantText);
   const savedNodes = parsed.operations.length
-    ? store.replaceMoodboardNodes(id!, applyMoodboardAgentOperations(nodes, parsed.operations))
+    ? store.replaceMoodboardNodes(id!, applyMoodboardAgentOperations(nodes, parsed.operations, conversation.id))
     : undefined;
-  const assistant = store.addMoodboardMessage(id!, "assistant", clippedBlock(parsed.text || "Updated the moodboard."));
+  const assistant = store.addMoodboardMessage(id!, "assistant", clippedBlock(parsed.text || "Updated the moodboard."), conversation.id);
   sendJson(res, 201, { messages: [user, assistant], ...(savedNodes ? { nodes: savedNodes } : {}) });
 }
 
@@ -350,25 +472,82 @@ export async function handleGenerateMoodboardImage(
 ): Promise<void> {
   if (!store.getMoodboard(id!)) return sendError(res, 404, "moodboard not found");
   const settings = store.getSettings();
-  if (!settings.imageApiBaseUrl || !settings.imageApiKey) return sendError(res, 409, "image generation is not configured");
+  const runtime = providerRuntimeConfig(settings, settings.aiProviderId);
+  const imageBaseUrl = runtime.baseUrl || settings.imageApiBaseUrl;
+  const imageApiKey = runtime.apiKey || settings.imageApiKey;
+  const providerCanUseDefaultBaseUrl = settings.aiProviderId === "vertex" || settings.aiProviderId === "fal";
+  if ((!imageBaseUrl && !providerCanUseDefaultBaseUrl) || !imageApiKey) return sendError(res, 409, "image generation is not configured");
   const body = asObject(await readJsonBody(req));
   const prompt = stringValue(body.prompt);
   if (!prompt) return sendError(res, 400, "prompt is required");
   const generatorId = stringValue(body.generatorId);
   const model = stringValue(body.model) || settings.imageModel;
+  const params = normalizeImageParams(body.params);
+  const hasParams = hasImageParams(params);
+  const conversationId = stringValue(body.conversationId);
+  const notifyConversation = conversationId ? conversationForBoard(store.getMoodboardConversation(conversationId), id!) : null;
+  if (conversationId && !notifyConversation) return sendError(res, 404, "moodboard conversation not found");
+  const sourceAssetId = stringValue(body.sourceAssetId);
+  const sourceAsset = sourceAssetId ? store.getMoodboardAsset(sourceAssetId) : null;
+  if (sourceAssetId && (!sourceAsset || sourceAsset.boardId !== id)) return sendError(res, 404, "source asset not found");
+  const sourceFile =
+    sourceAsset != null ? join(moodboardAssetsDir(dataDir, id!), `${sourceAsset.id}${extForMime(sourceAsset.mimeType)}`) : "";
+  if (sourceAsset && !existsSync(sourceFile)) return sendError(res, 404, "source asset file not found");
+  const referenceAssetIds = stringArrayValue(body.referenceAssetIds).filter((assetId) => assetId !== sourceAssetId);
+  const referenceImages: SourceImageInput[] = [];
+  for (const referenceAssetId of referenceAssetIds) {
+    const referenceAsset = store.getMoodboardAsset(referenceAssetId);
+    if (!referenceAsset || referenceAsset.boardId !== id) return sendError(res, 404, "reference asset not found");
+    const referenceFile = join(moodboardAssetsDir(dataDir, id!), `${referenceAsset.id}${extForMime(referenceAsset.mimeType)}`);
+    if (!existsSync(referenceFile)) return sendError(res, 404, "reference asset file not found");
+    referenceImages.push({
+      data: readFileSync(referenceFile),
+      mimeType: referenceAsset.mimeType,
+      fileName: referenceAsset.fileName,
+    });
+  }
 
-  const b64 = await requestImage(
-    { baseUrl: settings.imageApiBaseUrl, apiKey: settings.imageApiKey, model },
-    prompt,
-    fetch,
-  );
+  const imageOpts = {
+    baseUrl: imageBaseUrl,
+    apiKey: imageApiKey,
+    model,
+    providerId: settings.aiProviderId,
+    apiVersion: runtime.organization || settings.aiProviderOrganization,
+    ...(referenceImages.length ? { referenceImages } : {}),
+    ...(hasParams ? { params } : {}),
+  };
+  const statusMessages = notifyConversation
+    ? [store.addMoodboardMessage(id!, "assistant", `${sourceAsset ? "Editing" : "Generating"} image: ${prompt}`, notifyConversation.id)]
+    : [];
+  let b64: string;
+  try {
+    const providerFetch = createProviderFetch();
+    b64 = sourceAsset
+      ? await requestImageEdit(
+          imageOpts,
+          prompt,
+          { data: readFileSync(sourceFile), mimeType: sourceAsset.mimeType, fileName: sourceAsset.fileName },
+          providerFetch,
+        )
+      : await requestImage(imageOpts, prompt, providerFetch);
+  } catch (err) {
+    if (notifyConversation) {
+      store.addMoodboardMessage(
+        id!,
+        "assistant",
+        `${sourceAsset ? "Image edit" : "Image generation"} failed: ${err instanceof Error ? clippedBlock(err.message, 180) : "request failed"}`,
+        notifyConversation.id,
+      );
+    }
+    throw err;
+  }
   const asset = store.createMoodboardAsset(id!, {
     kind: "image",
-    fileName: "generated.png",
+    fileName: sourceAsset ? "edited.png" : "generated.png",
     mimeType: "image/png",
-    width: 1024,
-    height: 1024,
-    source: "generated",
+    width: sourceAsset?.width ?? 1024,
+    height: sourceAsset?.height ?? 1024,
+    source: sourceAsset ? "edited" : "generated",
   });
   const dir = moodboardAssetsDir(dataDir, id!);
   mkdirSync(dir, { recursive: true });
@@ -379,43 +558,79 @@ export async function handleGenerateMoodboardImage(
   const x = numberValue(body.x, generator ? generator.x + generator.width + 24 : 80 + nodes.length * 24);
   const y = numberValue(body.y, generator ? generator.y : 80 + nodes.length * 24);
   const maxZ = Math.max(0, ...nodes.map((node) => node.zIndex ?? 0));
-  const updatedNodes = generator
-    ? nodes.map((node) =>
+  const replaceGenerator = Boolean(generator && !sourceAsset);
+  const imageData = {
+    assetId: asset.id,
+    url: assetUrl(id!, asset.id),
+    prompt,
+    model,
+    source: sourceAsset ? "edited" : "generated",
+    ...(hasParams ? { generationParams: params } : {}),
+    ...(sourceAsset ? { sourceAssetId } : {}),
+    ...(referenceAssetIds.length ? { referenceAssetIds } : {}),
+  };
+  const updatedNodes: SaveMoodboardNodeInput[] = generator
+    ? nodes.map<SaveMoodboardNodeInput>((node) =>
         node.id === generator.id
-          ? {
-              type: node.type,
-              x: node.x,
-              y: node.y,
-              width: node.width,
-              height: node.height,
-              rotation: node.rotation,
-              zIndex: node.zIndex,
-              id: node.id,
-              data: {
-                ...node.data,
-                generatorPrompt: prompt,
-                generatorModel: model,
-                generatorStatus: "done",
-                resultAssetId: asset.id,
-                resultUrl: assetUrl(id!, asset.id),
-              },
-            }
+          ? replaceGenerator
+            ? {
+                type: "image",
+                x: node.x,
+                y: node.y,
+                width: node.width,
+                height: node.height,
+                rotation: node.rotation,
+                zIndex: node.zIndex,
+                id: node.id,
+                data: imageData,
+              }
+            : {
+                type: node.type,
+                x: node.x,
+                y: node.y,
+                width: node.width,
+                height: node.height,
+                rotation: node.rotation,
+                zIndex: node.zIndex,
+                id: node.id,
+                data: {
+                  ...node.data,
+                  generatorPrompt: prompt,
+                  generatorModel: model,
+                  generatorStatus: "done",
+                  resultAssetId: asset.id,
+                  resultUrl: assetUrl(id!, asset.id),
+                  ...(hasParams ? { generationParams: params } : {}),
+                  ...(referenceAssetIds.length ? { referenceAssetIds } : {}),
+                },
+              }
           : node,
       )
     : nodes;
-  const saved = store.replaceMoodboardNodes(id!, [
-    ...updatedNodes,
-    {
-      type: "image",
-      x,
-      y,
-      width: generator ? Math.max(180, generator.width) : 320,
-      height: generator ? Math.max(180, generator.height) : 320,
-      zIndex: maxZ + 1,
-      data: { assetId: asset.id, url: assetUrl(id!, asset.id), prompt, model, source: "generated" },
-    },
-  ]);
-  const user = store.addMoodboardMessage(id!, "user", `Generate image: ${prompt}`);
-  const assistant = store.addMoodboardMessage(id!, "assistant", "Generated an image and placed it on the canvas.");
-  sendJson(res, 201, { asset: { ...asset, url: assetUrl(id!, asset.id) }, nodes: saved, messages: [user, assistant] });
+  const appendedImageNode: SaveMoodboardNodeInput = {
+    type: "image",
+    x,
+    y,
+    width: generator ? Math.max(180, generator.width) : 320,
+    height: generator ? Math.max(180, generator.height) : 320,
+    zIndex: maxZ + 1,
+    data: imageData,
+  };
+  const saved = store.replaceMoodboardNodes(
+    id!,
+    replaceGenerator
+      ? updatedNodes
+      : [...updatedNodes, appendedImageNode],
+  );
+  if (notifyConversation) {
+    statusMessages.push(
+      store.addMoodboardMessage(
+        id!,
+        "assistant",
+        sourceAsset ? "Edited the image and placed the result on the canvas." : "Generated an image and placed it on the canvas.",
+        notifyConversation.id,
+      ),
+    );
+  }
+  sendJson(res, 201, { asset: { ...asset, url: assetUrl(id!, asset.id) }, nodes: saved, messages: statusMessages });
 }

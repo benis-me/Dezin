@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -42,6 +43,34 @@ async function withServer(fn: (ctx: Ctx) => Promise<void>, extraDeps: Partial<Ap
   }
 }
 
+async function rawRequest(
+  base: string,
+  path: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; text: string }> {
+  const url = new URL(path, base);
+  return await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method: options.method ?? "GET",
+        headers: options.headers,
+      },
+      (res) => {
+        let text = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (text += chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+      },
+    );
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
 test("GET /api/health", async () => {
   await withServer(async ({ base }) => {
     const res = await fetch(`${base}/api/health`);
@@ -50,8 +79,90 @@ test("GET /api/health", async () => {
   });
 });
 
-test("project CRUD over HTTP", async () => {
+test("daemon rejects non-local Host headers", async () => {
   await withServer(async ({ base }) => {
+    const res = await rawRequest(base, "/api/health", { headers: { host: "evil.test" } });
+    assert.equal(res.status, 403);
+  });
+});
+
+test("daemon rejects non-local Origin headers on API requests", async () => {
+  await withServer(async ({ base }) => {
+    const res = await rawRequest(base, "/api/projects", {
+      method: "POST",
+      headers: { origin: "https://evil.test", "content-type": "application/json" },
+      body: JSON.stringify({ name: "Drive by" }),
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
+test("daemon enforces token when configured", async () => {
+  await withServer(
+    async ({ base }) => {
+      const missing = await fetch(`${base}/api/health`);
+      assert.equal(missing.status, 401);
+
+      const accepted = await fetch(`${base}/api/health`, { headers: { authorization: "Bearer test-token" } });
+      assert.equal(accepted.status, 200);
+    },
+    { security: { token: "test-token" } } as Partial<AppDeps>,
+  );
+});
+
+test("daemon serves the web shell without a token but injects the daemon token", async () => {
+  const webDir = mkdtempSync(join(tmpdir(), "dezin-web-shell-"));
+  writeFileSync(join(webDir, "index.html"), "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>");
+  try {
+    await withServer(
+      async ({ base }) => {
+        const shell = await fetch(`${base}/`);
+        assert.equal(shell.status, 200);
+        const html = await shell.text();
+        assert.match(html, /window\.__DEZIN_DAEMON_TOKEN__/);
+        assert.match(html, /test-token/);
+
+        const api = await fetch(`${base}/api/projects`);
+        assert.equal(api.status, 401);
+      },
+      { security: { token: "test-token" }, webDir } as Partial<AppDeps>,
+    );
+  } finally {
+    rmSync(webDir, { recursive: true, force: true });
+  }
+});
+
+test("daemon allows static preview reads without a token while protecting APIs", async () => {
+  await withServer(
+    async ({ base, dataDir }) => {
+      const id = "proj-1";
+      mkdirSync(join(dataDir, "projects", id), { recursive: true });
+      writeFileSync(join(dataDir, "projects", id, "index.html"), "<h1>preview</h1>");
+
+      const preview = await fetch(`${base}/projects/${id}/preview/index.html`);
+      assert.equal(preview.status, 200);
+      assert.match(await preview.text(), /preview/);
+
+      const api = await fetch(`${base}/api/settings`);
+      assert.equal(api.status, 401);
+    },
+    { security: { token: "test-token" } } as Partial<AppDeps>,
+  );
+});
+
+test("JSON API routes reject non-JSON content types", async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ name: "Plain text JSON" }),
+    });
+    assert.equal(res.status, 415);
+  });
+});
+
+test("project CRUD over HTTP", async () => {
+  await withServer(async ({ base, dataDir }) => {
     // empty list
     assert.deepEqual(await (await fetch(`${base}/api/projects`)).json(), []);
 
@@ -84,15 +195,21 @@ test("project CRUD over HTTP", async () => {
     // list has one
     assert.equal(((await (await fetch(`${base}/api/projects`)).json()) as unknown[]).length, 1);
 
+    const diskDir = join(dataDir, "projects", project.id);
+    mkdirSync(diskDir, { recursive: true });
+    writeFileSync(join(diskDir, "index.html"), "<h1>delete me</h1>");
+    assert.equal(existsSync(diskDir), true);
+
     // delete (idempotent 204)
     const del = await fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" });
     assert.equal(del.status, 204);
     assert.equal((await fetch(`${base}/api/projects/${project.id}`)).status, 404);
+    assert.equal(existsSync(diskDir), false);
   });
 });
 
 test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
-  await withServer(async ({ base }) => {
+  await withServer(async ({ base, dataDir }) => {
     assert.deepEqual(await (await fetch(`${base}/api/moodboards`)).json(), []);
 
     const created = await fetch(`${base}/api/moodboards`, {
@@ -161,6 +278,12 @@ test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
     assert.equal(detail.nodes[0]?.type, "image-generator");
     assert.equal(detail.messages.length, 2);
     assert.ok(detail.coverUrl);
+
+    const diskDir = join(dataDir, "moodboards", board.id);
+    assert.equal(existsSync(diskDir), true);
+    const del = await fetch(`${base}/api/moodboards/${board.id}`, { method: "DELETE" });
+    assert.equal(del.status, 204);
+    assert.equal(existsSync(diskDir), false);
   });
 });
 
@@ -317,21 +440,71 @@ test("moodboard messages apply agent canvas operations", async () => {
       };
       assert.equal(body.messages[1]?.content, "Added a note.");
       assert.doesNotMatch(body.messages[1]?.content ?? "", /dezin_moodboard_ops/);
-      assert.equal(body.nodes?.length, 1);
+      assert.equal(body.nodes?.length, 2);
       assert.equal(body.nodes?.[0]?.type, "note");
       assert.equal(body.nodes?.[0]?.x, 120);
       assert.equal(body.nodes?.[0]?.y, 140);
       assert.equal(body.nodes?.[0]?.data.content, "Warm material cue");
-      assert.equal(store.listMoodboardNodes(board.id).length, 1);
+      assert.equal(body.nodes?.[1]?.type, "image-generator");
+      assert.equal(body.nodes?.[1]?.data.generatorPrompt, "Layered glass product shot");
+      assert.equal(typeof body.nodes?.[1]?.data.agentConversationId, "string");
+      assert.ok(body.nodes?.[1]?.data.agentConversationId);
+      assert.equal(store.listMoodboardNodes(board.id).length, 2);
     },
     {
       moodboardAgentText: async () => `Added a note.
 
 \`\`\`dezin_moodboard_ops
-[{"type":"add_note","content":"Warm material cue","x":120,"y":140}]
+[{"type":"add_note","content":"Warm material cue","x":120,"y":140},{"type":"add_image_generator","prompt":"Layered glass product shot","x":380,"y":140}]
 \`\`\``,
     },
   );
+});
+
+test("moodboard conversations isolate agent messages", async () => {
+  await withServer(async ({ base, store }) => {
+    const board = store.createMoodboard({ name: "Material board" });
+
+    const detail = (await (await fetch(`${base}/api/moodboards/${board.id}`)).json()) as {
+      activeConversationId: string;
+      conversations: Array<{ id: string; title: string; turns: number }>;
+      messages: unknown[];
+    };
+    assert.equal(detail.conversations.length, 1);
+    assert.equal(detail.conversations[0]?.title, "Conversation 1");
+    assert.equal(detail.messages.length, 0);
+
+    const created = (await (
+      await fetch(`${base}/api/moodboards/${board.id}/conversations`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "Alternate direction" }),
+      })
+    ).json()) as { id: string; title: string };
+    assert.equal(created.title, "Alternate direction");
+
+    const posted = await fetch(`${base}/api/moodboards/${board.id}/conversations/${created.id}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "Explore cooler references" }),
+    });
+    assert.equal(posted.status, 201);
+
+    const firstMessages = (await (await fetch(`${base}/api/moodboards/${board.id}/conversations/${detail.activeConversationId}/messages`)).json()) as unknown[];
+    const secondMessages = (await (await fetch(`${base}/api/moodboards/${board.id}/conversations/${created.id}/messages`)).json()) as Array<{
+      role: string;
+      content: string;
+      conversationId: string;
+    }>;
+
+    assert.equal(firstMessages.length, 0);
+    assert.equal(secondMessages.length, 2);
+    assert.equal(secondMessages[0]?.conversationId, created.id);
+    assert.equal(secondMessages[0]?.content, "Explore cooler references");
+
+    const conversations = (await (await fetch(`${base}/api/moodboards/${board.id}/conversations`)).json()) as Array<{ id: string; turns: number }>;
+    assert.equal(conversations.find((conversation) => conversation.id === created.id)?.turns, 1);
+  });
 });
 
 test("moodboard agent prompt uses a budgeted working set with a budgeted context path", () => {

@@ -60,10 +60,102 @@ test("PUT /api/settings merges and persists", async () => {
 
     const fetched = await getSettings(base);
     assert.equal(fetched.agentCommand, "codex");
-    assert.equal(fetched.apiKey, "sk-local");
+    assert.equal(fetched.apiKey, "");
     assert.equal(fetched.videoModel, "sora");
     assert.equal(fetched.visualQaEnabled, true);
     assert.equal(fetched.defaultDesignSystemId, "modern-minimal"); // untouched default
+  });
+});
+
+test("GET /api/settings redacts stored provider secrets", async () => {
+  await withServer(async (base) => {
+    const res = await putSettings(base, {
+      apiKey: "sk-agent",
+      imageApiKey: "sk-image",
+      videoApiKey: "sk-video",
+      imageApiBaseUrl: "https://images.example.test/v1",
+      videoApiBaseUrl: "https://videos.example.test/v1",
+    });
+    assert.equal(res.status, 200);
+
+    const fetched = await getSettings(base);
+    assert.equal(fetched.apiKey, "");
+    assert.equal(fetched.imageApiKey, "");
+    assert.equal(fetched.videoApiKey, "");
+    assert.equal(fetched.apiKeyConfigured, true);
+    assert.equal(fetched.imageApiKeyConfigured, true);
+    assert.equal(fetched.videoApiKeyConfigured, true);
+    assert.equal(fetched.imageApiBaseUrl, "https://images.example.test/v1");
+    assert.equal(fetched.videoApiBaseUrl, "https://videos.example.test/v1");
+  });
+});
+
+test("GET /api/settings redacts per-provider profile API keys", async () => {
+  await withServer(async (base) => {
+    const res = await putSettings(base, {
+      aiProviderProfiles: JSON.stringify({
+        openai: {
+          enabled: true,
+          baseUrl: "https://api.openai.com/v1",
+          apiKey: "openai-profile-key",
+          models: "gpt-image-1",
+          organization: "",
+        },
+        gemini: {
+          enabled: true,
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "gemini-profile-key",
+          models: "gemini-2.5-flash-image",
+          organization: "",
+        },
+      }),
+    });
+    assert.equal(res.status, 200);
+
+    const fetched = await getSettings(base);
+    const profiles = JSON.parse(String(fetched.aiProviderProfiles)) as Record<string, Record<string, unknown>>;
+    assert.equal(profiles.openai?.apiKey, "");
+    assert.equal(profiles.openai?.apiKeyConfigured, true);
+    assert.equal(profiles.gemini?.apiKey, "");
+    assert.equal(profiles.gemini?.apiKeyConfigured, true);
+    assert.doesNotMatch(String(fetched.aiProviderProfiles), /profile-key/);
+  });
+});
+
+test("PUT /api/settings preserves stored per-provider keys when saving a redacted profile", async () => {
+  await withServer(async (base) => {
+    await putSettings(base, {
+      aiProviderProfiles: JSON.stringify({
+        gemini: {
+          enabled: true,
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "gemini-profile-key",
+          models: "gemini-2.5-flash-image",
+          organization: "",
+        },
+      }),
+    });
+
+    const fetched = await getSettings(base);
+    const redactedProfiles = JSON.parse(String(fetched.aiProviderProfiles)) as Record<string, Record<string, unknown>>;
+    redactedProfiles.gemini!.models = JSON.stringify({ id: "gemini-2.5-flash-image", capabilities: ["Image"] });
+
+    const res = await putSettings(base, { aiProviderProfiles: JSON.stringify(redactedProfiles) });
+    assert.equal(res.status, 200);
+
+    const storeRes = await putSettings(base, {
+      aiProviderId: "gemini",
+      aiProviderEnabled: true,
+      apiBaseUrl: "",
+      apiKey: "",
+      imageApiBaseUrl: "",
+      imageApiKey: "",
+    });
+    assert.equal(storeRes.status, 200);
+    const after = await getSettings(base);
+    const profiles = JSON.parse(String(after.aiProviderProfiles)) as Record<string, Record<string, unknown>>;
+    assert.equal(profiles.gemini?.apiKey, "");
+    assert.equal(profiles.gemini?.apiKeyConfigured, true);
   });
 });
 

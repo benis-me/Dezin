@@ -17,6 +17,7 @@ import type {
   Moodboard,
   MoodboardNode,
   MoodboardAsset,
+  MoodboardConversation,
   MoodboardMessage,
   MessageRole,
   QualityFinding,
@@ -35,7 +36,9 @@ CREATE TABLE IF NOT EXISTS projects (
   design_system_id TEXT,
   mode TEXT,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  archived_at INTEGER,
+  active_variant_id TEXT
 );
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
@@ -54,9 +57,11 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  variant_id TEXT,
   user_message_id TEXT,
   assistant_message_id TEXT,
   commit_hash TEXT,
+  owner_id TEXT,
   status TEXT NOT NULL,
   repair_rounds INTEGER NOT NULL DEFAULT 0,
   lint_passed INTEGER NOT NULL DEFAULT 0,
@@ -101,6 +106,7 @@ CREATE TABLE IF NOT EXISTS settings (
   ai_provider_enabled INTEGER NOT NULL DEFAULT 0,
   ai_provider_models TEXT,
   ai_provider_organization TEXT,
+  ai_provider_profiles TEXT,
   visual_qa_enabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS moodboards (
@@ -136,15 +142,23 @@ CREATE TABLE IF NOT EXISTS moodboard_assets (
   source TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS moodboard_conversations (
+  id TEXT PRIMARY KEY,
+  board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS moodboard_messages (
   id TEXT PRIMARY KEY,
   board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES moodboard_conversations(id) ON DELETE CASCADE,
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_moodboard_nodes_board ON moodboard_nodes(board_id);
 CREATE INDEX IF NOT EXISTS idx_moodboard_assets_board ON moodboard_assets(board_id);
+CREATE INDEX IF NOT EXISTS idx_moodboard_conversations_board ON moodboard_conversations(board_id);
 CREATE INDEX IF NOT EXISTS idx_moodboard_messages_board ON moodboard_messages(board_id);
 `;
 
@@ -165,6 +179,7 @@ const DEFAULT_SETTINGS: Settings = {
   aiProviderEnabled: false,
   aiProviderModels: "gpt-image-1",
   aiProviderOrganization: "",
+  aiProviderProfiles: "",
   visualQaEnabled: false,
 };
 
@@ -306,10 +321,20 @@ function asMoodboardAsset(r: Row): MoodboardAsset {
     createdAt: Number(r.created_at),
   };
 }
+function asMoodboardConversation(r: Row): MoodboardConversation {
+  return {
+    id: r.id as string,
+    boardId: r.board_id as string,
+    title: r.title as string,
+    createdAt: Number(r.created_at),
+    ...(r.turns == null ? {} : { turns: Number(r.turns) }),
+  };
+}
 function asMoodboardMessage(r: Row): MoodboardMessage {
   return {
     id: r.id as string,
     boardId: r.board_id as string,
+    conversationId: (r.conversation_id as string | null) ?? undefined,
     role: r.role as MessageRole,
     content: r.content as string,
     createdAt: Number(r.created_at),
@@ -329,6 +354,7 @@ export class Store {
 
   constructor(path = ":memory:", clock: StoreClock = DEFAULT_CLOCK) {
     this.db = new DatabaseSync(path);
+    this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
@@ -357,6 +383,7 @@ export class Store {
     ensureColumn("settings", "ai_provider_enabled", "ai_provider_enabled INTEGER NOT NULL DEFAULT 0");
     ensureColumn("settings", "ai_provider_models", "ai_provider_models TEXT");
     ensureColumn("settings", "ai_provider_organization", "ai_provider_organization TEXT");
+    ensureColumn("settings", "ai_provider_profiles", "ai_provider_profiles TEXT");
     ensureColumn("settings", "visual_qa_enabled", "visual_qa_enabled INTEGER NOT NULL DEFAULT 0");
     ensureColumn("projects", "archived_at", "archived_at INTEGER");
     ensureColumn("projects", "active_variant_id", "active_variant_id TEXT");
@@ -364,6 +391,17 @@ export class Store {
     ensureColumn("runs", "user_message_id", "user_message_id TEXT");
     ensureColumn("runs", "assistant_message_id", "assistant_message_id TEXT");
     ensureColumn("runs", "commit_hash", "commit_hash TEXT");
+    ensureColumn("runs", "owner_id", "owner_id TEXT");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS moodboard_conversations (
+      id TEXT PRIMARY KEY,
+      board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );`);
+    ensureColumn("moodboard_messages", "conversation_id", "conversation_id TEXT REFERENCES moodboard_conversations(id) ON DELETE CASCADE");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_runs_project_variant_status ON runs(project_id, variant_id, status);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_moodboard_conversations_board ON moodboard_conversations(board_id);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_moodboard_messages_conversation ON moodboard_messages(conversation_id);");
   }
 
   close(): void {
@@ -561,22 +599,81 @@ export class Store {
     return rows.map(asMoodboardAsset);
   }
 
-  addMoodboardMessage(boardId: string, role: MessageRole, content: string): MoodboardMessage {
+  private adoptMoodboardLegacyMessages(boardId: string, conversationId: string): void {
+    this.db
+      .prepare(`UPDATE moodboard_messages SET conversation_id = ? WHERE board_id = ? AND conversation_id IS NULL`)
+      .run(conversationId, boardId);
+  }
+
+  ensureMoodboardConversation(boardId: string): MoodboardConversation {
+    if (!this.getMoodboard(boardId)) throw new Error(`moodboard not found: ${boardId}`);
+    const existing = this.db
+      .prepare(`SELECT * FROM moodboard_conversations WHERE board_id = ? ORDER BY created_at ASC, rowid ASC LIMIT 1`)
+      .get(boardId) as Row | undefined;
+    const conversation = existing ? asMoodboardConversation(existing) : this.createMoodboardConversation(boardId, "Conversation 1");
+    this.adoptMoodboardLegacyMessages(boardId, conversation.id);
+    return conversation;
+  }
+
+  createMoodboardConversation(boardId: string, title = "Conversation 1"): MoodboardConversation {
     if (!this.getMoodboard(boardId)) throw new Error(`moodboard not found: ${boardId}`);
     const id = this.clock.id();
     const now = this.clock.now();
     this.db
-      .prepare(`INSERT INTO moodboard_messages (id, board_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(id, boardId, role, content, now);
+      .prepare(`INSERT INTO moodboard_conversations (id, board_id, title, created_at) VALUES (?, ?, ?, ?)`)
+      .run(id, boardId, title.trim() || "Conversation 1", now);
+    this.db.prepare(`UPDATE moodboards SET updated_at = ? WHERE id = ?`).run(now, boardId);
+    const r = this.db.prepare(`SELECT * FROM moodboard_conversations WHERE id = ?`).get(id) as Row;
+    return asMoodboardConversation(r);
+  }
+
+  getMoodboardConversation(id: string): MoodboardConversation | null {
+    const r = this.db.prepare(`SELECT * FROM moodboard_conversations WHERE id = ?`).get(id) as Row | undefined;
+    return r ? asMoodboardConversation(r) : null;
+  }
+
+  listMoodboardConversations(boardId: string): MoodboardConversation[] {
+    this.ensureMoodboardConversation(boardId);
+    const rows = this.db
+      .prepare(
+        `SELECT c.*, (SELECT COUNT(*) FROM moodboard_messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS turns
+         FROM moodboard_conversations c WHERE c.board_id = ? ORDER BY c.created_at ASC, c.rowid ASC`,
+      )
+      .all(boardId) as Row[];
+    return rows.map(asMoodboardConversation);
+  }
+
+  renameMoodboardConversation(id: string, title: string): MoodboardConversation | null {
+    this.db.prepare(`UPDATE moodboard_conversations SET title = ? WHERE id = ?`).run(title.trim() || "Conversation 1", id);
+    return this.getMoodboardConversation(id);
+  }
+
+  deleteMoodboardConversation(id: string): void {
+    const conversation = this.getMoodboardConversation(id);
+    this.db.prepare(`DELETE FROM moodboard_conversations WHERE id = ?`).run(id);
+    if (conversation) this.ensureMoodboardConversation(conversation.boardId);
+  }
+
+  addMoodboardMessage(boardId: string, role: MessageRole, content: string, conversationId?: string): MoodboardMessage {
+    if (!this.getMoodboard(boardId)) throw new Error(`moodboard not found: ${boardId}`);
+    const conversation = conversationId ? this.getMoodboardConversation(conversationId) : this.ensureMoodboardConversation(boardId);
+    if (!conversation || conversation.boardId !== boardId) throw new Error(`moodboard conversation not found: ${conversationId}`);
+    const id = this.clock.id();
+    const now = this.clock.now();
+    this.db
+      .prepare(`INSERT INTO moodboard_messages (id, board_id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(id, boardId, conversation.id, role, content, now);
     this.db.prepare(`UPDATE moodboards SET updated_at = ? WHERE id = ?`).run(now, boardId);
     const r = this.db.prepare(`SELECT * FROM moodboard_messages WHERE id = ?`).get(id) as Row;
     return asMoodboardMessage(r);
   }
 
-  listMoodboardMessages(boardId: string): MoodboardMessage[] {
+  listMoodboardMessages(boardId: string, conversationId?: string): MoodboardMessage[] {
+    const conversation = conversationId ? this.getMoodboardConversation(conversationId) : this.ensureMoodboardConversation(boardId);
+    if (!conversation || conversation.boardId !== boardId) throw new Error(`moodboard conversation not found: ${conversationId}`);
     const rows = this.db
-      .prepare(`SELECT * FROM moodboard_messages WHERE board_id = ? ORDER BY created_at ASC, rowid ASC`)
-      .all(boardId) as Row[];
+      .prepare(`SELECT * FROM moodboard_messages WHERE board_id = ? AND conversation_id = ? ORDER BY created_at ASC, rowid ASC`)
+      .all(boardId, conversation.id) as Row[];
     return rows.map(asMoodboardMessage);
   }
 
@@ -744,14 +841,14 @@ export class Store {
   }
 
   // ── runs ──────────────────────────────────────────────────────────────────
-  createRun(projectId: string, conversationId: string, variantId?: string, userMessageId?: string): Run {
+  createRun(projectId: string, conversationId: string, variantId?: string, userMessageId?: string, ownerId?: string): Run {
     const id = this.clock.id();
     const vid = variantId ?? this.ensureMainVariant(projectId).id;
     this.db
       .prepare(
-        `INSERT INTO runs (id, project_id, conversation_id, variant_id, user_message_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO runs (id, project_id, conversation_id, variant_id, user_message_id, owner_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
-      .run(id, projectId, conversationId, vid, userMessageId ?? null, this.clock.now());
+      .run(id, projectId, conversationId, vid, userMessageId ?? null, ownerId ?? null, this.clock.now());
     return this.getRun(id)!;
   }
 
@@ -867,10 +964,32 @@ export class Store {
 
   /** Mark runs left "running"/"pending" (a previous process died mid-run) as cancelled. Run
    *  at daemon startup so interrupted runs don't look perpetually in-progress. */
-  markInterruptedRuns(): number {
-    const res = this.db
-      .prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending')`)
-      .run(this.clock.now());
+  findActiveRun(projectId: string, variantId?: string | null): Run | null {
+    const row =
+      variantId == null
+        ? (this.db
+            .prepare(
+              `SELECT * FROM runs
+               WHERE project_id = ? AND variant_id IS NULL AND status IN ('running', 'pending')
+               ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+            )
+            .get(projectId) as Row | undefined)
+        : (this.db
+            .prepare(
+              `SELECT * FROM runs
+               WHERE project_id = ? AND variant_id = ? AND status IN ('running', 'pending')
+               ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+            )
+            .get(projectId, variantId) as Row | undefined);
+    return row ? asRun(row) : null;
+  }
+
+  markInterruptedRuns(ownerId?: string): number {
+    const res = ownerId
+      ? this.db
+          .prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending') AND owner_id = ?`)
+          .run(this.clock.now(), ownerId)
+      : this.db.prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending')`).run(this.clock.now());
     return Number(res.changes ?? 0);
   }
 
@@ -937,6 +1056,7 @@ export class Store {
       aiProviderEnabled: Number(r.ai_provider_enabled ?? 0) === 1,
       aiProviderModels: str(r.ai_provider_models, DEFAULT_SETTINGS.aiProviderModels),
       aiProviderOrganization: str(r.ai_provider_organization, DEFAULT_SETTINGS.aiProviderOrganization),
+      aiProviderProfiles: str(r.ai_provider_profiles, DEFAULT_SETTINGS.aiProviderProfiles),
       visualQaEnabled: Number(r.visual_qa_enabled ?? 0) === 1,
     };
   }
@@ -960,6 +1080,7 @@ export class Store {
       aiProviderEnabled: patch.aiProviderEnabled ?? cur.aiProviderEnabled,
       aiProviderModels: patch.aiProviderModels ?? cur.aiProviderModels,
       aiProviderOrganization: patch.aiProviderOrganization ?? cur.aiProviderOrganization,
+      aiProviderProfiles: patch.aiProviderProfiles ?? cur.aiProviderProfiles,
       visualQaEnabled: patch.visualQaEnabled ?? cur.visualQaEnabled,
     };
     this.db
@@ -967,9 +1088,9 @@ export class Store {
         `INSERT INTO settings (id, agent_command, model, api_base_url, api_key, default_design_system_id, custom_instructions,
                                image_api_base_url, image_api_key, image_model,
                                video_api_base_url, video_api_key, video_model,
-                               ai_provider_id, ai_provider_enabled, ai_provider_models, ai_provider_organization,
+                               ai_provider_id, ai_provider_enabled, ai_provider_models, ai_provider_organization, ai_provider_profiles,
                                visual_qa_enabled)
-         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            agent_command = excluded.agent_command,
            model = excluded.model,
@@ -987,6 +1108,7 @@ export class Store {
            ai_provider_enabled = excluded.ai_provider_enabled,
            ai_provider_models = excluded.ai_provider_models,
            ai_provider_organization = excluded.ai_provider_organization,
+           ai_provider_profiles = excluded.ai_provider_profiles,
            visual_qa_enabled = excluded.visual_qa_enabled`,
       )
       .run(
@@ -1006,6 +1128,7 @@ export class Store {
         next.aiProviderEnabled ? 1 : 0,
         next.aiProviderModels,
         next.aiProviderOrganization,
+        next.aiProviderProfiles,
         next.visualQaEnabled ? 1 : 0,
       );
     return next;

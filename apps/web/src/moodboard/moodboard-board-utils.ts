@@ -82,7 +82,7 @@ export function createSectionNode(count: number, point?: { x: number; y: number;
   };
 }
 
-export function createImageGeneratorNode(count: number, point?: { x: number; y: number }): SaveMoodboardNodeInput {
+export function createImageGeneratorNode(count: number, point?: { x: number; y: number }, data?: Record<string, unknown>): SaveMoodboardNodeInput {
   return {
     id: localId(),
     type: "image-generator",
@@ -91,7 +91,7 @@ export function createImageGeneratorNode(count: number, point?: { x: number; y: 
     width: 360,
     height: 240,
     zIndex: Math.max(0, count),
-    data: { generatorPrompt: "", generatorStatus: "ready" },
+    data: { generatorPrompt: "", generatorStatus: "ready", ...data },
   };
 }
 

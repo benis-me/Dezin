@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deflateSync } from "fflate";
+import { deflateSync, zipSync } from "fflate";
 import { parseSchema, compileSchema, encodeBinarySchema } from "kiwi-schema";
 import { figToJson, summarizeFig } from "../src/parse-fig.ts";
 
@@ -74,4 +74,14 @@ test("figToJson decodes a fig-kiwi archive; summarizeFig extracts the design", (
 
 test("figToJson rejects a non-fig buffer", () => {
   assert.throws(() => figToJson(new TextEncoder().encode("not a fig file")), /fig-kiwi/);
+});
+
+test("figToJson rejects archives and chunks that exceed configured inflate budgets", () => {
+  const fig = buildFig({ nodeChanges: [{ type: "CANVAS", name: "Page 1" }] });
+  const limitedFigToJson = figToJson as (input: Uint8Array, options: { maxArchiveBytes?: number; maxInflatedBytes?: number }) => unknown;
+
+  assert.throws(() => limitedFigToJson(fig, { maxInflatedBytes: 8 }), /fig inflate output exceeds limit/);
+
+  const wrapped = zipSync({ "canvas.fig": fig });
+  assert.throws(() => limitedFigToJson(wrapped, { maxArchiveBytes: 8 }), /fig zip output exceeds limit/);
 });

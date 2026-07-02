@@ -9,7 +9,7 @@ test("Switch uses an inset thumb with even visual margins", () => {
   const thumb = track.querySelector("span");
   expect(track).toHaveClass("p-[3px]");
   expect(thumb).toHaveClass("size-[18px]");
-  expect(thumb).toHaveClass("translate-x-4");
+  expect(thumb).toHaveClass("translate-x-3.5");
 });
 
 test("Switch toggles through the checked change callback", () => {

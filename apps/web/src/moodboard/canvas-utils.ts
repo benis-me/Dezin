@@ -76,6 +76,15 @@ export interface CanvasFitTransformInput {
   maxScale?: number;
 }
 
+export interface AnchoredZoomTransformInput {
+  currentX: number;
+  currentY: number;
+  currentScale: number;
+  nextScale: number;
+  anchorX: number;
+  anchorY: number;
+}
+
 export interface ClientPointFallback {
   containerLeft: number;
   containerTop: number;
@@ -191,6 +200,12 @@ export function generatorPrompt(node: MoodboardNode): string {
   return typeof prompt === "string" ? prompt : "";
 }
 
+export function referenceAssetIds(node: MoodboardNode): string[] {
+  const value = node.data.referenceAssetIds;
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
 export function generatorStatus(node: MoodboardNode): string {
   const status = node.data.generatorStatus;
   return typeof status === "string" ? status : "";
@@ -198,7 +213,9 @@ export function generatorStatus(node: MoodboardNode): string {
 
 export function generatorModel(node: MoodboardNode): string {
   const model = node.data.generatorModel;
-  return typeof model === "string" ? model : "";
+  if (typeof model === "string" && model.trim()) return model.trim();
+  const imageModel = node.data.model;
+  return typeof imageModel === "string" ? imageModel.trim() : "";
 }
 
 export const MOODBOARD_LAYERS_OPEN_KEY = "dezin:moodboard:layers-open";
@@ -480,6 +497,25 @@ export function resolveCanvasFitTransform({
   };
 }
 
+export function resolveAnchoredZoomTransform({
+  currentX,
+  currentY,
+  currentScale,
+  nextScale,
+  anchorX,
+  anchorY,
+}: AnchoredZoomTransformInput): { scale: number; x: number; y: number } {
+  const fromScale = Number.isFinite(currentScale) && currentScale > 0 ? currentScale : 1;
+  const toScale = Number.isFinite(nextScale) && nextScale > 0 ? nextScale : fromScale;
+  const worldX = (anchorX - currentX) / fromScale;
+  const worldY = (anchorY - currentY) / fromScale;
+  return {
+    scale: toScale,
+    x: anchorX - worldX * toScale,
+    y: anchorY - worldY * toScale,
+  };
+}
+
 export function collectFloatingOccluderRects(container: HTMLElement, root: ParentNode = container, current?: HTMLElement | null): CanvasRect[] {
   const containerRect = container.getBoundingClientRect();
   return Array.from(root.querySelectorAll<HTMLElement>("[data-moodboard-floating-occluder]"))
@@ -511,9 +547,17 @@ export function numberFromEvent(value: string, fallback: number): number {
 export function nodeIdFromTarget(target: any): string | null {
   const first = Array.isArray(target) ? target[0] : target;
   let cur = first;
+  const seen = new Set<any>();
   while (cur) {
+    if (seen.has(cur)) return null;
+    seen.add(cur);
     const nodeId = cur.data?.nodeId ?? cur.data?.id;
     if (typeof nodeId === "string") return nodeId;
+    const editorTarget = editorControlTarget(cur);
+    if (editorTarget && editorTarget !== cur && !seen.has(editorTarget)) {
+      const editorTargetId = nodeIdFromTarget(editorTarget);
+      if (editorTargetId) return editorTargetId;
+    }
     cur = cur.parent;
   }
   return null;
@@ -532,8 +576,23 @@ export function nodeIdsFromTarget(target: any): string[] {
   return ids;
 }
 
-export function contextTargetIdFromEvent(eventTarget: unknown, _editorTarget: unknown): string | null {
-  return nodeIdFromTarget(eventTarget);
+function editorControlTarget(target: any): any | null {
+  let cur = target;
+  while (cur) {
+    const pointType = cur.pointType;
+    const editor = cur.editor;
+    const isEditPoint =
+      (typeof pointType === "string" && pointType.length > 0) ||
+      typeof cur.resizeDirection !== "undefined" ||
+      typeof cur.direction !== "undefined";
+    if (isEditPoint && editor?.target) return editor.target;
+    cur = cur.parent;
+  }
+  return null;
+}
+
+export function contextTargetIdFromEvent(eventTarget: unknown, editorTarget: unknown): string | null {
+  return nodeIdFromTarget(eventTarget) ?? (editorControlTarget(eventTarget) ? nodeIdFromTarget(editorTarget) : null);
 }
 
 export function eventClientPoint(event: any, fallback?: ClientPointFallback): { x: number; y: number } {
@@ -651,8 +710,12 @@ export function nudgeNodeInputs(nodes: MoodboardNode[], ids: string[], delta: Ca
   return moveContainedNodesWithSections(nodes, inputs);
 }
 
+export function effectiveLayerZIndex(node: MoodboardNode): number {
+  return node.type === "section" ? Math.min(node.zIndex ?? -1, -1) : (node.zIndex ?? 0);
+}
+
 function sortByLayer(a: MoodboardNode, b: MoodboardNode): number {
-  return (b.zIndex ?? 0) - (a.zIndex ?? 0);
+  return effectiveLayerZIndex(b) - effectiveLayerZIndex(a);
 }
 
 export function buildLayerTree(nodes: MoodboardNode[]): LayerTreeItem[] {

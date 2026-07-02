@@ -86,7 +86,7 @@ export interface MoodboardAsset {
   mimeType: string;
   width: number | null;
   height: number | null;
-  source: "upload" | "generated";
+  source: "upload" | "generated" | "edited";
   createdAt: number;
   url?: string;
 }
@@ -121,14 +121,47 @@ export interface SaveMoodboardNodeInput {
 export interface MoodboardMessage {
   id: string;
   boardId: string;
+  conversationId?: string;
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: number;
 }
 
+export interface MoodboardConversation {
+  id: string;
+  boardId: string;
+  title: string;
+  createdAt: number;
+  turns?: number;
+}
+
+export type ImageGenerationParams = {
+  quality?: "auto" | "low" | "medium" | "high";
+  size?: `${number}x${number}`;
+  aspectRatio?: `${number}:${number}`;
+  background?: "auto" | "transparent" | "opaque";
+  outputFormat?: "png" | "jpeg" | "webp";
+  outputCompression?: number;
+  moderation?: "auto" | "low";
+  count?: number;
+};
+
+export interface GenerateMoodboardImageOptions {
+  x?: number;
+  y?: number;
+  generatorId?: string;
+  model?: string;
+  sourceAssetId?: string;
+  referenceAssetIds?: string[];
+  conversationId?: string;
+  params?: ImageGenerationParams;
+}
+
 export interface MoodboardDetail extends Moodboard {
   assets: MoodboardAsset[];
   nodes: MoodboardNode[];
+  conversations?: MoodboardConversation[];
+  activeConversationId?: string;
   messages: MoodboardMessage[];
 }
 
@@ -188,19 +221,39 @@ export interface Settings {
   model: string;
   apiBaseUrl: string;
   apiKey: string;
+  apiKeyConfigured?: boolean;
   defaultDesignSystemId: string;
   customInstructions: string;
   imageApiBaseUrl: string;
   imageApiKey: string;
+  imageApiKeyConfigured?: boolean;
   imageModel: string;
   videoApiBaseUrl: string;
   videoApiKey: string;
+  videoApiKeyConfigured?: boolean;
   videoModel: string;
   aiProviderId: string;
   aiProviderEnabled: boolean;
   aiProviderModels: string;
   aiProviderOrganization: string;
+  aiProviderProfiles: string;
   visualQaEnabled: boolean;
+}
+
+export interface ModelProviderModel {
+  id: string;
+  name?: string;
+  capabilities?: string[];
+}
+
+export interface ModelProviderTestResult {
+  ok: boolean;
+  message: string;
+}
+
+export interface ModelProviderModelsResult {
+  models: ModelProviderModel[];
+  source?: string;
 }
 
 export interface AgentInfo {
@@ -232,6 +285,7 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 export interface ApiClientOptions {
   baseUrl?: string;
   fetchImpl?: FetchLike;
+  daemonToken?: string;
 }
 
 export class ApiError extends Error {
@@ -243,12 +297,31 @@ export class ApiError extends Error {
   }
 }
 
+function defaultDaemonToken(): string {
+  const g = globalThis as typeof globalThis & { __DEZIN_DAEMON_TOKEN__?: string };
+  return typeof g.__DEZIN_DAEMON_TOKEN__ === "string" ? g.__DEZIN_DAEMON_TOKEN__ : "";
+}
+
 async function safeText(res: Response): Promise<string> {
   try {
     return await res.text();
   } catch {
     return res.statusText ?? "";
   }
+}
+
+async function safeErrorText(res: Response): Promise<string> {
+  const text = await safeText(res);
+  if ((res.headers.get("content-type") ?? "").includes("application/json")) {
+    try {
+      const body = JSON.parse(text) as { error?: unknown; message?: unknown };
+      if (typeof body.error === "string" && body.error.trim()) return body.error.trim();
+      if (typeof body.message === "string" && body.message.trim()) return body.message.trim();
+    } catch {
+      // Keep the raw response text if the JSON body is malformed.
+    }
+  }
+  return text;
 }
 
 function jsonInit(method: string, body?: unknown): RequestInit {
@@ -331,6 +404,8 @@ export interface ApiClient {
   listSkills(): Promise<SkillCard[]>;
   getSettings(): Promise<Settings>;
   updateSettings(patch: Partial<Settings>): Promise<Settings>;
+  testModelProvider(providerId: string): Promise<ModelProviderTestResult>;
+  listModelProviderModels(providerId: string): Promise<ModelProviderModelsResult>;
   listAgents(): Promise<AgentInfo[]>;
   rescanAgents(): Promise<AgentInfo[]>;
   /** Rescan with per-agent progress (SSE). Yields progress events, then a final "done". */
@@ -362,13 +437,25 @@ export interface ApiClient {
   deleteMoodboard(id: string): Promise<void>;
   listMoodboardNodes(id: string): Promise<MoodboardNode[]>;
   saveMoodboardNodes(id: string, nodes: SaveMoodboardNodeInput[]): Promise<MoodboardNode[]>;
-  listMoodboardMessages(id: string): Promise<MoodboardMessage[]>;
-  postMoodboardMessage(id: string, content: string, options?: { agentCommand?: string; model?: string }): Promise<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>;
+  listMoodboardConversations(id: string): Promise<MoodboardConversation[]>;
+  createMoodboardConversation(id: string, title?: string): Promise<MoodboardConversation>;
+  renameMoodboardConversation(id: string, conversationId: string, title: string): Promise<MoodboardConversation>;
+  deleteMoodboardConversation(id: string, conversationId: string): Promise<{ ok: boolean; conversations: MoodboardConversation[] }>;
+  listMoodboardMessages(id: string, conversationId?: string): Promise<MoodboardMessage[]>;
+  postMoodboardMessage(
+    id: string,
+    content: string,
+    options?: { agentCommand?: string; model?: string; conversationId?: string },
+  ): Promise<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>;
   uploadMoodboardAsset(
     id: string,
     input: { name: string; contentBase64: string; mimeType?: string; width?: number; height?: number },
   ): Promise<MoodboardAsset & { url: string }>;
-  generateMoodboardImage(id: string, prompt: string, options?: { x?: number; y?: number; generatorId?: string; model?: string }): Promise<{
+  generateMoodboardImage(
+    id: string,
+    prompt: string,
+    options?: GenerateMoodboardImageOptions,
+  ): Promise<{
     asset: MoodboardAsset & { url: string };
     nodes: MoodboardNode[];
     messages: MoodboardMessage[];
@@ -383,10 +470,24 @@ export interface ApiClient {
 export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
   const baseUrl = opts.baseUrl ?? "";
   const f: FetchLike = opts.fetchImpl ?? ((input, init) => fetch(input, init));
+  const daemonToken = (opts.daemonToken ?? defaultDaemonToken()).trim();
+
+  function initWithDaemonToken(init?: RequestInit): RequestInit | undefined {
+    if (!daemonToken) return init;
+    const rawHeaders = init?.headers;
+    const headers =
+      rawHeaders instanceof Headers
+        ? Object.fromEntries(rawHeaders.entries())
+        : Array.isArray(rawHeaders)
+          ? Object.fromEntries(rawHeaders)
+          : { ...(rawHeaders as Record<string, string> | undefined) };
+    headers["x-dezin-daemon-token"] = daemonToken;
+    return { ...init, headers };
+  }
 
   async function json<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await f(baseUrl + path, init);
-    if (!res.ok) throw new ApiError(res.status, await safeText(res));
+    const res = await f(baseUrl + path, initWithDaemonToken(init));
+    if (!res.ok) throw new ApiError(res.status, await safeErrorText(res));
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   }
@@ -425,16 +526,16 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
   }
 
   async function* streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent> {
-    yield* consumeSse(await f(baseUrl + "/api/runs", { ...jsonInit("POST", input), signal }));
+    yield* consumeSse(await f(baseUrl + "/api/runs", initWithDaemonToken({ ...jsonInit("POST", input), signal })));
   }
 
   async function* reattachRun(runId: string, signal?: AbortSignal, options: { afterSeq?: number } = {}): AsyncGenerator<RunEvent> {
     const after = typeof options.afterSeq === "number" && Number.isFinite(options.afterSeq) ? `?after=${encodeURIComponent(String(options.afterSeq))}` : "";
-    yield* consumeSse(await f(`${baseUrl}/api/runs/${enc(runId)}/stream${after}`, { signal }));
+    yield* consumeSse(await f(`${baseUrl}/api/runs/${enc(runId)}/stream${after}`, initWithDaemonToken({ signal })));
   }
 
   async function* scanAgentsStream(): AsyncGenerator<ScanEvent> {
-    const res = await f(baseUrl + "/api/agents/rescan-stream", { method: "POST" });
+    const res = await f(baseUrl + "/api/agents/rescan-stream", initWithDaemonToken({ method: "POST" }));
     if (!res.ok) throw new ApiError(res.status, await safeText(res));
     const handle = (block: string): ScanEvent | null => {
       const data = block
@@ -515,6 +616,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     listSkills: () => json<SkillCard[]>("/api/skills"),
     getSettings: () => json<Settings>("/api/settings"),
     updateSettings: (patch) => json<Settings>("/api/settings", jsonInit("PUT", patch)),
+    testModelProvider: (providerId) => json<ModelProviderTestResult>("/api/model-providers/test", jsonInit("POST", { providerId })),
+    listModelProviderModels: (providerId) => json<ModelProviderModelsResult>("/api/model-providers/models", jsonInit("POST", { providerId })),
     listAgents: () => json<AgentInfo[]>("/api/agents"),
     rescanAgents: () => json<AgentInfo[]>("/api/agents/rescan", { method: "POST" }),
     getHealth: () => json<Health>("/api/health"),
@@ -522,7 +625,9 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     listRuns: (id, options) => json<RunSummary[]>(`/api/projects/${enc(id)}/runs${options?.all ? "?all=1" : ""}`),
     versionPreviewUrl: (id, runId) => `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`,
     getVersionText: async (id, runId) => {
-      const res = await f(`${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`);
+      const url = `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`;
+      const init = initWithDaemonToken();
+      const res = init ? await f(url, init) : await f(url);
       if (!res.ok) throw new ApiError(res.status, await safeText(res));
       return res.text();
     },
@@ -547,7 +652,9 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       }),
     getFileText: async (id, path) => {
       const rel = path.split("/").map(enc).join("/");
-      const res = await f(`${baseUrl}/projects/${enc(id)}/preview/${rel}`);
+      const url = `${baseUrl}/projects/${enc(id)}/preview/${rel}`;
+      const init = initWithDaemonToken();
+      const res = init ? await f(url, init) : await f(url);
       if (!res.ok) throw new ApiError(res.status, await safeText(res));
       return res.text();
     },
@@ -568,9 +675,24 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     deleteMoodboard: (id) => json<void>(`/api/moodboards/${enc(id)}`, { method: "DELETE" }),
     listMoodboardNodes: (id) => json<MoodboardNode[]>(`/api/moodboards/${enc(id)}/nodes`),
     saveMoodboardNodes: (id, nodes) => json<MoodboardNode[]>(`/api/moodboards/${enc(id)}/nodes`, jsonInit("PUT", { nodes })),
-    listMoodboardMessages: (id) => json<MoodboardMessage[]>(`/api/moodboards/${enc(id)}/messages`),
-    postMoodboardMessage: (id, content, options) =>
-      json<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>(`/api/moodboards/${enc(id)}/messages`, jsonInit("POST", { content, ...options })),
+    listMoodboardConversations: (id) => json<MoodboardConversation[]>(`/api/moodboards/${enc(id)}/conversations`),
+    createMoodboardConversation: (id, title) =>
+      json<MoodboardConversation>(`/api/moodboards/${enc(id)}/conversations`, jsonInit("POST", { title })),
+    renameMoodboardConversation: (id, conversationId, title) =>
+      json<MoodboardConversation>(`/api/moodboards/${enc(id)}/conversations/${enc(conversationId)}`, jsonInit("PATCH", { title })),
+    deleteMoodboardConversation: (id, conversationId) =>
+      json<{ ok: boolean; conversations: MoodboardConversation[] }>(`/api/moodboards/${enc(id)}/conversations/${enc(conversationId)}`, { method: "DELETE" }),
+    listMoodboardMessages: (id, conversationId) =>
+      json<MoodboardMessage[]>(
+        conversationId ? `/api/moodboards/${enc(id)}/conversations/${enc(conversationId)}/messages` : `/api/moodboards/${enc(id)}/messages`,
+      ),
+    postMoodboardMessage: (id, content, options) => {
+      const { conversationId, ...bodyOptions } = options ?? {};
+      return json<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }>(
+        conversationId ? `/api/moodboards/${enc(id)}/conversations/${enc(conversationId)}/messages` : `/api/moodboards/${enc(id)}/messages`,
+        jsonInit("POST", { content, ...bodyOptions }),
+      );
+    },
     uploadMoodboardAsset: (id, input) =>
       json<MoodboardAsset & { url: string }>(`/api/moodboards/${enc(id)}/assets`, jsonInit("POST", input)),
     generateMoodboardImage: (id, prompt, options) =>

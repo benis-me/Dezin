@@ -23,6 +23,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     aiProviderEnabled: false,
     aiProviderModels: serializeModelEntries(MODEL_PROVIDERS[0]!.models),
     aiProviderOrganization: "",
+    aiProviderProfiles: "",
     visualQaEnabled: false,
     ...overrides,
   };
@@ -49,5 +50,71 @@ test("ModelProviderDetail autosaves connection edits without a Save configuratio
   expect(screen.queryByRole("button", { name: "Save configuration" })).toBeNull();
 
   fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "sk-test" } });
-  expect(onPatchModelSettings).toHaveBeenLastCalledWith({ apiKey: "sk-test", imageApiKey: "sk-test", videoApiKey: "sk-test" }, true);
+  expect(onPatchModelSettings).toHaveBeenLastCalledWith(
+    {
+      apiKey: "sk-test",
+      apiKeyConfigured: true,
+    },
+    true,
+  );
+});
+
+test("ModelProviderDetail masks a configured API key, clears on focus, and restores when unchanged", () => {
+  const onPatchModelSettings = vi.fn();
+  const selected = MODEL_PROVIDERS[0]!;
+  render(
+    <ModelProviderDetail
+      selected={selected}
+      settings={settings({ apiKeyConfigured: true, imageApiKeyConfigured: true, videoApiKeyConfigured: true })}
+      apiKey=""
+      baseUrl={selected.baseUrl}
+      modelText={serializeModelEntries(selected.models)}
+      status={null}
+      onToggleEnabled={() => {}}
+      onPatchModelSettings={onPatchModelSettings}
+      onTestConnection={() => {}}
+      onLoadPresetModels={() => {}}
+    />,
+  );
+
+  const apiKey = screen.getByLabelText("API Key");
+  expect(apiKey).toHaveValue("configured");
+
+  fireEvent.focus(apiKey);
+  expect(apiKey).toHaveValue("");
+
+  fireEvent.blur(apiKey);
+  expect(apiKey).toHaveValue("configured");
+  expect(onPatchModelSettings).not.toHaveBeenCalled();
+});
+
+test("ModelProviderDetail saves a replacement API key after clearing the configured mask", () => {
+  const onPatchModelSettings = vi.fn();
+  const selected = MODEL_PROVIDERS[0]!;
+  render(
+    <ModelProviderDetail
+      selected={selected}
+      settings={settings({ apiKeyConfigured: true, imageApiKeyConfigured: true, videoApiKeyConfigured: true })}
+      apiKey=""
+      baseUrl={selected.baseUrl}
+      modelText={serializeModelEntries(selected.models)}
+      status={null}
+      onToggleEnabled={() => {}}
+      onPatchModelSettings={onPatchModelSettings}
+      onTestConnection={() => {}}
+      onLoadPresetModels={() => {}}
+    />,
+  );
+
+  const apiKey = screen.getByLabelText("API Key");
+  fireEvent.focus(apiKey);
+  fireEvent.change(apiKey, { target: { value: "sk-replacement" } });
+
+  expect(onPatchModelSettings).toHaveBeenLastCalledWith(
+    {
+      apiKey: "sk-replacement",
+      apiKeyConfigured: true,
+    },
+    true,
+  );
 });

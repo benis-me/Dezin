@@ -8,6 +8,7 @@
 import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
 import type { CreateProjectInput, Settings } from "../../../packages/core/src/index.ts";
@@ -34,25 +35,34 @@ import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } fro
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
+import { handleListModelProviderModels, handleTestModelProvider } from "./model-provider-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
+import { buildAgentEnv } from "./agent-env.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import type { VisualQaRunner } from "./visual-qa.ts";
 import { handleGenerateProjectTitle, type TitleGenerator } from "./title-handler.ts";
 import {
   handleCreateMoodboard,
+  handleCreateMoodboardConversation,
   handleDeleteMoodboard,
+  handleDeleteMoodboardConversation,
   handleGenerateMoodboardImage,
   handleGetMoodboard,
+  handleListMoodboardConversationMessages,
+  handleListMoodboardConversations,
   handleListMoodboardMessages,
   handleListMoodboardNodes,
   handleListMoodboards,
   handlePatchMoodboard,
   handlePostMoodboardMessage,
   handlePutMoodboardNodes,
+  handleRenameMoodboardConversation,
   handleServeMoodboardAsset,
   handleUploadMoodboardAsset,
 } from "./moodboard-handler.ts";
 import type { MoodboardAgentTextRunner } from "./moodboard-agent.ts";
+import { assertSafeId, redactSettings, requireDaemonRequest, type DaemonSecurityOptions } from "./security.ts";
+import { mergeProviderProfilesForUpdate } from "./provider-profile-config.ts";
 
 export interface AppDeps {
   store: Store;
@@ -82,6 +92,12 @@ export interface AppDeps {
   titleGenerator?: TitleGenerator;
   /** Moodboard chat one-shot agent hook; tests can avoid launching a real CLI. */
   moodboardAgentText?: MoodboardAgentTextRunner;
+  /** Provider model-list fetcher; tests can avoid real network calls. */
+  modelProviderFetch?: typeof fetch;
+  /** Optional local API boundary guard. */
+  security?: DaemonSecurityOptions;
+  /** Unique owner id for this daemon process; persisted on newly-created runs. */
+  daemonOwnerId?: string;
 }
 
 type Handler = (
@@ -95,6 +111,7 @@ interface Route {
   method: string;
   pattern: string;
   handler: Handler;
+  publicRead?: boolean;
 }
 
 function isNonEmptyString(v: unknown): v is string {
@@ -108,6 +125,13 @@ interface PendingCapture {
   source: string;
 }
 let pendingCapture: PendingCapture | null = null;
+
+function validateRouteParams(params: Record<string, string>): void {
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "rest") continue;
+    assertSafeId(value, key);
+  }
+}
 
 const routes: Route[] = [
   {
@@ -180,10 +204,11 @@ const routes: Route[] = [
       const body = (await readJsonBody(req)) as { image?: string; agentCommand?: string; model?: string } | null;
       const image = typeof body?.image === "string" ? body.image : "";
       if (!image) return sendError(res, 400, "no image");
-      const command = (typeof body?.agentCommand === "string" && body.agentCommand) || store.getSettings().agentCommand || "claude";
+      const settings = store.getSettings();
+      const command = (typeof body?.agentCommand === "string" && body.agentCommand) || settings.agentCommand || "claude";
       const model = typeof body?.model === "string" ? body.model : undefined;
       try {
-        const brief = await analyzeImage(command, image, model);
+        const brief = await analyzeImage(command, image, model, undefined, buildAgentEnv(settings, command));
         sendJson(res, 200, { brief, agent: command });
       } catch (e) {
         sendError(res, 502, e instanceof Error ? e.message : "analysis failed");
@@ -193,7 +218,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/settings",
-    handler: (_req, res, _p, { store }) => sendJson(res, 200, store.getSettings()),
+    handler: (_req, res, _p, { store }) => sendJson(res, 200, redactSettings(store.getSettings())),
   },
   {
     method: "PUT",
@@ -203,8 +228,22 @@ const routes: Route[] = [
       if (body === null || typeof body !== "object" || Array.isArray(body)) {
         return sendError(res, 400, "settings body must be an object");
       }
-      sendJson(res, 200, store.updateSettings(body as Partial<Settings>));
+      const patch = body as Partial<Settings>;
+      if (typeof patch.aiProviderProfiles === "string") {
+        patch.aiProviderProfiles = mergeProviderProfilesForUpdate(store.getSettings().aiProviderProfiles, patch.aiProviderProfiles);
+      }
+      sendJson(res, 200, redactSettings(store.updateSettings(patch)));
     },
+  },
+  {
+    method: "POST",
+    pattern: "/api/model-providers/test",
+    handler: (req, res, _p, deps) => handleTestModelProvider(req, res, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/model-providers/models",
+    handler: (req, res, _p, deps) => handleListModelProviderModels(req, res, deps),
   },
   {
     method: "GET",
@@ -317,6 +356,36 @@ const routes: Route[] = [
   },
   {
     method: "GET",
+    pattern: "/api/moodboards/:id/conversations",
+    handler: (_req, res, params, deps) => handleListMoodboardConversations(res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/moodboards/:id/conversations",
+    handler: (req, res, params, deps) => handleCreateMoodboardConversation(req, res, params, deps),
+  },
+  {
+    method: "PATCH",
+    pattern: "/api/moodboards/:id/conversations/:cid",
+    handler: (req, res, params, deps) => handleRenameMoodboardConversation(req, res, params, deps),
+  },
+  {
+    method: "DELETE",
+    pattern: "/api/moodboards/:id/conversations/:cid",
+    handler: (_req, res, params, deps) => handleDeleteMoodboardConversation(res, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/moodboards/:id/conversations/:cid/messages",
+    handler: (_req, res, params, deps) => handleListMoodboardConversationMessages(res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/moodboards/:id/conversations/:cid/messages",
+    handler: (req, res, params, deps) => handlePostMoodboardMessage(req, res, params, deps),
+  },
+  {
+    method: "GET",
     pattern: "/api/moodboards/:id/messages",
     handler: (_req, res, params, deps) => handleListMoodboardMessages(res, params, deps),
   },
@@ -333,6 +402,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/moodboards/:id/assets/:assetId",
+    publicRead: true,
     handler: (_req, res, params, deps) => handleServeMoodboardAsset(res, params, deps),
   },
   {
@@ -404,8 +474,9 @@ const routes: Route[] = [
   {
     method: "DELETE",
     pattern: "/api/projects/:id",
-    handler: (_req, res, { id }, { store }) => {
+    handler: async (_req, res, { id }, { store, dataDir }) => {
       store.deleteProject(id!);
+      await rm(projectDir(dataDir, id!), { recursive: true, force: true });
       res.writeHead(204);
       res.end();
     },
@@ -530,6 +601,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/variants/:vid/preview/*rest",
+    publicRead: true,
     handler: async (_req, res, { id, vid, rest }, deps) => {
       const project = deps.store.getProject(id!);
       if (!project) return sendError(res, 404, "project not found");
@@ -541,6 +613,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/versions/:runId",
+    publicRead: true,
     handler: (_req, res, params, deps) => handleGetVersion(res, params, deps),
   },
   {
@@ -567,16 +640,19 @@ const routes: Route[] = [
     // Serve an uploaded reference file (image thumbnails in the chat). safeJoin blocks traversal.
     method: "GET",
     pattern: "/api/projects/:id/refs/*rest",
+    publicRead: true,
     handler: (_req, res, { id, rest }, { dataDir }) => serveProjectFile(res, dataDir, id!, join(".refs", rest ?? "")),
   },
   {
     method: "GET",
     pattern: "/api/projects/:id/export",
+    publicRead: true,
     handler: (req, res, params, deps) => handleExport(req, res, params, deps),
   },
   {
     method: "GET",
     pattern: "/projects/:id/preview/*rest",
+    publicRead: true,
     handler: async (_req, res, { id, rest }, deps) => {
       const project = deps.store.getProject(id!);
       if (!project) return serveProjectFile(res, deps.dataDir, id!, rest ?? "");
@@ -626,6 +702,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/cover",
+    publicRead: true,
     handler: (_req, res, { id }, { dataDir }) => {
       const f = join(projectDir(dataDir, id!), ".cover.png");
       if (!existsSync(f)) return sendError(res, 404, "no cover");
@@ -656,12 +733,21 @@ export function createApp(deps: AppDeps): http.Server {
           matchedPathButNotMethod = true;
           continue;
         }
+        validateRouteParams(m.params);
+        requireDaemonRequest(req, { ...deps.security, allowMissingToken: route.publicRead === true });
         await route.handler(req, res, m.params, deps);
         return;
       }
-      if (matchedPathButNotMethod) return sendError(res, 405, "method not allowed");
+      if (matchedPathButNotMethod) {
+        requireDaemonRequest(req, deps.security);
+        return sendError(res, 405, "method not allowed");
+      }
       // Unmatched GET → serve the built web app (SPA) when present (Electron / prod).
-      if (method === "GET" && hasWeb && !pathname.startsWith("/api/")) return serveWeb(res, webDir, pathname);
+      if (method === "GET" && hasWeb && !pathname.startsWith("/api/")) {
+        requireDaemonRequest(req, { ...deps.security, allowMissingToken: true });
+        return serveWeb(res, webDir, pathname, { daemonToken: deps.security?.token });
+      }
+      requireDaemonRequest(req, deps.security);
       sendError(res, 404, "not found");
     } catch (err) {
       if (isHttpError(err)) {

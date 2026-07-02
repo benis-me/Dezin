@@ -15,10 +15,9 @@
  * headless/non-interactive flags; the spawn is injectable so they stay testable.
  */
 
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { AgentRunner, AgentTurnInput, AgentTurnResult } from "./types.ts";
 import { NodeSpawner, historyPreamble, type ProcessSpawner } from "./claude-runner.ts";
+import { assertSuccessfulExit, readArtifactSnapshot, readUpdatedArtifactHtml } from "./runner-utils.ts";
 
 export interface GenericAgentConfig {
   /** Build the full argv given the optional model and the combined prompt. */
@@ -62,24 +61,21 @@ export class GenericCliRunner implements AgentRunner {
     const spawner = this.opts.spawner ?? new NodeSpawner();
     const prompt = `${input.systemPrompt}\n\n--- TASK ---\n\n${historyPreamble(input.history)}${input.message}`;
     input.onActivity?.({ kind: "tool", name: this.command, summary: `Generating with ${this.command}…` });
+    const beforeArtifact = await readArtifactSnapshot(input.projectDir, artifactPath);
 
-    const { stdout } = await spawner.run({
+    const output = await spawner.run({
       command: this.command,
       args: this.buildArgs(prompt),
       cwd: input.projectDir,
       stdin: this.opts.config.viaStdin ? prompt : "",
       signal: input.signal,
+      env: input.env,
     });
-
-    let artifactHtml = "";
-    try {
-      artifactHtml = await readFile(join(input.projectDir, artifactPath), "utf8");
-    } catch {
-      artifactHtml = "";
-    }
+    assertSuccessfulExit(this.command, output);
+    const artifactHtml = await readUpdatedArtifactHtml(input.projectDir, artifactPath, beforeArtifact, this.command);
 
     // No structured stream — surface a trimmed tail of stdout as the assistant text.
-    const text = stdout.trim().split("\n").slice(-12).join("\n").slice(0, 2000);
+    const text = output.stdout.trim().split("\n").slice(-12).join("\n").slice(0, 2000);
     return { text, artifactHtml, artifactPath };
   }
 }

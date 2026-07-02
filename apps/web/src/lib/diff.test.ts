@@ -16,3 +16,12 @@ test("diffLines handles pure additions", () => {
   const lines = diffLines("a", "a\nb\nc");
   expect(diffStat(lines)).toEqual({ added: 2, removed: 0 });
 });
+
+test("diffLines avoids quadratic work for large unrelated files", () => {
+  const oldText = Array.from({ length: 5_000 }, (_, i) => `old-${i}`).join("\n");
+  const newText = Array.from({ length: 5_000 }, (_, i) => `new-${i}`).join("\n");
+  const lines = diffLines(oldText, newText);
+
+  expect(lines).toHaveLength(10_000);
+  expect(diffStat(lines)).toEqual({ added: 5_000, removed: 5_000 });
+});

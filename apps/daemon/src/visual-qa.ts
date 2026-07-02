@@ -7,6 +7,7 @@ import puppeteer from "puppeteer-core";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
 import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
 import { findChrome } from "./capture-cover.ts";
+import { buildAgentEnv } from "./agent-env.ts";
 
 export interface VisualQaInput {
   htmlPath: string;
@@ -294,12 +295,12 @@ async function collectGeometry(htmlPath: string, screenshotPath?: string, render
   }
 }
 
-function spawnAgentText(command: string, args: string[], cwd: string, timeoutMs: number): Promise<string> {
+function spawnAgentText(command: string, args: string[], cwd: string, timeoutMs: number, extraEnv: NodeJS.ProcessEnv = {}): Promise<string> {
   return new Promise((resolve, reject) => {
-    const env = agentSpawnEnv();
+    const env = agentSpawnEnv(extraEnv);
     let child;
     try {
-      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env });
+      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env, shell: process.platform === "win32" });
     } catch (e) {
       return reject(e instanceof Error ? e : new Error(String(e)));
     }
@@ -344,7 +345,7 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
   const prompt = agentReviewPrompt(input, screenshotPath);
   const args = provider ? provider.oneShotArgs(model, prompt) : ["-p", prompt];
   try {
-    const out = await spawnAgentText(command, args, projectDir, 120_000);
+    const out = await spawnAgentText(command, args, projectDir, 120_000, buildAgentEnv(input.settings, command));
     return parseVisualReview(out);
   } catch (err) {
     return [

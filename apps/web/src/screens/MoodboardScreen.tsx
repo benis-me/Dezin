@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { Button, Spinner } from "../components/ui/index.ts";
+import type { MoodboardNode } from "../lib/api.ts";
 import { panelPercentFromPixels, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
-import { MoodboardAgentPanel } from "../moodboard/MoodboardAgentPanel.tsx";
+import { MoodboardAgentPanel, type MoodboardComposerInsertion } from "../moodboard/MoodboardAgentPanel.tsx";
 import { MoodboardCanvas } from "../moodboard/MoodboardCanvas.tsx";
 import { MoodboardCanvasTopbar, type MoodboardCanvasTopbarControls } from "../moodboard/MoodboardCanvasTopbar.tsx";
+import { layerLabel } from "../moodboard/canvas-utils.ts";
 import { useMoodboardBoard } from "../moodboard/useMoodboardBoard.ts";
 
 const MOODBOARD_AGENT_PANEL = "agent";
@@ -25,6 +27,16 @@ export function MoodboardScreen({
     panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 28, 20, 44);
   const board = useMoodboardBoard(boardId);
   const [canvasTopbarControls, setCanvasTopbarControls] = useState<MoodboardCanvasTopbarControls | null>(null);
+  const composerInsertionSeq = useRef(0);
+  const [composerInsertion, setComposerInsertion] = useState<MoodboardComposerInsertion | null>(null);
+  const sendNodesToAgent = useCallback((nodes: MoodboardNode[]) => {
+    if (nodes.length === 0) return;
+    composerInsertionSeq.current += 1;
+    setComposerInsertion({
+      id: composerInsertionSeq.current,
+      text: formatMoodboardNodeAgentContext(nodes),
+    });
+  }, []);
 
   if (board.loading) {
     return (
@@ -92,11 +104,17 @@ export function MoodboardScreen({
           <MoodboardAgentPanel
             boardName={board.detail.name}
             messages={board.messages}
-            busy={board.busy}
+            conversations={board.conversations}
+            activeConversationId={board.conversationId}
+            busy={board.agentBusy}
             agents={board.agents}
             agent={board.runAgent}
             model={board.runModel}
             onBack={onBack}
+            onConversationChange={(value) => void board.switchConversation(value)}
+            onCreateConversation={() => void board.createConversation()}
+            onRenameConversation={(id, title) => void board.renameConversation(id, title)}
+            onDeleteConversation={(id) => void board.deleteConversation(id)}
             onAgentChange={(value) => {
               board.setRunAgent(value);
               board.setRunModel("");
@@ -105,6 +123,7 @@ export function MoodboardScreen({
             onRescanAgents={board.rescanAgents}
             onUploadFiles={(files) => void board.uploadFiles(files)}
             onSend={board.sendMessage}
+            composerInsertion={composerInsertion}
           />
         </Panel>
         <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
@@ -115,10 +134,14 @@ export function MoodboardScreen({
               onOpenModelSettings={() => onOpenSettings("models")}
             />
             <MoodboardCanvas
+              viewKey={boardId}
               nodes={board.nodes}
+              busy={board.imageBusy}
               selectedIds={board.selectedIds}
+              moodboardAssets={board.assets}
               imageModels={board.imageModels}
               imageModel={board.imageModel}
+              imageProviderId={board.imageProviderId}
               onImageModelChange={board.setImageModel}
               onSelectIds={board.setSelectedIds}
               onNodesChange={board.updateNodes}
@@ -126,7 +149,9 @@ export function MoodboardScreen({
               onAddSection={board.addSection}
               onAddImageGenerator={board.addImageGenerator}
               onUploadFiles={(files, point) => void board.uploadFiles(files, point)}
+              onUploadReferenceFiles={board.uploadReferenceFiles}
               onGenerateImage={board.generateImage}
+              onSendToAgent={sendNodesToAgent}
               onTopbarControlsChange={setCanvasTopbarControls}
             />
           </section>
@@ -134,6 +159,16 @@ export function MoodboardScreen({
       </Group>
     </div>
   );
+}
+
+export function formatMoodboardNodeAgentContext(nodes: MoodboardNode[]): string {
+  const title = nodes.length === 1 ? "Selected moodboard node:" : `Selected moodboard nodes (${nodes.length}):`;
+  const lines = nodes.map((node, index) => {
+    const label = layerLabel(node).replace(/\s+/g, " ").trim() || node.type;
+    const type = node.type.replace(/-/g, " ");
+    return `${index + 1}. ${label} [${type}, id:${node.id}] at x:${Math.round(node.x)}, y:${Math.round(node.y)}, ${Math.round(node.width)}x${Math.round(node.height)}`;
+  });
+  return [title, ...lines].join("\n");
 }
 
 function LoadingCanvasChrome() {
@@ -145,7 +180,7 @@ function LoadingCanvasChrome() {
       <div aria-hidden className="absolute left-[30%] top-[52%] h-24 w-64 rounded-lg border border-border bg-card/60 backdrop-blur-xl" />
       <div
         aria-hidden
-        className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-lg border border-border bg-card/85 p-1 backdrop-blur-xl"
+        className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-0.5 rounded-lg border border-border bg-card/85 p-1 backdrop-blur-xl"
       >
         <div className="h-8 w-8 rounded-md bg-surface-2/80" />
         <div className="h-8 w-8 rounded-md bg-surface-2/80" />

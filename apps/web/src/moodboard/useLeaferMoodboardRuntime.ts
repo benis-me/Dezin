@@ -18,6 +18,7 @@ import {
   nodeIdFromTarget,
   nodeIdsFromTarget,
   rectFromBounds,
+  resolveAnchoredZoomTransform,
   resolveCanvasFitTransform,
   resolveFloatingRect,
   rounded,
@@ -541,10 +542,14 @@ export function useLeaferMoodboardRuntime({
         return;
       }
       pointerSelectionHandledRef.current = false;
-      if (selectFromTarget(event?.target, event)) return;
-      if (sectionDragHandledRef.current) {
-        sectionDragHandledRef.current = false;
+	      if (selectFromTarget(event?.target, event)) return;
+      if (contextTargetIdFromEvent(event?.target, editor.target)) {
+        scheduleFloatingSelection();
         return;
+      }
+	      if (sectionDragHandledRef.current) {
+	        sectionDragHandledRef.current = false;
+	        return;
       }
       sectionDragStartRef.current = null;
       setSectionDraftRect(null);
@@ -698,11 +703,22 @@ export function useLeaferMoodboardRuntime({
   const changeZoom = useCallback(
     (next: number) => {
       const app: any = appRef.current;
+      const container = hostRef.current;
       const tree = app?.tree;
       const clamped = Math.max(0.1, Math.min(4, next));
       if (tree) {
-        tree.scaleX = clamped;
-        tree.scaleY = clamped;
+        const transform = resolveAnchoredZoomTransform({
+          currentX: Number(tree.x ?? 0),
+          currentY: Number(tree.y ?? 0),
+          currentScale: Number(tree.scaleX ?? tree.scale ?? 1),
+          nextScale: clamped,
+          anchorX: container ? container.clientWidth / 2 : 0,
+          anchorY: container ? container.clientHeight / 2 : 0,
+        });
+        tree.x = transform.x;
+        tree.y = transform.y;
+        tree.scaleX = transform.scale;
+        tree.scaleY = transform.scale;
         tree.forceUpdate?.();
       }
       setZoom(clamped);

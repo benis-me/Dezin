@@ -1,4 +1,4 @@
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, vi } from "vitest";
 import { HomeScreen } from "./HomeScreen.tsx";
@@ -10,6 +10,8 @@ import { Shell } from "../components/Shell.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
+import type { Settings } from "../lib/api.ts";
+import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 
 afterEach(() => {
   localStorage.removeItem("dezin.shell.sidebar.width");
@@ -31,6 +33,30 @@ function renderWithApiAndAgents(ui: React.ReactElement, over = {}) {
       <AgentsProvider>{ui}</AgentsProvider>
     </ApiProvider>,
   );
+}
+
+function settingsFixture(patch: Partial<Settings> = {}): Settings {
+  return {
+    agentCommand: "claude",
+    model: "",
+    apiBaseUrl: "",
+    apiKey: "",
+    defaultDesignSystemId: "modern-minimal",
+    customInstructions: "",
+    imageApiBaseUrl: "",
+    imageApiKey: "",
+    imageModel: "",
+    videoApiBaseUrl: "",
+    videoApiKey: "",
+    videoModel: "",
+    aiProviderId: "openai",
+    aiProviderEnabled: false,
+    aiProviderModels: "gpt-image-1",
+    aiProviderOrganization: "",
+    aiProviderProfiles: "",
+    visualQaEnabled: false,
+    ...patch,
+  };
 }
 
 test("HomeScreen shows an empty state with no projects", () => {
@@ -233,6 +259,7 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
       aiProviderEnabled: true,
       aiProviderModels: "gpt-image-1",
       aiProviderOrganization: "",
+      aiProviderProfiles: "",
       visualQaEnabled: false,
     }),
     createMoodboard,
@@ -255,6 +282,67 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
   );
   expect(postMoodboardMessage).not.toHaveBeenCalled();
   expect(onOpenBoard).toHaveBeenCalledWith("b1");
+});
+
+test("MoodboardsScreen refreshes image models when provider settings change", async () => {
+  renderWithApiAndAgents(<MoodboardsScreen onOpenBoard={vi.fn()} />, {
+    listMoodboards: async () => [],
+    listAgents: async () => [{ id: "claude", command: "claude", available: true, models: ["sonnet"] }],
+    getSettings: async () =>
+      settingsFixture({
+        aiProviderId: "openai",
+        aiProviderEnabled: true,
+        aiProviderModels: JSON.stringify({ id: "openai-image-live", capabilities: ["Image"] }),
+        imageModel: "openai-image-live",
+        aiProviderProfiles: JSON.stringify({
+          openai: {
+            enabled: true,
+            baseUrl: "https://api.openai.com/v1",
+            models: JSON.stringify({ id: "openai-image-live", capabilities: ["Image"] }),
+            organization: "",
+          },
+          "azure-openai": {
+            enabled: false,
+            baseUrl: "https://example.openai.azure.com/openai",
+            models: JSON.stringify({ id: "azure-image-deployment", capabilities: ["Image"] }),
+            organization: "preview",
+          },
+        }),
+      }),
+  });
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model" }));
+  expect(await screen.findByText(/openai-image-live/)).toBeInTheDocument();
+
+  act(() => {
+    window.dispatchEvent(
+      new CustomEvent<Settings>(SETTINGS_UPDATED_EVENT, {
+        detail: settingsFixture({
+          aiProviderId: "azure-openai",
+          aiProviderEnabled: true,
+          aiProviderModels: JSON.stringify({ id: "azure-image-deployment", capabilities: ["Image"] }),
+          imageModel: "azure-image-deployment",
+          aiProviderProfiles: JSON.stringify({
+            openai: {
+              enabled: true,
+              baseUrl: "https://api.openai.com/v1",
+              models: JSON.stringify({ id: "openai-image-live", capabilities: ["Image"] }),
+              organization: "",
+            },
+            "azure-openai": {
+              enabled: true,
+              baseUrl: "https://example.openai.azure.com/openai",
+              models: JSON.stringify({ id: "azure-image-deployment", capabilities: ["Image"] }),
+              organization: "preview",
+            },
+          }),
+        }),
+      }),
+    );
+  });
+
+  expect(await screen.findByText(/azure-image-deployment/)).toBeInTheDocument();
+  expect(screen.queryByText(/openai-image-live/)).toBeNull();
 });
 
 test("MoodboardsScreen prompt creates image nodes from dropped references", async () => {
@@ -422,6 +510,7 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
     aiProviderEnabled: false,
     aiProviderModels: "gpt-image-1",
     aiProviderOrganization: "",
+    aiProviderProfiles: "",
     visualQaEnabled: false,
   };
   render(
@@ -446,26 +535,7 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
 
 function renderSettings(over = {}) {
   const onToggleDark = vi.fn();
-  const updateSettings = vi.fn(async (p: object) => ({
-    agentCommand: "claude",
-    model: "",
-    apiBaseUrl: "",
-    apiKey: "",
-    defaultDesignSystemId: "modern-minimal",
-    customInstructions: "",
-    imageApiBaseUrl: "",
-    imageApiKey: "",
-    imageModel: "",
-    videoApiBaseUrl: "",
-    videoApiKey: "",
-    videoModel: "",
-    aiProviderId: "openai",
-    aiProviderEnabled: false,
-    aiProviderModels: "gpt-image-1",
-    aiProviderOrganization: "",
-    visualQaEnabled: false,
-    ...p,
-  }));
+  const updateSettings = vi.fn(async (p: Partial<Settings>) => settingsFixture(p));
   const api = makeFakeApi({ listAgents: async () => AGENTS, rescanAgents: async () => AGENTS, listDesignSystems: async () => DSYS, updateSettings, ...over });
   render(
     <ApiProvider client={api}>
@@ -477,12 +547,12 @@ function renderSettings(over = {}) {
   return { onToggleDark, updateSettings };
 }
 
-test("SettingsScreen sidebar lists sections; Provider + Defaults show daemon data", async () => {
+test("SettingsScreen sidebar lists sections; Agents + Defaults show daemon data", async () => {
   renderSettings();
-  for (const name of ["Appearance", "Provider", "Models", "Quality", "Defaults", "Custom instructions", "About"]) {
+  for (const name of ["Appearance", "Agents", "Providers", "Quality", "Defaults", "Custom instructions", "About"]) {
     expect(screen.getByRole("button", { name })).toBeInTheDocument();
   }
-  fireEvent.click(screen.getByRole("button", { name: "Provider" }));
+  fireEvent.click(screen.getByRole("button", { name: "Agents" }));
   // the detected daemon agent shows as a card with its version
   expect(await screen.findByText(/claude 1\.2\.3/)).toBeInTheDocument();
   // an uninstalled agent is shown but disabled (not selectable)
@@ -494,7 +564,7 @@ test("SettingsScreen sidebar lists sections; Provider + Defaults show daemon dat
 test("SettingsScreen persists the chosen provider and custom instructions", async () => {
   const user = userEvent.setup();
   const { updateSettings } = renderSettings();
-  fireEvent.click(screen.getByRole("button", { name: "Provider" }));
+  fireEvent.click(screen.getByRole("button", { name: "Agents" }));
   await user.click(await screen.findByRole("button", { name: /Codex/ }));
   expect(updateSettings).toHaveBeenCalledWith({ agentCommand: "codex" });
 
@@ -507,6 +577,255 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
   fireEvent.click(screen.getByRole("button", { name: "Quality" }));
   await user.click(await screen.findByRole("switch", { name: "Agent visual review" }));
   expect(updateSettings).toHaveBeenCalledWith({ visualQaEnabled: true });
+});
+
+test("SettingsScreen keeps model API key drafts after redacted settings saves", async () => {
+  const user = userEvent.setup();
+  const updateSettings = vi.fn(async (p: Partial<Settings>) => {
+    const saved = settingsFixture(p);
+    return { ...saved, apiKey: "", imageApiKey: "", videoApiKey: "" };
+  });
+
+  renderSettings({ updateSettings });
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+
+  const apiKey = await screen.findByLabelText("API Key");
+  await user.type(apiKey, "sk-live-test");
+
+  await waitFor(() => expect(updateSettings).toHaveBeenCalled());
+  expect(apiKey).toHaveValue("sk-live-test");
+});
+
+test("SettingsScreen keeps provider status enabled after reopening with a redacted API key", async () => {
+  renderSettings({
+    getSettings: async () =>
+      settingsFixture({
+        aiProviderEnabled: true,
+        apiKey: "",
+        imageApiKey: "",
+        apiKeyConfigured: true,
+        imageApiKeyConfigured: true,
+      } as Partial<Settings>),
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+
+  expect(await screen.findByLabelText("OpenAI enabled")).toHaveClass("bg-[var(--success)]");
+});
+
+test("SettingsScreen shows provider status per provider and hides unsupported providers", async () => {
+  const user = userEvent.setup();
+  let current = settingsFixture({
+    aiProviderId: "openai",
+    aiProviderEnabled: true,
+    aiProviderModels: "gpt-image-1",
+    aiProviderProfiles: JSON.stringify({
+      openai: {
+        enabled: true,
+        baseUrl: "https://api.openai.com/v1",
+        models: "gpt-image-1",
+        organization: "",
+      },
+      "azure-openai": {
+        enabled: false,
+        baseUrl: "https://{resource}.openai.azure.com",
+        models: JSON.stringify({ id: "azure-image-deployment", capabilities: ["Image"] }),
+        organization: "preview",
+      },
+    }),
+  });
+  const updateSettings = vi.fn(async (patch: Partial<Settings>) => {
+    current = { ...current, ...patch };
+    return current;
+  });
+  renderSettings({ getSettings: async () => current, updateSettings });
+
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+
+  expect(await screen.findByLabelText("OpenAI enabled")).toHaveClass("bg-[var(--success)]");
+  expect(screen.getByLabelText("Azure OpenAI disabled")).toHaveClass("bg-border-strong");
+  expect(screen.queryByText(/AI SDK|Native/)).toBeNull();
+  expect(screen.getByText("Google AI Studio")).toBeInTheDocument();
+  expect(screen.getByText("fal.ai")).toBeInTheDocument();
+  expect(screen.getByText("Google Vertex AI")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Mock/ })).toBeNull();
+  for (const removed of ["Midjourney", "WaveSpeed"]) {
+    expect(screen.queryByRole("button", { name: new RegExp(removed) })).toBeNull();
+  }
+
+  const azure = screen.getByLabelText("Azure OpenAI disabled").closest("button")!;
+  await user.click(azure);
+  expect(updateSettings).not.toHaveBeenCalled();
+  expect(await screen.findByLabelText("OpenAI enabled")).toHaveClass("bg-[var(--success)]");
+  expect(screen.getByLabelText("Azure OpenAI disabled")).toHaveClass("bg-border-strong");
+
+  await user.click(await screen.findByRole("switch", { name: "Enable Azure OpenAI" }));
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aiProviderId: "azure-openai",
+        aiProviderEnabled: true,
+        aiProviderModels: expect.stringContaining("azure-image-deployment"),
+        imageModel: "azure-image-deployment",
+        aiProviderProfiles: expect.stringContaining('"enabled":true'),
+      }),
+    ),
+  );
+});
+
+test("SettingsScreen shows Azure OpenAI fields as resource endpoint plus deployment names", async () => {
+  const user = userEvent.setup();
+  renderSettings();
+
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+  const azure = await screen.findByLabelText("Azure OpenAI disabled");
+  await user.click(azure.closest("button")!);
+
+  expect(await screen.findByLabelText("Resource endpoint")).toHaveAttribute("placeholder", "https://{resource}.openai.azure.com");
+  expect(screen.getByLabelText("API version")).toHaveAttribute("placeholder", "2025-04-01-preview");
+  expect(screen.getByText(/Enter Azure deployment names/)).toBeInTheDocument();
+});
+
+test("SettingsScreen clears image runtime when enabling a text-only provider", async () => {
+  const user = userEvent.setup();
+  let current = settingsFixture({
+    aiProviderId: "openai",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "https://api.openai.com/v1",
+    imageModel: "gpt-image-1",
+    aiProviderProfiles: JSON.stringify({
+      openai: {
+        enabled: true,
+        baseUrl: "https://api.openai.com/v1",
+        models: "gpt-image-1",
+        organization: "",
+      },
+      anthropic: {
+        enabled: false,
+        baseUrl: "https://api.anthropic.com/v1",
+        models: "claude-sonnet-4-6",
+        organization: "",
+      },
+    }),
+  });
+  const updateSettings = vi.fn(async (patch: Partial<Settings>) => {
+    current = { ...current, ...patch };
+    return current;
+  });
+  renderSettings({ getSettings: async () => current, updateSettings });
+
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+  const anthropic = await screen.findByLabelText("Anthropic disabled");
+  await user.click(anthropic.closest("button")!);
+  await user.click(await screen.findByRole("switch", { name: "Enable Anthropic" }));
+
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aiProviderId: "anthropic",
+        imageApiBaseUrl: "",
+        videoApiBaseUrl: "",
+        imageModel: "",
+      }),
+    ),
+  );
+});
+
+test("SettingsScreen tests the selected model provider through the daemon", async () => {
+  const user = userEvent.setup();
+  const testModelProvider = vi.fn(async () => ({ ok: true, message: "Connected to OpenAI. Found 2 models." }));
+  renderSettings({ testModelProvider });
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+
+  await user.click(await screen.findByRole("button", { name: "Test connection" }));
+
+  expect(testModelProvider).toHaveBeenCalledWith("openai");
+  expect(await screen.findByText("Connected to OpenAI. Found 2 models.")).toBeInTheDocument();
+});
+
+test("SettingsScreen loads live model provider models through the daemon", async () => {
+  const user = userEvent.setup();
+  const listModelProviderModels = vi.fn(async () => ({
+    models: [{ id: "gpt-live-1", name: "GPT Live 1" }],
+  }));
+  const { updateSettings } = renderSettings({ listModelProviderModels });
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+
+  await user.click(await screen.findByRole("button", { name: "Get model list" }));
+
+  expect(listModelProviderModels).toHaveBeenCalledWith("openai");
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      aiProviderModels: JSON.stringify({ id: "gpt-live-1", name: "GPT Live 1" }),
+      aiProviderProfiles: expect.stringContaining("gpt-live-1"),
+    })),
+  );
+  expect(await screen.findByText("Loaded 1 live model.")).toBeInTheDocument();
+});
+
+test("SettingsScreen preserves edited provider endpoint and models when switching providers", async () => {
+  const user = userEvent.setup();
+  let current = settingsFixture({
+    aiProviderEnabled: true,
+    apiBaseUrl: "https://api.openai.com/v1",
+    imageApiBaseUrl: "https://api.openai.com/v1",
+    videoApiBaseUrl: "https://api.openai.com/v1",
+    aiProviderModels: "gpt-image-1",
+  });
+  const updateSettings = vi.fn(async (patch: Partial<Settings>) => {
+    current = { ...current, ...patch };
+    return current;
+  });
+  const listModelProviderModels = vi.fn(async () => ({
+    models: [{ id: "gpt-live-image", name: "GPT Live Image", capabilities: ["Image" as const] }],
+  }));
+  renderSettings({
+    getSettings: async () => current,
+    updateSettings,
+    listModelProviderModels,
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+  const providerButton = (name: string) => screen.getByLabelText(new RegExp(`^${name} (enabled|disabled)$`)).closest("button")!;
+  const baseUrl = await screen.findByLabelText("Base URL");
+  await user.clear(baseUrl);
+  await user.type(baseUrl, "https://openai.local/v1");
+  await user.click(await screen.findByRole("button", { name: "Get model list" }));
+  expect(await screen.findByText("GPT Live Image")).toBeInTheDocument();
+
+  await user.click(providerButton("Azure OpenAI"));
+  expect(await screen.findByLabelText("Resource endpoint")).toHaveValue("https://{resource}.openai.azure.com");
+  await user.click(providerButton("OpenAI"));
+
+  expect(await screen.findByLabelText("Base URL")).toHaveValue("https://openai.local/v1");
+  expect(await screen.findByText("GPT Live Image")).toBeInTheDocument();
+});
+
+test("SettingsScreen keeps a cleared provider endpoint empty instead of restoring the preset", async () => {
+  const user = userEvent.setup();
+  const { updateSettings } = renderSettings({
+    getSettings: async () =>
+      settingsFixture({
+        apiBaseUrl: "https://api.openai.com/v1",
+        imageApiBaseUrl: "https://api.openai.com/v1",
+        videoApiBaseUrl: "https://api.openai.com/v1",
+      }),
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+
+  const baseUrl = await screen.findByLabelText("Base URL");
+  await user.clear(baseUrl);
+
+  expect(baseUrl).toHaveValue("");
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        apiBaseUrl: "",
+        imageApiBaseUrl: "",
+        videoApiBaseUrl: "",
+      }),
+    ),
+  );
 });
 
 test("SettingsScreen theme toggle calls onToggleDark", async () => {

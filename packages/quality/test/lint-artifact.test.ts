@@ -16,6 +16,16 @@ test("clean Linear/Vercel artifact produces zero findings", () => {
   assert.deepEqual(findings, [], `expected clean, got: ${JSON.stringify(ids(findings))}`);
 });
 
+test("empty or shell-only artifacts are blocking P0", () => {
+  for (const html of ["", " \n\t", "<!doctype html><html><head></head><body> </body></html>"]) {
+    const findings = lintArtifact(html);
+    assert.ok(
+      findings.some((f) => f.id === "empty-artifact" && f.severity === "P0"),
+      `expected empty-artifact P0 for ${JSON.stringify(html)}`,
+    );
+  }
+});
+
 test("sloppy artifact trips the cardinal sins", () => {
   const f = lintArtifact(SLOPPY_ARTIFACT);
   assert.ok(has(f, "ai-default-indigo"), "indigo");
@@ -46,6 +56,18 @@ test("indigo escape hatch: :root --accent passes, laundering fails", () => {
 test("blue→cyan trust gradient is caught even with no indigo", () => {
   const html = `<style>.hero { background: linear-gradient(90deg, #3b82f6, #06b6d4); }</style>`;
   assert.ok(has(lintArtifact(html), "trust-gradient"));
+});
+
+test("color checks normalize equivalent CSS color syntaxes and Tailwind classes", () => {
+  assert.ok(has(lintArtifact(`<style>.hero { color: rgb(99, 102, 241); }</style>`), "ai-default-indigo"));
+  assert.ok(has(lintArtifact(`<style>.hero { color: hsl(239 84% 67%); }</style>`), "ai-default-indigo"));
+  assert.ok(has(lintArtifact(`<style>.hero { color: oklch(0.585 0.233 277.117); }</style>`), "ai-default-indigo"));
+  assert.ok(has(lintArtifact(`<div class="bg-indigo-500 text-white">Launch</div>`), "ai-default-indigo"));
+});
+
+test("gradient checks cover nested colors plus radial and conic gradients", () => {
+  assert.ok(has(lintArtifact(`<style>.hero { background: radial-gradient(circle, rgb(99, 102, 241), white); }</style>`), "purple-gradient"));
+  assert.ok(has(lintArtifact(`<style>.hero { background: conic-gradient(from 90deg, #3b82f6, #06b6d4); }</style>`), "trust-gradient"));
 });
 
 test("emoji only flagged in structural context, not body prose", () => {

@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import type { AgentInfo, MoodboardMessage } from "../lib/api.ts";
+import type { AgentInfo, MoodboardConversation, MoodboardMessage } from "../lib/api.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
+import { ConversationSelect } from "../components/ConversationSelect.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
@@ -12,34 +13,53 @@ const FLOATING_COMPOSER_FADE_PX = 48;
 const SCROLL_TO_BOTTOM_GAP_PX = 12;
 const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
 
+export type MoodboardComposerInsertion = {
+  id: number;
+  text: string;
+};
+
 export function MoodboardAgentPanel({
   boardName,
   messages,
+  conversations = [],
+  activeConversationId = null,
   busy,
   agents,
   agent,
   model,
   onBack,
+  onConversationChange,
+  onCreateConversation,
+  onRenameConversation,
+  onDeleteConversation,
   onAgentChange,
   onModelChange,
   onRescanAgents,
   onUploadFiles,
   onSend,
   loading = false,
+  composerInsertion = null,
 }: {
   boardName: string;
   messages: MoodboardMessage[];
+  conversations?: MoodboardConversation[];
+  activeConversationId?: string | null;
   busy: boolean;
   agents: AgentInfo[];
   agent: string;
   model: string;
   onBack: () => void;
+  onConversationChange?: (id: string) => void;
+  onCreateConversation?: () => void;
+  onRenameConversation?: (id: string, title: string) => void;
+  onDeleteConversation?: (id: string) => void;
   onAgentChange: (command: string) => void;
   onModelChange: (model: string) => void;
   onRescanAgents: () => Promise<void>;
   onUploadFiles?: (files: FileList | null) => void;
   onSend: (content: string) => Promise<void>;
   loading?: boolean;
+  composerInsertion?: MoodboardComposerInsertion | null;
 }) {
   const [text, setText] = useState("");
   const [composerH, setComposerH] = useState(92);
@@ -48,10 +68,12 @@ export function MoodboardAgentPanel({
   const composerRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const stickBottom = useRef(true);
   const composerOverlayH = composerH + FLOATING_COMPOSER_FADE_PX;
   const messageBottomPadding = composerOverlayH + MESSAGE_BOTTOM_CLEARANCE_PX;
   const scrollToBottomBottom = composerOverlayH + SCROLL_TO_BOTTOM_GAP_PX;
+  const hasConversationContent = !loading && (messages.length > 0 || busy);
 
   useEffect(() => {
     const element = composerRef.current;
@@ -114,9 +136,25 @@ export function MoodboardAgentPanel({
     }
   };
 
-  const appendContext = (context: string) => {
+  const focusComposerEnd = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus({ preventScroll: true });
+    const end = textarea.value.length;
+    textarea.setSelectionRange(end, end);
+  }, []);
+
+  const appendContext = useCallback((context: string) => {
     setText((current) => `${current}${current.trim() ? "\n\n" : ""}${context}`);
-  };
+  }, []);
+
+  useEffect(() => {
+    const context = composerInsertion?.text.trim();
+    if (!context) return;
+    appendContext(context);
+    const frame = window.requestAnimationFrame(focusComposerEnd);
+    return () => window.cancelAnimationFrame(frame);
+  }, [appendContext, composerInsertion?.id, composerInsertion?.text, focusComposerEnd]);
 
   const attachFiles = (files: FileList | null) => {
     onUploadFiles?.(files);
@@ -147,14 +185,27 @@ export function MoodboardAgentPanel({
             </motion.span>
           </AnimatePresence>
         </button>
+        {conversations.length ? (
+          <div className="app-no-drag shrink-0">
+            <ConversationSelect
+              conversations={conversations}
+              activeId={activeConversationId}
+              onSwitch={(id) => onConversationChange?.(id)}
+              onCreate={onCreateConversation}
+              onRename={(id, title) => onRenameConversation?.(id, title)}
+              onDelete={(id) => onDeleteConversation?.(id)}
+              label={(conversation, index) => conversation.title || `Conversation ${index + 1}`}
+            />
+          </div>
+        ) : null}
       </div>
 
       <div
         ref={messagesRef}
         data-testid="moodboard-agent-messages"
         onScroll={updateBottomState}
-        className={cn("min-h-0 flex-1 px-4 pt-5", messages.length > 0 ? "space-y-4 overflow-auto" : "overflow-hidden")}
-        style={messages.length > 0 ? { paddingBottom: messageBottomPadding } : undefined}
+        className={cn("min-h-0 flex-1 px-4 pt-5", hasConversationContent ? "space-y-4 overflow-auto" : "overflow-hidden")}
+        style={hasConversationContent ? { paddingBottom: messageBottomPadding } : undefined}
       >
         {loading ? (
           <div className="flex h-full flex-col justify-end pb-8">
@@ -175,7 +226,7 @@ export function MoodboardAgentPanel({
               </div>
             </div>
           </div>
-        ) : messages.length === 0 ? (
+        ) : !hasConversationContent ? (
           <div className="grid h-full place-items-center">
             <div className="flex max-w-[16rem] flex-col items-center gap-3 text-center">
               <span className="grid h-11 w-11 place-items-center rounded-2xl border border-border bg-card text-foreground">
@@ -188,16 +239,31 @@ export function MoodboardAgentPanel({
           </div>
         ) : (
           <div className="space-y-3">
-            {messages.map((message) => (
-              <MoodboardMessageRow key={message.id} message={message} busy={busy} onCopy={(content) => void copyMessage(content)} />
-            ))}
+            <AnimatePresence initial={false}>
+              {messages.map((message) => (
+                <motion.div
+                  key={message.id}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
+                >
+                  <MoodboardMessageRow message={message} busy={busy} onCopy={(content) => void copyMessage(content)} />
+                </motion.div>
+              ))}
+            </AnimatePresence>
             {busy ? (
-              <div className="flex justify-start">
+              <motion.div
+                className="flex justify-start"
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.14, ease: [0.25, 1, 0.5, 1] }}
+              >
                 <div className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted-foreground">
                   <Loader2 size={14} className="animate-spin" />
                   Working...
                 </div>
-              </div>
+              </motion.div>
             ) : null}
           </div>
         )}
@@ -279,6 +345,7 @@ export function MoodboardAgentPanel({
             ) : (
               <>
                 <textarea
+                  ref={textareaRef}
                   aria-label="Message"
                   rows={1}
                   value={text}

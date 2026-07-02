@@ -4,10 +4,17 @@
 // — chunk 0 is the kiwi schema, chunk 1 is the kiwi-encoded document. Newer exports
 // wrap that in a ZIP whose canvas.fig holds the same archive.
 
-import { inflateSync, unzipSync } from "fflate";
+import { inflateRawSync } from "node:zlib";
 import { compileSchema, decodeBinarySchema } from "kiwi-schema";
 
 const PRELUDE = "fig-kiwi";
+export const MAX_FIG_ZIP_UNCOMPRESSED_BYTES = 128 * 1024 * 1024;
+export const MAX_FIG_INFLATED_BYTES = 128 * 1024 * 1024;
+
+export interface FigParseOptions {
+  maxArchiveBytes?: number;
+  maxInflatedBytes?: number;
+}
 
 interface FigColor {
   r?: number;
@@ -48,21 +55,74 @@ function parseArchive(buf: Uint8Array): Uint8Array[] {
   return files;
 }
 
+interface ZipCandidate {
+  path: string;
+  method: number;
+  raw: Uint8Array;
+  uncompressedSize: number;
+}
+
+function inflateRawLimited(raw: Uint8Array, maxBytes: number, label: string): Uint8Array {
+  try {
+    return new Uint8Array(inflateRawSync(raw, { maxOutputLength: maxBytes }));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "";
+    if (/larger than/i.test(message)) throw new Error(`${label} output exceeds limit`);
+    throw err;
+  }
+}
+
+function inflateZipCandidate(candidate: ZipCandidate, maxBytes: number): Uint8Array {
+  if (candidate.uncompressedSize > maxBytes) throw new Error("fig zip output exceeds limit");
+  if (candidate.method === 0) {
+    if (candidate.raw.length > maxBytes) throw new Error("fig zip output exceeds limit");
+    return candidate.raw;
+  }
+  if (candidate.method !== 8) throw new Error("unsupported fig zip compression");
+  return inflateRawLimited(candidate.raw, Math.min(maxBytes, candidate.uncompressedSize), "fig zip");
+}
+
+function readZipWrappedFig(zip: Uint8Array, maxBytes: number): Uint8Array {
+  const buf = Buffer.from(zip);
+  let offset = 0;
+  let fallback: ZipCandidate | null = null;
+  while (offset + 4 <= buf.length && buf.readUInt32LE(offset) === 0x04034b50) {
+    const method = buf.readUInt16LE(offset + 8);
+    const compSize = buf.readUInt32LE(offset + 18);
+    const uncompressedSize = buf.readUInt32LE(offset + 22);
+    const nameLen = buf.readUInt16LE(offset + 26);
+    const extraLen = buf.readUInt16LE(offset + 28);
+    const nameStart = offset + 30;
+    const dataStart = nameStart + nameLen + extraLen;
+    const dataEnd = dataStart + compSize;
+    if (dataEnd > buf.length) throw new Error("truncated fig zip entry");
+    const candidate = {
+      path: buf.toString("utf8", nameStart, nameStart + nameLen),
+      method,
+      raw: buf.subarray(dataStart, dataEnd),
+      uncompressedSize,
+    };
+    if (!fallback) fallback = candidate;
+    if (candidate.path === "canvas.fig") return inflateZipCandidate(candidate, maxBytes);
+    offset = dataEnd;
+  }
+  if (!fallback) throw new Error("zip archive has no canvas.fig");
+  return inflateZipCandidate(fallback, maxBytes);
+}
+
 /** Decode a .fig file (or ZIP-wrapped canvas.fig) into Figma's document message. */
-export function figToJson(input: Uint8Array): FigDocument {
+export function figToJson(input: Uint8Array, options: FigParseOptions = {}): FigDocument {
   let buf = input;
   if (buf[0] === 0x50 && buf[1] === 0x4b) {
     // PK\x03\x04 → ZIP container; the document lives in canvas.fig
-    const entries = unzipSync(buf);
-    const canvas = entries["canvas.fig"] ?? Object.values(entries)[0];
-    if (!canvas) throw new Error("zip archive has no canvas.fig");
-    buf = canvas;
+    buf = readZipWrappedFig(buf, options.maxArchiveBytes ?? MAX_FIG_ZIP_UNCOMPRESSED_BYTES);
   }
   const [schemaChunk, dataChunk] = parseArchive(buf);
   if (!schemaChunk || !dataChunk) throw new Error("missing schema/data chunks");
-  const schema = decodeBinarySchema(inflateSync(schemaChunk));
+  const maxInflatedBytes = options.maxInflatedBytes ?? MAX_FIG_INFLATED_BYTES;
+  const schema = decodeBinarySchema(inflateRawLimited(schemaChunk, maxInflatedBytes, "fig inflate"));
   const compiled = compileSchema(schema) as { decodeMessage: (b: Uint8Array) => FigDocument };
-  return compiled.decodeMessage(inflateSync(dataChunk));
+  return compiled.decodeMessage(inflateRawLimited(dataChunk, maxInflatedBytes, "fig inflate"));
 }
 
 function hex(c: FigColor): string {

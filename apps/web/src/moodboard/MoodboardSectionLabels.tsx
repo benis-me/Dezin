@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { PropertyEvent } from "leafer-editor";
 import type { MoodboardNode } from "../lib/api.ts";
 import { nodeTitle } from "./canvas-utils.ts";
 
@@ -16,7 +17,7 @@ export function MoodboardSectionLabels({
   const sections = nodes.filter((node) => node.type === "section");
   if (sections.length === 0) return null;
   return (
-    <div aria-hidden={false} className="pointer-events-none absolute inset-0 z-20">
+    <div aria-hidden={false} className="pointer-events-none absolute inset-0 z-10">
       {sections.map((node) => (
         <SectionLabel key={node.id} node={node} appRef={appRef} onSelect={onSelect} onRename={onRename} />
       ))}
@@ -55,14 +56,35 @@ function SectionLabel({
   }, [appRef, node.id, node.x, node.y]);
 
   useEffect(() => {
-    let frame = 0;
-    const tick = () => {
-      syncPosition();
-      frame = window.requestAnimationFrame(tick);
+    let frame: number | null = null;
+    const schedule = () => {
+      if (frame != null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        syncPosition();
+      });
     };
-    tick();
-    return () => window.cancelAnimationFrame(frame);
-  }, [syncPosition]);
+    const syncNow = () => {
+      if (frame != null) {
+        window.cancelAnimationFrame(frame);
+        frame = null;
+      }
+      syncPosition();
+    };
+    syncNow();
+    const tree = appRef.current?.tree;
+    tree?.on?.(PropertyEvent.LEAFER_CHANGE, schedule);
+    tree?.on?.("move", schedule);
+    tree?.on?.("move.end", schedule);
+    window.addEventListener("resize", schedule);
+    return () => {
+      tree?.off?.(PropertyEvent.LEAFER_CHANGE, schedule);
+      tree?.off?.("move", schedule);
+      tree?.off?.("move.end", schedule);
+      window.removeEventListener("resize", schedule);
+      if (frame != null) window.cancelAnimationFrame(frame);
+    };
+  }, [appRef, syncPosition]);
 
   useEffect(() => {
     if (!editing) return;

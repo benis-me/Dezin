@@ -1,5 +1,4 @@
 import { Search } from "lucide-react";
-import type { Settings } from "../lib/api.ts";
 import { Input } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import type { ProviderPreset } from "./model-provider-registry.ts";
@@ -8,18 +7,14 @@ import { ProviderIcon } from "./model-provider-ui-utils.tsx";
 export function ModelProviderSidebar({
   providers,
   selectedId,
-  activeProviderId,
-  enabled,
-  apiKey,
+  enabledProviderIds,
   query,
   onQueryChange,
   onSelect,
 }: {
   providers: ProviderPreset[];
   selectedId: string;
-  activeProviderId: Settings["aiProviderId"];
-  enabled: boolean;
-  apiKey: string;
+  enabledProviderIds: ReadonlySet<string>;
   query: string;
   onQueryChange: (value: string) => void;
   onSelect: (provider: ProviderPreset) => void;
@@ -39,7 +34,7 @@ export function ModelProviderSidebar({
       <div className="mt-2 space-y-1">
         {providers.map((provider) => {
           const active = provider.id === selectedId;
-          const configured = provider.id === activeProviderId && enabled && Boolean(apiKey || provider.id === "mock" || provider.id === "ollama");
+          const configured = enabledProviderIds.has(provider.id);
           return (
             <button
               key={provider.id}

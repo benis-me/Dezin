@@ -87,6 +87,28 @@ test("run lifecycle: pending → running → succeeded", () => {
   s.close();
 });
 
+test("Store configures a busy timeout for concurrent sqlite writers", () => {
+  const s = freshStore();
+  const row = s.db.prepare("PRAGMA busy_timeout").get() as Record<string, unknown>;
+  assert.equal(Number(Object.values(row)[0]), 5000);
+  s.close();
+});
+
+test("markInterruptedRuns only sweeps runs owned by this daemon", () => {
+  const s = freshStore();
+  const p = s.createProject({ name: "P" });
+  const c = s.createConversation(p.id);
+  const own = s.createRun(p.id, c.id, undefined, undefined, "daemon-a");
+  const other = s.createRun(p.id, c.id, undefined, undefined, "daemon-b");
+  s.updateRun(own.id, { status: "running" });
+  s.updateRun(other.id, { status: "running" });
+
+  assert.equal(s.markInterruptedRuns("daemon-a"), 1);
+  assert.equal(s.getRun(own.id)?.status, "cancelled");
+  assert.equal(s.getRun(other.id)?.status, "running");
+  s.close();
+});
+
 test("Store migrates a pre-existing runs table that lacks the score column", () => {
   const file = join(mkdtempSync(join(tmpdir(), "dezin-mig-")), "old.db");
   const old = new DatabaseSync(file);
@@ -257,12 +279,42 @@ test("moodboards persist nodes, assets, and messages", () => {
   const msg = s.addMoodboardMessage(board.id, "user", "Collect softer references");
   assert.equal(msg.content, "Collect softer references");
   assert.equal(s.listMoodboardMessages(board.id).length, 1);
+  assert.equal(s.listMoodboardConversations(board.id).length, 1);
 
   s.setMoodboardArchived(board.id, true);
   assert.ok(s.getMoodboard(board.id)?.archivedAt);
   s.deleteMoodboard(board.id);
   assert.equal(s.getMoodboard(board.id), null);
   assert.equal(s.listMoodboardNodes(board.id).length, 0);
+  s.close();
+});
+
+test("moodboard conversations isolate messages per board conversation", () => {
+  const s = freshStore();
+  const board = s.createMoodboard({ name: "Material board" });
+  const first = s.ensureMoodboardConversation(board.id);
+  const second = s.createMoodboardConversation(board.id, "Alternate direction");
+
+  s.addMoodboardMessage(board.id, "user", "Explore warm references", first.id);
+  s.addMoodboardMessage(board.id, "assistant", "Use amber lighting.", first.id);
+  s.addMoodboardMessage(board.id, "user", "Explore cooler references", second.id);
+
+  assert.deepEqual(
+    s.listMoodboardMessages(board.id, first.id).map((message) => message.content),
+    ["Explore warm references", "Use amber lighting."],
+  );
+  assert.deepEqual(
+    s.listMoodboardMessages(board.id, second.id).map((message) => message.content),
+    ["Explore cooler references"],
+  );
+  assert.deepEqual(
+    s.listMoodboardConversations(board.id).map((conversation) => [conversation.title, conversation.turns]),
+    [
+      ["Conversation 1", 1],
+      ["Alternate direction", 1],
+    ],
+  );
+  assert.throws(() => s.addMoodboardMessage(board.id, "user", "wrong board", "missing"), /moodboard conversation not found/);
   s.close();
 });
 

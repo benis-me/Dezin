@@ -36,6 +36,11 @@ const STREAM = [
   `{"type":"result","subtype":"success","result":"done","is_error":false}`,
 ].join("\n");
 
+const ERROR_STREAM = [
+  `{"type":"system","subtype":"init","session_id":"s1"}`,
+  `{"type":"result","subtype":"error_during_execution","result":"authentication expired","is_error":true}`,
+].join("\n");
+
 test("ClaudeCodeRunner assembles args/stdin, runs, and reads back the artifact", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-claude-"));
   const html = `<section data-dezin-id="x"><h1>Hero</h1></section>`;
@@ -111,19 +116,102 @@ test("NodeSpawner uses the augmented agent environment", async () => {
     stdin: "",
   });
   const env = JSON.parse(out.stdout) as { path: string; hook: string; quiet: string };
-  assert.ok(env.path.split(":").includes(dirname(process.execPath)));
+  assert.ok(env.path.split(process.platform === "win32" ? ";" : ":").includes(dirname(process.execPath)));
   assert.equal(env.hook, "1");
   assert.equal(env.quiet, "1");
 });
 
-test("missing artifact file yields empty artifactHtml (agent wrote nothing)", async () => {
+test("NodeSpawner passes per-turn extra environment variables", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-env-"));
+  const out = await new NodeSpawner().run({
+    command: process.execPath,
+    args: ["-e", "process.stdout.write(process.env.ANTHROPIC_API_KEY || '')"],
+    cwd: dir,
+    stdin: "",
+    env: { ANTHROPIC_API_KEY: "sk-test" },
+  });
+  assert.equal(out.stdout, "sk-test");
+});
+
+test("NodeSpawner times out a stuck process and escalates termination", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-timeout-"));
+  const spawner = new NodeSpawner({ timeoutMs: 40, killDelayMs: 10 });
+
+  await assert.rejects(
+    () =>
+      spawner.run({
+        command: process.execPath,
+        args: ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
+        cwd: dir,
+        stdin: "",
+      }),
+    /timed out after 40ms/i,
+  );
+});
+
+test("NodeSpawner abort kills a process that ignores SIGTERM", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-abort-"));
+  const spawner = new NodeSpawner({ timeoutMs: 1000, killDelayMs: 10 });
+  const controller = new AbortController();
+  const run = spawner.run({
+    command: process.execPath,
+    args: ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
+    cwd: dir,
+    stdin: "",
+    signal: controller.signal,
+  });
+
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(run, (error) => error instanceof Error && error.name === "AbortError");
+});
+
+test("ClaudeCodeRunner rejects when the CLI exits nonzero", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-exit-"));
+  const spawner: ProcessSpawner = {
+    run: async () => ({ stdout: STREAM, stderr: "authentication expired", exitCode: 1 }),
+  };
+  const runner = new ClaudeCodeRunner({ spawner });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    /claude.*exit code 1.*authentication expired/i,
+  );
+});
+
+test("ClaudeCodeRunner rejects Claude stream-json error results", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-is-error-"));
+  const spawner = new FakeSpawner(ERROR_STREAM, "<h1>old</h1>");
+  const runner = new ClaudeCodeRunner({ spawner });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    /claude.*error.*authentication expired/i,
+  );
+});
+
+test("ClaudeCodeRunner rejects when the agent writes no artifact", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-claude-empty-"));
-  // spawner that returns stream-json but writes NO file
   const spawner: ProcessSpawner = {
     run: async () => ({ stdout: STREAM, exitCode: 0 }),
   };
   const runner = new ClaudeCodeRunner({ spawner });
-  const result = await runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir });
-  assert.equal(result.artifactHtml, "");
-  assert.equal(result.text, "Wrote the hero.");
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    /artifact.*missing/i,
+  );
+});
+
+test("ClaudeCodeRunner rejects stale artifacts from a successful no-op turn", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-stale-"));
+  await writeFile(join(dir, "index.html"), "<h1>previous</h1>", "utf8");
+  const spawner: ProcessSpawner = {
+    run: async () => ({ stdout: STREAM, exitCode: 0 }),
+  };
+  const runner = new ClaudeCodeRunner({ spawner });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "S", message: "go", projectDir: dir }),
+    /artifact.*not updated/i,
+  );
 });
