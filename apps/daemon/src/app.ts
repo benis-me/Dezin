@@ -8,6 +8,7 @@
 import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
 import type { CreateProjectInput, Settings } from "../../../packages/core/src/index.ts";
@@ -35,6 +36,7 @@ import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./vari
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
+import { buildAgentEnv } from "./agent-env.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import type { VisualQaRunner } from "./visual-qa.ts";
 import { handleGenerateProjectTitle, type TitleGenerator } from "./title-handler.ts";
@@ -193,10 +195,11 @@ const routes: Route[] = [
       const body = (await readJsonBody(req)) as { image?: string; agentCommand?: string; model?: string } | null;
       const image = typeof body?.image === "string" ? body.image : "";
       if (!image) return sendError(res, 400, "no image");
-      const command = (typeof body?.agentCommand === "string" && body.agentCommand) || store.getSettings().agentCommand || "claude";
+      const settings = store.getSettings();
+      const command = (typeof body?.agentCommand === "string" && body.agentCommand) || settings.agentCommand || "claude";
       const model = typeof body?.model === "string" ? body.model : undefined;
       try {
-        const brief = await analyzeImage(command, image, model);
+        const brief = await analyzeImage(command, image, model, undefined, buildAgentEnv(settings, command));
         sendJson(res, 200, { brief, agent: command });
       } catch (e) {
         sendError(res, 502, e instanceof Error ? e.message : "analysis failed");
@@ -418,8 +421,9 @@ const routes: Route[] = [
   {
     method: "DELETE",
     pattern: "/api/projects/:id",
-    handler: (_req, res, { id }, { store }) => {
+    handler: async (_req, res, { id }, { store, dataDir }) => {
       store.deleteProject(id!);
+      await rm(projectDir(dataDir, id!), { recursive: true, force: true });
       res.writeHead(204);
       res.end();
     },

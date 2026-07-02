@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { Moodboard, MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
 import { requestImage } from "./image-gen.ts";
@@ -14,6 +15,7 @@ import {
 } from "./moodboard-agent.ts";
 import type { AppDeps } from "./app.ts";
 import { readJsonBody, send, sendError, sendJson } from "./http-util.ts";
+import { buildAgentEnv } from "./agent-env.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -227,8 +229,9 @@ export async function handlePatchMoodboard(
   sendJson(res, 200, withCover(store.updateMoodboard(id!, patch), store.listMoodboardAssets(id!)));
 }
 
-export function handleDeleteMoodboard(res: ServerResponse, { id }: Record<string, string>, { store }: AppDeps): void {
+export async function handleDeleteMoodboard(res: ServerResponse, { id }: Record<string, string>, { store, dataDir }: AppDeps): Promise<void> {
   store.deleteMoodboard(id!);
+  await rm(moodboardDir(dataDir, id!), { recursive: true, force: true });
   res.writeHead(204);
   res.end();
 }
@@ -284,9 +287,10 @@ export async function handlePostMoodboardMessage(
   let assistantText = localMoodboardReply(nodes, assets);
   if (agentCommand) {
     const prompt = buildMoodboardAgentPrompt({ board, nodes, assets, messages: previousMessages, content, contextPath });
+    const env = buildAgentEnv(store.getSettings(), agentCommand);
     try {
       assistantText = await runMoodboardAgentText(
-        { board, nodes, assets, messages, content, agentCommand, model, prompt, cwd },
+        { board, nodes, assets, messages, content, agentCommand, model, prompt, cwd, env },
         moodboardAgentText,
       );
     } catch (err) {

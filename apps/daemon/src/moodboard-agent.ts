@@ -12,6 +12,7 @@ export interface MoodboardAgentTextInput {
   model?: string;
   prompt: string;
   cwd: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 export type MoodboardAgentTextRunner = (input: MoodboardAgentTextInput) => Promise<string>;
@@ -497,11 +498,11 @@ export function parseMoodboardAgentOutput(output: string): MoodboardAgentParsedO
   };
 }
 
-function spawnMoodboardAgentText(command: string, args: string[], cwd: string, timeoutMs: number): Promise<string> {
+function spawnMoodboardAgentText(command: string, args: string[], cwd: string, timeoutMs: number, extraEnv: NodeJS.ProcessEnv = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv() });
+      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv(extraEnv), shell: process.platform === "win32" });
     } catch (e) {
       return reject(e instanceof Error ? e : new Error(String(e)));
     }
@@ -531,5 +532,5 @@ export async function runMoodboardAgentText(input: MoodboardAgentTextInput, runn
   if (runner) return runner(input);
   const provider = getProvider(input.agentCommand);
   const args = provider ? provider.oneShotArgs(input.model, input.prompt) : ["-p", input.prompt];
-  return spawnMoodboardAgentText(input.agentCommand, args, input.cwd, 120_000);
+  return spawnMoodboardAgentText(input.agentCommand, args, input.cwd, 120_000, input.env);
 }

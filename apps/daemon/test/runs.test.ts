@@ -104,6 +104,27 @@ test("clean run: streams SSE, persists, serves the artifact back", async () => {
   });
 });
 
+test("run passes BYOK settings to spawned agent turns", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base, store }) => {
+    store.updateSettings({
+      agentCommand: "claude",
+      apiKey: "sk-local",
+      apiBaseUrl: "https://api.local.test",
+    });
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+    });
+    assert.equal(res.status, 200);
+    await res.text();
+    assert.equal(runner.calls[0]?.env?.ANTHROPIC_API_KEY, "sk-local");
+    assert.equal(runner.calls[0]?.env?.ANTHROPIC_BASE_URL, "https://api.local.test");
+  });
+});
+
 test("POST /api/runs rejects a concurrent run for the same project variant", async () => {
   let releaseTurn!: () => void;
   const runner: AgentRunner = {

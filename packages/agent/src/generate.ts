@@ -54,6 +54,8 @@ export interface GenerateInput {
   signal?: AbortSignal;
   /** Prior turns in this conversation, so the agent has chat context (not just the artifact). */
   history?: { role: TurnRole; content: string }[];
+  /** Extra environment variables for spawned agent turns. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export type GenerateEvent =
@@ -92,6 +94,7 @@ export async function generateArtifact(input: GenerateInput): Promise<GenerateRe
       isRepair,
       onActivity: (activity) => onEvent?.({ type: "activity", round, activity }),
       signal,
+      env: input.env,
     };
     const result = await runTurnWithRetry(runner, turnInput, {
       onRetry: (attempt) =>

@@ -99,7 +99,7 @@ async function scrapeModelList(command: string, timeoutMs = 55_000): Promise<str
       });
     });
     // The trust prompt echoes the working-dir name in parens; drop it.
-    const dirName = dir.split("/").pop() ?? "";
+    const dirName = dir.split(/[\\/]/).pop() ?? "";
     return dedupModels(parseModelScreen(out)).filter((id) => id !== dirName);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});

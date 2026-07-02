@@ -51,6 +51,7 @@ function str(v: unknown): string | null {
 const ASK_USER_QUESTION_RE = /<dezin-ask-user-question>([\s\S]*?)<\/dezin-ask-user-question>/i;
 export const FINAL_SUMMARY_START = "<dezin-final-summary>";
 export const FINAL_SUMMARY_END = "</dezin-final-summary>";
+const FINAL_SUMMARY_RE = /<dezin-final-summary>([\s\S]*?)<\/dezin-final-summary>/gi;
 
 export function extractAskUserQuestion(text: string): AskUserQuestionExtraction {
   const match = text.match(ASK_USER_QUESTION_RE);
@@ -61,17 +62,16 @@ export function extractAskUserQuestion(text: string): AskUserQuestionExtraction 
 }
 
 export function extractFinalSummary(text: string): FinalSummaryExtraction {
-  const start = text.toLowerCase().lastIndexOf(FINAL_SUMMARY_START);
-  if (start < 0) return { processText: "", summaryText: text.trim(), hadBoundary: false };
+  let last: RegExpMatchArray | null = null;
+  FINAL_SUMMARY_RE.lastIndex = 0;
+  for (const match of text.matchAll(FINAL_SUMMARY_RE)) last = match;
+  if (!last || last.index === undefined) return { processText: "", summaryText: text.trim(), hadBoundary: false };
 
-  const end = text.toLowerCase().indexOf(FINAL_SUMMARY_END, start + FINAL_SUMMARY_START.length);
-  if (end < 0) return { processText: "", summaryText: text.trim(), hadBoundary: false };
-
-  const summaryText = text.slice(start + FINAL_SUMMARY_START.length, end).trim();
+  const summaryText = (last[1] ?? "").trim();
   if (!summaryText) return { processText: "", summaryText: text.trim(), hadBoundary: false };
 
   return {
-    processText: text.slice(0, start).trim(),
+    processText: text.slice(0, last.index).trim(),
     summaryText,
     hadBoundary: true,
   };

@@ -34,6 +34,7 @@ import { projectDir } from "./serve-static.ts";
 import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
+import { buildAgentEnv } from "./agent-env.ts";
 import type { AppDeps } from "./app.ts";
 
 // Skills are scanned once and cached for the daemon process.
@@ -53,7 +54,7 @@ export function buildRunner(settings: Settings, override: { agentCommand?: strin
   const provider = getProvider(command);
   if (provider) return provider.createRunner({ command, model });
 
-  const base = command.split("/").pop() ?? command;
+  const base = (command.split(/[\\/]/).pop() ?? command).replace(/\.(?:exe|cmd|bat|ps1)$/i, "");
   return new GenericCliRunner({ id: base, command, model, config: { buildArgs: (m, p) => [...(m ? ["--model", m] : []), p] } });
 }
 
@@ -198,6 +199,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const settings = store.getSettings();
   const runAgentCommand = body.agentCommand || settings.agentCommand || "claude";
   const runModel = body.model || settings.model || undefined;
+  const agentEnv = buildAgentEnv(settings, runAgentCommand);
   // deps.runner is the test override; production builds from settings (live changes apply).
   const runner = deps.runner ?? buildRunner(settings, { agentCommand: body.agentCommand, model: body.model });
 
@@ -357,6 +359,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             if (visible) sse({ type: "activity", round: 0, activity: visible });
           },
           signal: ctrl.signal,
+          env: agentEnv,
         },
         {
           onRetry: (attempt) =>
@@ -477,6 +480,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       history,
       lint: { maxRounds: body.maxRounds ?? 2 },
       signal: ctrl.signal,
+      env: agentEnv,
       onEvent: (e: GenerateEvent) => {
         if (e.type === "activity") {
           const visible = recordActivity(e.activity);

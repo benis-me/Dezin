@@ -6,6 +6,8 @@ test("the registry resolves providers by id and command (incl. a full path)", ()
   assert.equal(getProvider("claude")?.id, "claude");
   assert.equal(getProvider("codex")?.id, "codex");
   assert.equal(getProvider("/usr/local/bin/codebuddy")?.id, "codebuddy");
+  assert.equal(getProvider("C:\\Users\\ben\\AppData\\Roaming\\npm\\claude.cmd")?.id, "claude");
+  assert.equal(getProvider("C:\\Tools\\codex.exe")?.id, "codex");
   assert.equal(getProvider("nope"), undefined);
 });
 

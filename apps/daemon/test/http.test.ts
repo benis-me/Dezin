@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -162,7 +162,7 @@ test("JSON API routes reject non-JSON content types", async () => {
 });
 
 test("project CRUD over HTTP", async () => {
-  await withServer(async ({ base }) => {
+  await withServer(async ({ base, dataDir }) => {
     // empty list
     assert.deepEqual(await (await fetch(`${base}/api/projects`)).json(), []);
 
@@ -195,15 +195,21 @@ test("project CRUD over HTTP", async () => {
     // list has one
     assert.equal(((await (await fetch(`${base}/api/projects`)).json()) as unknown[]).length, 1);
 
+    const diskDir = join(dataDir, "projects", project.id);
+    mkdirSync(diskDir, { recursive: true });
+    writeFileSync(join(diskDir, "index.html"), "<h1>delete me</h1>");
+    assert.equal(existsSync(diskDir), true);
+
     // delete (idempotent 204)
     const del = await fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" });
     assert.equal(del.status, 204);
     assert.equal((await fetch(`${base}/api/projects/${project.id}`)).status, 404);
+    assert.equal(existsSync(diskDir), false);
   });
 });
 
 test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
-  await withServer(async ({ base }) => {
+  await withServer(async ({ base, dataDir }) => {
     assert.deepEqual(await (await fetch(`${base}/api/moodboards`)).json(), []);
 
     const created = await fetch(`${base}/api/moodboards`, {
@@ -272,6 +278,12 @@ test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
     assert.equal(detail.nodes[0]?.type, "image-generator");
     assert.equal(detail.messages.length, 2);
     assert.ok(detail.coverUrl);
+
+    const diskDir = join(dataDir, "moodboards", board.id);
+    assert.equal(existsSync(diskDir), true);
+    const del = await fetch(`${base}/api/moodboards/${board.id}`, { method: "DELETE" });
+    assert.equal(del.status, 204);
+    assert.equal(existsSync(diskDir), false);
   });
 });
 

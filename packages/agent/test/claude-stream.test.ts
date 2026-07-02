@@ -84,6 +84,15 @@ test("extracts the forced Dezin final summary boundary", () => {
   assert.equal(out.summaryText, "Done. Updated the pricing page.");
 });
 
+test("extractFinalSummary keeps indexes aligned when preceding text lowercases to multiple code points", () => {
+  const out = extractFinalSummary(
+    "Working with İstanbul copy.\n<DEZIN-FINAL-SUMMARY>\nDone. Updated the page.\n</DEZIN-FINAL-SUMMARY>",
+  );
+  assert.equal(out.hadBoundary, true);
+  assert.equal(out.processText, "Working with İstanbul copy.");
+  assert.equal(out.summaryText, "Done. Updated the page.");
+});
+
 test("falls back to treating unmarked text as summary only", () => {
   const out = extractFinalSummary("Done. Updated the pricing page.");
   assert.equal(out.hadBoundary, false);

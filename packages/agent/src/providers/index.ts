@@ -29,9 +29,14 @@ export const AGENT_PROVIDERS: ReadonlyArray<AgentProvider> = [
   aiderProvider,
 ];
 
+function commandBase(command: string): string {
+  const base = command.split(/[\\/]/).pop() ?? command;
+  return base.replace(/\.(?:exe|cmd|bat|ps1)$/i, "");
+}
+
 /** Resolve a provider by command (accepts a full path; matches id or command). */
 export function getProvider(command: string): AgentProvider | undefined {
-  const base = command.split("/").pop() ?? command;
+  const base = commandBase(command);
   return AGENT_PROVIDERS.find((p) => p.id === base || p.command === base);
 }
 

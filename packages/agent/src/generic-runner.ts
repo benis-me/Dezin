@@ -69,6 +69,7 @@ export class GenericCliRunner implements AgentRunner {
       cwd: input.projectDir,
       stdin: this.opts.config.viaStdin ? prompt : "",
       signal: input.signal,
+      env: input.env,
     });
     assertSuccessfulExit(this.command, output);
     const artifactHtml = await readUpdatedArtifactHtml(input.projectDir, artifactPath, beforeArtifact, this.command);

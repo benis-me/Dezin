@@ -44,6 +44,8 @@ export interface SpawnInput {
   onStdout?: (chunk: string) => void;
   /** Abort to terminate the child (a user "Stop"). */
   signal?: AbortSignal;
+  /** Extra environment variables for the spawned process. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface SpawnOutput {
@@ -76,9 +78,15 @@ export class NodeSpawner implements ProcessSpawner {
 
   run(input: SpawnInput): Promise<SpawnOutput> {
     return new Promise<SpawnOutput>((resolve, reject) => {
-      const env = agentSpawnEnv();
+      const env = agentSpawnEnv(input.env);
       if (input.signal?.aborted) return reject(abortError());
-      const child = spawn(input.command, input.args, { cwd: input.cwd, stdio: ["pipe", "pipe", "pipe"], env, detached: process.platform !== "win32" });
+      const child = spawn(input.command, input.args, {
+        cwd: input.cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+        env,
+        detached: process.platform !== "win32",
+        shell: process.platform === "win32",
+      });
       let stdout = "";
       let stderr = "";
       let timedOut = false;
@@ -215,6 +223,7 @@ export class ClaudeCodeRunner implements AgentRunner {
       stdin,
       onStdout,
       signal: input.signal,
+      env: input.env,
     });
 
     assertSuccessfulExit(command, output);

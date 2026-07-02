@@ -116,9 +116,21 @@ test("NodeSpawner uses the augmented agent environment", async () => {
     stdin: "",
   });
   const env = JSON.parse(out.stdout) as { path: string; hook: string; quiet: string };
-  assert.ok(env.path.split(":").includes(dirname(process.execPath)));
+  assert.ok(env.path.split(process.platform === "win32" ? ";" : ":").includes(dirname(process.execPath)));
   assert.equal(env.hook, "1");
   assert.equal(env.quiet, "1");
+});
+
+test("NodeSpawner passes per-turn extra environment variables", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-env-"));
+  const out = await new NodeSpawner().run({
+    command: process.execPath,
+    args: ["-e", "process.stdout.write(process.env.ANTHROPIC_API_KEY || '')"],
+    cwd: dir,
+    stdin: "",
+    env: { ANTHROPIC_API_KEY: "sk-test" },
+  });
+  assert.equal(out.stdout, "sk-test");
 });
 
 test("NodeSpawner times out a stuck process and escalates termination", async () => {

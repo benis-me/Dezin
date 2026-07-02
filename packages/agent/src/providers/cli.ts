@@ -5,7 +5,7 @@
 
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { delimiter, dirname } from "node:path";
 
 /** PATH augmented with well-known toolchain dirs so a minimal-env daemon (e.g. the desktop
  *  app launched from Finder, or a fresh machine) still finds CLIs. Critically this includes
@@ -25,7 +25,7 @@ export function augmentedPath(): string {
     "/usr/bin",
     "/bin",
   ];
-  return [process.env.PATH ?? "", ...extra].filter(Boolean).join(":");
+  return [process.env.PATH ?? "", ...extra].filter(Boolean).join(delimiter);
 }
 
 /** Environment shared by real agent/tool spawns, matching probe PATH and disabling host hooks. */
@@ -45,7 +45,7 @@ export function runCapture(command: string, args: string[], timeoutMs: number): 
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv() });
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv(), shell: process.platform === "win32" });
     } catch {
       return resolve(null);
     }
