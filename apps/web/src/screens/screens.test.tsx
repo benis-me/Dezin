@@ -10,6 +10,7 @@ import { Shell } from "../components/Shell.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
+import type { Settings } from "../lib/api.ts";
 
 afterEach(() => {
   localStorage.removeItem("dezin.shell.sidebar.width");
@@ -31,6 +32,29 @@ function renderWithApiAndAgents(ui: React.ReactElement, over = {}) {
       <AgentsProvider>{ui}</AgentsProvider>
     </ApiProvider>,
   );
+}
+
+function settingsFixture(patch: Partial<Settings> = {}): Settings {
+  return {
+    agentCommand: "claude",
+    model: "",
+    apiBaseUrl: "",
+    apiKey: "",
+    defaultDesignSystemId: "modern-minimal",
+    customInstructions: "",
+    imageApiBaseUrl: "",
+    imageApiKey: "",
+    imageModel: "",
+    videoApiBaseUrl: "",
+    videoApiKey: "",
+    videoModel: "",
+    aiProviderId: "openai",
+    aiProviderEnabled: false,
+    aiProviderModels: "gpt-image-1",
+    aiProviderOrganization: "",
+    visualQaEnabled: false,
+    ...patch,
+  };
 }
 
 test("HomeScreen shows an empty state with no projects", () => {
@@ -446,26 +470,7 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
 
 function renderSettings(over = {}) {
   const onToggleDark = vi.fn();
-  const updateSettings = vi.fn(async (p: object) => ({
-    agentCommand: "claude",
-    model: "",
-    apiBaseUrl: "",
-    apiKey: "",
-    defaultDesignSystemId: "modern-minimal",
-    customInstructions: "",
-    imageApiBaseUrl: "",
-    imageApiKey: "",
-    imageModel: "",
-    videoApiBaseUrl: "",
-    videoApiKey: "",
-    videoModel: "",
-    aiProviderId: "openai",
-    aiProviderEnabled: false,
-    aiProviderModels: "gpt-image-1",
-    aiProviderOrganization: "",
-    visualQaEnabled: false,
-    ...p,
-  }));
+  const updateSettings = vi.fn(async (p: Partial<Settings>) => settingsFixture(p));
   const api = makeFakeApi({ listAgents: async () => AGENTS, rescanAgents: async () => AGENTS, listDesignSystems: async () => DSYS, updateSettings, ...over });
   render(
     <ApiProvider client={api}>
@@ -507,6 +512,23 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
   fireEvent.click(screen.getByRole("button", { name: "Quality" }));
   await user.click(await screen.findByRole("switch", { name: "Agent visual review" }));
   expect(updateSettings).toHaveBeenCalledWith({ visualQaEnabled: true });
+});
+
+test("SettingsScreen keeps model API key drafts after redacted settings saves", async () => {
+  const user = userEvent.setup();
+  const updateSettings = vi.fn(async (p: Partial<Settings>) => {
+    const saved = settingsFixture(p);
+    return { ...saved, apiKey: "", imageApiKey: "", videoApiKey: "" };
+  });
+
+  renderSettings({ updateSettings });
+  fireEvent.click(screen.getByRole("button", { name: "Models" }));
+
+  const apiKey = await screen.findByLabelText("API Key");
+  await user.type(apiKey, "sk-live-test");
+
+  await waitFor(() => expect(updateSettings).toHaveBeenCalled());
+  expect(apiKey).toHaveValue("sk-live-test");
 });
 
 test("SettingsScreen theme toggle calls onToggleDark", async () => {

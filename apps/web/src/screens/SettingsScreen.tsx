@@ -12,6 +12,16 @@ import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui
 
 type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
+const SECRET_SETTING_KEYS = ["apiKey", "imageApiKey", "videoApiKey"] as const;
+
+function mergeSettingsSaveResponse(current: Settings | null, next: Settings): Settings {
+  const merged = { ...next };
+  for (const key of SECRET_SETTING_KEYS) {
+    if (current) merged[key] = current[key];
+  }
+  return merged;
+}
+
 const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "provider", label: "Provider", icon: Server },
@@ -62,7 +72,10 @@ export function SettingsScreen({
   };
   const savePatch = (patch: Partial<Settings>) => {
     setLocalPatch(patch);
-    void api.updateSettings(patch).then((next) => setSettings(next)).catch(() => toast("Couldn't save settings.", { variant: "error" }));
+    void api
+      .updateSettings(patch)
+      .then((next) => setSettings((current) => mergeSettingsSaveResponse(current, next)))
+      .catch(() => toast("Couldn't save settings.", { variant: "error" }));
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);

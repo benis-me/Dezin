@@ -28,7 +28,7 @@ export function Switch({ checked, onCheckedChange, className, disabled, onClick,
         aria-hidden
         className={cn(
           "pointer-events-none block size-[18px] rounded-full bg-background shadow-[0_1px_2px_rgba(0,0,0,0.16)] transition-transform",
-          checked ? "translate-x-4" : "translate-x-0",
+          checked ? "translate-x-3.5" : "translate-x-0",
         )}
       />
     </button>
