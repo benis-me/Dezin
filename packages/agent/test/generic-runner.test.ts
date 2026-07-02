@@ -24,12 +24,12 @@ test("codex invocation runs exec headlessly", () => {
 
 test("runTurn spawns the agent and reads the artifact it wrote", async () => {
   const dir = await mkdtemp(join(tmpdir(), "dezin-generic-"));
-  await writeFile(join(dir, "index.html"), "<h1>built by codex</h1>", "utf8");
 
   let captured: SpawnInput | null = null;
   const fakeSpawner: ProcessSpawner = {
     async run(input) {
       captured = input;
+      await writeFile(join(input.cwd, "index.html"), "<h1>built by codex</h1>", "utf8");
       return { stdout: "line a\nline b\napplied 1 edit\n", exitCode: 0 };
     },
   };
@@ -42,4 +42,50 @@ test("runTurn spawns the agent and reads the artifact it wrote", async () => {
   assert.equal(captured!.cwd, dir);
   // The combined prompt carries both the system prompt and the task message.
   assert.ok(captured!.args.some((a) => a.includes("SYS") && a.includes("make a hero")));
+});
+
+test("runTurn rejects when the CLI exits nonzero", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dezin-generic-exit-"));
+  const fakeSpawner: ProcessSpawner = {
+    async run() {
+      return { stdout: "", stderr: "rate limit exceeded", exitCode: 2 };
+    },
+  };
+  const runner = new GenericCliRunner({ command: "codex", config: GENERIC_AGENTS.codex!, spawner: fakeSpawner });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "SYS", message: "make a hero", projectDir: dir }),
+    /codex.*exit code 2.*rate limit exceeded/i,
+  );
+});
+
+test("runTurn rejects when the agent writes no artifact", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dezin-generic-missing-"));
+  const fakeSpawner: ProcessSpawner = {
+    async run() {
+      return { stdout: "done", exitCode: 0 };
+    },
+  };
+  const runner = new GenericCliRunner({ command: "codex", config: GENERIC_AGENTS.codex!, spawner: fakeSpawner });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "SYS", message: "make a hero", projectDir: dir }),
+    /artifact.*missing/i,
+  );
+});
+
+test("runTurn rejects stale artifacts from a successful no-op turn", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dezin-generic-stale-"));
+  await writeFile(join(dir, "index.html"), "<h1>previous</h1>", "utf8");
+  const fakeSpawner: ProcessSpawner = {
+    async run() {
+      return { stdout: "done", exitCode: 0 };
+    },
+  };
+  const runner = new GenericCliRunner({ command: "codex", config: GENERIC_AGENTS.codex!, spawner: fakeSpawner });
+
+  await assert.rejects(
+    () => runner.runTurn({ systemPrompt: "SYS", message: "make a hero", projectDir: dir }),
+    /artifact.*not updated/i,
+  );
 });

@@ -16,6 +16,16 @@ test("clean Linear/Vercel artifact produces zero findings", () => {
   assert.deepEqual(findings, [], `expected clean, got: ${JSON.stringify(ids(findings))}`);
 });
 
+test("empty or shell-only artifacts are blocking P0", () => {
+  for (const html of ["", " \n\t", "<!doctype html><html><head></head><body> </body></html>"]) {
+    const findings = lintArtifact(html);
+    assert.ok(
+      findings.some((f) => f.id === "empty-artifact" && f.severity === "P0"),
+      `expected empty-artifact P0 for ${JSON.stringify(html)}`,
+    );
+  }
+});
+
 test("sloppy artifact trips the cardinal sins", () => {
   const f = lintArtifact(SLOPPY_ARTIFACT);
   assert.ok(has(f, "ai-default-indigo"), "indigo");

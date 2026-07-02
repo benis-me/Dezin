@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { lintAndRepair, type ReviseArtifact } from "../src/closed-loop.ts";
 import { renderFindingsForAgent } from "../src/render-findings.ts";
 import { lintArtifact } from "../src/lint-artifact.ts";
+import { lintScore } from "../src/score.ts";
 import { CLEAN_ARTIFACT, SLOPPY_ARTIFACT } from "./fixtures.ts";
 
 test("clean artifact needs zero repair rounds", async () => {
@@ -38,6 +39,16 @@ test("closed loop stops at maxRounds when never fixed", async () => {
   assert.equal(result.rounds, 2, "ran exactly maxRounds");
   assert.equal(result.passed, false, "still failing");
   assert.ok(result.findings.length > 0, "findings remain");
+});
+
+test("closed loop returns the best-scoring artifact when repair regresses", async () => {
+  const initiallyBad = `<!doctype html><html><head><style>.cta{color:#6366f1}</style></head><body><h1>Plain product copy</h1></body></html>`;
+  const result = await lintAndRepair(initiallyBad, () => SLOPPY_ARTIFACT, { maxRounds: 1 });
+
+  assert.equal(result.passed, false);
+  assert.equal(result.rounds, 1);
+  assert.equal(result.html, initiallyBad);
+  assert.ok(lintScore(result.findings) > lintScore(lintArtifact(SLOPPY_ARTIFACT)), "returned findings should be from the best artifact");
 });
 
 test("closed loop converges across two rounds (partial fixes)", async () => {

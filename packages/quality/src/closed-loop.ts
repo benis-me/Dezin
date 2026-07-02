@@ -13,6 +13,7 @@
 import type { Finding, LintOptions, Severity } from "./types.ts";
 import { lintArtifact, hasFindings } from "./lint-artifact.ts";
 import { renderFindingsForAgent } from "./render-findings.ts";
+import { lintScore } from "./score.ts";
 
 /** Produce a revised artifact given the `<artifact-lint>` feedback block. */
 export type ReviseArtifact = (
@@ -62,6 +63,9 @@ export async function lintAndRepair(
 
   let html = initialHtml;
   let findings = lintArtifact(html, options);
+  let bestHtml = html;
+  let bestFindings = findings;
+  let bestScore = lintScore(findings);
   const history: RepairRound[] = [];
   let round = 0;
 
@@ -77,13 +81,24 @@ export async function lintAndRepair(
     history.push({ round, triggeringFindings: findings, html: revised });
     html = revised;
     findings = lintArtifact(html, options);
+    const score = lintScore(findings);
+    if (
+      score > bestScore ||
+      (score === bestScore &&
+        hasFindings(bestFindings, blockOn as readonly string[]) &&
+        !hasFindings(findings, blockOn as readonly string[]))
+    ) {
+      bestHtml = html;
+      bestFindings = findings;
+      bestScore = score;
+    }
   }
 
   return {
-    html,
+    html: bestHtml,
     rounds: round,
-    findings,
-    passed: !hasFindings(findings, blockOn as readonly string[]),
+    findings: bestFindings,
+    passed: !hasFindings(bestFindings, blockOn as readonly string[]),
     history,
   };
 }

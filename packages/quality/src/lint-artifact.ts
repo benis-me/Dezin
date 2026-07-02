@@ -39,6 +39,41 @@ import {
 const DEFAULT_ACCENT_OVERUSE_CAP = 3; // a deliberately strict cap.
 const DEFAULT_MAX_RADIUS_PX = 28;
 
+function checkEmptyArtifact(html: string): Finding[] {
+  const trimmed = html.trim();
+  if (!trimmed) {
+    return [{
+      severity: "P0",
+      id: "empty-artifact",
+      message: "Artifact is empty.",
+      fix: "Return a complete HTML artifact with visible content instead of an empty file.",
+      snippet: "",
+    }];
+  }
+
+  const body = trimmed.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? trimmed;
+  const content = body
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ");
+  const hasRenderableMedia = /<(?:canvas|embed|iframe|img|object|svg|video)\b/i.test(content);
+  const visibleText = content
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!hasRenderableMedia && visibleText.length === 0) {
+    return [{
+      severity: "P0",
+      id: "empty-artifact",
+      message: "Artifact body has no visible content.",
+      fix: "Render visible product content in the artifact body before marking the run complete.",
+      snippet: trimmed.slice(0, 120),
+    }];
+  }
+  return [];
+}
+
 function hexInValue(value: string, hexes: readonly string[]): boolean {
   const lower = value.toLowerCase();
   return hexes.some((h) => lower.includes(h.toLowerCase()));
@@ -491,6 +526,7 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
   const banned = options.bannedAccentHexes ?? [];
 
   const findings: Finding[] = [
+    ...checkEmptyArtifact(html),
     ...checkIndigo(html, banned),
     ...checkPurpleGradient(html),
     ...checkTrustGradient(html),

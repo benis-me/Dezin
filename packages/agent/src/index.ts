@@ -36,6 +36,7 @@ export {
   NodeSpawner,
   historyPreamble,
   type ClaudeCodeRunnerOptions,
+  type NodeSpawnerOptions,
   type ProcessSpawner,
   type SpawnInput,
   type SpawnOutput,
