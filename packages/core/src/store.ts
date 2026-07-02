@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS projects (
   design_system_id TEXT,
   mode TEXT,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  archived_at INTEGER,
+  active_variant_id TEXT
 );
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
@@ -54,9 +56,11 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  variant_id TEXT,
   user_message_id TEXT,
   assistant_message_id TEXT,
   commit_hash TEXT,
+  owner_id TEXT,
   status TEXT NOT NULL,
   repair_rounds INTEGER NOT NULL DEFAULT 0,
   lint_passed INTEGER NOT NULL DEFAULT 0,
@@ -329,6 +333,7 @@ export class Store {
 
   constructor(path = ":memory:", clock: StoreClock = DEFAULT_CLOCK) {
     this.db = new DatabaseSync(path);
+    this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
@@ -364,6 +369,8 @@ export class Store {
     ensureColumn("runs", "user_message_id", "user_message_id TEXT");
     ensureColumn("runs", "assistant_message_id", "assistant_message_id TEXT");
     ensureColumn("runs", "commit_hash", "commit_hash TEXT");
+    ensureColumn("runs", "owner_id", "owner_id TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_runs_project_variant_status ON runs(project_id, variant_id, status);");
   }
 
   close(): void {
@@ -744,14 +751,14 @@ export class Store {
   }
 
   // ── runs ──────────────────────────────────────────────────────────────────
-  createRun(projectId: string, conversationId: string, variantId?: string, userMessageId?: string): Run {
+  createRun(projectId: string, conversationId: string, variantId?: string, userMessageId?: string, ownerId?: string): Run {
     const id = this.clock.id();
     const vid = variantId ?? this.ensureMainVariant(projectId).id;
     this.db
       .prepare(
-        `INSERT INTO runs (id, project_id, conversation_id, variant_id, user_message_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO runs (id, project_id, conversation_id, variant_id, user_message_id, owner_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
-      .run(id, projectId, conversationId, vid, userMessageId ?? null, this.clock.now());
+      .run(id, projectId, conversationId, vid, userMessageId ?? null, ownerId ?? null, this.clock.now());
     return this.getRun(id)!;
   }
 
@@ -867,10 +874,32 @@ export class Store {
 
   /** Mark runs left "running"/"pending" (a previous process died mid-run) as cancelled. Run
    *  at daemon startup so interrupted runs don't look perpetually in-progress. */
-  markInterruptedRuns(): number {
-    const res = this.db
-      .prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending')`)
-      .run(this.clock.now());
+  findActiveRun(projectId: string, variantId?: string | null): Run | null {
+    const row =
+      variantId == null
+        ? (this.db
+            .prepare(
+              `SELECT * FROM runs
+               WHERE project_id = ? AND variant_id IS NULL AND status IN ('running', 'pending')
+               ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+            )
+            .get(projectId) as Row | undefined)
+        : (this.db
+            .prepare(
+              `SELECT * FROM runs
+               WHERE project_id = ? AND variant_id = ? AND status IN ('running', 'pending')
+               ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+            )
+            .get(projectId, variantId) as Row | undefined);
+    return row ? asRun(row) : null;
+  }
+
+  markInterruptedRuns(ownerId?: string): number {
+    const res = ownerId
+      ? this.db
+          .prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending') AND owner_id = ?`)
+          .run(this.clock.now(), ownerId)
+      : this.db.prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending')`).run(this.clock.now());
     return Number(res.changes ?? 0);
   }
 

@@ -43,6 +43,8 @@ const IGNORE_DIRS = new Set([
 ]);
 const IGNORE_FILES = new Set([".DS_Store", ".cover.png"]);
 const MANIFEST_PATH = "dezin-project.json";
+export const MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES = 128 * 1024 * 1024;
+const MAX_PROJECT_ARCHIVE_ENTRIES = 20_000;
 
 function isSecretEnvFile(name: string): boolean {
   if (name === ".env" || name === ".envrc") return true;
@@ -292,12 +294,25 @@ interface ZipFileEntry {
   data: Buffer;
 }
 
+function inflateZipEntry(raw: Buffer, maxOutputLength: number): Buffer {
+  try {
+    return inflateRawSync(raw, { maxOutputLength });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "";
+    if (/larger than/i.test(message)) throw new Error("archive exceeds decompressed size limit");
+    throw err;
+  }
+}
+
 function readZipEntries(zip: Buffer): ZipFileEntry[] {
   const out: ZipFileEntry[] = [];
   let offset = 0;
+  let uncompressedBytes = 0;
   while (offset + 4 <= zip.length && zip.readUInt32LE(offset) === 0x04034b50) {
+    if (out.length >= MAX_PROJECT_ARCHIVE_ENTRIES) throw new Error("archive has too many entries");
     const method = zip.readUInt16LE(offset + 8);
     const compSize = zip.readUInt32LE(offset + 18);
+    const uncompSize = zip.readUInt32LE(offset + 22);
     const nameLen = zip.readUInt16LE(offset + 26);
     const extraLen = zip.readUInt16LE(offset + 28);
     const nameStart = offset + 30;
@@ -306,8 +321,16 @@ function readZipEntries(zip: Buffer): ZipFileEntry[] {
     if (dataEnd > zip.length) throw new Error("truncated zip entry");
     const path = zip.toString("utf8", nameStart, nameStart + nameLen);
     const raw = zip.subarray(dataStart, dataEnd);
-    const data = method === 0 ? Buffer.from(raw) : method === 8 ? inflateRawSync(raw) : null;
+    if (method !== 0 && method !== 8) throw new Error("unsupported zip compression");
+    const declaredSize = method === 0 ? compSize : uncompSize;
+    if (uncompressedBytes + declaredSize > MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES) {
+      throw new Error("archive exceeds decompressed size limit");
+    }
+    const remaining = MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES - uncompressedBytes;
+    const data = method === 0 ? Buffer.from(raw) : inflateZipEntry(raw, Math.min(remaining, uncompSize));
     if (!data) throw new Error("unsupported zip compression");
+    uncompressedBytes += data.length;
+    if (uncompressedBytes > MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES) throw new Error("archive exceeds decompressed size limit");
     out.push({ path, data });
     offset = dataEnd;
   }
@@ -495,8 +518,8 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
   let archive: ZipFileEntry[];
   try {
     archive = readZipEntries(await readRawBody(req));
-  } catch {
-    return sendError(res, 422, "invalid project archive");
+  } catch (err) {
+    return sendError(res, 422, err instanceof Error ? err.message : "invalid project archive");
   }
   const manifestEntry = archive.find((entry) => entry.path === MANIFEST_PATH);
   if (!manifestEntry) return sendError(res, 422, "missing project manifest");

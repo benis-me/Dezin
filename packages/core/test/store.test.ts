@@ -87,6 +87,28 @@ test("run lifecycle: pending → running → succeeded", () => {
   s.close();
 });
 
+test("Store configures a busy timeout for concurrent sqlite writers", () => {
+  const s = freshStore();
+  const row = s.db.prepare("PRAGMA busy_timeout").get() as Record<string, unknown>;
+  assert.equal(Number(Object.values(row)[0]), 5000);
+  s.close();
+});
+
+test("markInterruptedRuns only sweeps runs owned by this daemon", () => {
+  const s = freshStore();
+  const p = s.createProject({ name: "P" });
+  const c = s.createConversation(p.id);
+  const own = s.createRun(p.id, c.id, undefined, undefined, "daemon-a");
+  const other = s.createRun(p.id, c.id, undefined, undefined, "daemon-b");
+  s.updateRun(own.id, { status: "running" });
+  s.updateRun(other.id, { status: "running" });
+
+  assert.equal(s.markInterruptedRuns("daemon-a"), 1);
+  assert.equal(s.getRun(own.id)?.status, "cancelled");
+  assert.equal(s.getRun(other.id)?.status, "running");
+  s.close();
+});
+
 test("Store migrates a pre-existing runs table that lacks the score column", () => {
   const file = join(mkdtempSync(join(tmpdir(), "dezin-mig-")), "old.db");
   const old = new DatabaseSync(file);

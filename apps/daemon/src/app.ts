@@ -85,6 +85,8 @@ export interface AppDeps {
   moodboardAgentText?: MoodboardAgentTextRunner;
   /** Optional local API boundary guard. */
   security?: DaemonSecurityOptions;
+  /** Unique owner id for this daemon process; persisted on newly-created runs. */
+  daemonOwnerId?: string;
 }
 
 type Handler = (

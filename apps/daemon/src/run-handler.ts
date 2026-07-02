@@ -204,11 +204,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const project = store.getProject(body.projectId);
   if (!project) return sendError(res, 404, "project not found");
 
-  const conversation = body.conversationId
-    ? store.getConversation(body.conversationId)
-    : store.createConversation(project.id);
-  if (!conversation) return sendError(res, 404, "conversation not found");
-  if (conversation.projectId !== project.id) return sendError(res, 400, "conversation does not belong to project");
+  let conversation = body.conversationId ? store.getConversation(body.conversationId) : null;
+  if (body.conversationId && !conversation) return sendError(res, 404, "conversation not found");
+  if (conversation && conversation.projectId !== project.id) return sendError(res, 400, "conversation does not belong to project");
 
   const mainVariant = store.ensureMainVariant(project.id);
   const targetVariantId = body.variantId ?? store.getActiveVariantId(project.id) ?? mainVariant.id;
@@ -217,6 +215,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   if (project.mode !== "standard" && body.variantId && body.variantId !== store.getActiveVariantId(project.id)) {
     return sendError(res, 409, "targeted variant runs are only supported in standard mode");
   }
+  const activeRun = store.findActiveRun(project.id, targetVariantId);
+  if (activeRun) return sendError(res, 409, "run already in progress for this project variant");
+  conversation ??= store.createConversation(project.id);
   let dir: string;
   try {
     dir = project.mode === "standard" ? await standardVariantArtifactDir(deps, project.id, targetVariantId) : projectDir(deps.dataDir, project.id);
@@ -253,7 +254,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const history = store
     .listMessages(conversation.id)
     .flatMap(messageToAgentTurn);
-  const run = store.createRun(project.id, conversation.id, targetVariantId);
+  const run = store.createRun(project.id, conversation.id, targetVariantId, undefined, deps.daemonOwnerId);
   const moodboardContext = buildProjectMoodboardContext({
     store,
     dataDir: deps.dataDir,

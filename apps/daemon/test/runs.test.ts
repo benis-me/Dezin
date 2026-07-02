@@ -54,6 +54,8 @@ function commitAll(dir: string, message: string): string {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
 }
 
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function createProject(base: string, body: object = { name: "P" }, daemonToken = ""): Promise<{ id: string }> {
   const res = await fetch(`${base}/api/projects`, {
     method: "POST",
@@ -99,6 +101,42 @@ test("clean run: streams SSE, persists, serves the artifact back", async () => {
     assert.equal(run.status, "succeeded");
     assert.equal(run.lintPassed, true);
     assert.equal(run.repairRounds, 0);
+  });
+});
+
+test("POST /api/runs rejects a concurrent run for the same project variant", async () => {
+  let releaseTurn!: () => void;
+  const runner: AgentRunner = {
+    id: "blocked",
+    runTurn: () =>
+      new Promise((resolve) => {
+        releaseTurn = () => resolve({ text: "done", artifactHtml: CLEAN, artifactPath: "index.html" });
+      }),
+  };
+
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = await createProject(base);
+    const first = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "first run" }),
+    });
+    assert.equal(first.status, 200);
+
+    try {
+      const second = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "second run" }),
+      });
+      assert.equal(second.status, 409);
+      assert.match(((await second.json()) as { error?: string }).error ?? "", /run already in progress/i);
+      assert.equal(store.listRuns(project.id).length, 1);
+    } finally {
+      while (!releaseTurn) await delay(5);
+      releaseTurn();
+      await first.text();
+    }
   });
 });
 
@@ -1128,6 +1166,54 @@ console.log(JSON.stringify({type:"assistant", message:{content:[{type:"text", te
       if (child.exitCode !== null || child.signalCode !== null) return resolve();
       child.once("exit", () => resolve());
       child.kill("SIGTERM");
+    });
+  }
+});
+
+test("daemon start rejects a second instance for the same data dir", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-start-lock-"));
+  const dataDir = join(root, "data");
+  const firstPortFile = join(root, "daemon-1.json");
+  const secondPortFile = join(root, "daemon-2.json");
+  const commonEnv = {
+    ...process.env,
+    DEZIN_DATA_DIR: dataDir,
+  };
+  const first = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
+    cwd: process.cwd(),
+    env: { ...commonEnv, DEZIN_PORTFILE: firstPortFile },
+    stdio: "ignore",
+  });
+
+  try {
+    let started = false;
+    for (let i = 0; i < 80; i++) {
+      if (existsSync(firstPortFile)) {
+        started = true;
+        break;
+      }
+      await delay(50);
+    }
+    assert.ok(started, "first daemon wrote its port file");
+
+    let stderr = "";
+    const second = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
+      cwd: process.cwd(),
+      env: { ...commonEnv, DEZIN_PORTFILE: secondPortFile },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    second.stderr?.setEncoding("utf8");
+    second.stderr?.on("data", (data: string) => (stderr += data));
+    const code = await new Promise<number | null>((resolve) => second.once("exit", resolve));
+
+    assert.notEqual(code, 0);
+    assert.match(stderr, /already using/);
+    assert.equal(existsSync(secondPortFile), false);
+  } finally {
+    await new Promise<void>((resolve) => {
+      if (first.exitCode !== null || first.signalCode !== null) return resolve();
+      first.once("exit", () => resolve());
+      first.kill("SIGTERM");
     });
   }
 });

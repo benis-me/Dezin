@@ -7,7 +7,7 @@
  */
 
 import { dirname, join } from "node:path";
-import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
@@ -21,7 +21,9 @@ const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
 const PORT = process.env.DEZIN_PORT !== undefined ? Number(process.env.DEZIN_PORT) : 0;
 const DATA_DIR = process.env.DEZIN_DATA_DIR ?? join(homedir(), ".dezin");
 const PORT_FILE = process.env.DEZIN_PORTFILE ?? join(DATA_DIR, "daemon.json");
+const LOCK_FILE = process.env.DEZIN_LOCKFILE ?? join(DATA_DIR, "daemon.lock");
 const DAEMON_TOKEN = process.env.DEZIN_DAEMON_TOKEN?.trim() || randomBytes(32).toString("base64url");
+const DAEMON_OWNER_ID = process.env.DEZIN_DAEMON_OWNER_ID?.trim() || `${process.pid}-${randomBytes(8).toString("hex")}`;
 // Single source of truth: the repo's package.json version, so About always matches it.
 const VERSION = (() => {
   try {
@@ -31,7 +33,48 @@ const VERSION = (() => {
   }
 })();
 
+function pidIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function lockOwnerPid(): number | null {
+  try {
+    const parsed = JSON.parse(readFileSync(LOCK_FILE, "utf8")) as { pid?: unknown };
+    return typeof parsed.pid === "number" ? parsed.pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function acquireDaemonLock(): () => void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(LOCK_FILE, "wx");
+      writeFileSync(fd, `${JSON.stringify({ pid: process.pid, ownerId: DAEMON_OWNER_ID, createdAt: Date.now() })}\n`, "utf8");
+      closeSync(fd);
+      return () => rmSync(LOCK_FILE, { force: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw err;
+      const pid = lockOwnerPid();
+      if (pidIsAlive(pid ?? -1)) {
+        throw new Error(`another Dezin daemon is already using ${DATA_DIR} (pid ${pid})`);
+      }
+      rmSync(LOCK_FILE, { force: true });
+    }
+  }
+  throw new Error(`could not acquire Dezin daemon lock at ${LOCK_FILE}`);
+}
+
 function main(): void {
+  const releaseLock = acquireDaemonLock();
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
   const store = new Store(join(DATA_DIR, "app.sqlite"));
   store.markInterruptedRuns(); // a prior process died mid-run → don't show those as running
@@ -44,6 +87,15 @@ function main(): void {
     version: VERSION,
     designRegistry,
     security: { token: DAEMON_TOKEN },
+    daemonOwnerId: DAEMON_OWNER_ID,
+  });
+  server.on("error", (err) => {
+    try {
+      releaseLock();
+      store.close();
+    } finally {
+      throw err;
+    }
   });
 
   server.listen(PORT, HOST, () => {
@@ -51,7 +103,7 @@ function main(): void {
     const url = `http://${HOST}:${port}`;
     try {
       mkdirSync(dirname(PORT_FILE), { recursive: true });
-      writeFileSync(PORT_FILE, `${JSON.stringify({ url, host: HOST, port, pid: process.pid, token: DAEMON_TOKEN })}\n`, "utf8");
+      writeFileSync(PORT_FILE, `${JSON.stringify({ url, host: HOST, port, pid: process.pid, ownerId: DAEMON_OWNER_ID, token: DAEMON_TOKEN })}\n`, "utf8");
     } catch {
       // discovery file is best-effort
     }
@@ -62,6 +114,7 @@ function main(): void {
     console.log(`\n${signal} — shutting down`);
     try {
       rmSync(PORT_FILE, { force: true });
+      releaseLock();
       stopAllDevServers();
     } catch {
       // ignore

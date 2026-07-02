@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { inflateRawSync } from "node:zlib";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp } from "../src/index.ts";
+import { MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES } from "../src/export-handler.ts";
 
 interface Ctx {
   base: string;
@@ -41,6 +42,23 @@ function readZip(zip: Buffer): Array<{ path: string; data: Buffer }> {
     o = start + compSize;
   }
   return out;
+}
+
+function zipEntry(path: string, data: Buffer, uncompressedSize = data.length): Buffer {
+  const name = Buffer.from(path, "utf8");
+  const compressed = deflateRawSync(data);
+  const local = Buffer.alloc(30 + name.length);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(0, 6);
+  local.writeUInt16LE(8, 8);
+  local.writeUInt32LE(0, 14);
+  local.writeUInt32LE(compressed.length, 18);
+  local.writeUInt32LE(uncompressedSize, 22);
+  local.writeUInt16LE(name.length, 26);
+  local.writeUInt16LE(0, 28);
+  name.copy(local, 30);
+  return Buffer.concat([local, compressed]);
 }
 
 test("export returns a zip of the project's artifact files", async () => {
@@ -191,6 +209,19 @@ test("import restores a full project zip as a new project", async () => {
       ["user", "original ask"],
       ["assistant", "original answer"],
     ]);
+  });
+});
+
+test("import rejects zip entries whose declared output exceeds the archive budget", async () => {
+  await withServer(async ({ base }) => {
+    const bomb = zipEntry("source/big.txt", Buffer.from("x"), MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES + 1);
+    const res = await fetch(`${base}/api/projects/import`, {
+      method: "POST",
+      headers: { "content-type": "application/zip" },
+      body: bomb,
+    });
+    assert.equal(res.status, 422);
+    assert.match(((await res.json()) as { error?: string }).error ?? "", /archive exceeds decompressed size limit/);
   });
 });
 
