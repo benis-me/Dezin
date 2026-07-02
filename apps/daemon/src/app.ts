@@ -53,6 +53,7 @@ import {
   handleUploadMoodboardAsset,
 } from "./moodboard-handler.ts";
 import type { MoodboardAgentTextRunner } from "./moodboard-agent.ts";
+import { assertSafeId, redactSettings, requireDaemonRequest, type DaemonSecurityOptions } from "./security.ts";
 
 export interface AppDeps {
   store: Store;
@@ -82,6 +83,8 @@ export interface AppDeps {
   titleGenerator?: TitleGenerator;
   /** Moodboard chat one-shot agent hook; tests can avoid launching a real CLI. */
   moodboardAgentText?: MoodboardAgentTextRunner;
+  /** Optional local API boundary guard. */
+  security?: DaemonSecurityOptions;
 }
 
 type Handler = (
@@ -95,6 +98,7 @@ interface Route {
   method: string;
   pattern: string;
   handler: Handler;
+  publicRead?: boolean;
 }
 
 function isNonEmptyString(v: unknown): v is string {
@@ -108,6 +112,13 @@ interface PendingCapture {
   source: string;
 }
 let pendingCapture: PendingCapture | null = null;
+
+function validateRouteParams(params: Record<string, string>): void {
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "rest") continue;
+    assertSafeId(value, key);
+  }
+}
 
 const routes: Route[] = [
   {
@@ -193,7 +204,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/settings",
-    handler: (_req, res, _p, { store }) => sendJson(res, 200, store.getSettings()),
+    handler: (_req, res, _p, { store }) => sendJson(res, 200, redactSettings(store.getSettings())),
   },
   {
     method: "PUT",
@@ -203,7 +214,7 @@ const routes: Route[] = [
       if (body === null || typeof body !== "object" || Array.isArray(body)) {
         return sendError(res, 400, "settings body must be an object");
       }
-      sendJson(res, 200, store.updateSettings(body as Partial<Settings>));
+      sendJson(res, 200, redactSettings(store.updateSettings(body as Partial<Settings>)));
     },
   },
   {
@@ -333,6 +344,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/moodboards/:id/assets/:assetId",
+    publicRead: true,
     handler: (_req, res, params, deps) => handleServeMoodboardAsset(res, params, deps),
   },
   {
@@ -530,6 +542,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/variants/:vid/preview/*rest",
+    publicRead: true,
     handler: async (_req, res, { id, vid, rest }, deps) => {
       const project = deps.store.getProject(id!);
       if (!project) return sendError(res, 404, "project not found");
@@ -541,6 +554,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/versions/:runId",
+    publicRead: true,
     handler: (_req, res, params, deps) => handleGetVersion(res, params, deps),
   },
   {
@@ -567,16 +581,19 @@ const routes: Route[] = [
     // Serve an uploaded reference file (image thumbnails in the chat). safeJoin blocks traversal.
     method: "GET",
     pattern: "/api/projects/:id/refs/*rest",
+    publicRead: true,
     handler: (_req, res, { id, rest }, { dataDir }) => serveProjectFile(res, dataDir, id!, join(".refs", rest ?? "")),
   },
   {
     method: "GET",
     pattern: "/api/projects/:id/export",
+    publicRead: true,
     handler: (req, res, params, deps) => handleExport(req, res, params, deps),
   },
   {
     method: "GET",
     pattern: "/projects/:id/preview/*rest",
+    publicRead: true,
     handler: async (_req, res, { id, rest }, deps) => {
       const project = deps.store.getProject(id!);
       if (!project) return serveProjectFile(res, deps.dataDir, id!, rest ?? "");
@@ -626,6 +643,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/cover",
+    publicRead: true,
     handler: (_req, res, { id }, { dataDir }) => {
       const f = join(projectDir(dataDir, id!), ".cover.png");
       if (!existsSync(f)) return sendError(res, 404, "no cover");
@@ -656,12 +674,21 @@ export function createApp(deps: AppDeps): http.Server {
           matchedPathButNotMethod = true;
           continue;
         }
+        validateRouteParams(m.params);
+        requireDaemonRequest(req, { ...deps.security, allowMissingToken: route.publicRead === true });
         await route.handler(req, res, m.params, deps);
         return;
       }
-      if (matchedPathButNotMethod) return sendError(res, 405, "method not allowed");
+      if (matchedPathButNotMethod) {
+        requireDaemonRequest(req, deps.security);
+        return sendError(res, 405, "method not allowed");
+      }
       // Unmatched GET → serve the built web app (SPA) when present (Electron / prod).
-      if (method === "GET" && hasWeb && !pathname.startsWith("/api/")) return serveWeb(res, webDir, pathname);
+      if (method === "GET" && hasWeb && !pathname.startsWith("/api/")) {
+        requireDaemonRequest(req, { ...deps.security, allowMissingToken: true });
+        return serveWeb(res, webDir, pathname, { daemonToken: deps.security?.token });
+      }
+      requireDaemonRequest(req, deps.security);
       sendError(res, 404, "not found");
     } catch (err) {
       if (isHttpError(err)) {

@@ -153,7 +153,7 @@ export async function setupImportedStandardProject(projectId: string, projectDir
     await mkdir(projectDir, { recursive: true });
     if (!existsSync(join(projectDir, ".git"))) await run("git", ["init", "-q"], projectDir, rt, "git init");
     await gitCommit(projectDir, "Dezin: import project");
-    const code = await run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install");
+    const code = await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install --ignore-scripts");
     if (code === 0) await gitCommit(projectDir, "Dezin: install dependencies");
     rt.phase = code === 0 ? "ready" : "error";
     appendLog(rt, rt.phase === "ready" ? "Imported standard project is ready" : "Imported standard project setup failed", rt.phase === "ready" ? "info" : "error");

@@ -54,10 +54,10 @@ function commitAll(dir: string, message: string): string {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
 }
 
-async function createProject(base: string, body: object = { name: "P" }): Promise<{ id: string }> {
+async function createProject(base: string, body: object = { name: "P" }, daemonToken = ""): Promise<{ id: string }> {
   const res = await fetch(`${base}/api/projects`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(daemonToken ? { "x-dezin-daemon-token": daemonToken } : {}) },
     body: JSON.stringify(body),
   });
   return (await res.json()) as { id: string };
@@ -1057,18 +1057,22 @@ console.log(JSON.stringify({type:"assistant", message:{content:[{type:"text", te
   });
   try {
     let base = "";
+    let daemonToken = "";
     for (let i = 0; i < 80; i++) {
       if (existsSync(portFile)) {
-        base = (JSON.parse(readFileSync(portFile, "utf8")) as { url: string }).url;
+        const info = JSON.parse(readFileSync(portFile, "utf8")) as { url: string; token: string };
+        base = info.url;
+        daemonToken = info.token;
         break;
       }
       await new Promise((r) => setTimeout(r, 50));
     }
     assert.ok(base, "daemon wrote its port file");
-    const project = await createProject(base);
+    assert.ok(daemonToken, "daemon wrote its token");
+    const project = await createProject(base, { name: "P" }, daemonToken);
     const res = await fetch(`${base}/api/runs`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-dezin-daemon-token": daemonToken },
       body: JSON.stringify({ projectId: project.id, brief: "go", agentCommand: "codex", model: "gpt-5" }),
     });
     assert.equal(res.status, 200);

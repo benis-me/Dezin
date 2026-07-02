@@ -39,6 +39,67 @@ test("createProject posts JSON and returns the project", async () => {
   );
 });
 
+test("createApiClient sends the daemon token header on JSON requests", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse([PROJECT]));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl, daemonToken: "tok_123" });
+
+  await api.listProjects();
+
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/projects",
+    expect.objectContaining({ headers: { "x-dezin-daemon-token": "tok_123" } }),
+  );
+});
+
+test("createApiClient reads the daemon token from the injected page global by default", async () => {
+  const g = globalThis as typeof globalThis & { __DEZIN_DAEMON_TOKEN__?: string };
+  const previous = g.__DEZIN_DAEMON_TOKEN__;
+  g.__DEZIN_DAEMON_TOKEN__ = "tok_global";
+  try {
+    const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse([PROJECT]));
+    const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+    await api.listProjects();
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://d/api/projects",
+      expect.objectContaining({ headers: { "x-dezin-daemon-token": "tok_global" } }),
+    );
+  } finally {
+    g.__DEZIN_DAEMON_TOKEN__ = previous;
+  }
+});
+
+test("createApiClient preserves existing headers when adding the daemon token", async () => {
+  const imported = { ...PROJECT, id: "p2", name: "Imported" };
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(imported, 201));
+  const api = createApiClient({ fetchImpl, daemonToken: "tok_123" });
+  const file = new Blob(["zip"], { type: "application/zip" });
+
+  await api.importProject(file);
+
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "/api/projects/import",
+    expect.objectContaining({
+      headers: { "content-type": "application/zip", "x-dezin-daemon-token": "tok_123" },
+    }),
+  );
+});
+
+test("createApiClient sends the daemon token header on SSE requests", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => new Response(sseStream([`data: {"type":"run-done"}\n\n`]), { status: 200 }));
+  const api = createApiClient({ fetchImpl, daemonToken: "tok_123" });
+
+  for await (const _ of api.streamRun({ projectId: "p1", brief: "make a hero" })) {
+    // consume stream
+  }
+
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "/api/runs",
+    expect.objectContaining({ headers: { "content-type": "application/json", "x-dezin-daemon-token": "tok_123" } }),
+  );
+});
+
 test("generateProjectTitle POSTs the background title endpoint", async () => {
   const titled = { ...PROJECT, name: "Pricing Control Room" };
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(titled));

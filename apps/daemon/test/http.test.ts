@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -42,11 +43,121 @@ async function withServer(fn: (ctx: Ctx) => Promise<void>, extraDeps: Partial<Ap
   }
 }
 
+async function rawRequest(
+  base: string,
+  path: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; text: string }> {
+  const url = new URL(path, base);
+  return await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: `${url.pathname}${url.search}`,
+        method: options.method ?? "GET",
+        headers: options.headers,
+      },
+      (res) => {
+        let text = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => (text += chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, text }));
+      },
+    );
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
 test("GET /api/health", async () => {
   await withServer(async ({ base }) => {
     const res = await fetch(`${base}/api/health`);
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { ok: true, version: "9.9.9" });
+  });
+});
+
+test("daemon rejects non-local Host headers", async () => {
+  await withServer(async ({ base }) => {
+    const res = await rawRequest(base, "/api/health", { headers: { host: "evil.test" } });
+    assert.equal(res.status, 403);
+  });
+});
+
+test("daemon rejects non-local Origin headers on API requests", async () => {
+  await withServer(async ({ base }) => {
+    const res = await rawRequest(base, "/api/projects", {
+      method: "POST",
+      headers: { origin: "https://evil.test", "content-type": "application/json" },
+      body: JSON.stringify({ name: "Drive by" }),
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
+test("daemon enforces token when configured", async () => {
+  await withServer(
+    async ({ base }) => {
+      const missing = await fetch(`${base}/api/health`);
+      assert.equal(missing.status, 401);
+
+      const accepted = await fetch(`${base}/api/health`, { headers: { authorization: "Bearer test-token" } });
+      assert.equal(accepted.status, 200);
+    },
+    { security: { token: "test-token" } } as Partial<AppDeps>,
+  );
+});
+
+test("daemon serves the web shell without a token but injects the daemon token", async () => {
+  const webDir = mkdtempSync(join(tmpdir(), "dezin-web-shell-"));
+  writeFileSync(join(webDir, "index.html"), "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>");
+  try {
+    await withServer(
+      async ({ base }) => {
+        const shell = await fetch(`${base}/`);
+        assert.equal(shell.status, 200);
+        const html = await shell.text();
+        assert.match(html, /window\.__DEZIN_DAEMON_TOKEN__/);
+        assert.match(html, /test-token/);
+
+        const api = await fetch(`${base}/api/projects`);
+        assert.equal(api.status, 401);
+      },
+      { security: { token: "test-token" }, webDir } as Partial<AppDeps>,
+    );
+  } finally {
+    rmSync(webDir, { recursive: true, force: true });
+  }
+});
+
+test("daemon allows static preview reads without a token while protecting APIs", async () => {
+  await withServer(
+    async ({ base, dataDir }) => {
+      const id = "proj-1";
+      mkdirSync(join(dataDir, "projects", id), { recursive: true });
+      writeFileSync(join(dataDir, "projects", id, "index.html"), "<h1>preview</h1>");
+
+      const preview = await fetch(`${base}/projects/${id}/preview/index.html`);
+      assert.equal(preview.status, 200);
+      assert.match(await preview.text(), /preview/);
+
+      const api = await fetch(`${base}/api/settings`);
+      assert.equal(api.status, 401);
+    },
+    { security: { token: "test-token" } } as Partial<AppDeps>,
+  );
+});
+
+test("JSON API routes reject non-JSON content types", async () => {
+  await withServer(async ({ base }) => {
+    const res = await fetch(`${base}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ name: "Plain text JSON" }),
+    });
+    assert.equal(res.status, 415);
   });
 });
 

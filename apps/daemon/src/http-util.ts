@@ -50,6 +50,11 @@ export async function readJsonBody(req: IncomingMessage, max = MAX_BODY): Promis
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (!raw) return {};
+  const contentType = req.headers["content-type"];
+  const mediaType = (Array.isArray(contentType) ? contentType[0] : contentType)?.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (mediaType !== "application/json" && !mediaType.endsWith("+json")) {
+    throw new HttpError(415, "content-type must be application/json");
+  }
   try {
     return JSON.parse(raw);
   } catch {

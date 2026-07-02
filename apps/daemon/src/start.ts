@@ -9,6 +9,7 @@
 import { dirname, join } from "node:path";
 import { mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDir } from "../../../packages/design/src/index.ts";
@@ -20,6 +21,7 @@ const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
 const PORT = process.env.DEZIN_PORT !== undefined ? Number(process.env.DEZIN_PORT) : 0;
 const DATA_DIR = process.env.DEZIN_DATA_DIR ?? join(homedir(), ".dezin");
 const PORT_FILE = process.env.DEZIN_PORTFILE ?? join(DATA_DIR, "daemon.json");
+const DAEMON_TOKEN = process.env.DEZIN_DAEMON_TOKEN?.trim() || randomBytes(32).toString("base64url");
 // Single source of truth: the repo's package.json version, so About always matches it.
 const VERSION = (() => {
   try {
@@ -36,14 +38,20 @@ function main(): void {
   if (process.env.DEZIN_AGENT_CMD) store.updateSettings({ agentCommand: process.env.DEZIN_AGENT_CMD });
   // One shared registry: bundled systems + any the user has imported (persisted to disk).
   const designRegistry = new DesignRegistry([...BUNDLED_DESIGN_SYSTEMS, ...loadDesignSystems(userDesignDir(DATA_DIR))]);
-  const server = createApp({ store, dataDir: DATA_DIR, version: VERSION, designRegistry });
+  const server = createApp({
+    store,
+    dataDir: DATA_DIR,
+    version: VERSION,
+    designRegistry,
+    security: { token: DAEMON_TOKEN },
+  });
 
   server.listen(PORT, HOST, () => {
     const { port } = server.address() as AddressInfo;
     const url = `http://${HOST}:${port}`;
     try {
       mkdirSync(dirname(PORT_FILE), { recursive: true });
-      writeFileSync(PORT_FILE, `${JSON.stringify({ url, host: HOST, port, pid: process.pid })}\n`, "utf8");
+      writeFileSync(PORT_FILE, `${JSON.stringify({ url, host: HOST, port, pid: process.pid, token: DAEMON_TOKEN })}\n`, "utf8");
     } catch {
       // discovery file is best-effort
     }

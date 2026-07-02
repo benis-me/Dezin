@@ -232,6 +232,7 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 export interface ApiClientOptions {
   baseUrl?: string;
   fetchImpl?: FetchLike;
+  daemonToken?: string;
 }
 
 export class ApiError extends Error {
@@ -241,6 +242,11 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
   }
+}
+
+function defaultDaemonToken(): string {
+  const g = globalThis as typeof globalThis & { __DEZIN_DAEMON_TOKEN__?: string };
+  return typeof g.__DEZIN_DAEMON_TOKEN__ === "string" ? g.__DEZIN_DAEMON_TOKEN__ : "";
 }
 
 async function safeText(res: Response): Promise<string> {
@@ -383,9 +389,23 @@ export interface ApiClient {
 export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
   const baseUrl = opts.baseUrl ?? "";
   const f: FetchLike = opts.fetchImpl ?? ((input, init) => fetch(input, init));
+  const daemonToken = (opts.daemonToken ?? defaultDaemonToken()).trim();
+
+  function initWithDaemonToken(init?: RequestInit): RequestInit | undefined {
+    if (!daemonToken) return init;
+    const rawHeaders = init?.headers;
+    const headers =
+      rawHeaders instanceof Headers
+        ? Object.fromEntries(rawHeaders.entries())
+        : Array.isArray(rawHeaders)
+          ? Object.fromEntries(rawHeaders)
+          : { ...(rawHeaders as Record<string, string> | undefined) };
+    headers["x-dezin-daemon-token"] = daemonToken;
+    return { ...init, headers };
+  }
 
   async function json<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await f(baseUrl + path, init);
+    const res = await f(baseUrl + path, initWithDaemonToken(init));
     if (!res.ok) throw new ApiError(res.status, await safeText(res));
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
@@ -425,16 +445,16 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
   }
 
   async function* streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent> {
-    yield* consumeSse(await f(baseUrl + "/api/runs", { ...jsonInit("POST", input), signal }));
+    yield* consumeSse(await f(baseUrl + "/api/runs", initWithDaemonToken({ ...jsonInit("POST", input), signal })));
   }
 
   async function* reattachRun(runId: string, signal?: AbortSignal, options: { afterSeq?: number } = {}): AsyncGenerator<RunEvent> {
     const after = typeof options.afterSeq === "number" && Number.isFinite(options.afterSeq) ? `?after=${encodeURIComponent(String(options.afterSeq))}` : "";
-    yield* consumeSse(await f(`${baseUrl}/api/runs/${enc(runId)}/stream${after}`, { signal }));
+    yield* consumeSse(await f(`${baseUrl}/api/runs/${enc(runId)}/stream${after}`, initWithDaemonToken({ signal })));
   }
 
   async function* scanAgentsStream(): AsyncGenerator<ScanEvent> {
-    const res = await f(baseUrl + "/api/agents/rescan-stream", { method: "POST" });
+    const res = await f(baseUrl + "/api/agents/rescan-stream", initWithDaemonToken({ method: "POST" }));
     if (!res.ok) throw new ApiError(res.status, await safeText(res));
     const handle = (block: string): ScanEvent | null => {
       const data = block
@@ -522,7 +542,9 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     listRuns: (id, options) => json<RunSummary[]>(`/api/projects/${enc(id)}/runs${options?.all ? "?all=1" : ""}`),
     versionPreviewUrl: (id, runId) => `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`,
     getVersionText: async (id, runId) => {
-      const res = await f(`${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`);
+      const url = `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`;
+      const init = initWithDaemonToken();
+      const res = init ? await f(url, init) : await f(url);
       if (!res.ok) throw new ApiError(res.status, await safeText(res));
       return res.text();
     },
@@ -547,7 +569,9 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       }),
     getFileText: async (id, path) => {
       const rel = path.split("/").map(enc).join("/");
-      const res = await f(`${baseUrl}/projects/${enc(id)}/preview/${rel}`);
+      const url = `${baseUrl}/projects/${enc(id)}/preview/${rel}`;
+      const init = initWithDaemonToken();
+      const res = init ? await f(url, init) : await f(url);
       if (!res.ok) throw new ApiError(res.status, await safeText(res));
       return res.text();
     },

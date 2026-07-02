@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureDevServer, ensureProjectPickerBridge, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
+import { ensureDevServer, ensureProjectPickerBridge, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
 
 async function waitForPortDown(url: string): Promise<void> {
   for (let i = 0; i < 20; i++) {
@@ -125,6 +125,27 @@ setInterval(() => {}, 1000);
     assert.notEqual(await waitForText(second.url), firstPid);
   } finally {
     stopAllDevServers();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("setupImportedStandardProject installs without running imported package scripts", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-imported-standard-"));
+  const marker = join(dir, "postinstall-ran.txt");
+  try {
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({
+        type: "module",
+        scripts: { postinstall: "node postinstall.mjs" },
+      }),
+    );
+    writeFileSync(join(dir, "postinstall.mjs"), `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "ran");\n`);
+
+    await setupImportedStandardProject("import-postinstall-test", dir);
+
+    assert.equal(existsSync(marker), false);
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

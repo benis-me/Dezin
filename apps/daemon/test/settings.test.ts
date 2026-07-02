@@ -60,10 +60,30 @@ test("PUT /api/settings merges and persists", async () => {
 
     const fetched = await getSettings(base);
     assert.equal(fetched.agentCommand, "codex");
-    assert.equal(fetched.apiKey, "sk-local");
+    assert.equal(fetched.apiKey, "");
     assert.equal(fetched.videoModel, "sora");
     assert.equal(fetched.visualQaEnabled, true);
     assert.equal(fetched.defaultDesignSystemId, "modern-minimal"); // untouched default
+  });
+});
+
+test("GET /api/settings redacts stored provider secrets", async () => {
+  await withServer(async (base) => {
+    const res = await putSettings(base, {
+      apiKey: "sk-agent",
+      imageApiKey: "sk-image",
+      videoApiKey: "sk-video",
+      imageApiBaseUrl: "https://images.example.test/v1",
+      videoApiBaseUrl: "https://videos.example.test/v1",
+    });
+    assert.equal(res.status, 200);
+
+    const fetched = await getSettings(base);
+    assert.equal(fetched.apiKey, "");
+    assert.equal(fetched.imageApiKey, "");
+    assert.equal(fetched.videoApiKey, "");
+    assert.equal(fetched.imageApiBaseUrl, "https://images.example.test/v1");
+    assert.equal(fetched.videoApiBaseUrl, "https://videos.example.test/v1");
   });
 });
 
