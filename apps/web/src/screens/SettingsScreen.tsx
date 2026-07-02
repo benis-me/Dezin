@@ -6,6 +6,7 @@ import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import type { DesignSystemCard, Settings } from "../lib/api.ts";
+import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
 import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
 import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
@@ -13,10 +14,11 @@ import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui
 type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
 const SECRET_SETTING_KEYS = ["apiKey", "imageApiKey", "videoApiKey"] as const;
-export const SETTINGS_UPDATED_EVENT = "dezin:settings-updated";
 
 function publishSettingsUpdate(settings: Settings): void {
-  window.dispatchEvent(new CustomEvent<Settings>(SETTINGS_UPDATED_EVENT, { detail: settings }));
+  queueMicrotask(() => {
+    window.dispatchEvent(new CustomEvent<Settings>(SETTINGS_UPDATED_EVENT, { detail: settings }));
+  });
 }
 
 function mergeSettingsSaveResponse(current: Settings | null, next: Settings): Settings {

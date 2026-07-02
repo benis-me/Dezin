@@ -3,12 +3,14 @@ import type { ModelCapability, ProviderPreset } from "./model-provider-registry.
 import { inferCapabilities, parseModelEntries, serializeModelEntries } from "./model-provider-ui-utils.tsx";
 
 export interface ProviderProfile {
+  enabled?: boolean;
   baseUrl: string;
   models: string;
   organization: string;
 }
 
 type ProviderProfiles = Record<string, ProviderProfile>;
+type ResolvedProviderProfile = ProviderProfile & { enabled: boolean };
 
 function hasOwn(value: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
@@ -16,6 +18,10 @@ function hasOwn(value: object, key: string): boolean {
 
 function stringField(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function booleanField(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 export function parseProviderProfiles(value: string | undefined): ProviderProfiles {
@@ -27,7 +33,9 @@ export function parseProviderProfiles(value: string | undefined): ProviderProfil
     for (const [id, raw] of Object.entries(parsed)) {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
       const profile = raw as Record<string, unknown>;
+      const enabled = booleanField(profile.enabled);
       profiles[id] = {
+        ...(enabled === undefined ? {} : { enabled }),
         baseUrl: stringField(profile.baseUrl) ?? "",
         models: stringField(profile.models) ?? "",
         organization: stringField(profile.organization) ?? "",
@@ -43,6 +51,7 @@ export function serializeProviderProfiles(profiles: ProviderProfiles): string {
   const clean: ProviderProfiles = {};
   for (const [id, profile] of Object.entries(profiles)) {
     clean[id] = {
+      enabled: Boolean(profile.enabled),
       baseUrl: profile.baseUrl ?? "",
       models: profile.models ?? "",
       organization: profile.organization ?? "",
@@ -55,11 +64,12 @@ function defaultModels(provider: ProviderPreset): string {
   return serializeModelEntries(provider.models);
 }
 
-export function providerProfile(settings: Settings, provider: ProviderPreset): ProviderProfile {
+export function providerProfile(settings: Settings, provider: ProviderPreset): ResolvedProviderProfile {
   const profiles = parseProviderProfiles(settings.aiProviderProfiles);
   const stored = profiles[provider.id];
   const selected = settings.aiProviderId === provider.id;
   return {
+    enabled: stored && hasOwn(stored, "enabled") ? Boolean(stored.enabled) : selected ? settings.aiProviderEnabled : false,
     baseUrl: stored && hasOwn(stored, "baseUrl") ? stored.baseUrl : selected ? settings.imageApiBaseUrl || settings.apiBaseUrl : provider.baseUrl,
     models: stored && hasOwn(stored, "models") ? stored.models : selected && settings.aiProviderModels ? settings.aiProviderModels : defaultModels(provider),
     organization:
@@ -93,36 +103,67 @@ export function patchSelectedProviderProfile(
   const profiles = parseProviderProfiles(settings.aiProviderProfiles);
   const current = providerProfile(settings, provider);
   const next: ProviderProfile = {
+    enabled: patch.aiProviderEnabled ?? Boolean(current.enabled),
     baseUrl: patch.apiBaseUrl ?? patch.imageApiBaseUrl ?? current.baseUrl,
     models: patch.aiProviderModels ?? current.models,
     organization: patch.aiProviderOrganization ?? current.organization,
   };
   profiles[provider.id] = next;
-  const syncedPatch: Partial<Settings> = { ...patch, aiProviderProfiles: serializeProviderProfiles(profiles) };
-  if (patch.aiProviderModels != null) {
+  const active = settings.aiProviderId === provider.id;
+  const globalPatch = active
+    ? patch
+    : Object.fromEntries(
+        Object.entries(patch).filter(
+          ([key]) => !["apiBaseUrl", "imageApiBaseUrl", "videoApiBaseUrl", "aiProviderModels", "aiProviderOrganization", "imageModel"].includes(key),
+        ),
+      );
+  const syncedPatch: Partial<Settings> = { ...globalPatch, aiProviderProfiles: serializeProviderProfiles(profiles) };
+  if (active && patch.aiProviderModels != null) {
     syncedPatch.imageModel = preferredImageModel(next.models, provider, settings.imageModel);
   }
   return syncedPatch;
 }
 
-export function selectProviderProfilePatch(
+function syncProviderToRuntime(settings: Settings, provider: ProviderPreset, profile: ProviderProfile): Partial<Settings> {
+  return {
+    aiProviderId: provider.id,
+    aiProviderEnabled: Boolean(profile.enabled),
+    aiProviderModels: profile.models,
+    aiProviderOrganization: profile.organization,
+    apiBaseUrl: profile.baseUrl,
+    imageApiBaseUrl: profile.baseUrl,
+    videoApiBaseUrl: profile.baseUrl,
+    imageModel: preferredImageModel(profile.models, provider, settings.imageModel),
+  };
+}
+
+export function enabledProviderIds(settings: Settings, providers: ProviderPreset[]): Set<string> {
+  return new Set(providers.filter((provider) => providerProfile(settings, provider).enabled).map((provider) => provider.id));
+}
+
+export function setProviderEnabledPatch(
   settings: Settings,
-  currentProvider: ProviderPreset,
-  nextProvider: ProviderPreset,
+  providers: ProviderPreset[],
+  provider: ProviderPreset,
+  enabled: boolean,
 ): Partial<Settings> {
   const profiles = parseProviderProfiles(settings.aiProviderProfiles);
-  profiles[currentProvider.id] = providerProfile(settings, currentProvider);
-  const settingsWithCurrentProfile = { ...settings, aiProviderProfiles: serializeProviderProfiles(profiles) };
-  const next = providerProfile(settingsWithCurrentProfile, nextProvider);
-  profiles[nextProvider.id] = next;
+  const nextProfile = { ...providerProfile(settings, provider), enabled };
+  profiles[provider.id] = nextProfile;
+  const nextProfiles = serializeProviderProfiles(profiles);
+  const profileSettings = { ...settings, aiProviderProfiles: nextProfiles };
+  const patch: Partial<Settings> = { aiProviderProfiles: nextProfiles };
+
+  if (enabled) return { ...patch, ...syncProviderToRuntime(settings, provider, nextProfile), aiProviderProfiles: nextProfiles };
+
+  if (settings.aiProviderId !== provider.id) return patch;
+
+  const nextActive = providers.find((candidate) => candidate.id !== provider.id && providerProfile(profileSettings, candidate).enabled);
+  if (!nextActive) return { ...patch, aiProviderEnabled: false, imageModel: "" };
+
   return {
-    aiProviderId: nextProvider.id,
-    aiProviderModels: next.models,
-    aiProviderOrganization: next.organization,
-    apiBaseUrl: next.baseUrl,
-    imageApiBaseUrl: next.baseUrl,
-    videoApiBaseUrl: next.baseUrl,
-    imageModel: preferredImageModel(next.models, nextProvider, settings.imageModel),
-    aiProviderProfiles: serializeProviderProfiles(profiles),
+    ...patch,
+    ...syncProviderToRuntime(settings, nextActive, providerProfile(profileSettings, nextActive)),
+    aiProviderProfiles: nextProfiles,
   };
 }

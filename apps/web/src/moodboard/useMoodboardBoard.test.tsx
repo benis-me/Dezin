@@ -40,6 +40,51 @@ test("imageModelOptions exposes image models from the enabled provider", () => {
   expect(imageModelOptions(settings({ aiProviderEnabled: true }))).toEqual(["gpt-image-1", "gpt-image-2"]);
 });
 
+test("imageModelOptions uses the active enabled provider profile instead of the last viewed provider models", () => {
+  expect(
+    imageModelOptions(
+      settings({
+        aiProviderId: "openai",
+        aiProviderEnabled: true,
+        aiProviderModels: JSON.stringify({ id: "azure-image-deployment", capabilities: ["Image"] }),
+        imageModel: "stale-image-model",
+        aiProviderProfiles: JSON.stringify({
+          openai: {
+            enabled: true,
+            baseUrl: "https://api.openai.com/v1",
+            models: JSON.stringify({ id: "openai-image-live", capabilities: ["Image"] }),
+            organization: "",
+          },
+          "azure-openai": {
+            enabled: false,
+            baseUrl: "https://example.openai.azure.com/openai",
+            models: JSON.stringify({ id: "azure-image-deployment", capabilities: ["Image"] }),
+            organization: "preview",
+          },
+        }),
+      }),
+    ),
+  ).toEqual(["openai-image-live"]);
+});
+
+test("imageModelOptions keeps legacy active provider profiles enabled through the global flag", () => {
+  expect(
+    imageModelOptions(
+      settings({
+        aiProviderId: "openai",
+        aiProviderEnabled: true,
+        aiProviderProfiles: JSON.stringify({
+          openai: {
+            baseUrl: "https://api.openai.com/v1",
+            models: JSON.stringify({ id: "openai-image-live", capabilities: ["Image"] }),
+            organization: "",
+          },
+        }),
+      }),
+    ),
+  ).toEqual(["openai-image-live"]);
+});
+
 test("useMoodboardBoard refreshes image model choices when settings change elsewhere", async () => {
   let board!: ReturnType<typeof useMoodboardBoard>;
   function Probe() {
@@ -71,7 +116,7 @@ test("useMoodboardBoard refreshes image model choices when settings change elsew
       <Probe />
     </ApiProvider>,
   );
-  await waitFor(() => expect(board.imageModels).toEqual(["gpt-image-1", "gpt-image-2"]));
+  await waitFor(() => expect(board.imageModels).toEqual(["gpt-image-1"]));
 
   await act(async () => {
     window.dispatchEvent(

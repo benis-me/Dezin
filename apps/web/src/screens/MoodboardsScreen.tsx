@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { Archive, ArchiveRestore, ArrowRight, ImagePlus, Images, LayoutGrid, List, Pencil, Plus, Search, Trash2, X } from "lucide-react";
-import type { Moodboard, SaveMoodboardNodeInput } from "../lib/api.ts";
+import type { Moodboard, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
+import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { useToast } from "../components/Toast.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import {
@@ -89,6 +90,13 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
 
   useEffect(() => refresh(), [refresh]);
 
+  const applyImageSettings = useCallback((settings: Settings) => {
+    const models = imageModelOptions(settings);
+    const configuredImageModel = settings.imageModel.trim();
+    setImageModels(models);
+    setImageModel((current) => (current && models.includes(current) ? current : models.includes(configuredImageModel) ? configuredImageModel : models[0] || ""));
+  }, []);
+
   useEffect(() => {
     let alive = true;
     void api
@@ -97,20 +105,23 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
         if (!alive) return;
         setSettingsAgent(settings.agentCommand ?? "");
         setSettingsModel(settings.model ?? "");
-        const models = imageModelOptions(settings);
-        const configuredImageModel = settings.imageModel.trim();
-        setImageModels(models);
-        setImageModel((current) => (current && models.includes(current) ? current : models.includes(configuredImageModel) ? configuredImageModel : models[0] || ""));
+        applyImageSettings(settings);
       })
       .catch(() => {
         if (!alive) return;
         setSettingsAgent("");
         setImageModels([]);
       });
+    const onSettingsUpdated = (event: Event) => {
+      const settings = (event as CustomEvent<Settings>).detail;
+      if (settings) applyImageSettings(settings);
+    };
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated);
     return () => {
       alive = false;
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated);
     };
-  }, [api]);
+  }, [api, applyImageSettings]);
 
   useEffect(() => {
     if (settingsAgent === null) return;

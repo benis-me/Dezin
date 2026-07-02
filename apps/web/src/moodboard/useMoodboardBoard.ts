@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentInfo, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
+import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { useToast } from "../components/Toast.tsx";
 import { MODEL_PROVIDERS } from "../settings/model-provider-registry.ts";
 import { inferCapabilities, parseModelEntries } from "../settings/model-provider-ui-utils.tsx";
+import { providerProfile } from "../settings/provider-profiles.ts";
 import { toInput } from "./canvas-utils.ts";
 import {
   appendInputs,
@@ -89,10 +91,10 @@ export function useMoodboardBoard(boardId: string) {
       const settings = (event as CustomEvent<Settings>).detail;
       if (settings) applyImageSettings(settings);
     };
-    window.addEventListener("dezin:settings-updated", onSettingsUpdated);
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated);
     return () => {
       alive = false;
-      window.removeEventListener("dezin:settings-updated", onSettingsUpdated);
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated);
     };
   }, [api, applyImageSettings]);
 
@@ -294,33 +296,33 @@ export function useMoodboardBoard(boardId: string) {
 
 export function imageModelOptions(settings: Settings): string[] {
   const models = new Set<string>();
-  const selectedProvider = MODEL_PROVIDERS.find((provider) => provider.id === settings.aiProviderId);
+  const activeProvider = MODEL_PROVIDERS.find((provider) => provider.id === settings.aiProviderId && provider.id !== "mock");
   const knownCapabilities = new Map<string, Set<string>>();
   for (const provider of MODEL_PROVIDERS) {
     for (const model of provider.models) knownCapabilities.set(model.id, new Set(model.capabilities));
   }
 
   const configuredImageModel = settings.imageModel.trim();
-  const hasLegacyImageEndpoint = Boolean(settings.imageApiBaseUrl.trim() && settings.imageApiKey.trim() && configuredImageModel);
-  if (!settings.aiProviderEnabled && !hasLegacyImageEndpoint) return [];
+  const hasLegacyImageEndpoint = Boolean(
+    settings.imageApiBaseUrl.trim() && (settings.imageApiKey.trim() || settings.imageApiKeyConfigured) && configuredImageModel,
+  );
 
-  if (settings.aiProviderEnabled) {
-    for (const model of selectedProvider?.models ?? []) {
-      if (model.capabilities.includes("Image")) models.add(model.id);
-    }
-    for (const entry of parseModelEntries(settings.aiProviderModels)) {
-      const known = knownCapabilities.get(entry.id);
-      const capabilities = entry.capabilities ?? (known ? [...known] : inferCapabilities(entry.id));
-      if (capabilities.includes("Image") && !capabilities.includes("Video")) models.add(entry.id);
+  if (activeProvider) {
+    const profile = providerProfile(settings, activeProvider);
+    if (profile.enabled) {
+      for (const entry of parseModelEntries(profile.models)) {
+        const known = knownCapabilities.get(entry.id);
+        const capabilities = entry.capabilities ?? (known ? [...known] : inferCapabilities(entry.id));
+        if (capabilities.includes("Image") && !capabilities.includes("Video")) models.add(entry.id);
+      }
     }
   }
 
-  if (hasLegacyImageEndpoint) {
-    models.add(configuredImageModel);
-  } else if (settings.aiProviderEnabled && configuredImageModel) {
+  if (models.size === 0 && hasLegacyImageEndpoint) {
     const known = knownCapabilities.get(configuredImageModel);
     const capabilities = known ? [...known] : inferCapabilities(configuredImageModel);
     if (capabilities.includes("Image") && !capabilities.includes("Video")) models.add(configuredImageModel);
   }
+
   return [...models];
 }
