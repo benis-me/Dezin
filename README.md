@@ -36,7 +36,8 @@ The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that d
 - **Variant branches.** Fork a design into parallel branches, iterate each differently, then compare them side by side with a draggable before/after slider.
 - **Files and Versions workspace.** Browse generated files with an in-pane source preview, and review per-branch versions grouped by branch with View, Diff, Compare, Restore, and Chat jump actions.
 - **Durable run state.** Run events are persisted and replayed when you reopen a project or navigate back. In-app navigation can reconnect to a running agent; if the desktop app quits, the interrupted run reopens at its last known state.
-- **Reference real work.** Attach another project as a reference (its actual artifact is handed to the agent), drop in screenshots to recreate, or paste local paths.
+- **Moodboards.** Collect visual references before a design starts on a local canvas with image, note, section, and image-generator nodes, plus a board-scoped Agent panel.
+- **Reference real work.** Attach another project as a reference (its actual artifact is handed to the agent), reference a Moodboard with budgeted canvas context and asset paths, drop in screenshots to recreate, or paste local paths.
 - **Live process view.** The agent's reasoning and file writes stream into the chat as it works; the artifact renders in a sandboxed iframe; export downloads a `.zip`.
 - **Desktop app.** An Electron shell (`apps/desktop`) with native window chrome and pixel-perfect off-screen capture for previews.
 - **Chrome extension.** Capture a cover image from Dribbble / Behance / Pinterest and send it straight to the composer (`apps/extension`).
@@ -87,7 +88,7 @@ packages/
   craft/     generates the anti-slop doc from quality's rule lists + a drift test
 apps/
   daemon/    node:http server: runs, project CRUD, agent scan, static preview, ZIP export
-  web/       Vite + React 19 + Tailwind v4 SPA — the workspace UI
+  web/       Vite + React 19 + Tailwind v4 SPA — workspace UI + Moodboard canvas
   desktop/   Electron shell + off-screen capture
   extension/ Chrome extension — capture a cover image into the composer
 content/
@@ -96,7 +97,7 @@ content/
   craft/           generated anti-ai-slop.md
 ```
 
-Generation is driven by a **3-axis content model**: `skills` (what to build) × `design-systems` (the brand visual language) × `craft` (universal anti-slop rules). All three are composed into one system prompt and handed to the agent, which writes files into the project folder. The result is linted; P0 findings re-enter as the next turn until clean.
+Generation is driven by a **3-axis content model**: `skills` (what to build) × `design-systems` (the brand visual language) × `craft` (universal anti-slop rules). All three are composed into one system prompt and handed to the agent, which writes files into the project folder. The result is linted; P0 findings re-enter as the next turn until clean. Moodboards are a separate local data model for pre-design material collection; projects can reference them without dumping the whole board into chat history.
 
 ## Test
 

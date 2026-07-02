@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add a first-class Moodboard area to Dezin for pre-design material collection, spatial organization, AI image generation, and agent-assisted interpretation. The reference implementation is Awen, but Dezin should distill its canvas architecture rather than inherit its full product surface.
+Add a first-class Moodboard area to Dezin for pre-design material collection, spatial organization, AI image generation, and agent-assisted interpretation. The canvas should be Dezin-native: it can borrow proven infinite-canvas patterns, but it must keep Dezin's product structure, visual language, and local-first runtime boundaries.
 
 ## Product Shape
 
@@ -21,9 +21,9 @@ Route A is the approved first version:
 - Video generation is represented in provider/model configuration and node data shape, but real video jobs are deferred.
 - Canvas supports pan, zoom, select, drag, resize, image upload/drop, sticky notes, sections, and generated image placement.
 - Board state is local-first and persisted in the Dezin store, with binary assets on disk under the app data directory.
-- Existing Dezin components and spacing/tokens are reused; no standalone Awen visual language is imported.
+- Existing Dezin components and spacing/tokens are reused; no standalone external visual language is imported.
 
-## Awen Concepts To Distill
+## Canvas Concepts To Distill
 
 - Leafer-based high-performance canvas runtime.
 - Zustand editor store split into canvas state, selection state, tools, and history.
@@ -100,7 +100,7 @@ The first canvas renderer should use Leafer if the dependency footprint stays co
 - Real video generation jobs.
 - Audio/3D nodes.
 - Collaboration and remote cursors.
-- Full Awen workflow graph/node execution.
+- Full workflow graph/node execution.
 - Export moodboard to project brief.
 - Moodboard-to-project attach flow.
 

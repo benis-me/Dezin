@@ -76,7 +76,7 @@ const PROPERTY_CHANGE = 'property.change'
 const PROPERTY_LEAFER_CHANGE = 'property.leafer_change'
 
 const META = Symbol('ImageLighterMeta')
-const PATCH_STATE = Symbol.for('awen.leafer-react.image-lighter.patch')
+const PATCH_STATE = Symbol.for('dezin.leafer-react.image-lighter.patch')
 export const IMAGE_LIGHTER_LOADING_FLAG = '__mcImageLighterLoading'
 
 type RuntimePatchState = {

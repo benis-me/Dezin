@@ -11,6 +11,8 @@ Dezin is an early open-source release. The core loop — describe → generate �
 - **Variant branches**: fork, iterate independently, and **compare** with a draggable slider.
 - **Versions workspace**: per-branch run/version history, file preview, restore, diff, compare, and chat jump actions.
 - **References**: attach another project's real artifact, drop screenshots, paste local paths.
+- **Moodboards**: create local boards for visual references, arrange images/notes/sections/generator nodes on the canvas, and use a board-scoped Agent panel.
+- **Project-to-Moodboard references**: attach a Moodboard from the project composer; the Agent receives budgeted board structure, notes, recent context, and local asset paths without storing a full canvas dump in the visible conversation.
 - Streaming **process view**, durable run event replay/reconnect, sandboxed preview, `.zip` export, command palette, dark mode.
 - Optional **agent-backed visual QA** for rendered screenshots and viewport geometry.
 - **Electron desktop** shell with off-screen capture, and a **Chrome extension** for cover-image capture.
@@ -24,7 +26,7 @@ Dezin is an early open-source release. The core loop — describe → generate �
 - [ ] **Desktop packaging.** The Electron app runs, but code-signing, notarization, and distribution (installers, auto-update) are intentionally not done.
 - [ ] **Chrome extension polish.** Functional capture-to-composer; not packaged for the Web Store, limited site coverage.
 - [ ] **CI / release automation.** Not set up for this initial release.
-- [ ] **Broader test coverage** for newer UI surfaces and workflows (agent scan, references, Standard-mode edge cases).
+- [ ] **Broader test coverage** for newer UI surfaces and workflows (agent scan, references, Moodboard edge cases, Standard-mode edge cases).
 
 ## Explicitly out of scope
 

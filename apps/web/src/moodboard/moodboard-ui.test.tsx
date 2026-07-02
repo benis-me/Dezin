@@ -656,14 +656,14 @@ test("normalizeCanvasRect turns drag endpoints into a positive drawing rect", ()
   expect(normalizeCanvasRect({ x: 320, y: 220 }, { x: 120, y: 90 })).toEqual({ x: 120, y: 90, width: 200, height: 130 });
 });
 
-test("Awen snap geometry resolves the nearest axis delta for moodboard nodes", () => {
+test("Moodboard snap geometry resolves the nearest axis delta for moodboard nodes", () => {
   const candidates = createSnapPointsFromBounds({ x: 100, y: 80, width: 160, height: 120 }, "candidate");
   const target = createSnapPointsFromBounds({ x: 263, y: 230, width: 80, height: 60 }, "target");
 
   expect(resolveSnapDeltas({ targetPoints: target, snapLines: createSnapLines(candidates), threshold: 6 }).x?.delta).toBe(-3);
 });
 
-test("Awen editor selection adapter maps node ids onto the Leafer editor target", () => {
+test("Moodboard editor selection adapter maps node ids onto the Leafer editor target", () => {
   const nodes = new Map([
     ["a", { id: "a" }],
     ["b", { id: "b" }],
@@ -683,7 +683,7 @@ test("Awen editor selection adapter maps node ids onto the Leafer editor target"
   expect(app.editor.target).toBeUndefined();
 });
 
-test("Awen editor selection adapter prefers editor.select when Leafer exposes it", () => {
+test("Moodboard editor selection adapter prefers editor.select when Leafer exposes it", () => {
   const nodes = new Map([
     ["a", { id: "a" }],
     ["b", { id: "b" }],
@@ -755,7 +755,7 @@ test("temporary hand shortcut only uses bare space", () => {
   expect(isTemporaryHandShortcut({ key: " ", metaKey: false, ctrlKey: false, altKey: true })).toBe(false);
 });
 
-test("reset zoom shortcut accepts zero and Awen-style nine variants", () => {
+test("reset zoom shortcut accepts zero and editor-style nine variants", () => {
   expect(isResetZoomShortcut({ key: "0", metaKey: true, ctrlKey: false })).toBe(true);
   expect(isResetZoomShortcut({ key: "9", metaKey: false, ctrlKey: true })).toBe(true);
   expect(isResetZoomShortcut({ key: "1", metaKey: true, ctrlKey: false })).toBe(false);
