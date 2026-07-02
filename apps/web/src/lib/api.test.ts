@@ -184,12 +184,12 @@ test("non-ok responses throw ApiError with the status", async () => {
 });
 
 test("non-ok JSON responses throw ApiError with the daemon error message", async () => {
-  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ error: "WaveSpeed rejected credentials." }, 401));
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ error: "OpenAI rejected credentials." }, 401));
   const api = createApiClient({ fetchImpl });
-  await expect(api.testModelProvider("wavespeed")).rejects.toMatchObject({
+  await expect(api.testModelProvider("openai")).rejects.toMatchObject({
     name: "ApiError",
     status: 401,
-    message: "WaveSpeed rejected credentials.",
+    message: "OpenAI rejected credentials.",
   });
 });
 

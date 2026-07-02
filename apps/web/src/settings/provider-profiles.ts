@@ -78,6 +78,7 @@ export function providerProfile(settings: Settings, provider: ProviderPreset): R
 }
 
 function imageModelIds(modelsText: string, provider: ProviderPreset): string[] {
+  if (!provider.imageRuntime) return [];
   const knownCapabilities = new Map<string, Set<ModelCapability>>();
   for (const model of provider.models) knownCapabilities.set(model.id, new Set(model.capabilities));
   const ids: string[] = [];
@@ -92,7 +93,7 @@ function imageModelIds(modelsText: string, provider: ProviderPreset): string[] {
 export function preferredImageModel(modelsText: string, provider: ProviderPreset, current: string): string {
   const ids = imageModelIds(modelsText, provider);
   if (current && ids.includes(current)) return current;
-  return ids[0] ?? current;
+  return ids[0] ?? "";
 }
 
 export function patchSelectedProviderProfile(
@@ -118,22 +119,27 @@ export function patchSelectedProviderProfile(
         ),
       );
   const syncedPatch: Partial<Settings> = { ...globalPatch, aiProviderProfiles: serializeProviderProfiles(profiles) };
-  if (active && patch.aiProviderModels != null) {
+  if (active && !provider.imageRuntime) {
+    syncedPatch.imageApiBaseUrl = "";
+    syncedPatch.videoApiBaseUrl = "";
+    syncedPatch.imageModel = "";
+  } else if (active && patch.aiProviderModels != null) {
     syncedPatch.imageModel = preferredImageModel(next.models, provider, settings.imageModel);
   }
   return syncedPatch;
 }
 
 function syncProviderToRuntime(settings: Settings, provider: ProviderPreset, profile: ProviderProfile): Partial<Settings> {
+  const imageModel = preferredImageModel(profile.models, provider, settings.imageModel);
   return {
     aiProviderId: provider.id,
     aiProviderEnabled: Boolean(profile.enabled),
     aiProviderModels: profile.models,
     aiProviderOrganization: profile.organization,
     apiBaseUrl: profile.baseUrl,
-    imageApiBaseUrl: profile.baseUrl,
-    videoApiBaseUrl: profile.baseUrl,
-    imageModel: preferredImageModel(profile.models, provider, settings.imageModel),
+    imageApiBaseUrl: provider.imageRuntime ? profile.baseUrl : "",
+    videoApiBaseUrl: "",
+    imageModel,
   };
 }
 

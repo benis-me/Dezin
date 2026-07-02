@@ -1,12 +1,16 @@
 /**
  * Image/media generation, woven into the run. The agent emits placeholder images
- * with a `data-gen-prompt` describing what to draw; after generation we call a
- * BYOK image endpoint (OpenAI Images-compatible), save each result under assets/,
- * and rewrite the <img src>. No key configured → artifact passes through untouched.
+ * with a `data-gen-prompt` describing what to draw; after generation we call an
+ * AI SDK image model, save each result under assets/, and rewrite the <img src>.
+ * No key configured -> artifact passes through untouched.
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createAzure } from "@ai-sdk/azure";
+import { createGoogle } from "@ai-sdk/google";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { generateImage, type GenerateImageResult, type ImageModel } from "ai";
 
 export interface ImageGenOpts {
   baseUrl: string;
@@ -22,11 +26,17 @@ export type SourceImageInput = {
   fileName: string;
 };
 
-export type FetchLike = (input: string, init?: { method?: string; headers?: Record<string, string>; body?: string | FormData }) => Promise<{
-  ok: boolean;
-  status: number;
-  json: () => Promise<unknown>;
-}>;
+export type FetchLike = typeof fetch;
+
+type ImageOperation = "generate" | "edit";
+
+interface ImageRequestLogContext {
+  operation: ImageOperation;
+  opts: ImageGenOpts;
+  imageField?: string;
+  sourceMimeType?: string;
+  sourceFileName?: string;
+}
 
 function decodeEntities(s: string): string {
   return s
@@ -35,6 +45,10 @@ function decodeEntities(s: string): string {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&amp;/g, "&");
+}
+
+function withoutTrailingSlash(value: string): string {
+  return value.trim().replace(/\/+$/, "");
 }
 
 function isAzureOpenAi(opts: ImageGenOpts): boolean {
@@ -46,85 +60,132 @@ function isAzureOpenAi(opts: ImageGenOpts): boolean {
   }
 }
 
-function azureApiVersion(opts: ImageGenOpts): string {
-  return opts.apiVersion?.trim() || "preview";
+function isGoogle(opts: ImageGenOpts): boolean {
+  return opts.providerId === "gemini";
 }
 
-function azureResourceUrl(opts: ImageGenOpts): URL {
+function azureApiVersion(opts: ImageGenOpts): string {
+  return opts.apiVersion?.trim() || "2025-04-01-preview";
+}
+
+function azureBaseUrl(opts: ImageGenOpts): string {
   const url = new URL(opts.baseUrl.endsWith("/") ? opts.baseUrl : `${opts.baseUrl}/`);
   const path = url.pathname.replace(/\/+$/, "");
   const openaiIndex = path.indexOf("/openai");
-  url.pathname = openaiIndex >= 0 ? path.slice(0, openaiIndex) || "/" : path || "/";
+  url.pathname = openaiIndex >= 0 ? path.slice(0, openaiIndex + "/openai".length) : `${path}/openai`;
   url.search = "";
-  return url;
+  return withoutTrailingSlash(url.toString());
 }
 
-function azureV1ImageGenerationEndpoint(opts: ImageGenOpts): string {
-  const url = azureResourceUrl(opts);
-  const basePath = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${basePath}/openai/v1/images/generations`;
-  url.searchParams.set("api-version", "preview");
-  return url.toString();
+function googleBaseUrl(opts: ImageGenOpts): string {
+  const baseUrl = opts.baseUrl.trim() || "https://generativelanguage.googleapis.com/v1beta";
+  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+  url.pathname = url.pathname.replace(/\/+$/, "").replace(/\/openai$/, "");
+  url.search = "";
+  return withoutTrailingSlash(url.toString());
 }
 
-function azureDeploymentEndpoint(opts: ImageGenOpts, operation: "images/generations" | "images/edits"): string {
-  const deployment = (opts.model || "gpt-image-1").trim();
-  const url = new URL(opts.baseUrl.endsWith("/") ? opts.baseUrl : `${opts.baseUrl}/`);
-  const path = url.pathname.replace(/\/+$/, "");
-  const existing = path.match(/^(.*\/openai\/deployments\/)([^/]+)(?:\/.*)?$/);
-  if (existing) {
-    url.pathname = `${existing[1]}${encodeURIComponent(deployment || decodeURIComponent(existing[2] ?? ""))}/${operation}`;
-  } else {
-    const openaiIndex = path.indexOf("/openai");
-    const openaiRoot = openaiIndex >= 0 ? path.slice(0, openaiIndex + "/openai".length) : `${path}/openai`;
-    url.pathname = `${openaiRoot}/deployments/${encodeURIComponent(deployment)}/${operation}`;
+function clipLogValue(value: string, max = 2000): string {
+  return value.length > max ? `${value.slice(0, max - 1)}...` : value;
+}
+
+async function imageErrorResponseText(res: Response): Promise<string> {
+  try {
+    return clipLogValue(await res.clone().text());
+  } catch {
+    return "";
   }
-  url.search = "";
-  url.searchParams.set("api-version", azureApiVersion(opts));
-  return url.toString();
 }
 
-function imageGenerationEndpoint(opts: ImageGenOpts): string {
-  if (isAzureOpenAi(opts)) return azureV1ImageGenerationEndpoint(opts);
-  return `${opts.baseUrl.replace(/\/$/, "")}/images/generations`;
+function fetchInputUrl(input: Parameters<FetchLike>[0]): string {
+  return typeof input === "string" || input instanceof URL ? String(input) : input.url;
 }
 
-function imageEditEndpoint(opts: ImageGenOpts): string {
-  if (isAzureOpenAi(opts)) return azureDeploymentEndpoint(opts, "images/edits");
-  return `${opts.baseUrl.replace(/\/$/, "")}/images/edits`;
+async function logImageRequestFailure(res: Response, context: ImageRequestLogContext & { endpoint: string }): Promise<void> {
+  const response = await imageErrorResponseText(res);
+  console.warn("[dezin:image-api] request failed", {
+    operation: context.operation,
+    providerId: context.opts.providerId || "custom",
+    azure: isAzureOpenAi(context.opts),
+    endpoint: context.endpoint,
+    model: context.opts.model || "gpt-image-1",
+    apiVersion: context.opts.apiVersion,
+    status: res.status,
+    response,
+    ...(context.imageField ? { imageField: context.imageField } : {}),
+    ...(context.sourceMimeType ? { sourceMimeType: context.sourceMimeType } : {}),
+    ...(context.sourceFileName ? { sourceFileName: context.sourceFileName } : {}),
+  });
 }
 
-function jsonHeaders(opts: ImageGenOpts): Record<string, string> {
-  return isAzureOpenAi(opts)
-    ? { "content-type": "application/json", "api-key": opts.apiKey }
-    : { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` };
+function withFailureLogging(fetchImpl: FetchLike, context: ImageRequestLogContext): FetchLike {
+  return (async (input, init) => {
+    const res = await fetchImpl(input, init);
+    if (!res.ok) await logImageRequestFailure(res, { ...context, endpoint: fetchInputUrl(input) });
+    return res;
+  }) as FetchLike;
 }
 
-function multipartHeaders(opts: ImageGenOpts): Record<string, string> {
-  return isAzureOpenAi(opts) ? { "api-key": opts.apiKey } : { authorization: `Bearer ${opts.apiKey}` };
+function imageModel(opts: ImageGenOpts, fetchImpl: FetchLike): ImageModel {
+  if (isAzureOpenAi(opts)) {
+    const model = opts.model.trim() || "gpt-image-1";
+    return createAzure({
+      apiKey: opts.apiKey,
+      baseURL: azureBaseUrl(opts),
+      apiVersion: azureApiVersion(opts),
+      useDeploymentBasedUrls: true,
+      fetch: fetchImpl,
+    }).image(model);
+  }
+  if (isGoogle(opts)) {
+    const model = opts.model.trim() || "gemini-2.5-flash-image";
+    return createGoogle({
+      apiKey: opts.apiKey,
+      baseURL: googleBaseUrl(opts),
+      fetch: fetchImpl,
+    }).image(model);
+  }
+  const baseURL = withoutTrailingSlash(opts.baseUrl);
+  if (!baseURL) throw new Error("Missing image API base URL.");
+  const model = opts.model.trim() || "gpt-image-1";
+  return createOpenAICompatible({
+    name: opts.providerId || "openai-compatible",
+    apiKey: opts.apiKey || undefined,
+    baseURL,
+    fetch: fetchImpl,
+  }).imageModel(model);
 }
 
-function imagePayload(opts: ImageGenOpts, prompt: string): Record<string, unknown> {
-  if (isAzureOpenAi(opts)) return { model: opts.model || "gpt-image-1", prompt, n: 1, size: "1024x1024" };
-  return { model: opts.model || "gpt-image-1", prompt, n: 1, size: "1024x1024", response_format: "b64_json" };
+function generationSettings(opts: ImageGenOpts): { n: 1; maxRetries: 0; size?: "1024x1024"; aspectRatio?: "1:1" } {
+  return isGoogle(opts) ? { n: 1, maxRetries: 0, aspectRatio: "1:1" } : { n: 1, maxRetries: 0, size: "1024x1024" };
 }
 
-async function base64FromImageResponse(res: Awaited<ReturnType<FetchLike>>): Promise<string> {
-  if (!res.ok) throw new Error(`image API ${res.status}`);
-  const body = (await res.json()) as { data?: Array<{ b64_json?: string }> };
-  const b64 = body.data?.[0]?.b64_json;
+function base64FromResult(result: GenerateImageResult): string {
+  const b64 = result.image?.base64.replace(/^data:[^,]+;base64,/, "");
   if (!b64) throw new Error("image API returned no data");
   return b64;
 }
 
-/** One image via the OpenAI Images-compatible endpoint; returns base64 PNG. */
+function imageApiError(err: unknown): Error {
+  const status = typeof err === "object" && err !== null ? (err as { statusCode?: unknown; status?: unknown }).statusCode ?? (err as { status?: unknown }).status : undefined;
+  if (typeof status === "number") return new Error(`image API ${status}`);
+  if (typeof status === "string" && status) return new Error(`image API ${status}`);
+  return err instanceof Error ? err : new Error("image API failed");
+}
+
+/** One image via an AI SDK image model; returns base64 PNG data. */
 export async function requestImage(opts: ImageGenOpts, prompt: string, fetchImpl: FetchLike): Promise<string> {
-  const res = await fetchImpl(imageGenerationEndpoint(opts), {
-    method: "POST",
-    headers: jsonHeaders(opts),
-    body: JSON.stringify(imagePayload(opts, prompt)),
-  });
-  return base64FromImageResponse(res);
+  const loggedFetch = withFailureLogging(fetchImpl, { operation: "generate", opts });
+  try {
+    const result = await generateImage({
+      model: imageModel(opts, loggedFetch),
+      prompt,
+      ...generationSettings(opts),
+    });
+    return base64FromResult(result);
+  } catch (err) {
+    throw imageApiError(err);
+  }
 }
 
 export async function requestImageEdit(
@@ -133,27 +194,29 @@ export async function requestImageEdit(
   image: SourceImageInput,
   fetchImpl: FetchLike,
 ): Promise<string> {
-  const form = new FormData();
-  form.append("prompt", prompt);
-  form.append("n", "1");
-  form.append("size", "1024x1024");
-  form.append("model", opts.model || "gpt-image-1");
-  if (!isAzureOpenAi(opts)) {
-    form.append("response_format", "b64_json");
-  }
+  const loggedFetch = withFailureLogging(fetchImpl, {
+    operation: "edit",
+    opts,
+    imageField: "image",
+    sourceMimeType: image.mimeType,
+    sourceFileName: image.fileName,
+  });
   const imageBytes = new Uint8Array(image.data.length);
   imageBytes.set(image.data);
-  form.append(isAzureOpenAi(opts) ? "image[]" : "image", new Blob([imageBytes], { type: image.mimeType }), image.fileName);
-  const res = await fetchImpl(imageEditEndpoint(opts), {
-    method: "POST",
-    headers: multipartHeaders(opts),
-    body: form,
-  });
-  return base64FromImageResponse(res);
+  try {
+    const result = await generateImage({
+      model: imageModel(opts, loggedFetch),
+      prompt: { text: prompt, images: [imageBytes] },
+      ...generationSettings(opts),
+    });
+    return base64FromResult(result);
+  } catch (err) {
+    throw imageApiError(err);
+  }
 }
 
 /**
- * Replace every `<img … data-gen-prompt="…">` in html with a generated asset.
+ * Replace every `<img ... data-gen-prompt="...">` in html with a generated asset.
  * Returns the rewritten html and the number of images generated.
  */
 export async function generateImages(

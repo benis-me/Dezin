@@ -186,7 +186,7 @@ test("POST /api/model-providers/models uses the Gemini native list endpoint", as
     async (base) => {
       await putSettings(base, {
         aiProviderId: "gemini",
-        apiBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+        apiBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
         apiKey: "gemini-local",
       });
 
@@ -205,41 +205,6 @@ test("POST /api/model-providers/models uses the Gemini native list endpoint", as
   assert.equal(new Headers(calls[0]?.init?.headers).get("authorization"), null);
 });
 
-test("POST /api/model-providers/test verifies WaveSpeed through its authenticated model list", async () => {
-  const calls: FetchCall[] = [];
-  await withServer(
-    {
-      modelProviderFetch: async (input, init) => {
-        calls.push({ url: String(input), init });
-        return new Response(JSON.stringify({ data: [{ model_id: "wavespeed-ai/flux-kontext-pro", name: "FLUX Kontext Pro" }] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    },
-    async (base) => {
-      await putSettings(base, {
-        aiProviderId: "wavespeed",
-        apiBaseUrl: "https://api.wavespeed.ai/api/v3",
-        apiKey: "wavespeed-local",
-      });
-
-      const res = await fetch(`${base}/api/model-providers/test`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ providerId: "wavespeed" }),
-      });
-      await assertOk(res);
-      const body = (await res.json()) as { ok: boolean; message: string };
-      assert.equal(body.ok, true);
-      assert.match(body.message, /WaveSpeed/);
-    },
-  );
-
-  assert.equal(calls[0]?.url, "https://api.wavespeed.ai/api/v3/models");
-  assert.equal(new Headers(calls[0]?.init?.headers).get("authorization"), "Bearer wavespeed-local");
-});
-
 test("POST /api/model-providers/test returns provider JSON error messages cleanly", async () => {
   await withServer(
     {
@@ -251,118 +216,19 @@ test("POST /api/model-providers/test returns provider JSON error messages cleanl
     },
     async (base) => {
       await putSettings(base, {
-        aiProviderId: "wavespeed",
-        apiBaseUrl: "https://api.wavespeed.ai/api/v3",
-        apiKey: "wavespeed-local",
+        aiProviderId: "openai",
+        apiBaseUrl: "https://api.openai.com/v1",
+        apiKey: "sk-local",
       });
 
       const res = await fetch(`${base}/api/model-providers/test`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ providerId: "wavespeed" }),
+        body: JSON.stringify({ providerId: "openai" }),
       });
       assert.equal(res.status, 502);
       const body = (await res.json()) as { error: string };
-      assert.equal(body.error, "WaveSpeed model list request failed (401): Unauthorized.");
+      assert.equal(body.error, "OpenAI model list request failed (401): Unauthorized.");
     },
   );
-});
-
-test("POST /api/model-providers/test verifies Vertex AI with project and location", async () => {
-  const calls: FetchCall[] = [];
-  await withServer(
-    {
-      modelProviderFetch: async (input, init) => {
-        calls.push({ url: String(input), init });
-        return new Response(JSON.stringify({ publisherModels: [{ name: "publishers/google/models/gemini-2.5-pro", displayName: "Gemini 2.5 Pro" }] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    },
-    async (base) => {
-      await putSettings(base, {
-        aiProviderId: "vertex-ai",
-        apiBaseUrl: "https://aiplatform.googleapis.com/v1",
-        apiKey: "ya29.local",
-        aiProviderOrganization: "demo-project:us-central1",
-        aiProviderProfiles: "",
-      });
-
-      const res = await fetch(`${base}/api/model-providers/test`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ providerId: "vertex-ai" }),
-      });
-      await assertOk(res);
-    },
-  );
-
-  assert.equal(calls[0]?.url, "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/us-central1/publishers/google/models");
-  assert.equal(new Headers(calls[0]?.init?.headers).get("authorization"), "Bearer ya29.local");
-});
-
-test("POST /api/model-providers/test probes Fal without submitting generation work", async () => {
-  const calls: FetchCall[] = [];
-  await withServer(
-    {
-      modelProviderFetch: async (input, init) => {
-        calls.push({ url: String(input), init });
-        return new Response(JSON.stringify({ detail: "request not found" }), {
-          status: 404,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    },
-    async (base) => {
-      await putSettings(base, {
-        aiProviderId: "fal",
-        apiBaseUrl: "https://fal.run",
-        apiKey: "fal-local",
-        aiProviderModels: "fal-ai/flux-pro",
-      });
-
-      const res = await fetch(`${base}/api/model-providers/test`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ providerId: "fal" }),
-      });
-      await assertOk(res);
-    },
-  );
-
-  assert.equal(calls[0]?.url, "https://queue.fal.run/fal-ai/flux-pro/requests/dezin-connection-test/status");
-  assert.equal(new Headers(calls[0]?.init?.headers).get("authorization"), "Key fal-local");
-});
-
-test("POST /api/model-providers/test probes a Midjourney gateway without creating a job", async () => {
-  const calls: FetchCall[] = [];
-  await withServer(
-    {
-      modelProviderFetch: async (input, init) => {
-        calls.push({ url: String(input), init });
-        return new Response(JSON.stringify({ error: "job not found" }), {
-          status: 404,
-          headers: { "content-type": "application/json" },
-        });
-      },
-    },
-    async (base) => {
-      await putSettings(base, {
-        aiProviderId: "midjourney-gateway",
-        apiBaseUrl: "https://api.ttapi.io",
-        apiKey: "ttapi-local",
-      });
-
-      const res = await fetch(`${base}/api/model-providers/test`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ providerId: "midjourney-gateway" }),
-      });
-      await assertOk(res);
-    },
-  );
-
-  assert.equal(calls[0]?.url, "https://api.ttapi.io/midjourney/v1/fetch?jobId=dezin-connection-test");
-  assert.equal(new Headers(calls[0]?.init?.headers).get("tt-api-key"), "ttapi-local");
 });

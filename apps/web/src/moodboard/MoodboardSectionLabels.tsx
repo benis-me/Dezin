@@ -17,7 +17,7 @@ export function MoodboardSectionLabels({
   const sections = nodes.filter((node) => node.type === "section");
   if (sections.length === 0) return null;
   return (
-    <div aria-hidden={false} className="pointer-events-none absolute inset-0 z-20">
+    <div aria-hidden={false} className="pointer-events-none absolute inset-0 z-10">
       {sections.map((node) => (
         <SectionLabel key={node.id} node={node} appRef={appRef} onSelect={onSelect} onRename={onRename} />
       ))}

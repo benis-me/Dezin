@@ -85,8 +85,7 @@ test("POST /api/moodboards/:id/generate-image sends source asset bytes for Quick
   const form = imageRequest.init?.body as FormData;
   assert.equal(form.get("prompt"), "make it warmer");
   assert.equal(form.get("model"), "gpt-image-2-deployment");
-  const image = form.get("image[]") as File;
-  assert.equal(image.name, "source.png");
+  const image = form.get("image") as File;
   assert.equal(await image.text(), "PNGDATA");
   assert.deepEqual(responseBody.messages ?? [], []);
   assert.equal(store.listMoodboardMessages(board.id).length, 0);

@@ -7,7 +7,7 @@ import { MODEL_PROVIDERS, type ProviderPreset } from "./model-provider-registry.
 import { isModelCapability, serializeModelEntries } from "./model-provider-ui-utils.tsx";
 import { enabledProviderIds, patchSelectedProviderProfile, providerProfile, setProviderEnabledPatch } from "./provider-profiles.ts";
 
-const VISIBLE_MODEL_PROVIDERS = MODEL_PROVIDERS.filter((provider) => provider.id !== "mock");
+const VISIBLE_MODEL_PROVIDERS = MODEL_PROVIDERS;
 
 export function ModelProviderSettings({
   settings,

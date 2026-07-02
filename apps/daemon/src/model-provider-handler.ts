@@ -20,28 +20,18 @@ const PROVIDER_LABELS: Record<string, string> = {
   openrouter: "OpenRouter",
   ollama: "Ollama",
   "openai-compatible": "OpenAI Compatible",
-  "vertex-ai": "Vertex AI",
-  fal: "Fal",
-  wavespeed: "WaveSpeed",
-  volcengine: "Volcengine Ark",
-  "midjourney-gateway": "Midjourney Gateway",
-  mock: "Mock",
 };
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
-  "azure-openai": "https://{resource}.openai.azure.com/openai/v1",
+  "azure-openai": "https://{resource}.openai.azure.com/openai",
   anthropic: "https://api.anthropic.com/v1",
-  gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
+  gemini: "https://generativelanguage.googleapis.com/v1beta",
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://127.0.0.1:11434/v1",
-  "vertex-ai": "https://aiplatform.googleapis.com/v1",
-  fal: "https://fal.run",
-  wavespeed: "https://api.wavespeed.ai/api/v3",
-  volcengine: "https://ark.cn-beijing.volces.com/api/v3",
 };
 
-const OPENAI_COMPATIBLE_PROVIDERS = new Set(["openai", "openrouter", "ollama", "openai-compatible", "volcengine"]);
+const OPENAI_COMPATIBLE_PROVIDERS = new Set(["openai", "openrouter", "ollama", "openai-compatible"]);
 
 function providerLabel(providerId: string): string {
   return PROVIDER_LABELS[providerId] ?? providerId;
@@ -68,13 +58,6 @@ function modelsEndpoint(baseUrl: string): string {
   return url.toString();
 }
 
-function appendPath(baseUrl: string, path: string): string {
-  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
-  const basePath = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${basePath}/${path.replace(/^\/+/, "")}`;
-  return url.toString();
-}
-
 function geminiModelsEndpoint(baseUrl: string, apiKey: string): string {
   const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
   const path = url.pathname.replace(/\/+$/, "").replace(/\/openai$/, "");
@@ -88,54 +71,6 @@ function azureModelsEndpoint(baseUrl: string, settings: Settings): string {
   const url = new URL(modelsEndpoint(baseUrl));
   const apiVersion = settings.aiProviderOrganization.trim();
   if (apiVersion && !url.pathname.includes("/v1/")) url.searchParams.set("api-version", apiVersion);
-  return url.toString();
-}
-
-function vertexModelsEndpoint(baseUrl: string, settings: Settings): string {
-  const [project, location] = settings.aiProviderOrganization
-    .split(/[:/]/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-  if (!project || !location) throw new Error("Missing Vertex AI project/location. Use project-id:location.");
-  return appendPath(
-    baseUrl,
-    `projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/publishers/google/models`,
-  );
-}
-
-function firstConfiguredModelId(settings: Settings, fallback: string): string {
-  for (const line of settings.aiProviderModels.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed) as { id?: unknown };
-      if (typeof parsed.id === "string" && parsed.id.trim()) return parsed.id.trim();
-    } catch {
-      return trimmed;
-    }
-  }
-  return fallback;
-}
-
-function encodedModelPath(modelId: string): string {
-  return modelId
-    .split("/")
-    .filter(Boolean)
-    .map((part) => encodeURIComponent(part))
-    .join("/");
-}
-
-function falProbeEndpoint(baseUrl: string, settings: Settings): string {
-  const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
-  if (url.hostname === "fal.run") url.hostname = "queue.fal.run";
-  url.pathname = `/${encodedModelPath(firstConfiguredModelId(settings, "fal-ai/flux-pro"))}/requests/dezin-connection-test/status`;
-  url.search = "";
-  return url.toString();
-}
-
-function midjourneyProbeEndpoint(baseUrl: string): string {
-  const url = new URL(appendPath(baseUrl, "/midjourney/v1/fetch"));
-  url.searchParams.set("jobId", "dezin-connection-test");
   return url.toString();
 }
 
@@ -210,8 +145,6 @@ function assertConnectionSettings(settings: Settings, providerId: string): { bas
 }
 
 async function fetchProviderModels(settings: Settings, providerId: string, fetchImpl: typeof fetch): Promise<ProviderModel[]> {
-  if (providerId === "mock") return [{ id: "mock-image", name: "Mock Image" }];
-
   if (providerId === "anthropic") {
     const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
     return fetchJsonModels(
@@ -232,16 +165,6 @@ async function fetchProviderModels(settings: Settings, providerId: string, fetch
     return fetchJsonModels(geminiModelsEndpoint(baseUrl, apiKey), { accept: "application/json" }, providerId, fetchImpl);
   }
 
-  if (providerId === "vertex-ai") {
-    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
-    return fetchJsonModels(modelsEndpoint(vertexModelsEndpoint(baseUrl, settings)), { accept: "application/json", authorization: `Bearer ${apiKey}` }, providerId, fetchImpl);
-  }
-
-  if (providerId === "wavespeed") {
-    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
-    return fetchJsonModels(modelsEndpoint(baseUrl), { accept: "application/json", authorization: `Bearer ${apiKey}` }, providerId, fetchImpl);
-  }
-
   if (!OPENAI_COMPATIBLE_PROVIDERS.has(providerId)) {
     throw new Error(`${providerLabel(providerId)} does not support live model discovery yet.`);
   }
@@ -253,35 +176,9 @@ async function fetchProviderModels(settings: Settings, providerId: string, fetch
   return fetchJsonModels(modelsEndpoint(baseUrl), headers, providerId, fetchImpl);
 }
 
-async function probeEndpoint(url: string, headers: Record<string, string>, providerId: string, fetchImpl: typeof fetch): Promise<void> {
-  const res = await fetchImpl(url, { headers });
-  if (res.status === 401 || res.status === 403) {
-    const detail = await res.text().catch(() => "");
-    const message = providerErrorDetail(detail);
-    throw new Error(`${providerLabel(providerId)} rejected credentials (${res.status})${message ? `: ${message}` : ""}`);
-  }
-  if (res.status >= 500) {
-    const detail = await res.text().catch(() => "");
-    const message = providerErrorDetail(detail);
-    throw new Error(`${providerLabel(providerId)} connection probe failed (${res.status})${message ? `: ${message}` : ""}`);
-  }
-}
-
 async function testProviderConnection(settings: Settings, providerId: string, fetchImpl: typeof fetch): Promise<ConnectionResult> {
-  if (providerId === "fal") {
-    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
-    await probeEndpoint(falProbeEndpoint(baseUrl, settings), { accept: "application/json", authorization: `Key ${apiKey}` }, providerId, fetchImpl);
-    return {};
-  }
-
-  if (providerId === "midjourney-gateway") {
-    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
-    await probeEndpoint(midjourneyProbeEndpoint(baseUrl), { accept: "application/json", "tt-api-key": apiKey }, providerId, fetchImpl);
-    return {};
-  }
-
   const models = await fetchProviderModels(settings, providerId, fetchImpl);
-  return { modelsFound: models.length };
+  return providerId === "azure-openai" ? {} : { modelsFound: models.length };
 }
 
 export async function handleTestModelProvider(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {

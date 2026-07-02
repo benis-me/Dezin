@@ -613,7 +613,7 @@ test("SettingsScreen keeps provider status enabled after reopening with a redact
   expect(await screen.findByLabelText("OpenAI enabled")).toHaveClass("bg-[var(--success)]");
 });
 
-test("SettingsScreen shows provider status per provider and hides the mock provider", async () => {
+test("SettingsScreen shows provider status per provider and hides unsupported providers", async () => {
   const user = userEvent.setup();
   let current = settingsFixture({
     aiProviderId: "openai",
@@ -645,6 +645,9 @@ test("SettingsScreen shows provider status per provider and hides the mock provi
   expect(await screen.findByLabelText("OpenAI enabled")).toHaveClass("bg-[var(--success)]");
   expect(screen.getByLabelText("Azure OpenAI disabled")).toHaveClass("bg-border-strong");
   expect(screen.queryByRole("button", { name: /Mock/ })).toBeNull();
+  for (const removed of ["Midjourney", "Fal", "WaveSpeed", "Vertex AI"]) {
+    expect(screen.queryByRole("button", { name: new RegExp(removed) })).toBeNull();
+  }
 
   const azure = screen.getByLabelText("Azure OpenAI disabled").closest("button")!;
   await user.click(azure);
@@ -661,6 +664,51 @@ test("SettingsScreen shows provider status per provider and hides the mock provi
         aiProviderModels: expect.stringContaining("azure-image-deployment"),
         imageModel: "azure-image-deployment",
         aiProviderProfiles: expect.stringContaining('"enabled":true'),
+      }),
+    ),
+  );
+});
+
+test("SettingsScreen clears image runtime when enabling a text-only provider", async () => {
+  const user = userEvent.setup();
+  let current = settingsFixture({
+    aiProviderId: "openai",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "https://api.openai.com/v1",
+    imageModel: "gpt-image-1",
+    aiProviderProfiles: JSON.stringify({
+      openai: {
+        enabled: true,
+        baseUrl: "https://api.openai.com/v1",
+        models: "gpt-image-1",
+        organization: "",
+      },
+      anthropic: {
+        enabled: false,
+        baseUrl: "https://api.anthropic.com/v1",
+        models: "claude-sonnet-4-6",
+        organization: "",
+      },
+    }),
+  });
+  const updateSettings = vi.fn(async (patch: Partial<Settings>) => {
+    current = { ...current, ...patch };
+    return current;
+  });
+  renderSettings({ getSettings: async () => current, updateSettings });
+
+  fireEvent.click(screen.getByRole("button", { name: "Providers" }));
+  const anthropic = await screen.findByLabelText("Anthropic disabled");
+  await user.click(anthropic.closest("button")!);
+  await user.click(await screen.findByRole("switch", { name: "Enable Anthropic" }));
+
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aiProviderId: "anthropic",
+        imageApiBaseUrl: "",
+        videoApiBaseUrl: "",
+        imageModel: "",
       }),
     ),
   );

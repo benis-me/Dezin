@@ -886,6 +886,36 @@ test("MoodboardSectionLabels lets section titles be edited outside the canvas no
   expect(onRename).toHaveBeenCalledWith("section-1", "Edited direction");
 });
 
+test("MoodboardSectionLabels renders below canvas toolbars", () => {
+  const section: MoodboardNode = {
+    id: "section-1",
+    boardId: "b1",
+    type: "section",
+    x: 120,
+    y: 140,
+    width: 320,
+    height: 160,
+    rotation: 0,
+    zIndex: -1,
+    data: { title: "Direction" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <MoodboardSectionLabels
+      nodes={[section]}
+      appRef={{ current: { findId: () => ({ x: 120, y: 140 }) } }}
+      onRename={() => {}}
+      onSelect={() => {}}
+    />,
+  );
+
+  const labelLayer = screen.getByText("Direction").parentElement;
+  expect(labelLayer).toHaveClass("z-10");
+  expect(labelLayer).not.toHaveClass("z-20");
+});
+
 test("moodboard scrollbars stay one pixel from the canvas edge", () => {
   expect(MOODBOARD_SCROLLBAR_PADDING).toBe(1);
 });

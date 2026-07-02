@@ -40,6 +40,18 @@ test("imageModelOptions exposes image models from the enabled provider", () => {
   expect(imageModelOptions(settings({ aiProviderEnabled: true }))).toEqual(["gpt-image-1", "gpt-image-2"]);
 });
 
+test("imageModelOptions ignores enabled providers without an image runtime", () => {
+  expect(
+    imageModelOptions(
+      settings({
+        aiProviderId: "anthropic",
+        aiProviderEnabled: true,
+        aiProviderModels: JSON.stringify({ id: "claude-image-ish", capabilities: ["Image"] }),
+      }),
+    ),
+  ).toEqual([]);
+});
+
 test("imageModelOptions uses the active enabled provider profile instead of the last viewed provider models", () => {
   expect(
     imageModelOptions(

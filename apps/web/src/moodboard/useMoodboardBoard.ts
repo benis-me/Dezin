@@ -412,7 +412,7 @@ export function useMoodboardBoard(boardId: string) {
 
 export function imageModelOptions(settings: Settings): string[] {
   const models = new Set<string>();
-  const activeProvider = MODEL_PROVIDERS.find((provider) => provider.id === settings.aiProviderId && provider.id !== "mock");
+  const activeProvider = MODEL_PROVIDERS.find((provider) => provider.id === settings.aiProviderId);
   const knownCapabilities = new Map<string, Set<string>>();
   for (const provider of MODEL_PROVIDERS) {
     for (const model of provider.models) knownCapabilities.set(model.id, new Set(model.capabilities));
@@ -423,7 +423,7 @@ export function imageModelOptions(settings: Settings): string[] {
     settings.imageApiBaseUrl.trim() && (settings.imageApiKey.trim() || settings.imageApiKeyConfigured) && configuredImageModel,
   );
 
-  if (activeProvider) {
+  if (activeProvider?.imageRuntime) {
     const profile = providerProfile(settings, activeProvider);
     if (profile.enabled) {
       for (const entry of parseModelEntries(profile.models)) {
