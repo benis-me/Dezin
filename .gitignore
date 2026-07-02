@@ -8,3 +8,5 @@ dist/
 .omks/
 .impeccable/
 .codegraph/
+
+.env*

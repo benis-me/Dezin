@@ -3,6 +3,7 @@ import type { Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import type { AppDeps } from "./app.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
+import { createProviderFetch } from "./provider-fetch.ts";
 
 type ProviderModel = {
   id: string;
@@ -197,7 +198,7 @@ export async function handleTestModelProvider(req: IncomingMessage, res: ServerR
   const settings = deps.store.getSettings();
   const providerId = selectedProviderId(body, settings);
   try {
-    const result = await testProviderConnection(settings, providerId, deps.modelProviderFetch ?? fetch);
+    const result = await testProviderConnection(settings, providerId, createProviderFetch(deps.modelProviderFetch ?? fetch));
     sendJson(res, 200, {
       ok: true,
       message:
@@ -220,7 +221,7 @@ export async function handleListModelProviderModels(req: IncomingMessage, res: S
     return;
   }
   try {
-    const models = await fetchProviderModels(settings, providerId, deps.modelProviderFetch ?? fetch);
+    const models = await fetchProviderModels(settings, providerId, createProviderFetch(deps.modelProviderFetch ?? fetch));
     sendJson(res, 200, { models, source: "live" });
   } catch (err) {
     sendError(res, 502, err instanceof Error ? err.message : "model discovery failed");

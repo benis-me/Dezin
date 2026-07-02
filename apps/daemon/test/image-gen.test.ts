@@ -143,7 +143,7 @@ test("requestImage logs Azure request context on API errors without leaking secr
           "private prompt text",
           fetcher,
         ),
-    /image API 404/,
+      /image API 404: deployment missing/,
     );
   } finally {
     console.warn = originalWarn;

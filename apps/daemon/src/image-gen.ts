@@ -166,10 +166,34 @@ function base64FromResult(result: GenerateImageResult): string {
   return b64;
 }
 
+function imageApiErrorDetail(err: unknown): string {
+  const error = err as { responseBody?: unknown; data?: unknown; message?: unknown };
+  const candidates = [error.responseBody, error.data];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (typeof candidate === "string") {
+      try {
+        const parsed = JSON.parse(candidate) as { error?: { message?: unknown }; message?: unknown };
+        const message = parsed.error?.message ?? parsed.message;
+        if (typeof message === "string" && message.trim()) return message.trim();
+      } catch {
+        if (candidate.trim()) return clipLogValue(candidate.trim(), 500);
+      }
+    }
+    if (typeof candidate === "object") {
+      const value = candidate as { error?: { message?: unknown }; message?: unknown };
+      const message = value.error?.message ?? value.message;
+      if (typeof message === "string" && message.trim()) return message.trim();
+    }
+  }
+  return typeof error.message === "string" && error.message.trim() ? error.message.trim() : "";
+}
+
 function imageApiError(err: unknown): Error {
   const status = typeof err === "object" && err !== null ? (err as { statusCode?: unknown; status?: unknown }).statusCode ?? (err as { status?: unknown }).status : undefined;
-  if (typeof status === "number") return new Error(`image API ${status}`);
-  if (typeof status === "string" && status) return new Error(`image API ${status}`);
+  const detail = imageApiErrorDetail(err);
+  if (typeof status === "number") return new Error(`image API ${status}${detail ? `: ${detail}` : ""}`);
+  if (typeof status === "string" && status) return new Error(`image API ${status}${detail ? `: ${detail}` : ""}`);
   return err instanceof Error ? err : new Error("image API failed");
 }
 

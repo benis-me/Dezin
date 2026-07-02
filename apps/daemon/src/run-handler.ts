@@ -35,6 +35,8 @@ import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspa
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
+import { providerRuntimeConfig } from "./provider-profile-config.ts";
+import { createProviderFetch } from "./provider-fetch.ts";
 import type { AppDeps } from "./app.ts";
 
 // Skills are scanned once and cached for the daemon process.
@@ -200,6 +202,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const runAgentCommand = body.agentCommand || settings.agentCommand || "claude";
   const runModel = body.model || settings.model || undefined;
   const agentEnv = buildAgentEnv(settings, runAgentCommand);
+  const imageRuntime = providerRuntimeConfig(settings, settings.aiProviderId);
+  const imageBaseUrl = imageRuntime.baseUrl || settings.imageApiBaseUrl;
+  const imageApiKey = imageRuntime.apiKey || settings.imageApiKey;
   // deps.runner is the test override; production builds from settings (live changes apply).
   const runner = deps.runner ?? buildRunner(settings, { agentCommand: body.agentCommand, model: body.model });
 
@@ -245,7 +250,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     skill: skill ? { name: skill.name, body: skill.body, mode: skill.mode, libraries: skill.libraries } : undefined,
     userInstructions: settings.customInstructions || undefined,
     craft: craft || undefined,
-    imageGen: Boolean(settings.imageApiKey && settings.imageApiBaseUrl),
+    imageGen: Boolean(imageApiKey && imageBaseUrl),
     mode: project.mode,
   });
 
@@ -519,14 +524,14 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const { html: finalHtml, generated } = await generateImages(
       result.html,
       {
-        baseUrl: settings.imageApiBaseUrl,
-        apiKey: settings.imageApiKey,
+        baseUrl: imageBaseUrl,
+        apiKey: imageApiKey,
         model: settings.imageModel,
         providerId: settings.aiProviderId,
-        apiVersion: settings.aiProviderOrganization,
+        apiVersion: imageRuntime.organization || settings.aiProviderOrganization,
       },
       join(dir, "assets"),
-      fetch,
+      createProviderFetch(),
     );
     if (generated > 0) sse({ type: "images", count: generated });
 

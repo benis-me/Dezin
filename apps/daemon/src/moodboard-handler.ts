@@ -17,6 +17,7 @@ import type { AppDeps } from "./app.ts";
 import { readJsonBody, send, sendError, sendJson } from "./http-util.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
+import { createProviderFetch } from "./provider-fetch.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -452,14 +453,15 @@ export async function handleGenerateMoodboardImage(
     : [];
   let b64: string;
   try {
+    const providerFetch = createProviderFetch();
     b64 = sourceAsset
       ? await requestImageEdit(
           imageOpts,
           prompt,
           { data: readFileSync(sourceFile), mimeType: sourceAsset.mimeType, fileName: sourceAsset.fileName },
-          fetch,
+          providerFetch,
         )
-      : await requestImage(imageOpts, prompt, fetch);
+      : await requestImage(imageOpts, prompt, providerFetch);
   } catch (err) {
     if (notifyConversation) {
       store.addMoodboardMessage(
