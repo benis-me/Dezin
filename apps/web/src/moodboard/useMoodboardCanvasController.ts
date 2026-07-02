@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import type { ImageGenerationParams, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import type { ImageGenerationParams, MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import {
   allMoodboardNodeIds,
   buildLayerTree,
@@ -48,7 +48,12 @@ export interface MoodboardCanvasProps {
   onAddSection: (point?: { x: number; y: number; width?: number; height?: number }) => void;
   onAddImageGenerator: (point?: { x: number; y: number }, data?: Record<string, unknown>) => void;
   onUploadFiles: (files: FileList | null, point?: { x: number; y: number }) => void;
-  onGenerateImage: (node: MoodboardNode, prompt: string, options?: { sourceAssetId?: string; params?: ImageGenerationParams }) => Promise<void>;
+  onUploadReferenceFiles?: (files: FileList | null) => Promise<MoodboardAsset[]>;
+  onGenerateImage: (
+    node: MoodboardNode,
+    prompt: string,
+    options?: { sourceAssetId?: string; referenceAssetIds?: string[]; params?: ImageGenerationParams },
+  ) => Promise<void>;
   onTopbarControlsChange?: (controls: MoodboardCanvasTopbarControls | null) => void;
 }
 

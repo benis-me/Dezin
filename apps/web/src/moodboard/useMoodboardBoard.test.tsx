@@ -79,6 +79,44 @@ test("imageModelOptions uses the active enabled provider profile instead of the 
   ).toEqual(["openai-image-live"]);
 });
 
+test("imageModelOptions exposes fal and Vertex image models from enabled provider profiles", () => {
+  expect(
+    imageModelOptions(
+      settings({
+        aiProviderId: "fal",
+        aiProviderEnabled: true,
+        aiProviderProfiles: JSON.stringify({
+          fal: {
+            enabled: true,
+            baseUrl: "https://fal.run",
+            apiKey: "fal-key",
+            models: JSON.stringify({ id: "fal-ai/flux/dev", capabilities: ["Image"] }),
+            organization: "",
+          },
+        }),
+      }),
+    ),
+  ).toEqual(["fal-ai/flux/dev"]);
+
+  expect(
+    imageModelOptions(
+      settings({
+        aiProviderId: "vertex",
+        aiProviderEnabled: true,
+        aiProviderProfiles: JSON.stringify({
+          vertex: {
+            enabled: true,
+            baseUrl: "",
+            apiKey: "vertex-key",
+            models: JSON.stringify({ id: "imagen-4.0-generate-001", capabilities: ["Image"] }),
+            organization: "",
+          },
+        }),
+      }),
+    ),
+  ).toEqual(["imagen-4.0-generate-001"]);
+});
+
 test("imageModelOptions keeps legacy active provider profiles enabled through the global flag", () => {
   expect(
     imageModelOptions(
@@ -446,6 +484,83 @@ test("generateImage sends generation parameters to the daemon", async () => {
     }),
   );
   expect(board.nodes[0]?.data).toEqual(expect.objectContaining({ generationParams: params }));
+});
+
+test("generateImage sends reference asset ids to the daemon", async () => {
+  let capturedOptions: Parameters<ReturnType<typeof makeFakeApi>["generateMoodboardImage"]>[2] | undefined;
+  const generator: MoodboardNode = {
+    id: "gen-ref",
+    boardId: "board-1",
+    type: "image-generator",
+    x: 10,
+    y: 20,
+    width: 240,
+    height: 180,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light", referenceAssetIds: ["ref-1"] },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [generator],
+      assets: [],
+      messages: [],
+    }),
+    generateMoodboardImage: async (_id, _prompt, options) => {
+      capturedOptions = options;
+      return {
+        asset: {
+          id: "asset-1",
+          boardId: "board-1",
+          kind: "image",
+          fileName: "generated.png",
+          mimeType: "image/png",
+          width: 1024,
+          height: 1024,
+          source: "generated",
+          createdAt: 2,
+          url: "/api/moodboards/board-1/assets/asset-1",
+        },
+        nodes: [
+          {
+            ...generator,
+            type: "image",
+            data: { assetId: "asset-1", prompt: "soft light", model: "gpt-image-1", referenceAssetIds: ["ref-1"] },
+            updatedAt: 3,
+          },
+        ],
+        messages: [],
+      };
+    },
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+
+  await act(async () => {
+    await board.generateImage(generator, "soft light");
+  });
+
+  expect(capturedOptions).toEqual(expect.objectContaining({ referenceAssetIds: ["ref-1"] }));
+  expect(board.nodes[0]?.data).toEqual(expect.objectContaining({ referenceAssetIds: ["ref-1"] }));
 });
 
 test("generateImage notifies the active agent conversation for agent-created generators", async () => {

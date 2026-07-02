@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { Moodboard, MoodboardAsset, MoodboardConversation, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
-import { requestImage, requestImageEdit, type ImageGenerationParams } from "./image-gen.ts";
+import { requestImage, requestImageEdit, type ImageGenerationParams, type SourceImageInput } from "./image-gen.ts";
 import {
   buildMoodboardAgentContext,
   buildMoodboardAgentPrompt,
@@ -44,6 +44,20 @@ function conversationForBoard(conversation: MoodboardConversation | null, boardI
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function stringArrayValue(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
 }
 
 function numberValue(value: unknown, fallback: number): number {
@@ -461,7 +475,8 @@ export async function handleGenerateMoodboardImage(
   const runtime = providerRuntimeConfig(settings, settings.aiProviderId);
   const imageBaseUrl = runtime.baseUrl || settings.imageApiBaseUrl;
   const imageApiKey = runtime.apiKey || settings.imageApiKey;
-  if (!imageBaseUrl || !imageApiKey) return sendError(res, 409, "image generation is not configured");
+  const providerCanUseDefaultBaseUrl = settings.aiProviderId === "vertex" || settings.aiProviderId === "fal";
+  if ((!imageBaseUrl && !providerCanUseDefaultBaseUrl) || !imageApiKey) return sendError(res, 409, "image generation is not configured");
   const body = asObject(await readJsonBody(req));
   const prompt = stringValue(body.prompt);
   if (!prompt) return sendError(res, 400, "prompt is required");
@@ -478,6 +493,19 @@ export async function handleGenerateMoodboardImage(
   const sourceFile =
     sourceAsset != null ? join(moodboardAssetsDir(dataDir, id!), `${sourceAsset.id}${extForMime(sourceAsset.mimeType)}`) : "";
   if (sourceAsset && !existsSync(sourceFile)) return sendError(res, 404, "source asset file not found");
+  const referenceAssetIds = stringArrayValue(body.referenceAssetIds).filter((assetId) => assetId !== sourceAssetId);
+  const referenceImages: SourceImageInput[] = [];
+  for (const referenceAssetId of referenceAssetIds) {
+    const referenceAsset = store.getMoodboardAsset(referenceAssetId);
+    if (!referenceAsset || referenceAsset.boardId !== id) return sendError(res, 404, "reference asset not found");
+    const referenceFile = join(moodboardAssetsDir(dataDir, id!), `${referenceAsset.id}${extForMime(referenceAsset.mimeType)}`);
+    if (!existsSync(referenceFile)) return sendError(res, 404, "reference asset file not found");
+    referenceImages.push({
+      data: readFileSync(referenceFile),
+      mimeType: referenceAsset.mimeType,
+      fileName: referenceAsset.fileName,
+    });
+  }
 
   const imageOpts = {
     baseUrl: imageBaseUrl,
@@ -485,6 +513,7 @@ export async function handleGenerateMoodboardImage(
     model,
     providerId: settings.aiProviderId,
     apiVersion: runtime.organization || settings.aiProviderOrganization,
+    ...(referenceImages.length ? { referenceImages } : {}),
     ...(hasParams ? { params } : {}),
   };
   const statusMessages = notifyConversation
@@ -538,6 +567,7 @@ export async function handleGenerateMoodboardImage(
     source: sourceAsset ? "edited" : "generated",
     ...(hasParams ? { generationParams: params } : {}),
     ...(sourceAsset ? { sourceAssetId } : {}),
+    ...(referenceAssetIds.length ? { referenceAssetIds } : {}),
   };
   const updatedNodes: SaveMoodboardNodeInput[] = generator
     ? nodes.map<SaveMoodboardNodeInput>((node) =>
@@ -571,6 +601,7 @@ export async function handleGenerateMoodboardImage(
                   resultAssetId: asset.id,
                   resultUrl: assetUrl(id!, asset.id),
                   ...(hasParams ? { generationParams: params } : {}),
+                  ...(referenceAssetIds.length ? { referenceAssetIds } : {}),
                 },
               }
           : node,

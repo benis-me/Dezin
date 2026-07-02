@@ -8,7 +8,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createAzure } from "@ai-sdk/azure";
+import { createFal } from "@ai-sdk/fal";
 import { createGoogle } from "@ai-sdk/google";
+import { createVertex } from "@ai-sdk/google-vertex";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateImage, type GenerateImageResult, type ImageModel } from "ai";
 
@@ -30,6 +32,7 @@ export interface ImageGenOpts {
   providerId?: string;
   apiVersion?: string;
   params?: ImageGenerationParams;
+  referenceImages?: SourceImageInput[];
 }
 
 export type SourceImageInput = {
@@ -77,6 +80,14 @@ function isAzureOpenAi(opts: ImageGenOpts): boolean {
 
 function isGoogle(opts: ImageGenOpts): boolean {
   return opts.providerId === "gemini";
+}
+
+function isFal(opts: ImageGenOpts): boolean {
+  return opts.providerId === "fal";
+}
+
+function isVertex(opts: ImageGenOpts): boolean {
+  return opts.providerId === "vertex";
 }
 
 function azureApiVersion(opts: ImageGenOpts): string {
@@ -160,6 +171,22 @@ function imageModel(opts: ImageGenOpts, fetchImpl: FetchLike): ImageModel {
       fetch: fetchImpl,
     }).image(model);
   }
+  if (isFal(opts)) {
+    const model = opts.model.trim() || "fal-ai/flux/dev";
+    return createFal({
+      apiKey: opts.apiKey,
+      ...(opts.baseUrl.trim() ? { baseURL: withoutTrailingSlash(opts.baseUrl) } : {}),
+      fetch: fetchImpl,
+    }).image(model);
+  }
+  if (isVertex(opts)) {
+    const model = opts.model.trim() || "imagen-4.0-generate-001";
+    return createVertex({
+      apiKey: opts.apiKey,
+      ...(opts.baseUrl.trim() ? { baseURL: withoutTrailingSlash(opts.baseUrl) } : {}),
+      fetch: fetchImpl,
+    }).image(model);
+  }
   const baseURL = withoutTrailingSlash(opts.baseUrl);
   if (!baseURL) throw new Error("Missing image API base URL.");
   const model = opts.model.trim() || "gpt-image-1";
@@ -177,7 +204,12 @@ function clampCount(value: number | undefined): 1 {
 
 function imageProviderOptions(opts: ImageGenOpts): ProviderOptions | undefined {
   const params = opts.params;
-  if (!params || isGoogle(opts)) return undefined;
+  if (!params || isGoogle(opts) || isVertex(opts)) return undefined;
+  if (isFal(opts)) {
+    const falOptions: { [key: string]: JsonValue | undefined } = { useMultipleImages: true };
+    if (params.outputFormat === "png" || params.outputFormat === "jpeg") falOptions.outputFormat = params.outputFormat;
+    return { fal: falOptions };
+  }
   const openaiOptions: { [key: string]: JsonValue | undefined } = {};
   if (params.quality && params.quality !== "auto") openaiOptions.quality = params.quality;
   if (params.background && params.background !== "auto") openaiOptions.background = params.background;
@@ -198,11 +230,12 @@ function generationSettings(opts: ImageGenOpts): {
   providerOptions?: ProviderOptions;
 } {
   const params = opts.params;
-  if (isGoogle(opts)) {
+  if (isGoogle(opts) || isFal(opts) || isVertex(opts)) {
     return {
       n: clampCount(params?.count),
       maxRetries: 0,
       aspectRatio: params?.aspectRatio ?? "1:1",
+      providerOptions: imageProviderOptions(opts),
     };
   }
   return {
@@ -250,13 +283,24 @@ function imageApiError(err: unknown): Error {
   return err instanceof Error ? err : new Error("image API failed");
 }
 
+function imageBytes(image: SourceImageInput): Uint8Array {
+  const bytes = new Uint8Array(image.data.length);
+  bytes.set(image.data);
+  return bytes;
+}
+
+function imagePrompt(prompt: string, images: SourceImageInput[] | undefined): string | { text: string; images: Uint8Array[] } {
+  if (!images?.length) return prompt;
+  return { text: prompt, images: images.map(imageBytes) };
+}
+
 /** One image via an AI SDK image model; returns base64 PNG data. */
 export async function requestImage(opts: ImageGenOpts, prompt: string, fetchImpl: FetchLike): Promise<string> {
   const loggedFetch = withFailureLogging(fetchImpl, { operation: "generate", opts });
   try {
     const result = await generateImage({
       model: imageModel(opts, loggedFetch),
-      prompt,
+      prompt: imagePrompt(prompt, opts.referenceImages),
       ...generationSettings(opts),
     });
     return base64FromResult(result);
@@ -278,12 +322,11 @@ export async function requestImageEdit(
     sourceMimeType: image.mimeType,
     sourceFileName: image.fileName,
   });
-  const imageBytes = new Uint8Array(image.data.length);
-  imageBytes.set(image.data);
+  const images = [image, ...(opts.referenceImages ?? [])];
   try {
     const result = await generateImage({
       model: imageModel(opts, loggedFetch),
-      prompt: { text: prompt, images: [imageBytes] },
+      prompt: imagePrompt(prompt, images),
       ...generationSettings(opts),
     });
     return base64FromResult(result);

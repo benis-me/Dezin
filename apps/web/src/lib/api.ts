@@ -152,6 +152,7 @@ export interface GenerateMoodboardImageOptions {
   generatorId?: string;
   model?: string;
   sourceAssetId?: string;
+  referenceAssetIds?: string[];
   conversationId?: string;
   params?: ImageGenerationParams;
 }

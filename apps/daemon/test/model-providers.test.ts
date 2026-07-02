@@ -289,6 +289,83 @@ test("POST /api/model-providers/models uses the selected provider profile API ke
   assert.equal(calls[0]?.url, "https://generativelanguage.googleapis.com/v1beta/models?key=gemini-profile-key");
 });
 
+test("POST /api/model-providers/test accepts fal and Vertex local provider settings", async () => {
+  const calls: FetchCall[] = [];
+  await withServer(
+    {
+      modelProviderFetch: async (input, init) => {
+        calls.push({ url: String(input), init });
+        return new Response("should not be called", { status: 500 });
+      },
+    },
+    async (base) => {
+      await putSettings(base, {
+        aiProviderProfiles: JSON.stringify({
+          fal: {
+            enabled: true,
+            baseUrl: "https://fal.run",
+            apiKey: "fal-key",
+            models: "fal-ai/flux/dev",
+            organization: "",
+          },
+          vertex: {
+            enabled: true,
+            baseUrl: "",
+            apiKey: "vertex-express-key",
+            models: "imagen-4.0-generate-001",
+            organization: "",
+          },
+        }),
+      });
+
+      const falRes = await fetch(`${base}/api/model-providers/test`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerId: "fal" }),
+      });
+      await assertOk(falRes);
+      assert.match(((await falRes.json()) as { message: string }).message, /preset models/);
+
+      const vertexRes = await fetch(`${base}/api/model-providers/test`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerId: "vertex" }),
+      });
+      await assertOk(vertexRes);
+      assert.match(((await vertexRes.json()) as { message: string }).message, /preset models/);
+    },
+  );
+
+  assert.equal(calls.length, 0);
+});
+
+test("POST /api/model-providers/models keeps fal and Vertex model lists manual", async () => {
+  await withServer(
+    {},
+    async (base) => {
+      await putSettings(base, {
+        aiProviderProfiles: JSON.stringify({
+          fal: {
+            enabled: true,
+            baseUrl: "https://fal.run",
+            apiKey: "fal-key",
+            models: "fal-ai/flux/dev",
+            organization: "",
+          },
+        }),
+      });
+
+      const res = await fetch(`${base}/api/model-providers/models`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerId: "fal" }),
+      });
+      assert.equal(res.status, 502);
+      assert.match(((await res.json()) as { error: string }).error, /preset models/);
+    },
+  );
+});
+
 test("POST /api/model-providers/test returns provider JSON error messages cleanly", async () => {
   await withServer(
     {

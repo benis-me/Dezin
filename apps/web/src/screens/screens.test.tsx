@@ -646,8 +646,10 @@ test("SettingsScreen shows provider status per provider and hides unsupported pr
   expect(screen.getByLabelText("Azure OpenAI disabled")).toHaveClass("bg-border-strong");
   expect(screen.queryByText(/AI SDK|Native/)).toBeNull();
   expect(screen.getByText("Google AI Studio")).toBeInTheDocument();
+  expect(screen.getByText("fal.ai")).toBeInTheDocument();
+  expect(screen.getByText("Google Vertex AI")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Mock/ })).toBeNull();
-  for (const removed of ["Midjourney", "Fal", "WaveSpeed", "Vertex AI"]) {
+  for (const removed of ["Midjourney", "WaveSpeed"]) {
     expect(screen.queryByRole("button", { name: new RegExp(removed) })).toBeNull();
   }
 

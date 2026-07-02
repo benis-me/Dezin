@@ -135,6 +135,7 @@ export function MoodboardScreen({
               onAddSection={board.addSection}
               onAddImageGenerator={board.addImageGenerator}
               onUploadFiles={(files, point) => void board.uploadFiles(files, point)}
+              onUploadReferenceFiles={board.uploadReferenceFiles}
               onGenerateImage={board.generateImage}
               onTopbarControlsChange={setCanvasTopbarControls}
             />

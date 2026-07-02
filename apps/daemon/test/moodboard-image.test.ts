@@ -92,6 +92,82 @@ test("POST /api/moodboards/:id/generate-image sends source asset bytes for Quick
   store.close();
 });
 
+test("POST /api/moodboards/:id/generate-image sends reference asset bytes with Quick Edit", async () => {
+  const store = new Store(":memory:");
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-moodboard-image-"));
+  const board = store.createMoodboard({ name: "Board" });
+  store.updateSettings({
+    aiProviderId: "azure-openai",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "https://dezin-resource.openai.azure.com/openai",
+    imageApiKey: "azure-key",
+    imageModel: "gpt-image-2-deployment",
+    aiProviderOrganization: "2025-04-01-preview",
+    aiProviderProfiles: "",
+  });
+  const source = store.createMoodboardAsset(board.id, {
+    kind: "image",
+    fileName: "source.png",
+    mimeType: "image/png",
+    width: 320,
+    height: 240,
+    source: "upload",
+  });
+  const reference = store.createMoodboardAsset(board.id, {
+    kind: "image",
+    fileName: "reference.png",
+    mimeType: "image/png",
+    width: 512,
+    height: 512,
+    source: "upload",
+  });
+  const assetsDir = join(dataDir, "moodboards", board.id, "assets");
+  mkdirSync(assetsDir, { recursive: true });
+  writeFileSync(join(assetsDir, `${source.id}.png`), Buffer.from("PNGDATA"));
+  writeFileSync(join(assetsDir, `${reference.id}.png`), Buffer.from("REFDATA"));
+
+  const imageRequests: Array<{ url: string; init?: RequestInit }> = [];
+  const previousFetch = globalThis.fetch;
+  const httpFetch = previousFetch.bind(globalThis);
+  globalThis.fetch = (async (input, init) => {
+    imageRequests.push({ url: String(input), init });
+    return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("EDITED").toString("base64") }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const server = createApp({ store, dataDir });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  let responseBody!: { nodes: Array<{ data: Record<string, unknown> }> };
+  try {
+    const res = await httpFetch(`http://127.0.0.1:${port}/api/moodboards/${board.id}/generate-image`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "make it warmer",
+        sourceAssetId: source.id,
+        referenceAssetIds: [reference.id],
+        model: "gpt-image-2-deployment",
+      }),
+    });
+    const text = await res.text();
+    assert.equal(res.status, 201, text);
+    responseBody = JSON.parse(text) as typeof responseBody;
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    globalThis.fetch = previousFetch;
+  }
+
+  const form = imageRequests[0]?.init?.body as FormData;
+  const images = form.getAll("image[]") as File[];
+  assert.equal(images.length, 2);
+  assert.deepEqual(await Promise.all(images.map((image) => image.text())), ["PNGDATA", "REFDATA"]);
+  assert.deepEqual(responseBody.nodes[0]?.data.referenceAssetIds, [reference.id]);
+  store.close();
+});
+
 test("POST /api/moodboards/:id/generate-image can notify an agent conversation when requested", async () => {
   const store = new Store(":memory:");
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-moodboard-image-"));

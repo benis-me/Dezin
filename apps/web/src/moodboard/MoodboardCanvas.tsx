@@ -18,6 +18,7 @@ import {
   generatorModel,
   generatorPrompt,
   isEditableShortcutTarget,
+  referenceAssetIds,
   rectFromBounds,
   resolveFloatingChromeRect,
   resolveFloatingRect,
@@ -29,6 +30,8 @@ import type { MoodboardCanvasTopbarControls } from "./MoodboardCanvasTopbar.tsx"
 import { MOODBOARD_LEAFER_EDITOR_CONFIG } from "./moodboard-canvas-config.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
+type ReferencePickTarget = { kind: "node" | "quick-edit"; id: string };
+
 export function MoodboardCanvas(props: MoodboardCanvasProps) {
   const {
     nodes,
@@ -38,6 +41,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     imageProviderId = "",
     onImageModelChange = () => {},
     onGenerateImage,
+    onUploadReferenceFiles,
     onTopbarControlsChange,
   } = props;
   const { toast } = useToast();
@@ -47,12 +51,50 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   const cursor = canvas.tool === "hand" ? "grab" : canvas.tool === "note" || canvas.tool === "section" ? "crosshair" : "default";
   const [presentationMode, setPresentationMode] = useState(false);
   const [quickEditOpen, setQuickEditOpen] = useState(false);
+  const [quickEditReferenceAssetIds, setQuickEditReferenceAssetIds] = useState<string[]>([]);
+  const [referencePickTarget, setReferencePickTarget] = useState<ReferencePickTarget | null>(null);
   const quickEditNode = canvas.selectedIds.length === 1 && canvas.selected?.type === "image" ? canvas.selected : null;
   const quickEditModel = quickEditNode ? generatorModel(quickEditNode) || imageModel : imageModel;
   const quickEditSourceAssetId =
     quickEditNode && typeof quickEditNode.data.assetId === "string" && quickEditNode.data.assetId.trim()
       ? quickEditNode.data.assetId.trim()
       : undefined;
+
+  const mergeReferenceIds = useCallback((current: string[], additions: string[]) => {
+    const next = new Set(current);
+    for (const id of additions) {
+      if (id.trim()) next.add(id.trim());
+    }
+    return [...next];
+  }, []);
+
+  const patchReferenceIdsForTarget = useCallback(
+    (target: ReferencePickTarget, assetIds: string[]) => {
+      if (assetIds.length === 0) return;
+      if (target.kind === "quick-edit") {
+        setQuickEditReferenceAssetIds((current) => mergeReferenceIds(current, assetIds));
+        return;
+      }
+      const node = nodes.find((item) => item.id === target.id);
+      if (!node) return;
+      canvas.patchNodeData(node.id, { referenceAssetIds: mergeReferenceIds(referenceAssetIds(node), assetIds) });
+    },
+    [canvas, mergeReferenceIds, nodes],
+  );
+
+  const uploadReferenceFilesForTarget = useCallback(
+    async (files: FileList, target: ReferencePickTarget) => {
+      if (!onUploadReferenceFiles) return;
+      const assets = await onUploadReferenceFiles(files);
+      patchReferenceIdsForTarget(target, assets.map((asset) => asset.id));
+    },
+    [onUploadReferenceFiles, patchReferenceIdsForTarget],
+  );
+
+  const beginReferencePick = useCallback((target: ReferencePickTarget) => {
+    setReferencePickTarget(target);
+    toast("Select an image on the canvas to use as reference.");
+  }, [toast]);
 
   const openQuickEdit = useCallback(() => {
     if (!quickEditNode) return;
@@ -120,6 +162,25 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   }, [quickEditNode]);
 
   useEffect(() => {
+    if (!quickEditOpen) setQuickEditReferenceAssetIds([]);
+  }, [quickEditOpen]);
+
+  useEffect(() => {
+    if (!referencePickTarget) return;
+    const picked = canvas.selected;
+    if (!picked || picked.id === referencePickTarget.id || picked.type !== "image") return;
+    const assetId = typeof picked.data.assetId === "string" ? picked.data.assetId.trim() : "";
+    if (!assetId) {
+      toast("That image is missing an asset reference.", { variant: "error" });
+      setReferencePickTarget(null);
+      return;
+    }
+    patchReferenceIdsForTarget(referencePickTarget, [assetId]);
+    canvas.selectLayer(referencePickTarget.id);
+    setReferencePickTarget(null);
+  }, [canvas, patchReferenceIdsForTarget, referencePickTarget, toast]);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Tab" || event.metaKey || event.ctrlKey || event.altKey || presentationMode || !quickEditNode || !canvas.runtimeReady) return;
       if (isEditableShortcutTarget(event.target)) return;
@@ -184,6 +245,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           generatorModel: generatorModel(node) || imageModel,
           generatorStatus: "ready",
           generationParams: imageGenerationParamsFromNode(node),
+          referenceAssetIds: referenceAssetIds(node),
         },
       );
     },
@@ -348,11 +410,13 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                   canvas.patchNodeData(canvas.selected!.id, { generationParams: params });
                 }}
                 onPromptChange={(prompt) => canvas.patchNodeData(canvas.selected!.id, { generatorPrompt: prompt, generatorStatus: prompt ? "ready" : "" })}
-                onGenerate={(prompt, params) => {
+                onGenerate={(prompt, params, options) => {
                   canvas.recordHistory();
-                  return onGenerateImage(canvas.selected!, prompt, { params });
+                  return onGenerateImage(canvas.selected!, prompt, { params, referenceAssetIds: options.referenceAssetIds });
                 }}
                 onUploadFiles={(files) => uploadFilesNearNode(files, canvas.selected!)}
+                onUploadReferenceFiles={(files) => void uploadReferenceFilesForTarget(files, { kind: "node", id: canvas.selected!.id })}
+                onSelectCanvasReference={() => beginReferencePick({ kind: "node", id: canvas.selected!.id })}
               />
             </FloatingCanvasSurface>
           ) : null}
@@ -375,12 +439,15 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                   canvas.patchNodeData(quickEditNode.id, { generatorModel: model });
                   onImageModelChange(model);
                 }}
-                onGenerate={async (prompt) => {
+                referenceAssetIds={quickEditReferenceAssetIds}
+                onGenerate={async (prompt, options) => {
                   canvas.recordHistory();
-                  await onGenerateImage(quickEditNode, prompt, { sourceAssetId: quickEditSourceAssetId });
+                  await onGenerateImage(quickEditNode, prompt, { sourceAssetId: quickEditSourceAssetId, referenceAssetIds: options.referenceAssetIds });
                   setQuickEditOpen(false);
                 }}
                 onUploadFiles={(files) => uploadFilesNearNode(files, quickEditNode)}
+                onUploadReferenceFiles={(files) => void uploadReferenceFilesForTarget(files, { kind: "quick-edit", id: quickEditNode.id })}
+                onSelectCanvasReference={() => beginReferencePick({ kind: "quick-edit", id: quickEditNode.id })}
               />
             </FloatingCanvasSurface>
           ) : null}
@@ -455,7 +522,10 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               onGenerate={() => {
                 if (canvas.selected?.type !== "image-generator") return;
                 canvas.recordHistory();
-                void onGenerateImage(canvas.selected, selectedGeneratorPrompt, { params: imageGenerationParamsFromNode(canvas.selected) });
+                void onGenerateImage(canvas.selected, selectedGeneratorPrompt, {
+                  params: imageGenerationParamsFromNode(canvas.selected),
+                  referenceAssetIds: referenceAssetIds(canvas.selected),
+                });
               }}
               onEditImage={openQuickEdit}
               onUsePrompt={usePromptFromImage}

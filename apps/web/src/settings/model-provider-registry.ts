@@ -23,7 +23,7 @@ export interface ProviderPreset {
   name: string;
   protocol: string;
   baseUrl: string;
-  imageRuntime?: "openai-compatible" | "azure-openai" | "google";
+  imageRuntime?: "openai-compatible" | "azure-openai" | "google" | "fal" | "vertex";
   docsUrl?: string;
   keyPlaceholder: string;
   fields: ProviderConfigField[];
@@ -110,6 +110,51 @@ export const MODEL_PROVIDERS: ProviderPreset[] = [
     ],
     models: [
       { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", capabilities: ["Stream", "Tools", "Vision", "JSON", "Reasoning"] },
+      { id: "gemini-2.5-flash-image", name: "Gemini 2.5 Flash Image", capabilities: ["Image", "Vision"] },
+    ],
+  },
+  {
+    id: "fal",
+    name: "fal",
+    protocol: "fal.ai",
+    baseUrl: "https://fal.run",
+    imageRuntime: "fal",
+    docsUrl: "https://fal.ai/docs",
+    keyPlaceholder: "fal_...",
+    fields: [
+      { key: "apiKey", label: "API Key", placeholder: "fal_...", required: true, secret: true },
+      { key: "baseUrl", label: "Base URL", placeholder: "https://fal.run", required: true },
+    ],
+    modelHelp: "Enter fal model IDs such as fal-ai/flux/dev.",
+    models: [
+      { id: "fal-ai/flux/dev", name: "FLUX.1 Dev", capabilities: ["Image", "Vision"] },
+      { id: "fal-ai/flux/schnell", name: "FLUX.1 Schnell", capabilities: ["Image"] },
+      { id: "fal-ai/flux-pro/v1.1-ultra", name: "FLUX Pro 1.1 Ultra", capabilities: ["Image"] },
+      { id: "fal-ai/imagen4/preview", name: "Imagen 4 Preview", capabilities: ["Image"] },
+    ],
+  },
+  {
+    id: "vertex",
+    name: "Vertex AI",
+    protocol: "Google Vertex AI",
+    baseUrl: "",
+    imageRuntime: "vertex",
+    docsUrl: "https://cloud.google.com/vertex-ai/generative-ai/docs",
+    keyPlaceholder: "Vertex Express API key",
+    fields: [
+      { key: "apiKey", label: "API Key", placeholder: "Vertex Express API key", required: true, secret: true },
+      {
+        key: "baseUrl",
+        label: "Base URL",
+        placeholder: "optional",
+        help: "Leave empty for Vertex Express Mode. Advanced deployments may override the API endpoint.",
+      },
+    ],
+    modelHelp: "Enter Vertex image model IDs. Express Mode uses the API key above.",
+    models: [
+      { id: "imagen-4.0-generate-001", name: "Imagen 4", capabilities: ["Image"] },
+      { id: "imagen-4.0-fast-generate-001", name: "Imagen 4 Fast", capabilities: ["Image"] },
+      { id: "imagen-4.0-ultra-generate-001", name: "Imagen 4 Ultra", capabilities: ["Image"] },
       { id: "gemini-2.5-flash-image", name: "Gemini 2.5 Flash Image", capabilities: ["Image", "Vision"] },
     ],
   },

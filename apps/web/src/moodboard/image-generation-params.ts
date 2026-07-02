@@ -1,6 +1,6 @@
 import type { ImageGenerationParams, MoodboardNode } from "../lib/api.ts";
 
-export type ImageProviderId = "openai" | "azure-openai" | "gemini" | "openai-compatible" | string;
+export type ImageProviderId = "openai" | "azure-openai" | "gemini" | "openai-compatible" | "fal" | "vertex" | string;
 
 export const DEFAULT_IMAGE_GENERATION_PARAMS: Required<Pick<ImageGenerationParams, "quality" | "aspectRatio" | "size" | "background" | "moderation" | "count">> = {
   quality: "medium",
@@ -81,7 +81,7 @@ export function imageGenerationParamsForNode(node: MoodboardNode, providerId: Im
     count: DEFAULT_IMAGE_GENERATION_PARAMS.count,
     ...stored,
   };
-  if (isGeminiProvider(providerId)) {
+  if (isAspectRatioOnlyProvider(providerId)) {
     return {
       aspectRatio: base.aspectRatio,
       count: 1,
@@ -95,15 +95,15 @@ export function imageGenerationParamsForNode(node: MoodboardNode, providerId: Im
 }
 
 export function supportsImageQuality(providerId: ImageProviderId): boolean {
-  return !isGeminiProvider(providerId);
+  return isOpenAiStyleProvider(providerId);
 }
 
 export function supportsImageSize(providerId: ImageProviderId): boolean {
-  return !isGeminiProvider(providerId);
+  return isOpenAiStyleProvider(providerId);
 }
 
 export function supportsImageBackground(providerId: ImageProviderId): boolean {
-  return !isGeminiProvider(providerId);
+  return isOpenAiStyleProvider(providerId);
 }
 
 export function supportsImageModeration(providerId: ImageProviderId): boolean {
@@ -130,6 +130,14 @@ export function sizeForAspectRatio(aspectRatio: NonNullable<ImageGenerationParam
 
 function isGeminiProvider(providerId: ImageProviderId): boolean {
   return providerId === "gemini" || providerId === "google" || providerId === "google-ai-studio";
+}
+
+function isAspectRatioOnlyProvider(providerId: ImageProviderId): boolean {
+  return isGeminiProvider(providerId) || providerId === "vertex" || providerId === "fal";
+}
+
+function isOpenAiStyleProvider(providerId: ImageProviderId): boolean {
+  return providerId === "openai" || providerId === "azure-openai" || providerId === "openai-compatible";
 }
 
 function isOneOf<const T extends string>(value: unknown, choices: readonly T[]): value is T {

@@ -2200,6 +2200,61 @@ test("GeneratorPromptToolbar exposes model parameters and submits them with the 
         size: "1536x1024",
         count: 1,
       }),
+      expect.objectContaining({ referenceAssetIds: [] }),
+    ),
+  );
+});
+
+test("GeneratorPromptToolbar exposes reference image actions and submits reference asset ids", async () => {
+  const onGenerate = vi.fn().mockResolvedValue(undefined);
+  const onUploadReferenceFiles = vi.fn();
+  const onSelectCanvasReference = vi.fn();
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light", referenceAssetIds: ["asset-ref"] },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const files = [new File(["image"], "material.png", { type: "image/png" })] as unknown as FileList;
+
+  render(
+    <GeneratorPromptToolbar
+      node={node}
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      onModelChange={() => {}}
+      onPromptChange={() => {}}
+      onGenerate={onGenerate}
+      onUploadReferenceFiles={onUploadReferenceFiles}
+      onSelectCanvasReference={onSelectCanvasReference}
+    />,
+  );
+
+  expect(screen.getByLabelText("Reference images")).toHaveTextContent("1");
+  fireEvent.click(screen.getByLabelText("Reference images"));
+  expect(screen.getByRole("button", { name: "从本地上传图片" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "从画布选择" }));
+  expect(onSelectCanvasReference).toHaveBeenCalledOnce();
+
+  const input = screen.getByLabelText("Upload reference image") as HTMLInputElement;
+  fireEvent.change(input, { target: { files } });
+  expect(onUploadReferenceFiles).toHaveBeenCalledWith(files);
+
+  fireEvent.click(screen.getByRole("button", { name: "Generate" }));
+  await waitFor(() =>
+    expect(onGenerate).toHaveBeenCalledWith(
+      "soft light",
+      expect.any(Object),
+      expect.objectContaining({ referenceAssetIds: ["asset-ref"] }),
     ),
   );
 });
@@ -2343,8 +2398,37 @@ test("QuickEditPromptToolbar submits image variations with the selected model", 
   fireEvent.change(screen.getByLabelText("Quick edit prompt"), { target: { value: "make it warmer" } });
   fireEvent.click(screen.getByRole("button", { name: "Generate" }));
 
-  expect(onGenerate).toHaveBeenCalledWith("make it warmer");
+  expect(onGenerate).toHaveBeenCalledWith("make it warmer", expect.objectContaining({ referenceAssetIds: [] }));
   expect(screen.getByLabelText("Image generation model")).toHaveTextContent("gpt-image-1");
+});
+
+test("QuickEditPromptToolbar exposes reference image actions and submits references", async () => {
+  const onGenerate = vi.fn().mockResolvedValue(undefined);
+  const onUploadReferenceFiles = vi.fn();
+  const onSelectCanvasReference = vi.fn();
+
+  render(
+    <QuickEditPromptToolbar
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      referenceAssetIds={["asset-ref"]}
+      onModelChange={() => {}}
+      onGenerate={onGenerate}
+      onUploadReferenceFiles={onUploadReferenceFiles}
+      onSelectCanvasReference={onSelectCanvasReference}
+    />,
+  );
+
+  fireEvent.click(screen.getByLabelText("Reference images"));
+  fireEvent.click(screen.getByRole("button", { name: "从画布选择" }));
+  expect(onSelectCanvasReference).toHaveBeenCalledOnce();
+
+  fireEvent.change(screen.getByLabelText("Quick edit prompt"), { target: { value: "make it warmer" } });
+  fireEvent.click(screen.getByRole("button", { name: "Generate" }));
+  await waitFor(() =>
+    expect(onGenerate).toHaveBeenCalledWith("make it warmer", expect.objectContaining({ referenceAssetIds: ["asset-ref"] })),
+  );
 });
 
 test("QuickEditPromptToolbar keeps the prompt disabled while the image edit is running", async () => {

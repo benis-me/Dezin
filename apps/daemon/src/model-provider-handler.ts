@@ -20,6 +20,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   "azure-openai": "Azure OpenAI",
   anthropic: "Anthropic",
   gemini: "Gemini",
+  fal: "fal",
+  vertex: "Vertex AI",
   openrouter: "OpenRouter",
   ollama: "Ollama",
   "openai-compatible": "OpenAI Compatible",
@@ -30,11 +32,14 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   "azure-openai": "https://{resource}.openai.azure.com",
   anthropic: "https://api.anthropic.com/v1",
   gemini: "https://generativelanguage.googleapis.com/v1beta",
+  fal: "https://fal.run",
+  vertex: "",
   openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://127.0.0.1:11434/v1",
 };
 
 const OPENAI_COMPATIBLE_PROVIDERS = new Set(["openai", "openrouter", "ollama", "openai-compatible"]);
+const MANUAL_MODEL_PROVIDERS = new Set(["fal", "vertex"]);
 
 function providerLabel(providerId: string): string {
   return PROVIDER_LABELS[providerId] ?? providerId;
@@ -148,13 +153,18 @@ async function fetchJsonModels(url: string, headers: Record<string, string>, pro
 function assertConnectionSettings(settings: Settings, providerId: string): { baseUrl: string; apiKey: string; organization: string } {
   const runtime = providerRuntimeConfig(settings, providerId, DEFAULT_BASE_URLS[providerId] || "");
   const baseUrl = runtime.baseUrl;
-  if (!baseUrl) throw new Error("Missing base URL.");
+  if (!baseUrl && providerId !== "vertex") throw new Error("Missing base URL.");
   const apiKey = runtime.apiKey;
   if (!apiKey && providerId !== "ollama") throw new Error("Missing API key.");
   return { baseUrl, apiKey, organization: runtime.organization };
 }
 
 async function fetchProviderModels(settings: Settings, providerId: string, fetchImpl: typeof fetch): Promise<ProviderModel[]> {
+  if (MANUAL_MODEL_PROVIDERS.has(providerId)) {
+    assertConnectionSettings(settings, providerId);
+    throw new Error(`${providerLabel(providerId)} uses preset models in Dezin. Enter custom model IDs manually when needed.`);
+  }
+
   if (providerId === "anthropic") {
     const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
     return fetchJsonModels(
@@ -187,6 +197,10 @@ async function fetchProviderModels(settings: Settings, providerId: string, fetch
 }
 
 async function testProviderConnection(settings: Settings, providerId: string, fetchImpl: typeof fetch): Promise<ConnectionResult> {
+  if (MANUAL_MODEL_PROVIDERS.has(providerId)) {
+    assertConnectionSettings(settings, providerId);
+    return { message: `Connected to ${providerLabel(providerId)}. Using preset models in Dezin.` };
+  }
   const models = await fetchProviderModels(settings, providerId, fetchImpl);
   return providerId === "azure-openai"
     ? { message: "Connected to Azure OpenAI. Deployment names must be entered manually in Models." }

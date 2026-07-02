@@ -200,6 +200,12 @@ export function generatorPrompt(node: MoodboardNode): string {
   return typeof prompt === "string" ? prompt : "";
 }
 
+export function referenceAssetIds(node: MoodboardNode): string[] {
+  const value = node.data.referenceAssetIds;
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
 export function generatorStatus(node: MoodboardNode): string {
   const status = node.data.generatorStatus;
   return typeof status === "string" ? status : "";

@@ -1,4 +1,4 @@
-import { useEffect, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
 import {
   AlignCenterHorizontal,
   AlignCenterVertical,
@@ -10,6 +10,7 @@ import {
   Copy,
   Eraser,
   Hand,
+  Image as ImageIcon,
   ImagePlus,
   LayoutGrid,
   Layers,
@@ -17,6 +18,7 @@ import {
   Maximize2,
   Minus,
   MousePointer2,
+  Paperclip,
   Presentation,
   Plus,
   Scissors,
@@ -43,7 +45,7 @@ import {
   TooltipTrigger,
 } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
-import { generatorPrompt, type MoodboardAlignType, type MoodboardCanvasTool } from "./canvas-utils.ts";
+import { generatorPrompt, referenceAssetIds as referenceAssetIdsFromNode, type MoodboardAlignType, type MoodboardCanvasTool } from "./canvas-utils.ts";
 import {
   IMAGE_ASPECT_RATIO_OPTIONS,
   IMAGE_BACKGROUND_OPTIONS,
@@ -119,6 +121,78 @@ function handleToolbarFileDrop(event: ReactDragEvent<HTMLElement>, onUploadFiles
 function isToolbarEventTarget(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest("[data-moodboard-toolbar]"));
 }
+
+function ReferenceImageControl({
+  disabled,
+  referenceAssetIds,
+  onUploadReferenceFiles,
+  onSelectCanvasReference,
+}: {
+  disabled: boolean;
+  referenceAssetIds: string[];
+  onUploadReferenceFiles?: (files: FileList) => void;
+  onSelectCanvasReference?: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const count = referenceAssetIds.length;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="Reference images"
+          disabled={disabled}
+          className={cn(
+            "mb-2 inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface px-2.5 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground",
+            count > 0 && "border-primary/30 bg-primary/5 text-foreground",
+          )}
+        >
+          <ImageIcon size={14} strokeWidth={1.75} />
+          <span>参考图</span>
+          {count > 0 ? <span className="rounded-full bg-foreground/10 px-1.5 py-0.5 text-[10px] tabular-nums">{count}</span> : null}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" side="top" sideOffset={8} className="w-40 rounded-xl p-1.5">
+        <input
+          ref={inputRef}
+          aria-label="Upload reference image"
+          type="file"
+          accept="image/*"
+          multiple
+          className="sr-only"
+          onChange={(event) => {
+            const files = event.currentTarget.files;
+            if (files?.length) onUploadReferenceFiles?.(files);
+            event.currentTarget.value = "";
+          }}
+        />
+        <button
+          type="button"
+          disabled={disabled || !onUploadReferenceFiles}
+          className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-foreground hover:bg-surface-2 disabled:opacity-45"
+          onClick={() => inputRef.current?.click()}
+        >
+          <Paperclip size={13} strokeWidth={1.75} />
+          从本地上传图片
+        </button>
+        <button
+          type="button"
+          disabled={disabled || !onSelectCanvasReference}
+          className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-xs text-foreground hover:bg-surface-2 disabled:opacity-45"
+          onClick={onSelectCanvasReference}
+        >
+          <SquareDashedMousePointer size={13} strokeWidth={1.75} />
+          从画布选择
+        </button>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+type ImageGenerateOptions = {
+  referenceAssetIds: string[];
+};
 
 function ToolbarChrome({ children, className }: { children: ReactNode; className?: string }) {
   return (
@@ -449,6 +523,8 @@ export function GeneratorPromptToolbar({
   onPromptChange,
   onGenerate,
   onUploadFiles,
+  onUploadReferenceFiles,
+  onSelectCanvasReference,
 }: {
   node: MoodboardNode;
   busy: boolean;
@@ -458,13 +534,16 @@ export function GeneratorPromptToolbar({
   onModelChange: (model: string) => void;
   onParamsChange?: (params: ImageGenerationParams) => void;
   onPromptChange: (prompt: string) => void;
-  onGenerate: (prompt: string, params: ImageGenerationParams) => Promise<void>;
+  onGenerate: (prompt: string, params: ImageGenerationParams, options: ImageGenerateOptions) => Promise<void>;
   onUploadFiles?: (files: FileList) => void;
+  onUploadReferenceFiles?: (files: FileList) => void;
+  onSelectCanvasReference?: () => void;
 }) {
   const [prompt, setPrompt] = useState(generatorPrompt(node));
   const [params, setParams] = useState(() => imageGenerationParamsForNode(node, imageProviderId));
   const [submitting, setSubmitting] = useState(false);
   const generating = busy || submitting;
+  const referenceAssetIds = referenceAssetIdsFromNode(node);
 
   useEffect(() => {
     setPrompt(generatorPrompt(node));
@@ -487,7 +566,7 @@ export function GeneratorPromptToolbar({
     onParamsChange?.(params);
     setSubmitting(true);
     try {
-      await onGenerate(next, params);
+      await onGenerate(next, params, { referenceAssetIds });
     } finally {
       setSubmitting(false);
     }
@@ -508,6 +587,12 @@ export function GeneratorPromptToolbar({
       onDrop={(event) => handleToolbarFileDrop(event, onUploadFiles)}
     >
       <div className="min-h-0 px-2.5 pb-2.5 pt-2">
+        <ReferenceImageControl
+          disabled={generating}
+          referenceAssetIds={referenceAssetIds}
+          onUploadReferenceFiles={onUploadReferenceFiles}
+          onSelectCanvasReference={onSelectCanvasReference}
+        />
         <Textarea
           aria-label="Image generator prompt"
           rows={2}
@@ -712,16 +797,22 @@ export function QuickEditPromptToolbar({
   busy,
   models,
   model,
+  referenceAssetIds = [],
   onModelChange,
   onGenerate,
   onUploadFiles,
+  onUploadReferenceFiles,
+  onSelectCanvasReference,
 }: {
   busy: boolean;
   models: string[];
   model: string;
+  referenceAssetIds?: string[];
   onModelChange: (model: string) => void;
-  onGenerate: (prompt: string) => Promise<void>;
+  onGenerate: (prompt: string, options: ImageGenerateOptions) => Promise<void>;
   onUploadFiles?: (files: FileList) => void;
+  onUploadReferenceFiles?: (files: FileList) => void;
+  onSelectCanvasReference?: () => void;
 }) {
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -732,7 +823,7 @@ export function QuickEditPromptToolbar({
     if (!next || generating) return;
     setSubmitting(true);
     try {
-      await onGenerate(next);
+      await onGenerate(next, { referenceAssetIds });
       setPrompt("");
     } finally {
       setSubmitting(false);
@@ -752,6 +843,12 @@ export function QuickEditPromptToolbar({
       onDrop={(event) => handleToolbarFileDrop(event, onUploadFiles)}
     >
       <div className="min-h-0 px-2.5 pb-2.5 pt-2">
+        <ReferenceImageControl
+          disabled={generating}
+          referenceAssetIds={referenceAssetIds}
+          onUploadReferenceFiles={onUploadReferenceFiles}
+          onSelectCanvasReference={onSelectCanvasReference}
+        />
         <Textarea
           aria-label="Quick edit prompt"
           rows={2}

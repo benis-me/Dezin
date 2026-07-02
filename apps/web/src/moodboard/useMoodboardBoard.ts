@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AgentInfo,
   ImageGenerationParams,
+  MoodboardAsset,
   MoodboardConversation,
   MoodboardDetail,
   MoodboardMessage,
@@ -15,7 +16,7 @@ import { useToast } from "../components/Toast.tsx";
 import { MODEL_PROVIDERS } from "../settings/model-provider-registry.ts";
 import { inferCapabilities, parseModelEntries } from "../settings/model-provider-ui-utils.tsx";
 import { providerProfile } from "../settings/provider-profiles.ts";
-import { generatorModel, toInput } from "./canvas-utils.ts";
+import { generatorModel, referenceAssetIds, toInput } from "./canvas-utils.ts";
 import { imageGenerationParamsFromNode } from "./image-generation-params.ts";
 import {
   appendInputs,
@@ -247,10 +248,45 @@ export function useMoodboardBoard(boardId: string) {
     [api, appendNodes, boardId, nodes.length, toast],
   );
 
+  const uploadReferenceFiles = useCallback(
+    async (files: FileList | null): Promise<MoodboardAsset[]> => {
+      if (!files?.length) return [];
+      setImageBusy(true);
+      try {
+        const assets: MoodboardAsset[] = [];
+        for (const file of Array.from(files)) {
+          if (!file.type.startsWith("image/")) continue;
+          const [contentBase64, size] = await Promise.all([fileToBase64(file), imageSize(file)]);
+          assets.push(
+            await api.uploadMoodboardAsset(boardId, {
+              name: file.name,
+              contentBase64,
+              mimeType: file.type,
+              width: size.width,
+              height: size.height,
+            }),
+          );
+        }
+        return assets;
+      } catch {
+        toast("Couldn't upload those reference images.", { variant: "error" });
+        return [];
+      } finally {
+        setImageBusy(false);
+      }
+    },
+    [api, boardId, toast],
+  );
+
   const generateImage = useCallback(
-    async (node: MoodboardNode, prompt: string, options: { sourceAssetId?: string; params?: ImageGenerationParams } = {}) => {
+    async (
+      node: MoodboardNode,
+      prompt: string,
+      options: { sourceAssetId?: string; referenceAssetIds?: string[]; params?: ImageGenerationParams } = {},
+    ) => {
       const selectedModel = generatorModel(node) || imageModel;
       const generationParams = options.params ?? imageGenerationParamsFromNode(node);
+      const imageReferenceAssetIds = options.referenceAssetIds ?? referenceAssetIds(node);
       const agentConversationId =
         typeof node.data.agentConversationId === "string" && node.data.agentConversationId.trim()
           ? node.data.agentConversationId.trim()
@@ -267,6 +303,7 @@ export function useMoodboardBoard(boardId: string) {
                   generatorModel: selectedModel,
                   generatorStatus: "running",
                   generationParams,
+                  referenceAssetIds: imageReferenceAssetIds,
                 },
               }
             : item,
@@ -278,6 +315,7 @@ export function useMoodboardBoard(boardId: string) {
           model: selectedModel || undefined,
           conversationId: agentConversationId || undefined,
           sourceAssetId: options.sourceAssetId,
+          referenceAssetIds: imageReferenceAssetIds,
           params: generationParams,
           x: node.x + node.width + 24,
           y: node.y,
@@ -427,6 +465,7 @@ export function useMoodboardBoard(boardId: string) {
     addSection,
     addImageGenerator,
     uploadFiles,
+    uploadReferenceFiles,
     generateImage,
     sendMessage,
     rescanAgents,
