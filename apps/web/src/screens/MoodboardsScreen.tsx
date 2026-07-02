@@ -349,14 +349,16 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
                 <IconButton aria-label="Attach images" onClick={() => promptImageInputRef.current?.click()}>
                   <ImagePlus size={15} strokeWidth={1.75} />
                 </IconButton>
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 <Segmented
                   ariaLabel="Moodboard start mode"
                   size="sm"
                   value={startMode}
                   onChange={(value) => setStartMode(value as StartMode)}
                   options={[
-                    { value: "agent", title: "Agent" },
-                    { value: "generate", title: "Generate" },
+                    { value: "agent", label: "Agent" },
+                    { value: "generate", label: "Model" },
                   ]}
                 />
                 {startMode === "agent" ? (
@@ -374,17 +376,17 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
                 ) : (
                   <ImageModelPicker model={imageModel} options={imageModels} onModelChange={setImageModel} />
                 )}
+                <Button
+                  size="lg"
+                  aria-label={startMode === "generate" ? "Generate board" : "Start board"}
+                  onClick={() => void startBoard()}
+                  disabled={starting || generateNeedsModel || (!promptText && promptImages.length === 0)}
+                  className="rounded-xl px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_48%,transparent)]"
+                >
+                  {startMode === "generate" ? "Generate" : "Start board"}
+                  <ArrowRight size={16} strokeWidth={2} />
+                </Button>
               </div>
-              <Button
-                size="lg"
-                aria-label={startMode === "generate" ? "Generate board" : "Start board"}
-                onClick={() => void startBoard()}
-                disabled={starting || generateNeedsModel || (!promptText && promptImages.length === 0)}
-                className="rounded-xl px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_48%,transparent)]"
-              >
-                {startMode === "generate" ? "Generate" : "Start board"}
-                <ArrowRight size={16} strokeWidth={2} />
-              </Button>
             </div>
           </div>
         </div>

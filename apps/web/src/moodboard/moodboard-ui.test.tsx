@@ -4,7 +4,7 @@ import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
-import { CanvasViewBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
+import { CanvasActionBar, CanvasViewBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
@@ -2038,6 +2038,16 @@ test("CanvasViewBar groups layers and presentation controls at the canvas edge",
 
   expect(onToggleLayers).toHaveBeenCalledOnce();
   expect(onTogglePresentation).toHaveBeenCalledOnce();
+});
+
+test("CanvasActionBar uses md rounded items in the bottom toolbar", () => {
+  render(<CanvasActionBar tool="select" onToolChange={() => {}} onAddImageGenerator={() => {}} />);
+
+  for (const label of ["Select", "Hand", "Add note", "Add section", "Image generator"]) {
+    const button = screen.getByRole("button", { name: label });
+    expect(button.className).toContain("rounded-md");
+    expect(button.className).not.toContain("rounded-lg");
+  }
 });
 
 test("Moodboard layers default closed until the user opens them", () => {

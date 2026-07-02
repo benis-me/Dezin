@@ -1204,6 +1204,7 @@ test("conversation opens at the bottom and shows an icon-only jump button when s
     expect(jump.textContent).toBe("");
     expect(jump.className).not.toContain("shadow");
     expect(jump.className).not.toContain("before:animate-spin");
+    expect(jump.style.bottom).toBe("calc(100% + 12px)");
 
     fireEvent.click(jump);
     expect(scroll.scrollTop).toBe(1200);

@@ -67,6 +67,9 @@ const PREVIEW_INSPECT_PANEL = "inspect";
 const REPLAYABLE_RUN_STATUSES = new Set(["running", "pending", "cancelled", "failed"]);
 const SHOW_VARIANT_FANOUT_BUTTON: boolean = false;
 const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg-primary hover:!text-primary-foreground";
+const FLOATING_COMPOSER_FADE_PX = 48;
+const SCROLL_TO_BOTTOM_GAP_PX = 12;
+const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
 
 function queueKey(projectId: string): string {
   return `dezin.workspace.queue.${projectId}`;
@@ -2303,7 +2306,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   // up to read (stickBottom is cleared by the container's onScroll below).
   useEffect(() => {
     if (stickBottom.current) scrollChatToBottom("auto");
-  }, [liveItems, messages, liveStatus, running, scrollChatToBottom]);
+  }, [composerH, liveItems, messages, liveStatus, running, scrollChatToBottom]);
 
   // Drain queued prompts one at a time once the current run finishes.
   useEffect(() => {
@@ -2889,6 +2892,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const transcriptRows = useMemo(() => groupRunCardMessages(messages), [messages]);
   const transcriptBlocks = useMemo(() => groupAssistantTurns(transcriptRows), [transcriptRows]);
+  const composerOverlayH = composerH + FLOATING_COMPOSER_FADE_PX;
+  const messageBottomPadding = composerOverlayH + MESSAGE_BOTTOM_CLEARANCE_PX;
   const renderTranscriptMessage = (m: Msg, stackPosition: RunCardStackPosition = "single"): ReactNode =>
     m.kind === "user" ? (
       <UserMessage text={m.text} srcFor={(p) => api.refUrl(projectId, p)} onTargetClick={focusMarkupTarget} />
@@ -3004,7 +3009,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           data-testid="conversation-scroll"
           onScroll={updateChatBottomState}
           className="flex-1 space-y-4 overflow-auto px-4 pt-5"
-          style={{ paddingBottom: composerH + 36 }}
+          style={{ paddingBottom: messageBottomPadding }}
         >
           {messages.length === 0 ? (
             <div className="grid h-full place-items-center">
@@ -3088,30 +3093,30 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             </>
           )}
         </div>
-        <AnimatePresence>
-          {showScrollToBottom ? (
-            <motion.button
-              type="button"
-              aria-label="Scroll to bottom"
-              onClick={() => scrollChatToBottom("smooth")}
-              initial={{ opacity: 0, y: 6, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 6, scale: 0.96 }}
-              transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
-              className={cn(
-                "app-no-drag absolute right-4 z-30 grid size-8 place-items-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                running &&
-                  "overflow-hidden before:absolute before:inset-[-1px] before:rounded-full before:border before:border-primary/20 before:border-t-primary/70 before:content-[''] before:animate-spin",
-              )}
-              style={{ bottom: composerH + 16 }}
-            >
-              <ArrowDown size={15} strokeWidth={1.8} aria-hidden />
-            </motion.button>
-          ) : null}
-        </AnimatePresence>
         <div className="pointer-events-none absolute inset-x-0 bottom-0">
+          <AnimatePresence>
+            {showScrollToBottom ? (
+              <motion.button
+                type="button"
+                aria-label="Scroll to bottom"
+                onClick={() => scrollChatToBottom("smooth")}
+                initial={{ opacity: 0, y: 6, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 6, scale: 0.96 }}
+                transition={{ duration: 0.16, ease: [0.25, 1, 0.5, 1] }}
+                className={cn(
+                  "pointer-events-auto app-no-drag absolute right-4 z-30 grid size-8 place-items-center rounded-full border border-border bg-card text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                  running &&
+                    "overflow-hidden before:absolute before:inset-[-1px] before:rounded-full before:border before:border-primary/20 before:border-t-primary/70 before:content-[''] before:animate-spin",
+                )}
+                style={{ bottom: `calc(100% + ${SCROLL_TO_BOTTOM_GAP_PX}px)` }}
+              >
+                <ArrowDown size={15} strokeWidth={1.8} aria-hidden />
+              </motion.button>
+            ) : null}
+          </AnimatePresence>
           {/* dissolve zone above the opaque strip */}
-          <div aria-hidden className="h-12 bg-gradient-to-t from-background via-background/90 to-transparent" />
+          <div aria-hidden className="bg-gradient-to-t from-background via-background/90 to-transparent" style={{ height: FLOATING_COMPOSER_FADE_PX }} />
           {/* opaque strip — fully masks content scrolling underneath + holds the card */}
           <div ref={composerRef} className="bg-background px-3 pb-3">
           {isExisting ? (

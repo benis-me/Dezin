@@ -240,7 +240,7 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
     generateMoodboardImage,
   });
 
-  await userEvent.click(await screen.findByRole("button", { name: "Generate" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Model" }));
   expect(screen.queryByRole("button", { name: "Agent and model" })).toBeNull();
   expect(screen.getByRole("button", { name: "Image generation model" })).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Describe moodboard direction"), { target: { value: "Brutalist campaign board with product images" } });
