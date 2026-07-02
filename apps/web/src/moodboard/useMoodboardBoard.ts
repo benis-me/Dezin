@@ -64,22 +64,37 @@ export function useMoodboardBoard(boardId: string) {
     };
   }, [api]);
 
+  const applyImageSettings = useCallback((settings: Settings) => {
+    const models = imageModelOptions(settings);
+    const configuredImageModel = settings.imageModel.trim();
+    setImageModels(models);
+    setImageModel((current) =>
+      configuredImageModel && models.includes(configuredImageModel)
+        ? configuredImageModel
+        : current && models.includes(current)
+          ? current
+          : models[0] || "",
+    );
+  }, []);
+
   useEffect(() => {
     let alive = true;
     void api
       .getSettings()
       .then((settings) => {
-        if (!alive) return;
-        const models = imageModelOptions(settings);
-        const configuredImageModel = settings.imageModel.trim();
-        setImageModels(models);
-        setImageModel((current) => (current && models.includes(current) ? current : models.includes(configuredImageModel) ? configuredImageModel : models[0] || ""));
+        if (alive) applyImageSettings(settings);
       })
       .catch(() => {});
+    const onSettingsUpdated = (event: Event) => {
+      const settings = (event as CustomEvent<Settings>).detail;
+      if (settings) applyImageSettings(settings);
+    };
+    window.addEventListener("dezin:settings-updated", onSettingsUpdated);
     return () => {
       alive = false;
+      window.removeEventListener("dezin:settings-updated", onSettingsUpdated);
     };
-  }, [api]);
+  }, [api, applyImageSettings]);
 
   useEffect(() => {
     return () => {
@@ -191,7 +206,7 @@ export function useMoodboardBoard(boardId: string) {
   );
 
   const generateImage = useCallback(
-    async (node: MoodboardNode, prompt: string) => {
+    async (node: MoodboardNode, prompt: string, options: { sourceAssetId?: string } = {}) => {
       const selectedModel =
         typeof node.data.generatorModel === "string" && node.data.generatorModel.trim() ? node.data.generatorModel.trim() : imageModel;
       setBusy(true);
@@ -206,6 +221,7 @@ export function useMoodboardBoard(boardId: string) {
         const result = await api.generateMoodboardImage(boardId, prompt, {
           generatorId: node.id,
           model: selectedModel || undefined,
+          sourceAssetId: options.sourceAssetId,
           x: node.x + node.width + 24,
           y: node.y,
         });

@@ -132,7 +132,7 @@ export interface MoodboardAsset {
   mimeType: string;
   width: number | null;
   height: number | null;
-  source: "upload" | "generated";
+  source: "upload" | "generated" | "edited";
   createdAt: number;
 }
 
@@ -207,6 +207,8 @@ export interface Settings {
   aiProviderModels: string;
   /** Optional organization/project id for providers that support it. */
   aiProviderOrganization: string;
+  /** Serialized per-provider endpoint/model metadata for the Providers settings panel. */
+  aiProviderProfiles: string;
   /** When enabled, the selected Agent/model reviews a rendered screenshot after prototype runs. */
   visualQaEnabled: boolean;
 }

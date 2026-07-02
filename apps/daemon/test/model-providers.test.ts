@@ -101,6 +101,39 @@ test("POST /api/model-providers/models returns live OpenAI-compatible models", a
   );
 });
 
+test("POST /api/model-providers/models does not return the Azure model catalog as deployment names", async () => {
+  const calls: FetchCall[] = [];
+  await withServer(
+    {
+      modelProviderFetch: async (input, init) => {
+        calls.push({ url: String(input), init });
+        return new Response(JSON.stringify({ data: Array.from({ length: 200 }, (_, index) => ({ id: `catalog-model-${index}` })) }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+    async (base) => {
+      await putSettings(base, {
+        aiProviderId: "azure-openai",
+        apiBaseUrl: "https://dezin-resource.openai.azure.com/openai/v1",
+        apiKey: "azure-local",
+      });
+
+      const res = await fetch(`${base}/api/model-providers/models`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerId: "azure-openai" }),
+      });
+      assert.equal(res.status, 502);
+      const body = (await res.json()) as { error: string };
+      assert.match(body.error, /Azure OpenAI deployment names must be entered manually/);
+    },
+  );
+
+  assert.equal(calls.length, 0);
+});
+
 test("POST /api/model-providers/models uses Anthropic model-list headers", async () => {
   const calls: FetchCall[] = [];
   await withServer(
@@ -253,6 +286,7 @@ test("POST /api/model-providers/test verifies Vertex AI with project and locatio
         apiBaseUrl: "https://aiplatform.googleapis.com/v1",
         apiKey: "ya29.local",
         aiProviderOrganization: "demo-project:us-central1",
+        aiProviderProfiles: "",
       });
 
       const res = await fetch(`${base}/api/model-providers/test`, {

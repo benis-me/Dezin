@@ -286,6 +286,7 @@ test("settings + agents + health endpoints", async () => {
         aiProviderEnabled: false,
         aiProviderModels: "gpt-image-1",
         aiProviderOrganization: "",
+        aiProviderProfiles: "",
         visualQaEnabled: false,
       });
     }
@@ -307,6 +308,7 @@ test("settings + agents + health endpoints", async () => {
         aiProviderEnabled: false,
         aiProviderModels: "gpt-image-1",
         aiProviderOrganization: "",
+        aiProviderProfiles: "",
         visualQaEnabled: false,
       });
     }
@@ -354,6 +356,9 @@ test("moodboard client methods hit first-class board endpoints", async () => {
   await expect(api.saveMoodboardNodes("b1", [node])).resolves.toEqual([node]);
   await expect(api.postMoodboardMessage("b1", "read the board", { agentCommand: "codex", model: "gpt-5" })).resolves.toEqual({ messages: [] });
   await expect(api.generateMoodboardImage("b1", "soft glass")).resolves.toMatchObject({ nodes: [node] });
+  await expect(api.generateMoodboardImage("b1", "make it warmer", { sourceAssetId: "asset-1", model: "gpt-image-2" })).resolves.toMatchObject({
+    nodes: [node],
+  });
 
   expect(fetchImpl).toHaveBeenCalledWith("http://d/api/moodboards", undefined);
   expect(fetchImpl).toHaveBeenCalledWith("http://d/api/moodboards/b1/nodes", expect.objectContaining({ method: "PUT" }));
@@ -362,6 +367,12 @@ test("moodboard client methods hit first-class board endpoints", async () => {
     expect.objectContaining({ body: JSON.stringify({ content: "read the board", agentCommand: "codex", model: "gpt-5" }) }),
   );
   expect(fetchImpl).toHaveBeenCalledWith("http://d/api/moodboards/b1/generate-image", expect.objectContaining({ method: "POST" }));
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/moodboards/b1/generate-image",
+    expect.objectContaining({
+      body: JSON.stringify({ prompt: "make it warmer", sourceAssetId: "asset-1", model: "gpt-image-2" }),
+    }),
+  );
 });
 
 test("parseSseBlock ignores non-data noise", () => {

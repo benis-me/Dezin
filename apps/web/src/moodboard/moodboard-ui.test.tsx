@@ -1958,7 +1958,7 @@ test("GeneratorPromptToolbar exposes a compact image model selector", () => {
   render(
     <GeneratorPromptToolbar
       node={node}
-      busy={true}
+      busy={false}
       models={["gpt-image-1", "gpt-image-2"]}
       model="gpt-image-1"
       onModelChange={onModelChange}
@@ -1976,6 +1976,51 @@ test("GeneratorPromptToolbar exposes a compact image model selector", () => {
   fireEvent.click(screen.getByLabelText("Image generation model"));
   fireEvent.click(screen.getByRole("button", { name: /gpt-image-2/ }));
   expect(onModelChange).toHaveBeenCalledWith("gpt-image-2");
+});
+
+test("GeneratorPromptToolbar enters a disabled loading state while generating", async () => {
+  let finish!: () => void;
+  const onGenerate = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light", generatorStatus: "ready" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <GeneratorPromptToolbar
+      node={node}
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      onModelChange={() => {}}
+      onPromptChange={() => {}}
+      onGenerate={onGenerate}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Generate" }));
+
+  expect(await screen.findByRole("button", { name: /Generating/ })).toBeDisabled();
+  expect(screen.getByLabelText("Image generator prompt")).toBeDisabled();
+  expect(screen.getByLabelText("Image generation model")).toBeDisabled();
+
+  await act(async () => finish());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Generate" })).not.toBeDisabled());
 });
 
 test("GeneratorPromptToolbar keeps prompt interactions out of the canvas event layer", () => {
@@ -2074,6 +2119,38 @@ test("QuickEditPromptToolbar submits image variations with the selected model", 
 
   expect(onGenerate).toHaveBeenCalledWith("make it warmer");
   expect(screen.getByLabelText("Image generation model")).toHaveTextContent("gpt-image-1");
+});
+
+test("QuickEditPromptToolbar keeps the prompt disabled while the image edit is running", async () => {
+  let finish!: () => void;
+  const onGenerate = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+
+  render(
+    <QuickEditPromptToolbar
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      onModelChange={() => {}}
+      onGenerate={onGenerate}
+    />,
+  );
+
+  fireEvent.change(screen.getByLabelText("Quick edit prompt"), { target: { value: "make it warmer" } });
+  fireEvent.click(screen.getByRole("button", { name: "Generate" }));
+
+  expect(await screen.findByRole("button", { name: /Generating/ })).toBeDisabled();
+  expect(screen.getByLabelText("Quick edit prompt")).toBeDisabled();
+  expect(screen.getByLabelText("Image generation model")).toBeDisabled();
+
+  await act(async () => finish());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Generate" })).toBeDisabled());
+  expect(screen.getByLabelText("Quick edit prompt")).not.toBeDisabled();
+  expect(screen.getByLabelText("Quick edit prompt")).toHaveValue("");
 });
 
 test("CanvasViewBar groups layers and presentation controls at the canvas edge", () => {

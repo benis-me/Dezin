@@ -3,13 +3,24 @@ import { Check, ChevronDown, WandSparkles } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 
-export function ImageModelPicker({ model, options, onModelChange }: { model: string; options: string[]; onModelChange: (model: string) => void }) {
+export function ImageModelPicker({
+  model,
+  options,
+  disabled = false,
+  onModelChange,
+}: {
+  model: string;
+  options: string[];
+  disabled?: boolean;
+  onModelChange: (model: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const selected = model || options[0] || "";
   return (
-    <Popover open={open} onOpenChange={setOpen} modal={false}>
+    <Popover open={disabled ? false : open} onOpenChange={(next) => !disabled && setOpen(next)} modal={false}>
       <PopoverTrigger
         aria-label="Image generation model"
+        disabled={disabled}
         className="flex h-7 min-w-0 max-w-[21rem] items-center gap-1.5 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
       >
         <WandSparkles size={13} strokeWidth={1.75} className="shrink-0 text-primary" />

@@ -518,7 +518,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     // Generate any media the agent requested (data-gen-prompt placeholders → assets/).
     const { html: finalHtml, generated } = await generateImages(
       result.html,
-      { baseUrl: settings.imageApiBaseUrl, apiKey: settings.imageApiKey, model: settings.imageModel },
+      {
+        baseUrl: settings.imageApiBaseUrl,
+        apiKey: settings.imageApiKey,
+        model: settings.imageModel,
+        providerId: settings.aiProviderId,
+        apiVersion: settings.aiProviderOrganization,
+      },
       join(dir, "assets"),
       fetch,
     );

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { Moodboard, MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
-import { requestImage } from "./image-gen.ts";
+import { requestImage, requestImageEdit } from "./image-gen.ts";
 import {
   buildMoodboardAgentContext,
   buildMoodboardAgentPrompt,
@@ -360,19 +360,35 @@ export async function handleGenerateMoodboardImage(
   if (!prompt) return sendError(res, 400, "prompt is required");
   const generatorId = stringValue(body.generatorId);
   const model = stringValue(body.model) || settings.imageModel;
+  const sourceAssetId = stringValue(body.sourceAssetId);
+  const sourceAsset = sourceAssetId ? store.getMoodboardAsset(sourceAssetId) : null;
+  if (sourceAssetId && (!sourceAsset || sourceAsset.boardId !== id)) return sendError(res, 404, "source asset not found");
+  const sourceFile =
+    sourceAsset != null ? join(moodboardAssetsDir(dataDir, id!), `${sourceAsset.id}${extForMime(sourceAsset.mimeType)}`) : "";
+  if (sourceAsset && !existsSync(sourceFile)) return sendError(res, 404, "source asset file not found");
 
-  const b64 = await requestImage(
-    { baseUrl: settings.imageApiBaseUrl, apiKey: settings.imageApiKey, model },
-    prompt,
-    fetch,
-  );
+  const imageOpts = {
+    baseUrl: settings.imageApiBaseUrl,
+    apiKey: settings.imageApiKey,
+    model,
+    providerId: settings.aiProviderId,
+    apiVersion: settings.aiProviderOrganization,
+  };
+  const b64 = sourceAsset
+    ? await requestImageEdit(
+        imageOpts,
+        prompt,
+        { data: readFileSync(sourceFile), mimeType: sourceAsset.mimeType, fileName: sourceAsset.fileName },
+        fetch,
+      )
+    : await requestImage(imageOpts, prompt, fetch);
   const asset = store.createMoodboardAsset(id!, {
     kind: "image",
-    fileName: "generated.png",
+    fileName: sourceAsset ? "edited.png" : "generated.png",
     mimeType: "image/png",
-    width: 1024,
-    height: 1024,
-    source: "generated",
+    width: sourceAsset?.width ?? 1024,
+    height: sourceAsset?.height ?? 1024,
+    source: sourceAsset ? "edited" : "generated",
   });
   const dir = moodboardAssetsDir(dataDir, id!);
   mkdirSync(dir, { recursive: true });
@@ -416,10 +432,21 @@ export async function handleGenerateMoodboardImage(
       width: generator ? Math.max(180, generator.width) : 320,
       height: generator ? Math.max(180, generator.height) : 320,
       zIndex: maxZ + 1,
-      data: { assetId: asset.id, url: assetUrl(id!, asset.id), prompt, model, source: "generated" },
+      data: {
+        assetId: asset.id,
+        url: assetUrl(id!, asset.id),
+        prompt,
+        model,
+        source: sourceAsset ? "edited" : "generated",
+        ...(sourceAsset ? { sourceAssetId } : {}),
+      },
     },
   ]);
-  const user = store.addMoodboardMessage(id!, "user", `Generate image: ${prompt}`);
-  const assistant = store.addMoodboardMessage(id!, "assistant", "Generated an image and placed it on the canvas.");
+  const user = store.addMoodboardMessage(id!, "user", `${sourceAsset ? "Edit" : "Generate"} image: ${prompt}`);
+  const assistant = store.addMoodboardMessage(
+    id!,
+    "assistant",
+    sourceAsset ? "Edited the image and placed the result on the canvas." : "Generated an image and placed it on the canvas.",
+  );
   sendJson(res, 201, { asset: { ...asset, url: assetUrl(id!, asset.id) }, nodes: saved, messages: [user, assistant] });
 }

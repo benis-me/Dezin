@@ -13,6 +13,7 @@ import {
   ImagePlus,
   LayoutGrid,
   Layers,
+  Loader2,
   Maximize2,
   Minus,
   MousePointer2,
@@ -442,6 +443,8 @@ export function GeneratorPromptToolbar({
   onUploadFiles?: (files: FileList) => void;
 }) {
   const [prompt, setPrompt] = useState(generatorPrompt(node));
+  const [submitting, setSubmitting] = useState(false);
+  const generating = busy || submitting;
 
   useEffect(() => {
     setPrompt(generatorPrompt(node));
@@ -449,9 +452,14 @@ export function GeneratorPromptToolbar({
 
   const submit = async () => {
     const next = prompt.trim();
-    if (!next || busy) return;
+    if (!next || generating) return;
     onPromptChange(next);
-    await onGenerate(next);
+    setSubmitting(true);
+    try {
+      await onGenerate(next);
+    } finally {
+      setSubmitting(false);
+    }
   };
   const modelOptions = models.length ? models : [model].filter(Boolean);
 
@@ -474,6 +482,7 @@ export function GeneratorPromptToolbar({
           rows={2}
           value={prompt}
           autoFocus
+          disabled={generating}
           placeholder="Describe the image material to generate..."
           onChange={(event) => {
             setPrompt(event.target.value);
@@ -489,9 +498,10 @@ export function GeneratorPromptToolbar({
         />
       </div>
       <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
-        <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
-        <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
-          Generate
+        <ImageModelPicker model={model} options={modelOptions} disabled={generating} onModelChange={onModelChange} />
+        <Button size="sm" disabled={generating || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
+          {generating ? <Loader2 size={13} strokeWidth={1.75} className="animate-spin" /> : null}
+          {generating ? "Generating" : "Generate"}
         </Button>
       </div>
     </div>
@@ -514,12 +524,19 @@ export function QuickEditPromptToolbar({
   onUploadFiles?: (files: FileList) => void;
 }) {
   const [prompt, setPrompt] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const generating = busy || submitting;
   const modelOptions = models.length ? models : [model].filter(Boolean);
   const submit = async () => {
     const next = prompt.trim();
-    if (!next || busy) return;
-    await onGenerate(next);
-    setPrompt("");
+    if (!next || generating) return;
+    setSubmitting(true);
+    try {
+      await onGenerate(next);
+      setPrompt("");
+    } finally {
+      setSubmitting(false);
+    }
   };
   return (
     <div
@@ -540,6 +557,7 @@ export function QuickEditPromptToolbar({
           rows={2}
           value={prompt}
           autoFocus
+          disabled={generating}
           placeholder="Describe the variation or edit..."
           onChange={(event) => setPrompt(event.target.value)}
           onKeyDown={(event) => {
@@ -555,9 +573,10 @@ export function QuickEditPromptToolbar({
         />
       </div>
       <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
-        <ImageModelPicker model={model} options={modelOptions} onModelChange={onModelChange} />
-        <Button size="sm" disabled={busy || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
-          Generate
+        <ImageModelPicker model={model} options={modelOptions} disabled={generating} onModelChange={onModelChange} />
+        <Button size="sm" disabled={generating || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
+          {generating ? <Loader2 size={13} strokeWidth={1.75} className="animate-spin" /> : null}
+          {generating ? "Generating" : "Generate"}
         </Button>
       </div>
     </div>

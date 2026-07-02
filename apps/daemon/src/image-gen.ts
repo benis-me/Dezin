@@ -12,9 +12,17 @@ export interface ImageGenOpts {
   baseUrl: string;
   apiKey: string;
   model: string;
+  providerId?: string;
+  apiVersion?: string;
 }
 
-export type FetchLike = (input: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{
+export type SourceImageInput = {
+  data: Buffer;
+  mimeType: string;
+  fileName: string;
+};
+
+export type FetchLike = (input: string, init?: { method?: string; headers?: Record<string, string>; body?: string | FormData }) => Promise<{
   ok: boolean;
   status: number;
   json: () => Promise<unknown>;
@@ -29,18 +37,102 @@ function decodeEntities(s: string): string {
     .replace(/&amp;/g, "&");
 }
 
-/** One image via the OpenAI Images-compatible endpoint; returns base64 PNG. */
-export async function requestImage(opts: ImageGenOpts, prompt: string, fetchImpl: FetchLike): Promise<string> {
-  const res = await fetchImpl(`${opts.baseUrl.replace(/\/$/, "")}/images/generations`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },
-    body: JSON.stringify({ model: opts.model || "gpt-image-1", prompt, n: 1, size: "1024x1024", response_format: "b64_json" }),
-  });
+function isAzureOpenAi(opts: ImageGenOpts): boolean {
+  if (opts.providerId === "azure-openai") return true;
+  try {
+    return new URL(opts.baseUrl).hostname.endsWith(".openai.azure.com");
+  } catch {
+    return false;
+  }
+}
+
+function azureApiVersion(opts: ImageGenOpts): string {
+  return opts.apiVersion?.trim() || "preview";
+}
+
+function azureDeploymentEndpoint(opts: ImageGenOpts, operation: "images/generations" | "images/edits"): string {
+  const deployment = (opts.model || "gpt-image-1").trim();
+  const url = new URL(opts.baseUrl.endsWith("/") ? opts.baseUrl : `${opts.baseUrl}/`);
+  const path = url.pathname.replace(/\/+$/, "");
+  const existing = path.match(/^(.*\/openai\/deployments\/)([^/]+)(?:\/.*)?$/);
+  if (existing) {
+    url.pathname = `${existing[1]}${encodeURIComponent(deployment || decodeURIComponent(existing[2] ?? ""))}/${operation}`;
+  } else {
+    const openaiIndex = path.indexOf("/openai");
+    const openaiRoot = openaiIndex >= 0 ? path.slice(0, openaiIndex + "/openai".length) : `${path}/openai`;
+    url.pathname = `${openaiRoot}/deployments/${encodeURIComponent(deployment)}/${operation}`;
+  }
+  url.search = "";
+  url.searchParams.set("api-version", azureApiVersion(opts));
+  return url.toString();
+}
+
+function imageGenerationEndpoint(opts: ImageGenOpts): string {
+  if (isAzureOpenAi(opts)) return azureDeploymentEndpoint(opts, "images/generations");
+  return `${opts.baseUrl.replace(/\/$/, "")}/images/generations`;
+}
+
+function imageEditEndpoint(opts: ImageGenOpts): string {
+  if (isAzureOpenAi(opts)) return azureDeploymentEndpoint(opts, "images/edits");
+  return `${opts.baseUrl.replace(/\/$/, "")}/images/edits`;
+}
+
+function jsonHeaders(opts: ImageGenOpts): Record<string, string> {
+  return isAzureOpenAi(opts)
+    ? { "content-type": "application/json", "api-key": opts.apiKey }
+    : { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` };
+}
+
+function multipartHeaders(opts: ImageGenOpts): Record<string, string> {
+  return isAzureOpenAi(opts) ? { "api-key": opts.apiKey } : { authorization: `Bearer ${opts.apiKey}` };
+}
+
+function imagePayload(opts: ImageGenOpts, prompt: string): Record<string, unknown> {
+  if (isAzureOpenAi(opts)) return { prompt, n: 1, size: "1024x1024" };
+  return { model: opts.model || "gpt-image-1", prompt, n: 1, size: "1024x1024", response_format: "b64_json" };
+}
+
+async function base64FromImageResponse(res: Awaited<ReturnType<FetchLike>>): Promise<string> {
   if (!res.ok) throw new Error(`image API ${res.status}`);
   const body = (await res.json()) as { data?: Array<{ b64_json?: string }> };
   const b64 = body.data?.[0]?.b64_json;
   if (!b64) throw new Error("image API returned no data");
   return b64;
+}
+
+/** One image via the OpenAI Images-compatible endpoint; returns base64 PNG. */
+export async function requestImage(opts: ImageGenOpts, prompt: string, fetchImpl: FetchLike): Promise<string> {
+  const res = await fetchImpl(imageGenerationEndpoint(opts), {
+    method: "POST",
+    headers: jsonHeaders(opts),
+    body: JSON.stringify(imagePayload(opts, prompt)),
+  });
+  return base64FromImageResponse(res);
+}
+
+export async function requestImageEdit(
+  opts: ImageGenOpts,
+  prompt: string,
+  image: SourceImageInput,
+  fetchImpl: FetchLike,
+): Promise<string> {
+  const form = new FormData();
+  form.append("prompt", prompt);
+  form.append("n", "1");
+  form.append("size", "1024x1024");
+  if (!isAzureOpenAi(opts)) {
+    form.append("model", opts.model || "gpt-image-1");
+    form.append("response_format", "b64_json");
+  }
+  const imageBytes = new Uint8Array(image.data.length);
+  imageBytes.set(image.data);
+  form.append("image", new Blob([imageBytes], { type: image.mimeType }), image.fileName);
+  const res = await fetchImpl(imageEditEndpoint(opts), {
+    method: "POST",
+    headers: multipartHeaders(opts),
+    body: form,
+  });
+  return base64FromImageResponse(res);
 }
 
 /**

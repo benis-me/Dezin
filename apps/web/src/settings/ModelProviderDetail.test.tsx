@@ -23,6 +23,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     aiProviderEnabled: false,
     aiProviderModels: serializeModelEntries(MODEL_PROVIDERS[0]!.models),
     aiProviderOrganization: "",
+    aiProviderProfiles: "",
     visualQaEnabled: false,
     ...overrides,
   };

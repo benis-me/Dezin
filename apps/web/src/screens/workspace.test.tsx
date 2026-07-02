@@ -709,6 +709,7 @@ test("/projects/new preserves the selected agent and model for the first run", a
       aiProviderEnabled: false,
       aiProviderModels: "gpt-image-1",
       aiProviderOrganization: "",
+      aiProviderProfiles: "",
       visualQaEnabled: false,
     }),
   });

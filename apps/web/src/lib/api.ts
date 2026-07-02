@@ -86,7 +86,7 @@ export interface MoodboardAsset {
   mimeType: string;
   width: number | null;
   height: number | null;
-  source: "upload" | "generated";
+  source: "upload" | "generated" | "edited";
   createdAt: number;
   url?: string;
 }
@@ -203,6 +203,7 @@ export interface Settings {
   aiProviderEnabled: boolean;
   aiProviderModels: string;
   aiProviderOrganization: string;
+  aiProviderProfiles: string;
   visualQaEnabled: boolean;
 }
 
@@ -409,7 +410,11 @@ export interface ApiClient {
     id: string,
     input: { name: string; contentBase64: string; mimeType?: string; width?: number; height?: number },
   ): Promise<MoodboardAsset & { url: string }>;
-  generateMoodboardImage(id: string, prompt: string, options?: { x?: number; y?: number; generatorId?: string; model?: string }): Promise<{
+  generateMoodboardImage(
+    id: string,
+    prompt: string,
+    options?: { x?: number; y?: number; generatorId?: string; model?: string; sourceAssetId?: string },
+  ): Promise<{
     asset: MoodboardAsset & { url: string };
     nodes: MoodboardNode[];
     messages: MoodboardMessage[];

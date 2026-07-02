@@ -26,6 +26,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     aiProviderEnabled: false,
     aiProviderModels: "",
     aiProviderOrganization: "",
+    aiProviderProfiles: "",
     visualQaEnabled: false,
     ...overrides,
   };
@@ -37,6 +38,56 @@ test("imageModelOptions hides provider preset image models until the provider is
 
 test("imageModelOptions exposes image models from the enabled provider", () => {
   expect(imageModelOptions(settings({ aiProviderEnabled: true }))).toEqual(["gpt-image-1", "gpt-image-2"]);
+});
+
+test("useMoodboardBoard refreshes image model choices when settings change elsewhere", async () => {
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [],
+      assets: [],
+      messages: [],
+    }),
+    getSettings: async () =>
+      settings({
+        aiProviderEnabled: true,
+        aiProviderModels: JSON.stringify({ id: "gpt-image-1", capabilities: ["Image"] }),
+      }),
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.imageModels).toEqual(["gpt-image-1", "gpt-image-2"]));
+
+  await act(async () => {
+    window.dispatchEvent(
+      new CustomEvent("dezin:settings-updated", {
+        detail: settings({
+          aiProviderEnabled: true,
+          aiProviderId: "azure-openai",
+          imageModel: "azure-image-deployment",
+          aiProviderModels: JSON.stringify({ id: "azure-image-deployment", capabilities: ["Image"] }),
+        }),
+      }),
+    );
+  });
+
+  await waitFor(() => expect(board.imageModels).toContain("azure-image-deployment"));
+  expect(board.imageModel).toBe("azure-image-deployment");
 });
 
 test("imageModelOptions still honors an explicitly configured legacy image endpoint", () => {

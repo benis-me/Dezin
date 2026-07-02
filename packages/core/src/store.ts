@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS settings (
   ai_provider_enabled INTEGER NOT NULL DEFAULT 0,
   ai_provider_models TEXT,
   ai_provider_organization TEXT,
+  ai_provider_profiles TEXT,
   visual_qa_enabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS moodboards (
@@ -169,6 +170,7 @@ const DEFAULT_SETTINGS: Settings = {
   aiProviderEnabled: false,
   aiProviderModels: "gpt-image-1",
   aiProviderOrganization: "",
+  aiProviderProfiles: "",
   visualQaEnabled: false,
 };
 
@@ -362,6 +364,7 @@ export class Store {
     ensureColumn("settings", "ai_provider_enabled", "ai_provider_enabled INTEGER NOT NULL DEFAULT 0");
     ensureColumn("settings", "ai_provider_models", "ai_provider_models TEXT");
     ensureColumn("settings", "ai_provider_organization", "ai_provider_organization TEXT");
+    ensureColumn("settings", "ai_provider_profiles", "ai_provider_profiles TEXT");
     ensureColumn("settings", "visual_qa_enabled", "visual_qa_enabled INTEGER NOT NULL DEFAULT 0");
     ensureColumn("projects", "archived_at", "archived_at INTEGER");
     ensureColumn("projects", "active_variant_id", "active_variant_id TEXT");
@@ -966,6 +969,7 @@ export class Store {
       aiProviderEnabled: Number(r.ai_provider_enabled ?? 0) === 1,
       aiProviderModels: str(r.ai_provider_models, DEFAULT_SETTINGS.aiProviderModels),
       aiProviderOrganization: str(r.ai_provider_organization, DEFAULT_SETTINGS.aiProviderOrganization),
+      aiProviderProfiles: str(r.ai_provider_profiles, DEFAULT_SETTINGS.aiProviderProfiles),
       visualQaEnabled: Number(r.visual_qa_enabled ?? 0) === 1,
     };
   }
@@ -989,6 +993,7 @@ export class Store {
       aiProviderEnabled: patch.aiProviderEnabled ?? cur.aiProviderEnabled,
       aiProviderModels: patch.aiProviderModels ?? cur.aiProviderModels,
       aiProviderOrganization: patch.aiProviderOrganization ?? cur.aiProviderOrganization,
+      aiProviderProfiles: patch.aiProviderProfiles ?? cur.aiProviderProfiles,
       visualQaEnabled: patch.visualQaEnabled ?? cur.visualQaEnabled,
     };
     this.db
@@ -996,9 +1001,9 @@ export class Store {
         `INSERT INTO settings (id, agent_command, model, api_base_url, api_key, default_design_system_id, custom_instructions,
                                image_api_base_url, image_api_key, image_model,
                                video_api_base_url, video_api_key, video_model,
-                               ai_provider_id, ai_provider_enabled, ai_provider_models, ai_provider_organization,
+                               ai_provider_id, ai_provider_enabled, ai_provider_models, ai_provider_organization, ai_provider_profiles,
                                visual_qa_enabled)
-         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            agent_command = excluded.agent_command,
            model = excluded.model,
@@ -1016,6 +1021,7 @@ export class Store {
            ai_provider_enabled = excluded.ai_provider_enabled,
            ai_provider_models = excluded.ai_provider_models,
            ai_provider_organization = excluded.ai_provider_organization,
+           ai_provider_profiles = excluded.ai_provider_profiles,
            visual_qa_enabled = excluded.visual_qa_enabled`,
       )
       .run(
@@ -1035,6 +1041,7 @@ export class Store {
         next.aiProviderEnabled ? 1 : 0,
         next.aiProviderModels,
         next.aiProviderOrganization,
+        next.aiProviderProfiles,
         next.visualQaEnabled ? 1 : 0,
       );
     return next;

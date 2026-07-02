@@ -5,6 +5,7 @@ import { ModelProviderDetail } from "./ModelProviderDetail.tsx";
 import { ModelProviderSidebar } from "./ModelProviderSidebar.tsx";
 import { MODEL_PROVIDERS, type ProviderPreset } from "./model-provider-registry.ts";
 import { isModelCapability, serializeModelEntries } from "./model-provider-ui-utils.tsx";
+import { patchSelectedProviderProfile, providerProfile, selectProviderProfilePatch } from "./provider-profiles.ts";
 
 export function ModelProviderSettings({
   settings,
@@ -23,25 +24,22 @@ export function ModelProviderSettings({
     () => MODEL_PROVIDERS.filter((provider) => provider.name.toLowerCase().includes(query.trim().toLowerCase())),
     [query],
   );
-  const modelText = settings.aiProviderModels || serializeModelEntries(selected.models);
-  const baseUrl = settings.imageApiBaseUrl || settings.apiBaseUrl || selected.baseUrl;
+  const profile = providerProfile(settings, selected);
+  const detailSettings = { ...settings, aiProviderModels: profile.models, aiProviderOrganization: profile.organization };
+  const modelText = profile.models;
+  const baseUrl = profile.baseUrl;
   const apiKey = settings.imageApiKey || settings.apiKey;
   const apiKeyConfigured = Boolean(apiKey || settings.imageApiKeyConfigured || settings.apiKeyConfigured);
 
   const patchModelSettings = (patch: Partial<Settings>, save = false) => {
-    onLocalPatch(patch);
-    if (save) onSavePatch(patch);
+    const nextPatch = patchSelectedProviderProfile(settings, selected, patch);
+    onLocalPatch(nextPatch);
+    if (save) onSavePatch(nextPatch);
   };
 
   const selectProvider = (provider: ProviderPreset) => {
     setStatus(null);
-    onSavePatch({
-      aiProviderId: provider.id,
-      aiProviderModels: serializeModelEntries(provider.models),
-      apiBaseUrl: provider.baseUrl,
-      imageApiBaseUrl: provider.baseUrl,
-      videoApiBaseUrl: provider.baseUrl,
-    });
+    onSavePatch(selectProviderProfilePatch(settings, selected, provider));
   };
 
   const testConnection = async () => {
@@ -91,7 +89,7 @@ export function ModelProviderSettings({
       />
       <ModelProviderDetail
         selected={selected}
-        settings={settings}
+        settings={detailSettings}
         apiKey={apiKey}
         baseUrl={baseUrl}
         modelText={modelText}

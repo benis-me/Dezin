@@ -306,6 +306,10 @@ export async function handleListModelProviderModels(req: IncomingMessage, res: S
   const body = await readJsonBody(req);
   const settings = deps.store.getSettings();
   const providerId = selectedProviderId(body, settings);
+  if (providerId === "azure-openai") {
+    sendError(res, 502, "Azure OpenAI deployment names must be entered manually. Azure's data-plane model list returns a catalog, not your deployed model IDs.");
+    return;
+  }
   try {
     const models = await fetchProviderModels(settings, providerId, deps.modelProviderFetch ?? fetch);
     sendJson(res, 200, { models, source: "live" });

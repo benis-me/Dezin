@@ -46,7 +46,7 @@ export interface MoodboardCanvasProps {
   onAddSection: (point?: { x: number; y: number; width?: number; height?: number }) => void;
   onAddImageGenerator: (point?: { x: number; y: number }) => void;
   onUploadFiles: (files: FileList | null, point?: { x: number; y: number }) => void;
-  onGenerateImage: (node: MoodboardNode, prompt: string) => Promise<void>;
+  onGenerateImage: (node: MoodboardNode, prompt: string, options?: { sourceAssetId?: string }) => Promise<void>;
   onTopbarControlsChange?: (controls: MoodboardCanvasTopbarControls | null) => void;
 }
 

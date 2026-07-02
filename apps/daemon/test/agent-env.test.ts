@@ -20,6 +20,7 @@ const SETTINGS: Settings = {
   aiProviderEnabled: false,
   aiProviderModels: "",
   aiProviderOrganization: "org-test",
+  aiProviderProfiles: "",
   visualQaEnabled: false,
 };
 

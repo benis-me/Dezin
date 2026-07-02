@@ -13,6 +13,11 @@ import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui
 type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
 const SECRET_SETTING_KEYS = ["apiKey", "imageApiKey", "videoApiKey"] as const;
+export const SETTINGS_UPDATED_EVENT = "dezin:settings-updated";
+
+function publishSettingsUpdate(settings: Settings): void {
+  window.dispatchEvent(new CustomEvent<Settings>(SETTINGS_UPDATED_EVENT, { detail: settings }));
+}
 
 function mergeSettingsSaveResponse(current: Settings | null, next: Settings): Settings {
   const merged = { ...next };
@@ -24,8 +29,8 @@ function mergeSettingsSaveResponse(current: Settings | null, next: Settings): Se
 
 const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
   { id: "appearance", label: "Appearance", icon: Palette },
-  { id: "provider", label: "Provider", icon: Server },
-  { id: "models", label: "Models", icon: SlidersHorizontal },
+  { id: "provider", label: "Agents", icon: Server },
+  { id: "models", label: "Providers", icon: SlidersHorizontal },
   { id: "quality", label: "Quality", icon: Eye },
   { id: "defaults", label: "Defaults", icon: SlidersHorizontal },
   { id: "instructions", label: "Custom instructions", icon: Type },
@@ -64,8 +69,20 @@ export function SettingsScreen({
     };
   }, [api]);
 
-  const setLocal = (key: keyof Settings, value: string | boolean) => setSettings((s) => (s ? { ...s, [key]: value } : s));
-  const setLocalPatch = (patch: Partial<Settings>) => setSettings((s) => (s ? { ...s, ...patch } : s));
+  const setLocal = (key: keyof Settings, value: string | boolean) =>
+    setSettings((s) => {
+      if (!s) return s;
+      const next = { ...s, [key]: value };
+      publishSettingsUpdate(next);
+      return next;
+    });
+  const setLocalPatch = (patch: Partial<Settings>) =>
+    setSettings((s) => {
+      if (!s) return s;
+      const next = { ...s, ...patch };
+      publishSettingsUpdate(next);
+      return next;
+    });
   const save = (key: keyof Settings, value: string | boolean) => {
     setLocal(key, value);
     void api.updateSettings({ [key]: value } as Partial<Settings>).catch(() => toast("Couldn't save settings.", { variant: "error" }));
@@ -74,7 +91,13 @@ export function SettingsScreen({
     setLocalPatch(patch);
     void api
       .updateSettings(patch)
-      .then((next) => setSettings((current) => mergeSettingsSaveResponse(current, next)))
+      .then((next) =>
+        setSettings((current) => {
+          const merged = mergeSettingsSaveResponse(current, next);
+          publishSettingsUpdate(merged);
+          return merged;
+        }),
+      )
       .catch(() => toast("Couldn't save settings.", { variant: "error" }));
   };
 

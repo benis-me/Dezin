@@ -47,6 +47,10 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   const [quickEditOpen, setQuickEditOpen] = useState(false);
   const quickEditNode = canvas.selectedIds.length === 1 && canvas.selected?.type === "image" ? canvas.selected : null;
   const quickEditModel = quickEditNode ? generatorModel(quickEditNode) || imageModel : imageModel;
+  const quickEditSourceAssetId =
+    quickEditNode && typeof quickEditNode.data.assetId === "string" && quickEditNode.data.assetId.trim()
+      ? quickEditNode.data.assetId.trim()
+      : undefined;
 
   const openQuickEdit = useCallback(() => {
     if (!quickEditNode) return;
@@ -350,7 +354,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 }}
                 onGenerate={async (prompt) => {
                   canvas.recordHistory();
-                  await onGenerateImage(quickEditNode, prompt);
+                  await onGenerateImage(quickEditNode, prompt, { sourceAssetId: quickEditSourceAssetId });
                   setQuickEditOpen(false);
                 }}
                 onUploadFiles={(files) => uploadFilesNearNode(files, quickEditNode)}

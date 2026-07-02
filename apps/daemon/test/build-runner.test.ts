@@ -22,6 +22,7 @@ function settings(over: Partial<Settings>): Settings {
     aiProviderEnabled: false,
     aiProviderModels: "gpt-image-1",
     aiProviderOrganization: "",
+    aiProviderProfiles: "",
     visualQaEnabled: false,
     ...over,
   };

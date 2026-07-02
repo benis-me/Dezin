@@ -50,6 +50,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
       aiProviderEnabled: false,
       aiProviderModels: "gpt-image-1",
       aiProviderOrganization: "",
+      aiProviderProfiles: "",
       visualQaEnabled: false,
     }),
     updateSettings: notImpl as ApiClient["updateSettings"],
