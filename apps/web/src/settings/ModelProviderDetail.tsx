@@ -51,7 +51,18 @@ export function ModelProviderDetail({
 
   const setProviderField = (key: ProviderConfigFieldKey, value: string) => {
     if (key === "apiKey") {
-      onPatchModelSettings({ apiKey: value, imageApiKey: value, videoApiKey: value }, true);
+      const configured = value.length > 0;
+      onPatchModelSettings(
+        {
+          apiKey: value,
+          apiKeyConfigured: configured,
+          imageApiKey: value,
+          imageApiKeyConfigured: configured,
+          videoApiKey: value,
+          videoApiKeyConfigured: configured,
+        },
+        true,
+      );
       return;
     }
     if (key === "baseUrl") {

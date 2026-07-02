@@ -11,6 +11,7 @@ export function ModelProviderSidebar({
   activeProviderId,
   enabled,
   apiKey,
+  apiKeyConfigured = false,
   query,
   onQueryChange,
   onSelect,
@@ -20,6 +21,7 @@ export function ModelProviderSidebar({
   activeProviderId: Settings["aiProviderId"];
   enabled: boolean;
   apiKey: string;
+  apiKeyConfigured?: boolean;
   query: string;
   onQueryChange: (value: string) => void;
   onSelect: (provider: ProviderPreset) => void;
@@ -39,7 +41,7 @@ export function ModelProviderSidebar({
       <div className="mt-2 space-y-1">
         {providers.map((provider) => {
           const active = provider.id === selectedId;
-          const configured = provider.id === activeProviderId && enabled && Boolean(apiKey || provider.id === "mock" || provider.id === "ollama");
+          const configured = provider.id === activeProviderId && enabled && Boolean(apiKey || apiKeyConfigured || provider.id === "mock" || provider.id === "ollama");
           return (
             <button
               key={provider.id}

@@ -531,6 +531,54 @@ test("SettingsScreen keeps model API key drafts after redacted settings saves", 
   expect(apiKey).toHaveValue("sk-live-test");
 });
 
+test("SettingsScreen keeps provider status enabled after reopening with a redacted API key", async () => {
+  renderSettings({
+    getSettings: async () =>
+      settingsFixture({
+        aiProviderEnabled: true,
+        apiKey: "",
+        imageApiKey: "",
+        apiKeyConfigured: true,
+        imageApiKeyConfigured: true,
+      } as Partial<Settings>),
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Models" }));
+
+  expect(await screen.findByLabelText("OpenAI enabled")).toHaveClass("bg-[var(--success)]");
+});
+
+test("SettingsScreen tests the selected model provider through the daemon", async () => {
+  const user = userEvent.setup();
+  const testModelProvider = vi.fn(async () => ({ ok: true, message: "Connected to OpenAI. Found 2 models." }));
+  renderSettings({ testModelProvider });
+  fireEvent.click(screen.getByRole("button", { name: "Models" }));
+
+  await user.click(await screen.findByRole("button", { name: "Test connection" }));
+
+  expect(testModelProvider).toHaveBeenCalledWith("openai");
+  expect(await screen.findByText("Connected to OpenAI. Found 2 models.")).toBeInTheDocument();
+});
+
+test("SettingsScreen loads live model provider models through the daemon", async () => {
+  const user = userEvent.setup();
+  const listModelProviderModels = vi.fn(async () => ({
+    models: [{ id: "gpt-live-1", name: "GPT Live 1" }],
+  }));
+  const { updateSettings } = renderSettings({ listModelProviderModels });
+  fireEvent.click(screen.getByRole("button", { name: "Models" }));
+
+  await user.click(await screen.findByRole("button", { name: "Get model list" }));
+
+  expect(listModelProviderModels).toHaveBeenCalledWith("openai");
+  await waitFor(() =>
+    expect(updateSettings).toHaveBeenCalledWith({
+      aiProviderModels: JSON.stringify({ id: "gpt-live-1", name: "GPT Live 1" }),
+    }),
+  );
+  expect(await screen.findByText("Loaded 1 live model.")).toBeInTheDocument();
+});
+
 test("SettingsScreen theme toggle calls onToggleDark", async () => {
   const { onToggleDark } = renderSettings();
   fireEvent.click(await screen.findByText("Light"));

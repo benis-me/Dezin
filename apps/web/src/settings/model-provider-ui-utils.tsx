@@ -63,7 +63,7 @@ function parseModelEntry(line: string): ModelProviderEntry | null {
   return { id: line };
 }
 
-function isModelCapability(value: unknown): value is ModelCapability {
+export function isModelCapability(value: unknown): value is ModelCapability {
   return ["Stream", "Tools", "Vision", "JSON", "Reasoning", "Image", "Video", "Local"].includes(String(value));
 }
 

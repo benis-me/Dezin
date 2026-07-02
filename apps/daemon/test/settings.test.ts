@@ -82,6 +82,9 @@ test("GET /api/settings redacts stored provider secrets", async () => {
     assert.equal(fetched.apiKey, "");
     assert.equal(fetched.imageApiKey, "");
     assert.equal(fetched.videoApiKey, "");
+    assert.equal(fetched.apiKeyConfigured, true);
+    assert.equal(fetched.imageApiKeyConfigured, true);
+    assert.equal(fetched.videoApiKeyConfigured, true);
     assert.equal(fetched.imageApiBaseUrl, "https://images.example.test/v1");
     assert.equal(fetched.videoApiBaseUrl, "https://videos.example.test/v1");
   });

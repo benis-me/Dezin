@@ -74,8 +74,11 @@ export function assertSafeId(id: string, label = "id"): string {
 export function redactSettings(settings: Settings): Settings {
   return {
     ...settings,
+    apiKeyConfigured: settings.apiKey.length > 0,
     apiKey: "",
+    imageApiKeyConfigured: settings.imageApiKey.length > 0,
     imageApiKey: "",
+    videoApiKeyConfigured: settings.videoApiKey.length > 0,
     videoApiKey: "",
   };
 }

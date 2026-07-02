@@ -35,6 +35,7 @@ import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } fro
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
+import { handleListModelProviderModels, handleTestModelProvider } from "./model-provider-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
@@ -85,6 +86,8 @@ export interface AppDeps {
   titleGenerator?: TitleGenerator;
   /** Moodboard chat one-shot agent hook; tests can avoid launching a real CLI. */
   moodboardAgentText?: MoodboardAgentTextRunner;
+  /** Provider model-list fetcher; tests can avoid real network calls. */
+  modelProviderFetch?: typeof fetch;
   /** Optional local API boundary guard. */
   security?: DaemonSecurityOptions;
   /** Unique owner id for this daemon process; persisted on newly-created runs. */
@@ -221,6 +224,16 @@ const routes: Route[] = [
       }
       sendJson(res, 200, redactSettings(store.updateSettings(body as Partial<Settings>)));
     },
+  },
+  {
+    method: "POST",
+    pattern: "/api/model-providers/test",
+    handler: (req, res, _p, deps) => handleTestModelProvider(req, res, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/model-providers/models",
+    handler: (req, res, _p, deps) => handleListModelProviderModels(req, res, deps),
   },
   {
     method: "GET",

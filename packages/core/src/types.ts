@@ -177,6 +177,8 @@ export interface Settings {
   apiBaseUrl: string;
   /** Optional API key (BYOK). Stored locally; never leaves the machine. */
   apiKey: string;
+  /** Redacted API responses set this when a local API key exists. Not persisted as a separate setting. */
+  apiKeyConfigured?: boolean;
   /** Design system applied when a project pins none. */
   defaultDesignSystemId: string;
   /** Project-agnostic instructions injected into every generation. */
@@ -185,12 +187,16 @@ export interface Settings {
   imageApiBaseUrl: string;
   /** Optional image-generation API key. Stored locally; never leaves the machine. */
   imageApiKey: string;
+  /** Redacted API responses set this when a local image API key exists. Not persisted as a separate setting. */
+  imageApiKeyConfigured?: boolean;
   /** Optional image model, e.g. "gpt-image-1" / "dall-e-3". */
   imageModel: string;
   /** Optional video-generation endpoint. Reserved for Moodboard video generation. */
   videoApiBaseUrl: string;
   /** Optional video-generation API key. Stored locally; never leaves the machine. */
   videoApiKey: string;
+  /** Redacted API responses set this when a local video API key exists. Not persisted as a separate setting. */
+  videoApiKeyConfigured?: boolean;
   /** Optional video model, e.g. "sora". */
   videoModel: string;
   /** Selected AI provider in the model platform settings. */

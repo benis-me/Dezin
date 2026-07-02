@@ -49,5 +49,15 @@ test("ModelProviderDetail autosaves connection edits without a Save configuratio
   expect(screen.queryByRole("button", { name: "Save configuration" })).toBeNull();
 
   fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "sk-test" } });
-  expect(onPatchModelSettings).toHaveBeenLastCalledWith({ apiKey: "sk-test", imageApiKey: "sk-test", videoApiKey: "sk-test" }, true);
+  expect(onPatchModelSettings).toHaveBeenLastCalledWith(
+    {
+      apiKey: "sk-test",
+      apiKeyConfigured: true,
+      imageApiKey: "sk-test",
+      imageApiKeyConfigured: true,
+      videoApiKey: "sk-test",
+      videoApiKeyConfigured: true,
+    },
+    true,
+  );
 });

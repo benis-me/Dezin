@@ -53,6 +53,8 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
       visualQaEnabled: false,
     }),
     updateSettings: notImpl as ApiClient["updateSettings"],
+    testModelProvider: async () => ({ ok: true, message: "Connected." }),
+    listModelProviderModels: async () => ({ models: [] }),
     listAgents: async () => [],
     rescanAgents: async () => [],
     async *scanAgentsStream() {

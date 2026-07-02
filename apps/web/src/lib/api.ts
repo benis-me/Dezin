@@ -188,19 +188,38 @@ export interface Settings {
   model: string;
   apiBaseUrl: string;
   apiKey: string;
+  apiKeyConfigured?: boolean;
   defaultDesignSystemId: string;
   customInstructions: string;
   imageApiBaseUrl: string;
   imageApiKey: string;
+  imageApiKeyConfigured?: boolean;
   imageModel: string;
   videoApiBaseUrl: string;
   videoApiKey: string;
+  videoApiKeyConfigured?: boolean;
   videoModel: string;
   aiProviderId: string;
   aiProviderEnabled: boolean;
   aiProviderModels: string;
   aiProviderOrganization: string;
   visualQaEnabled: boolean;
+}
+
+export interface ModelProviderModel {
+  id: string;
+  name?: string;
+  capabilities?: string[];
+}
+
+export interface ModelProviderTestResult {
+  ok: boolean;
+  message: string;
+}
+
+export interface ModelProviderModelsResult {
+  models: ModelProviderModel[];
+  source?: string;
 }
 
 export interface AgentInfo {
@@ -337,6 +356,8 @@ export interface ApiClient {
   listSkills(): Promise<SkillCard[]>;
   getSettings(): Promise<Settings>;
   updateSettings(patch: Partial<Settings>): Promise<Settings>;
+  testModelProvider(providerId: string): Promise<ModelProviderTestResult>;
+  listModelProviderModels(providerId: string): Promise<ModelProviderModelsResult>;
   listAgents(): Promise<AgentInfo[]>;
   rescanAgents(): Promise<AgentInfo[]>;
   /** Rescan with per-agent progress (SSE). Yields progress events, then a final "done". */
@@ -535,6 +556,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     listSkills: () => json<SkillCard[]>("/api/skills"),
     getSettings: () => json<Settings>("/api/settings"),
     updateSettings: (patch) => json<Settings>("/api/settings", jsonInit("PUT", patch)),
+    testModelProvider: (providerId) => json<ModelProviderTestResult>("/api/model-providers/test", jsonInit("POST", { providerId })),
+    listModelProviderModels: (providerId) => json<ModelProviderModelsResult>("/api/model-providers/models", jsonInit("POST", { providerId })),
     listAgents: () => json<AgentInfo[]>("/api/agents"),
     rescanAgents: () => json<AgentInfo[]>("/api/agents/rescan", { method: "POST" }),
     getHealth: () => json<Health>("/api/health"),
