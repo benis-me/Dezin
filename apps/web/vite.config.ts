@@ -2,6 +2,7 @@ import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
 /**
@@ -42,6 +43,9 @@ function configureDaemonProxy(proxy: { on: Function }) {
 }
 
 const target = daemonTarget();
+const require = createRequire(import.meta.url);
+const nucleoFill18PackageDir = dirname(require.resolve("nucleo-ui-essential-fill-18/package.json"));
+const nucleoFill18Runtime = join(nucleoFill18PackageDir, "dist", "min", "index.min.js");
 // Dev server port. Override with DEZIN_WEB_PORT; defaults off the common 5173.
 const webPort = Number(process.env.DEZIN_WEB_PORT ?? 6273);
 
@@ -78,7 +82,10 @@ const router = () => daemonTarget();
 export default defineConfig({
   plugins: [react(), tailwindcss(), webPortfilePlugin()],
   resolve: {
-    alias: { "@": join(import.meta.dirname, "src") },
+    alias: {
+      "@": join(import.meta.dirname, "src"),
+      "nucleo-ui-essential-fill-18": nucleoFill18Runtime,
+    },
     // pnpm can resolve a second React instance for radix-ui → "Invalid hook call".
     // Force a single copy of React across the app and component libs.
     dedupe: ["react", "react-dom"],

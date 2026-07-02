@@ -51,11 +51,19 @@ function appendUniqueMessages(current: MoodboardMessage[], next: MoodboardMessag
   return merged;
 }
 
+function mergeAssets(current: MoodboardAsset[], next: MoodboardAsset[]): MoodboardAsset[] {
+  if (!next.length) return current;
+  const byId = new Map(current.map((asset) => [asset.id, asset]));
+  for (const asset of next) byId.set(asset.id, asset);
+  return [...byId.values()];
+}
+
 export function useMoodboardBoard(boardId: string) {
   const api = useApi();
   const { toast } = useToast();
   const [detail, setDetail] = useState<MoodboardDetail | null>(null);
   const [nodes, setNodes] = useState<MoodboardNode[]>([]);
+  const [assets, setAssets] = useState<MoodboardAsset[]>([]);
   const [conversations, setConversations] = useState<MoodboardConversation[]>([]);
   const [conversationId, setConversationId] = useState("");
   const [messages, setMessages] = useState<MoodboardMessage[]>([]);
@@ -80,6 +88,7 @@ export function useMoodboardBoard(boardId: string) {
       .then((next) => {
         setDetail(next);
         setNodes(next.nodes);
+        setAssets(next.assets ?? []);
         setConversations(next.conversations ?? []);
         setConversationId(next.activeConversationId ?? next.conversations?.[0]?.id ?? "");
         setMessages(next.messages);
@@ -216,6 +225,7 @@ export function useMoodboardBoard(boardId: string) {
       const node = createImageGeneratorNode(nodes.length, point, data);
       appendNodes([node]);
       setSelectedIds(node.id ? [node.id] : []);
+      return node.id;
     },
     [appendNodes, nodes.length],
   );
@@ -267,6 +277,7 @@ export function useMoodboardBoard(boardId: string) {
             }),
           );
         }
+        if (assets.length) setAssets((current) => mergeAssets(current, assets));
         return assets;
       } catch {
         toast("Couldn't upload those reference images.", { variant: "error" });
@@ -321,6 +332,7 @@ export function useMoodboardBoard(boardId: string) {
           y: node.y,
         });
         setNodes(result.nodes);
+        setAssets((current) => mergeAssets(current, [result.asset]));
         if (agentConversationId && agentConversationId === conversationId && result.messages.length) {
           setMessages((current) => appendUniqueMessages(current, result.messages));
         }
@@ -436,6 +448,7 @@ export function useMoodboardBoard(boardId: string) {
   return {
     detail,
     nodes,
+    assets,
     conversations,
     conversationId,
     messages,

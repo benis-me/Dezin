@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MoodboardConversation, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
@@ -519,6 +519,13 @@ test("nodeIdFromTarget reads reconciler node ids from parent data", () => {
   expect(nodeIdFromTarget({ parent: { data: { nodeId: "n2" } } })).toBe("n2");
 });
 
+test("nodeIdFromTarget reads selected nodes from editor resize handles", () => {
+  const editorTarget = { data: { nodeId: "img1" } };
+  const resizeHandle = { pointType: "resize", editor: { target: editorTarget }, parent: null };
+
+  expect(nodeIdFromTarget(resizeHandle)).toBe("img1");
+});
+
 test("nodeIdsFromTarget reads multi-selection editor targets in order", () => {
   expect(nodeIdsFromTarget([{ data: { nodeId: "a" } }, { parent: { data: { nodeId: "b" } } }, { data: { nodeId: "a" } }])).toEqual(["a", "b"]);
 });
@@ -849,6 +856,60 @@ test("MoodboardCanvasNode keeps section labels out of the Leafer node body", () 
 
   expect(container.querySelector('text[text="Direction"]')).toBeNull();
   expect(container.querySelector("rect")).toHaveAttribute("hittable", "false");
+});
+
+test("MoodboardCanvasNode renders node bodies with square corners", () => {
+  const base = {
+    boardId: "b1",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const nodes: MoodboardNode[] = [
+    { ...base, id: "image-1", type: "image", data: { url: "/asset.png", assetId: "asset-1" } },
+    { ...base, id: "generator-1", type: "image-generator", data: { generatorPrompt: "soft light" } },
+    { ...base, id: "video-1", type: "video", data: {} },
+    { ...base, id: "note-1", type: "note", data: { text: "Note" } },
+    { ...base, id: "section-1", type: "section", zIndex: -1, data: { title: "Direction" } },
+  ];
+
+  const { container } = render(
+    <>
+      {nodes.map((node) => (
+        <MoodboardCanvasNode key={node.id} node={node} />
+      ))}
+    </>,
+  );
+
+  expect(container.querySelectorAll("[cornerradius], [cornerRadius]")).toHaveLength(0);
+});
+
+test("MoodboardCanvasNode renders image generators without a dashed border and with the mountain image icon", () => {
+  const generator: MoodboardNode = {
+    id: "generator-1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 320,
+    height: 180,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  const { container } = render(<MoodboardCanvasNode node={generator} />);
+
+  expect(container.querySelectorAll("[dashpattern], [dashPattern]")).toHaveLength(0);
+  expect(container.querySelectorAll("rect")).toHaveLength(1);
+  expect(container.querySelector("image")).toHaveAttribute("url", expect.stringContaining("IconImageMountainFill18"));
 });
 
 test("MoodboardSectionLabels lets section titles be edited outside the canvas node", () => {
@@ -1540,10 +1601,10 @@ test("MoodboardPropertiesPanel pins image actions at the bottom and reuses gener
   expect(screen.getByTestId("moodboard-properties-panel")).toHaveClass("bottom-4");
   expect(screen.getByTestId("moodboard-properties-actions")).toHaveClass("sticky");
   expect(screen.getByRole("button", { name: "Edit image" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Use Prompt" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Reuse Prompt" })).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Edit image" }));
-  fireEvent.click(screen.getByRole("button", { name: "Use Prompt" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reuse Prompt" }));
 
   expect(onEditImage).toHaveBeenCalledOnce();
   expect(onUsePrompt).toHaveBeenCalledOnce();
@@ -1651,6 +1712,54 @@ test("MoodboardAgentPanel renders project-style assistant messages with copy act
 
   fireEvent.click(screen.getByLabelText("Copy message"));
   expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
+});
+
+test("MoodboardAgentPanel inserts external canvas context into the composer and focuses it", async () => {
+  const onSend = vi.fn().mockResolvedValue(undefined);
+  const Panel = MoodboardAgentPanel as any;
+  const { rerender } = render(
+    <ApiProvider client={makeFakeApi()}>
+      <Panel
+        boardName="Material board"
+        messages={[]}
+        busy={false}
+        agents={[]}
+        agent=""
+        model=""
+        onBack={() => {}}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => {}}
+        onSend={onSend}
+      />
+    </ApiProvider>,
+  );
+
+  rerender(
+    <ApiProvider client={makeFakeApi()}>
+      <Panel
+        boardName="Material board"
+        messages={[]}
+        busy={false}
+        agents={[]}
+        agent=""
+        model=""
+        composerInsertion={{ id: 1, text: "Selected moodboard nodes:\n- note-1: Material tone" }}
+        onBack={() => {}}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => {}}
+        onSend={onSend}
+      />
+    </ApiProvider>,
+  );
+
+  const message = screen.getByLabelText("Message") as HTMLTextAreaElement;
+  await waitFor(() => expect(message).toHaveFocus());
+  expect(message).toHaveValue("Selected moodboard nodes:\n- note-1: Material tone");
+
+  fireEvent.keyDown(message, { key: "Enter" });
+  await waitFor(() => expect(onSend).toHaveBeenCalledWith("Selected moodboard nodes:\n- note-1: Material tone"));
 });
 
 test("MoodboardAgentPanel exposes moodboard conversations in the project conversation control", () => {
@@ -1937,6 +2046,7 @@ test("MoodboardPropertiesPanel shows concrete layout values", () => {
 test("SelectionToolbar exposes compact object actions", () => {
   const onDuplicate = vi.fn();
   const onDelete = vi.fn();
+  const onSendToAgent = vi.fn();
   const node: MoodboardNode = {
     id: "n1",
     boardId: "b1",
@@ -1951,18 +2061,23 @@ test("SelectionToolbar exposes compact object actions", () => {
     createdAt: 1,
     updatedAt: 1,
   };
+  const Toolbar = SelectionToolbar as any;
 
   render(
-    <SelectionToolbar
+    <Toolbar
       node={node}
       onDuplicate={onDuplicate}
       onDelete={onDelete}
+      onSendToAgent={onSendToAgent}
     />,
   );
 
+  expect(screen.getByRole("button", { name: "Send to Agent" })).toHaveTextContent("Enter");
+  fireEvent.click(screen.getByRole("button", { name: "Send to Agent" }));
   fireEvent.click(screen.getByLabelText("Duplicate"));
   fireEvent.click(screen.getByLabelText("Delete"));
 
+  expect(onSendToAgent).toHaveBeenCalledOnce();
   expect(onDuplicate).toHaveBeenCalledOnce();
   expect(onDelete).toHaveBeenCalledOnce();
   expect(screen.queryByLabelText("Bring to front")).toBeNull();
@@ -2037,6 +2152,7 @@ test("MultiSelectionToolbar exposes batch node actions", () => {
   const onAlign = vi.fn();
   const onArrange = vi.fn();
   const onDelete = vi.fn();
+  const onSendToAgent = vi.fn();
   const first: MoodboardNode = {
     id: "n1",
     boardId: "b1",
@@ -2056,18 +2172,21 @@ test("MultiSelectionToolbar exposes batch node actions", () => {
     id: "n2",
     data: { content: "Hidden reference", visible: false, locked: true },
   };
+  const Toolbar = MultiSelectionToolbar as any;
 
   render(
-    <MultiSelectionToolbar
+    <Toolbar
       nodes={[first, second]}
       onDuplicate={onDuplicate}
       onAlign={onAlign}
       onArrange={onArrange}
       onDelete={onDelete}
+      onSendToAgent={onSendToAgent}
     />,
   );
 
   expect(screen.getByText("2 selected")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Send to Agent" }));
   fireEvent.click(screen.getByLabelText("Duplicate selected"));
   fireEvent.click(screen.getByLabelText("Align selected"));
   expect(screen.getByText("Align right").closest("[data-moodboard-toolbar]")).not.toBeNull();
@@ -2075,12 +2194,54 @@ test("MultiSelectionToolbar exposes batch node actions", () => {
   fireEvent.click(screen.getByLabelText("Arrange selected"));
   fireEvent.click(screen.getByLabelText("Delete selected"));
 
+  expect(onSendToAgent).toHaveBeenCalledOnce();
   expect(onDuplicate).toHaveBeenCalledOnce();
   expect(onAlign).toHaveBeenCalledWith("left");
   expect(onArrange).toHaveBeenCalledOnce();
   expect(onDelete).toHaveBeenCalledOnce();
   expect(screen.queryByLabelText("Bring selected to front")).toBeNull();
   expect(screen.queryByLabelText("Hide selected")).toBeNull();
+});
+
+test("MoodboardContextMenu exposes Send to Agent and Quick Edit for image selections", () => {
+  const onSendToAgent = vi.fn();
+  const onQuickEdit = vi.fn();
+  const node: MoodboardNode = {
+    id: "img1",
+    boardId: "b1",
+    type: "image",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { url: "dezin://assets/reference.png" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const Menu = MoodboardContextMenu as any;
+
+  render(
+    <Menu
+      menu={{ x: 24, y: 32, canvasX: 240, canvasY: 260, targetId: node.id }}
+      targetId={node.id}
+      targetNode={node}
+      onClose={() => {}}
+      onAddNote={() => {}}
+      onAddSection={() => {}}
+      onGenerate={() => {}}
+      onSendToAgent={onSendToAgent}
+      onQuickEdit={onQuickEdit}
+    />,
+  );
+
+  expect(screen.getByText("Enter")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Send to Agent"));
+  fireEvent.click(screen.getByText("Quick Edit"));
+
+  expect(onSendToAgent).toHaveBeenCalledOnce();
+  expect(onQuickEdit).toHaveBeenCalledOnce();
 });
 
 test("MultiSelectionToolbar does not expose quick edit for multi-image selections", () => {
@@ -2154,6 +2315,40 @@ test("GeneratorPromptToolbar exposes a compact image model selector", () => {
   expect(onModelChange).toHaveBeenCalledWith("gpt-image-2");
 });
 
+test("GeneratorPromptToolbar places the prompt caret at the end after autofocus", async () => {
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light", generatorStatus: "ready" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <GeneratorPromptToolbar
+      node={node}
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      onModelChange={() => {}}
+      onPromptChange={() => {}}
+      onGenerate={async () => {}}
+    />,
+  );
+
+  const prompt = screen.getByLabelText("Image generator prompt") as HTMLTextAreaElement;
+  await waitFor(() => expect(prompt).toHaveFocus());
+  expect(prompt.selectionStart).toBe("soft light".length);
+  expect(prompt.selectionEnd).toBe("soft light".length);
+});
+
 test("GeneratorPromptToolbar exposes model parameters and submits them with the prompt", async () => {
   const onGenerate = vi.fn().mockResolvedValue(undefined);
   const node: MoodboardNode = {
@@ -2186,6 +2381,8 @@ test("GeneratorPromptToolbar exposes model parameters and submits them with the 
 
   fireEvent.click(screen.getByLabelText("Image generation parameters"));
   expect(screen.getByText("Image settings")).toBeInTheDocument();
+  expect(screen.getByLabelText("Image generation parameters")).toHaveClass("rounded-md");
+  expect(screen.getByLabelText("Image generation parameters")).not.toHaveClass("rounded-full");
   fireEvent.click(screen.getByRole("button", { name: "High" }));
   fireEvent.click(screen.getByRole("button", { name: "16:9" }));
   fireEvent.click(screen.getByRole("button", { name: "1536 x 1024" }));
@@ -2205,10 +2402,7 @@ test("GeneratorPromptToolbar exposes model parameters and submits them with the 
   );
 });
 
-test("GeneratorPromptToolbar exposes reference image actions and submits reference asset ids", async () => {
-  const onGenerate = vi.fn().mockResolvedValue(undefined);
-  const onUploadReferenceFiles = vi.fn();
-  const onSelectCanvasReference = vi.fn();
+test("GeneratorPromptToolbar shows reference image previews from supplied board assets", () => {
   const node: MoodboardNode = {
     id: "g1",
     boardId: "b1",
@@ -2219,14 +2413,67 @@ test("GeneratorPromptToolbar exposes reference image actions and submits referen
     height: 240,
     rotation: 0,
     zIndex: 0,
-    data: { generatorPrompt: "soft light", referenceAssetIds: ["asset-ref"] },
+    data: {
+      generatorPrompt: "soft light",
+      referenceAssetIds: ["asset-a", "asset-b"],
+    },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <GeneratorPromptToolbar
+      node={node}
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      referenceImages={[
+        { assetId: "asset-a", url: "/api/moodboards/b1/assets/asset-a", name: "first reference.png" },
+        { assetId: "asset-b", url: "/api/moodboards/b1/assets/asset-b", name: "second reference.png" },
+      ]}
+      onModelChange={() => {}}
+      onPromptChange={() => {}}
+      onGenerate={async () => {}}
+    />,
+  );
+
+  expect(screen.getByAltText("first reference.png")).toHaveAttribute("src", "/api/moodboards/b1/assets/asset-a");
+  expect(screen.getByAltText("second reference.png")).toHaveAttribute("src", "/api/moodboards/b1/assets/asset-b");
+  expect(screen.getByText("#1")).toBeInTheDocument();
+  expect(screen.getByText("#2")).toBeInTheDocument();
+});
+
+test("GeneratorPromptToolbar exposes reference image actions and submits reference asset ids", async () => {
+  const onGenerate = vi.fn().mockResolvedValue(undefined);
+  const onUploadReferenceFiles = vi.fn();
+  const onSelectCanvasReference = vi.fn();
+  const onReferenceAssetIdsChange = vi.fn();
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: {
+      generatorPrompt: "soft light",
+      referenceAssetIds: ["asset-a", "asset-b"],
+      referenceAssets: [
+        { assetId: "asset-a", url: "/api/moodboards/b1/assets/asset-a", name: "first reference.png" },
+        { assetId: "asset-b", url: "/api/moodboards/b1/assets/asset-b", name: "second reference.png" },
+      ],
+    },
     createdAt: 1,
     updatedAt: 1,
   };
   const files = [new File(["image"], "material.png", { type: "image/png" })] as unknown as FileList;
+  const Toolbar = GeneratorPromptToolbar as any;
 
   render(
-    <GeneratorPromptToolbar
+    <Toolbar
       node={node}
       busy={false}
       models={["gpt-image-1"]}
@@ -2236,11 +2483,25 @@ test("GeneratorPromptToolbar exposes reference image actions and submits referen
       onGenerate={onGenerate}
       onUploadReferenceFiles={onUploadReferenceFiles}
       onSelectCanvasReference={onSelectCanvasReference}
+      onReferenceAssetIdsChange={onReferenceAssetIdsChange}
     />,
   );
 
-  expect(screen.getByLabelText("Reference images")).toHaveTextContent("1");
-  fireEvent.click(screen.getByLabelText("Reference images"));
+  const referenceStrip = screen.getByLabelText("Reference images");
+  expect(referenceStrip).toHaveTextContent("first reference.png");
+  expect(referenceStrip).toHaveTextContent("second reference.png");
+  expect(screen.getByAltText("first reference.png")).toHaveAttribute("src", "/api/moodboards/b1/assets/asset-a");
+
+  fireEvent.click(screen.getByRole("button", { name: "Move reference image second reference.png before previous" }));
+  expect(onReferenceAssetIdsChange).toHaveBeenCalledWith(["asset-b", "asset-a"]);
+  expect(within(referenceStrip).getAllByRole("img").map((image) => image.getAttribute("alt"))).toEqual(["second reference.png", "first reference.png"]);
+
+  fireEvent.click(screen.getByRole("button", { name: "Remove reference image second reference.png" }));
+  expect(onReferenceAssetIdsChange).toHaveBeenLastCalledWith(["asset-a"]);
+  expect(within(referenceStrip).getAllByRole("img").map((image) => image.getAttribute("alt"))).toEqual(["first reference.png"]);
+
+  fireEvent.click(screen.getByLabelText("Add reference image"));
+  expect(screen.getByRole("button", { name: "从本地上传图片" }).closest("[data-slot='popover-content']")).not.toHaveClass("rounded-xl");
   expect(screen.getByRole("button", { name: "从本地上传图片" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "从画布选择" }));
   expect(onSelectCanvasReference).toHaveBeenCalledOnce();
@@ -2254,9 +2515,42 @@ test("GeneratorPromptToolbar exposes reference image actions and submits referen
     expect(onGenerate).toHaveBeenCalledWith(
       "soft light",
       expect.any(Object),
-      expect.objectContaining({ referenceAssetIds: ["asset-ref"] }),
+      expect.objectContaining({ referenceAssetIds: ["asset-a"] }),
     ),
   );
+});
+
+test("GeneratorPromptToolbar starts reference input as a square add tile", () => {
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <GeneratorPromptToolbar
+      node={node}
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      onModelChange={() => {}}
+      onPromptChange={() => {}}
+      onGenerate={async () => {}}
+    />,
+  );
+
+  const addButton = screen.getByLabelText("Add reference image");
+  expect(addButton.className).toContain("aspect-square");
+  expect(addButton).not.toHaveTextContent("参考图");
 });
 
 test("GeneratorPromptToolbar enters a disabled loading state while generating", async () => {
@@ -2307,6 +2601,7 @@ test("GeneratorPromptToolbar enters a disabled loading state while generating", 
 test("GeneratorPromptToolbar keeps prompt interactions out of the canvas event layer", () => {
   const onCanvasPointerDown = vi.fn();
   const onCanvasClick = vi.fn();
+  const onCanvasContextMenu = vi.fn((event: { preventDefault: () => void }) => event.preventDefault());
   const node: MoodboardNode = {
     id: "g1",
     boardId: "b1",
@@ -2323,7 +2618,7 @@ test("GeneratorPromptToolbar keeps prompt interactions out of the canvas event l
   };
 
   render(
-    <div onPointerDown={onCanvasPointerDown} onClick={onCanvasClick}>
+    <div onPointerDown={onCanvasPointerDown} onClick={onCanvasClick} onContextMenu={onCanvasContextMenu}>
       <GeneratorPromptToolbar
         node={node}
         busy={false}
@@ -2338,9 +2633,13 @@ test("GeneratorPromptToolbar keeps prompt interactions out of the canvas event l
 
   fireEvent.pointerDown(screen.getByLabelText("Image generator prompt"));
   fireEvent.click(screen.getByLabelText("Image generation model"));
+  const contextEvent = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+  screen.getByLabelText("Image generator prompt").dispatchEvent(contextEvent);
 
   expect(onCanvasPointerDown).not.toHaveBeenCalled();
   expect(onCanvasClick).not.toHaveBeenCalled();
+  expect(onCanvasContextMenu).not.toHaveBeenCalled();
+  expect(contextEvent.defaultPrevented).toBe(false);
 });
 
 test("GeneratorPromptToolbar accepts dropped image files through the upload path", () => {
@@ -2390,16 +2689,39 @@ test("QuickEditPromptToolbar submits image variations with the selected model", 
       busy={false}
       models={["gpt-image-1"]}
       model="gpt-image-1"
+      imageProviderId="openai"
       onModelChange={onModelChange}
       onGenerate={onGenerate}
     />,
   );
 
+  fireEvent.click(screen.getByLabelText("Image generation parameters"));
+  fireEvent.click(screen.getByRole("button", { name: "High" }));
   fireEvent.change(screen.getByLabelText("Quick edit prompt"), { target: { value: "make it warmer" } });
   fireEvent.click(screen.getByRole("button", { name: "Generate" }));
 
-  expect(onGenerate).toHaveBeenCalledWith("make it warmer", expect.objectContaining({ referenceAssetIds: [] }));
+  expect(onGenerate).toHaveBeenCalledWith(
+    "make it warmer",
+    expect.objectContaining({
+      referenceAssetIds: [],
+      params: expect.objectContaining({ quality: "high" }),
+    }),
+  );
   expect(screen.getByLabelText("Image generation model")).toHaveTextContent("gpt-image-1");
+});
+
+test("QuickEditPromptToolbar focuses the prompt when it appears", async () => {
+  render(
+    <QuickEditPromptToolbar
+      busy={false}
+      models={["gpt-image-1"]}
+      model="gpt-image-1"
+      onModelChange={() => {}}
+      onGenerate={async () => {}}
+    />,
+  );
+
+  await waitFor(() => expect(screen.getByLabelText("Quick edit prompt")).toHaveFocus());
 });
 
 test("QuickEditPromptToolbar exposes reference image actions and submits references", async () => {
@@ -2420,7 +2742,7 @@ test("QuickEditPromptToolbar exposes reference image actions and submits referen
     />,
   );
 
-  fireEvent.click(screen.getByLabelText("Reference images"));
+  fireEvent.click(screen.getByLabelText("Add reference image"));
   fireEvent.click(screen.getByRole("button", { name: "从画布选择" }));
   expect(onSelectCanvasReference).toHaveBeenCalledOnce();
 
@@ -2429,6 +2751,30 @@ test("QuickEditPromptToolbar exposes reference image actions and submits referen
   await waitFor(() =>
     expect(onGenerate).toHaveBeenCalledWith("make it warmer", expect.objectContaining({ referenceAssetIds: ["asset-ref"] })),
   );
+});
+
+test("MoodboardPropertiesPanel labels reusable image prompts as Reuse Prompt", () => {
+  const onUsePrompt = vi.fn();
+  const node: MoodboardNode = {
+    id: "img1",
+    boardId: "b1",
+    type: "image",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { source: "generated", prompt: "soft light", model: "gpt-image-1", assetId: "asset-1", url: "/asset.png" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(<MoodboardPropertiesPanel node={node} onPatch={() => {}} onPatchData={() => {}} onGenerate={() => {}} onEditImage={() => {}} onUsePrompt={onUsePrompt} />);
+
+  expect(screen.queryByRole("button", { name: "Use Prompt" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Reuse Prompt" }));
+  expect(onUsePrompt).toHaveBeenCalledWith(node);
 });
 
 test("QuickEditPromptToolbar keeps the prompt disabled while the image edit is running", async () => {
@@ -2497,4 +2843,11 @@ test("Moodboard layers default closed until the user opens them", () => {
   expect(readInitialLayersOpen()).toBe(false);
   localStorage.setItem("dezin:moodboard:layers-open", "1");
   expect(readInitialLayersOpen()).toBe(true);
+});
+
+test("context target resolution keeps selected nodes active when tapping editor resize handles", () => {
+  const editorTarget = { data: { nodeId: "img1" } };
+  const resizeHandle = { pointType: "resize", editor: { target: editorTarget }, parent: null };
+
+  expect(contextTargetIdFromEvent(resizeHandle, editorTarget)).toBe("img1");
 });

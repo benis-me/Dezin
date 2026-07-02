@@ -1,5 +1,7 @@
 import { Frame, Img, Rect, Txt } from "@dezin/leafer-react";
+import { IconImageMountainFill18 } from "nucleo-ui-essential-fill-18";
 import { Platform } from "leafer-editor";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { MoodboardNode } from "../lib/api.ts";
 import {
   assetUrl,
@@ -15,7 +17,6 @@ import {
 } from "./canvas-utils.ts";
 
 export function MoodboardCanvasNode({ node }: { node: MoodboardNode }) {
-  const radius = node.type === "section" ? 6 : 8;
   const locked = isNodeLocked(node);
   const visible = isNodeVisible(node);
   const data = { nodeId: node.id, node };
@@ -42,18 +43,18 @@ export function MoodboardCanvasNode({ node }: { node: MoodboardNode }) {
       resizeChildren
       data={data}
     >
-      <NodeBody node={node} radius={radius} data={data} />
+      <NodeBody node={node} data={data} />
     </Frame>
   );
 }
 
-function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number; data: Record<string, unknown> }) {
+function NodeBody({ node, data }: { node: MoodboardNode; data: Record<string, unknown> }) {
   if (node.type === "image") {
     return (
       <>
-        <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} cornerRadius={radius} data={data} />
+        <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} data={data} />
         {assetUrl(node) ? (
-          <Img url={assetUrl(node)} x={0} y={0} width={node.width} height={node.height} cornerRadius={radius} draggable={false} data={data} />
+          <Img url={assetUrl(node)} x={0} y={0} width={node.width} height={node.height} draggable={false} data={data} />
         ) : null}
         {promptText(node) ? (
           <>
@@ -88,7 +89,6 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
           stroke={nodeStroke(node)}
           strokeWidth={1}
           dashPattern={[8, 6]}
-          cornerRadius={radius}
           hittable={false}
           data={data}
         />
@@ -108,16 +108,14 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
           fill={nodeFill(node)}
           stroke={nodeStroke(node)}
           strokeWidth={1}
-          dashPattern={[10, 7]}
-          cornerRadius={10}
           data={data}
         />
-        <Rect
+        <Img
+          url={IMAGE_GENERATOR_ICON_URL}
           x={Math.max(0, (node.width - iconSize) / 2)}
           y={Math.max(0, (node.height - iconSize) / 2)}
           width={iconSize}
           height={iconSize}
-          fill={IMAGE_GENERATOR_ICON_FILL}
           hittable={false}
           draggable={false}
           data={data}
@@ -129,7 +127,7 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
   if (node.type === "video") {
     return (
       <>
-        <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} stroke={nodeStroke(node)} strokeWidth={1} cornerRadius={radius} data={data} />
+        <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} stroke={nodeStroke(node)} strokeWidth={1} data={data} />
         <Txt
           text="Video"
           x={0}
@@ -148,7 +146,7 @@ function NodeBody({ node, radius, data }: { node: MoodboardNode; radius: number;
 
   return (
     <>
-      <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} stroke={nodeStroke(node)} strokeWidth={1} cornerRadius={radius} data={data} />
+      <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} stroke={nodeStroke(node)} strokeWidth={1} data={data} />
       <Txt text="Note" x={12} y={10} width={Math.max(24, node.width - 24)} fontSize={11} fill="#8a7b16" hittable={false} draggable={false} data={data} />
       <Txt
         text={nodeText(node) || "New note"}
@@ -175,13 +173,10 @@ function nodeLabel(node: MoodboardNode): string {
 }
 
 const GENERATOR_ICON_COLOR = "#c2c2bd";
-const IMAGE_GENERATOR_ICON_FILL = {
-  type: "image",
-  url: Platform.toURL(
-    `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="${GENERATOR_ICON_COLOR}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M16 5h6"/><path d="M19 2v6"/><path d="M21 11.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/><circle cx="9" cy="9" r="2"/></svg>`,
-    "svg",
-  ),
-};
+const IMAGE_GENERATOR_ICON_URL = Platform.toURL(
+  renderToStaticMarkup(<IconImageMountainFill18 data-nucleo-icon="IconImageMountainFill18" color={GENERATOR_ICON_COLOR} />),
+  "svg",
+);
 
 function generatorIconSize(width: number, height: number): number {
   const base = Math.min(width, height) * 0.22;

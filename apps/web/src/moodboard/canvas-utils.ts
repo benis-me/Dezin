@@ -547,9 +547,17 @@ export function numberFromEvent(value: string, fallback: number): number {
 export function nodeIdFromTarget(target: any): string | null {
   const first = Array.isArray(target) ? target[0] : target;
   let cur = first;
+  const seen = new Set<any>();
   while (cur) {
+    if (seen.has(cur)) return null;
+    seen.add(cur);
     const nodeId = cur.data?.nodeId ?? cur.data?.id;
     if (typeof nodeId === "string") return nodeId;
+    const editorTarget = editorControlTarget(cur);
+    if (editorTarget && editorTarget !== cur && !seen.has(editorTarget)) {
+      const editorTargetId = nodeIdFromTarget(editorTarget);
+      if (editorTargetId) return editorTargetId;
+    }
     cur = cur.parent;
   }
   return null;
@@ -568,8 +576,23 @@ export function nodeIdsFromTarget(target: any): string[] {
   return ids;
 }
 
-export function contextTargetIdFromEvent(eventTarget: unknown, _editorTarget: unknown): string | null {
-  return nodeIdFromTarget(eventTarget);
+function editorControlTarget(target: any): any | null {
+  let cur = target;
+  while (cur) {
+    const pointType = cur.pointType;
+    const editor = cur.editor;
+    const isEditPoint =
+      (typeof pointType === "string" && pointType.length > 0) ||
+      typeof cur.resizeDirection !== "undefined" ||
+      typeof cur.direction !== "undefined";
+    if (isEditPoint && editor?.target) return editor.target;
+    cur = cur.parent;
+  }
+  return null;
+}
+
+export function contextTargetIdFromEvent(eventTarget: unknown, editorTarget: unknown): string | null {
+  return nodeIdFromTarget(eventTarget) ?? (editorControlTarget(eventTarget) ? nodeIdFromTarget(editorTarget) : null);
 }
 
 export function eventClientPoint(event: any, fallback?: ClientPointFallback): { x: number; y: number } {

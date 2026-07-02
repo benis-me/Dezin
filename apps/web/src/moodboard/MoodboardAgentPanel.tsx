@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardConversation, MoodboardMessage } from "../lib/api.ts";
@@ -12,6 +12,11 @@ import { cn } from "../lib/utils.ts";
 const FLOATING_COMPOSER_FADE_PX = 48;
 const SCROLL_TO_BOTTOM_GAP_PX = 12;
 const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
+
+export type MoodboardComposerInsertion = {
+  id: number;
+  text: string;
+};
 
 export function MoodboardAgentPanel({
   boardName,
@@ -33,6 +38,7 @@ export function MoodboardAgentPanel({
   onUploadFiles,
   onSend,
   loading = false,
+  composerInsertion = null,
 }: {
   boardName: string;
   messages: MoodboardMessage[];
@@ -53,6 +59,7 @@ export function MoodboardAgentPanel({
   onUploadFiles?: (files: FileList | null) => void;
   onSend: (content: string) => Promise<void>;
   loading?: boolean;
+  composerInsertion?: MoodboardComposerInsertion | null;
 }) {
   const [text, setText] = useState("");
   const [composerH, setComposerH] = useState(92);
@@ -61,6 +68,7 @@ export function MoodboardAgentPanel({
   const composerRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const stickBottom = useRef(true);
   const composerOverlayH = composerH + FLOATING_COMPOSER_FADE_PX;
   const messageBottomPadding = composerOverlayH + MESSAGE_BOTTOM_CLEARANCE_PX;
@@ -128,9 +136,25 @@ export function MoodboardAgentPanel({
     }
   };
 
-  const appendContext = (context: string) => {
+  const focusComposerEnd = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus({ preventScroll: true });
+    const end = textarea.value.length;
+    textarea.setSelectionRange(end, end);
+  }, []);
+
+  const appendContext = useCallback((context: string) => {
     setText((current) => `${current}${current.trim() ? "\n\n" : ""}${context}`);
-  };
+  }, []);
+
+  useEffect(() => {
+    const context = composerInsertion?.text.trim();
+    if (!context) return;
+    appendContext(context);
+    const frame = window.requestAnimationFrame(focusComposerEnd);
+    return () => window.cancelAnimationFrame(frame);
+  }, [appendContext, composerInsertion?.id, composerInsertion?.text, focusComposerEnd]);
 
   const attachFiles = (files: FileList | null) => {
     onUploadFiles?.(files);
@@ -321,6 +345,7 @@ export function MoodboardAgentPanel({
             ) : (
               <>
                 <textarea
+                  ref={textareaRef}
                   aria-label="Message"
                   rows={1}
                   value={text}

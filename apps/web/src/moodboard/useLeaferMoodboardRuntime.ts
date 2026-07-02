@@ -542,10 +542,14 @@ export function useLeaferMoodboardRuntime({
         return;
       }
       pointerSelectionHandledRef.current = false;
-      if (selectFromTarget(event?.target, event)) return;
-      if (sectionDragHandledRef.current) {
-        sectionDragHandledRef.current = false;
+	      if (selectFromTarget(event?.target, event)) return;
+      if (contextTargetIdFromEvent(event?.target, editor.target)) {
+        scheduleFloatingSelection();
         return;
+      }
+	      if (sectionDragHandledRef.current) {
+	        sectionDragHandledRef.current = false;
+	        return;
       }
       sectionDragStartRef.current = null;
       setSectionDraftRect(null);

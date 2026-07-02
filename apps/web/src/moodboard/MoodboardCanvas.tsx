@@ -1,4 +1,4 @@
-import { ImagePlus, Loader2 } from "lucide-react";
+import { ImagePlus, Loader2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode, type RefObject } from "react";
 import { Frame as LeaferFrame, Leafer } from "@dezin/leafer-react";
@@ -7,7 +7,14 @@ import { useToast } from "../components/Toast.tsx";
 import type { MoodboardNode } from "../lib/api.ts";
 import { cn } from "../lib/utils.ts";
 import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
-import { CanvasActionBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
+import {
+  CanvasActionBar,
+  GeneratorPromptToolbar,
+  MultiSelectionToolbar,
+  QuickEditPromptToolbar,
+  SelectionToolbar,
+  type ReferenceImageItem,
+} from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
@@ -32,6 +39,10 @@ import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMo
 
 type ReferencePickTarget = { kind: "node" | "quick-edit"; id: string };
 
+function moodboardAssetPreviewUrl(boardId: string, assetId: string): string {
+  return `/api/moodboards/${encodeURIComponent(boardId)}/assets/${encodeURIComponent(assetId)}`;
+}
+
 export function MoodboardCanvas(props: MoodboardCanvasProps) {
   const {
     nodes,
@@ -39,26 +50,55 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     imageModels = [],
     imageModel = "",
     imageProviderId = "",
+    moodboardAssets = [],
     onImageModelChange = () => {},
     onGenerateImage,
+    onSendToAgent,
     onUploadReferenceFiles,
     onTopbarControlsChange,
   } = props;
   const { toast } = useToast();
-  const canvas = useMoodboardCanvasController(props);
+  const [referencePickTarget, setReferencePickTarget] = useState<ReferencePickTarget | null>(null);
+  const referencePickActive = Boolean(referencePickTarget);
+  const referenceNodePickRef = useRef<((node: MoodboardNode) => void) | null>(null);
+  const canvas = useMoodboardCanvasController({
+    ...props,
+    referencePickActive,
+    onReferenceNodePick: (node) => referenceNodePickRef.current?.(node),
+  });
   const selectedGeneratorPrompt = canvas.selected ? generatorPrompt(canvas.selected) : "";
   const selectedGeneratorModel = canvas.selected ? generatorModel(canvas.selected) : "";
   const cursor = canvas.tool === "hand" ? "grab" : canvas.tool === "note" || canvas.tool === "section" ? "crosshair" : "default";
   const [presentationMode, setPresentationMode] = useState(false);
   const [quickEditOpen, setQuickEditOpen] = useState(false);
   const [quickEditReferenceAssetIds, setQuickEditReferenceAssetIds] = useState<string[]>([]);
-  const [referencePickTarget, setReferencePickTarget] = useState<ReferencePickTarget | null>(null);
   const quickEditNode = canvas.selectedIds.length === 1 && canvas.selected?.type === "image" ? canvas.selected : null;
   const quickEditModel = quickEditNode ? generatorModel(quickEditNode) || imageModel : imageModel;
   const quickEditSourceAssetId =
     quickEditNode && typeof quickEditNode.data.assetId === "string" && quickEditNode.data.assetId.trim()
       ? quickEditNode.data.assetId.trim()
       : undefined;
+
+  const referenceImagesById = useMemo(() => {
+    const byId = new Map<string, ReferenceImageItem>();
+    for (const asset of moodboardAssets) {
+      byId.set(asset.id, { assetId: asset.id, url: asset.url || moodboardAssetPreviewUrl(asset.boardId, asset.id), name: asset.fileName });
+    }
+    for (const node of nodes) {
+      const assetId = typeof node.data.assetId === "string" && node.data.assetId.trim() ? node.data.assetId.trim() : "";
+      if (!assetId || byId.has(assetId)) continue;
+      const url = typeof node.data.url === "string" ? node.data.url : moodboardAssetPreviewUrl(node.boardId, assetId);
+      const name = typeof node.data.fileName === "string" ? node.data.fileName : undefined;
+      byId.set(assetId, { assetId, url, name });
+    }
+    return byId;
+  }, [moodboardAssets, nodes]);
+  const nodesById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+
+  const referenceImagesForIds = useCallback(
+    (assetIds: string[]) => assetIds.map((assetId) => referenceImagesById.get(assetId) ?? { assetId }),
+    [referenceImagesById],
+  );
 
   const mergeReferenceIds = useCallback((current: string[], additions: string[]) => {
     const next = new Set(current);
@@ -93,14 +133,39 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
 
   const beginReferencePick = useCallback((target: ReferencePickTarget) => {
     setReferencePickTarget(target);
-    toast("Select an image on the canvas to use as reference.");
-  }, [toast]);
+  }, []);
+
+  const handleReferenceNodePick = useCallback(
+    (picked: MoodboardNode) => {
+      const target = referencePickTarget;
+      if (!target) return;
+      const assetId = typeof picked.data.assetId === "string" ? picked.data.assetId.trim() : "";
+      if (!assetId) {
+        toast("That image is missing an asset reference.", { variant: "error" });
+        setReferencePickTarget(null);
+        return;
+      }
+      patchReferenceIdsForTarget(target, [assetId]);
+      setReferencePickTarget(null);
+    },
+    [patchReferenceIdsForTarget, referencePickTarget, toast],
+  );
+
+  referenceNodePickRef.current = handleReferenceNodePick;
 
   const openQuickEdit = useCallback(() => {
     if (!quickEditNode) return;
     canvas.fitNodes([quickEditNode.id], { padding: 140, maxScale: 2.2 });
     window.requestAnimationFrame(() => setQuickEditOpen(true));
   }, [canvas.fitNodes, quickEditNode]);
+
+  const sendNodesToAgent = useCallback(
+    (targetNodes: MoodboardNode[]) => {
+      if (targetNodes.length === 0) return;
+      onSendToAgent?.(targetNodes);
+    },
+    [onSendToAgent],
+  );
 
   const handleTopbarZoomOut = useCallback(() => {
     canvas.changeZoom(canvas.zoom * 0.88);
@@ -167,18 +232,14 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
 
   useEffect(() => {
     if (!referencePickTarget) return;
-    const picked = canvas.selected;
-    if (!picked || picked.id === referencePickTarget.id || picked.type !== "image") return;
-    const assetId = typeof picked.data.assetId === "string" ? picked.data.assetId.trim() : "";
-    if (!assetId) {
-      toast("That image is missing an asset reference.", { variant: "error" });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
       setReferencePickTarget(null);
-      return;
-    }
-    patchReferenceIdsForTarget(referencePickTarget, [assetId]);
-    canvas.selectLayer(referencePickTarget.id);
-    setReferencePickTarget(null);
-  }, [canvas, patchReferenceIdsForTarget, referencePickTarget, toast]);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [referencePickTarget]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -190,6 +251,19 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [canvas.runtimeReady, openQuickEdit, presentationMode, quickEditNode]);
+
+  useEffect(() => {
+    if (!onSendToAgent) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (presentationMode || quickEditOpen || referencePickActive || !canvas.runtimeReady || canvas.selectedNodes.length === 0) return;
+      if (isEditableShortcutTarget(event.target) || isInteractiveSendShortcutTarget(event.target)) return;
+      event.preventDefault();
+      sendNodesToAgent(canvas.selectedNodes);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canvas.runtimeReady, canvas.selectedNodes, onSendToAgent, presentationMode, quickEditOpen, referencePickActive, sendNodesToAgent]);
 
   const handleExternalDragEnter = (event: ReactDragEvent<HTMLDivElement>): void => {
     if (!hasDraggedFiles(event)) return;
@@ -252,6 +326,25 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     [canvas.addImageGeneratorAt, canvas.recordHistory, imageModel],
   );
 
+  const contextActionNodes = useMemo(() => {
+    if (!canvas.contextTargetId) return [];
+    return contextActionIds(canvas.contextTargetId, canvas.selectedIds)
+      .map((id) => nodesById.get(id))
+      .filter((node): node is MoodboardNode => Boolean(node));
+  }, [canvas.contextTargetId, canvas.selectedIds, nodesById]);
+  const contextSingleNode = contextActionNodes.length === 1 ? contextActionNodes[0] : null;
+  const sendContextNodesToAgent = useCallback(() => {
+    sendNodesToAgent(contextActionNodes);
+    canvas.setContextMenu(null);
+  }, [canvas.setContextMenu, contextActionNodes, sendNodesToAgent]);
+  const openContextQuickEdit = useCallback(() => {
+    if (contextSingleNode?.type !== "image") return;
+    canvas.selectLayers([contextSingleNode.id]);
+    canvas.fitNodes([contextSingleNode.id], { padding: 140, maxScale: 2.2 });
+    canvas.setContextMenu(null);
+    window.requestAnimationFrame(() => setQuickEditOpen(true));
+  }, [canvas.fitNodes, canvas.selectLayers, canvas.setContextMenu, contextSingleNode]);
+
   return (
     <div className="relative min-h-0 flex-1 bg-surface">
       <div
@@ -263,7 +356,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         onDrop={handleExternalDrop}
       >
         <AnimatePresence initial={false}>
-          {canvas.layersOpen && !presentationMode ? (
+          {canvas.layersOpen && !presentationMode && !referencePickActive ? (
             <MoodboardLayerPanel
               items={canvas.layerTree}
               selectedIds={canvas.selectedIds}
@@ -297,6 +390,10 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </div>
 
         <MoodboardSectionLabels nodes={nodes} appRef={canvas.appRef} onSelect={canvas.selectLayer} onRename={canvas.renameNode} />
+
+        <AnimatePresence initial={false}>
+          {referencePickTarget ? <ReferencePickBanner onCancel={() => setReferencePickTarget(null)} /> : null}
+        </AnimatePresence>
 
         <AnimatePresence initial={false}>
           {!canvas.runtimeReady ? (
@@ -343,7 +440,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         ) : null}
 
         <AnimatePresence initial={false}>
-          {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen ? (
+          {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen && !referencePickActive ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -359,13 +456,14 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 onDelete={() => canvas.deleteNode(canvas.selected!.id)}
                 onImageAction={unavailableImageAction}
                 onQuickEdit={openQuickEdit}
+                onSendToAgent={onSendToAgent ? () => sendNodesToAgent([canvas.selected!]) : undefined}
               />
             </FloatingCanvasSurface>
           ) : null}
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selectedNodes.length > 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen ? (
+          {canvas.selectedNodes.length > 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen && !referencePickActive ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -382,13 +480,14 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 onArrange={() => canvas.arrangeNodes(canvas.selectedIds)}
                 onDelete={() => canvas.deleteNodes(canvas.selectedIds)}
                 onImageAction={unavailableImageAction}
+                onSendToAgent={onSendToAgent ? () => sendNodesToAgent(canvas.selectedNodes) : undefined}
               />
             </FloatingCanvasSurface>
           ) : null}
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selected?.type === "image-generator" && canvas.runtimeReady && !presentationMode ? (
+          {canvas.selected?.type === "image-generator" && canvas.runtimeReady && !presentationMode && !referencePickActive ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -402,6 +501,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 models={imageModels}
                 model={selectedGeneratorModel || imageModel}
                 imageProviderId={imageProviderId}
+                referenceImages={referenceImagesForIds(referenceAssetIds(canvas.selected))}
+                referencePickActive={referencePickTarget?.kind === "node" && referencePickTarget.id === canvas.selected.id}
                 onModelChange={(model) => {
                   canvas.patchNodeData(canvas.selected!.id, { generatorModel: model });
                   onImageModelChange(model);
@@ -410,6 +511,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                   canvas.patchNodeData(canvas.selected!.id, { generationParams: params });
                 }}
                 onPromptChange={(prompt) => canvas.patchNodeData(canvas.selected!.id, { generatorPrompt: prompt, generatorStatus: prompt ? "ready" : "" })}
+                onReferenceAssetIdsChange={(assetIds) => canvas.patchNodeData(canvas.selected!.id, { referenceAssetIds: assetIds })}
                 onGenerate={(prompt, params, options) => {
                   canvas.recordHistory();
                   return onGenerateImage(canvas.selected!, prompt, { params, referenceAssetIds: options.referenceAssetIds });
@@ -423,7 +525,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {quickEditOpen && quickEditNode && canvas.runtimeReady && !presentationMode ? (
+          {quickEditOpen && quickEditNode && canvas.runtimeReady && !presentationMode && !referencePickActive ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -432,17 +534,22 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               placement="bottom"
             >
               <QuickEditPromptToolbar
+                node={quickEditNode}
                 busy={busy}
                 models={imageModels}
                 model={quickEditModel}
+                imageProviderId={imageProviderId}
                 onModelChange={(model) => {
                   canvas.patchNodeData(quickEditNode.id, { generatorModel: model });
                   onImageModelChange(model);
                 }}
                 referenceAssetIds={quickEditReferenceAssetIds}
+                referenceImages={referenceImagesForIds(quickEditReferenceAssetIds)}
+                referencePickActive={referencePickTarget?.kind === "quick-edit" && referencePickTarget.id === quickEditNode.id}
+                onReferenceAssetIdsChange={setQuickEditReferenceAssetIds}
                 onGenerate={async (prompt, options) => {
                   canvas.recordHistory();
-                  await onGenerateImage(quickEditNode, prompt, { sourceAssetId: quickEditSourceAssetId, referenceAssetIds: options.referenceAssetIds });
+                  await onGenerateImage(quickEditNode, prompt, { sourceAssetId: quickEditSourceAssetId, referenceAssetIds: options.referenceAssetIds, params: options.params });
                   setQuickEditOpen(false);
                 }}
                 onUploadFiles={(files) => uploadFilesNearNode(files, quickEditNode)}
@@ -453,11 +560,11 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           ) : null}
         </AnimatePresence>
 
-        {!presentationMode ? (
+        {!presentationMode && !referencePickActive ? (
           <CanvasActionBar tool={canvas.tool} onToolChange={canvas.setTool} onAddImageGenerator={() => canvas.addImageGeneratorAt()} />
         ) : null}
 
-        {canvas.contextMenu && !presentationMode ? (
+        {canvas.contextMenu && !presentationMode && !referencePickActive ? (
           <MoodboardContextMenu
             menu={canvas.contextMenu}
             targetId={canvas.contextTargetId}
@@ -485,6 +592,8 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               canvas.setContextMenu(null);
             }}
             onDuplicate={canvas.contextTargetId ? () => canvas.duplicateNodes(contextActionIds(canvas.contextTargetId, canvas.selectedIds)) : undefined}
+            onQuickEdit={contextSingleNode?.type === "image" ? openContextQuickEdit : undefined}
+            onSendToAgent={contextActionNodes.length > 0 && onSendToAgent ? sendContextNodesToAgent : undefined}
             onMoveForward={canvas.contextTargetId ? () => canvas.moveNodesLayerStep(contextActionIds(canvas.contextTargetId, canvas.selectedIds), "up") : undefined}
             onMoveBackward={canvas.contextTargetId ? () => canvas.moveNodesLayerStep(contextActionIds(canvas.contextTargetId, canvas.selectedIds), "down") : undefined}
             onBringToFront={canvas.contextTargetId ? () => canvas.bringNodesToFront(contextActionIds(canvas.contextTargetId, canvas.selectedIds)) : undefined}
@@ -508,13 +617,13 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               canvas.changeZoom(1);
               canvas.setContextMenu(null);
             }}
-            targetNode={canvas.contextTargetId ? nodes.find((node) => node.id === canvas.contextTargetId) ?? null : null}
+            targetNode={contextSingleNode ?? (canvas.contextTargetId ? nodesById.get(canvas.contextTargetId) ?? null : null)}
             boundaryElement={canvas.hostRef.current}
           />
         ) : null}
 
         <AnimatePresence initial={false}>
-          {canvas.selected && !presentationMode ? (
+          {canvas.selected && !presentationMode && !referencePickActive ? (
             <MoodboardPropertiesPanel
               node={canvas.selected}
               onPatch={(patch) => canvas.selected && canvas.patchNode(canvas.selected.id, patch)}
@@ -541,6 +650,39 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
       </div>
     </div>
+  );
+}
+
+function isInteractiveSendShortcutTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest("button, [role='menu'], [data-moodboard-toolbar]"));
+}
+
+function ReferencePickBanner({ onCancel }: { onCancel: () => void }) {
+  return (
+    <motion.div
+      role="status"
+      aria-label="Canvas reference picking"
+      data-moodboard-floating-occluder
+      className="pointer-events-auto app-no-drag absolute left-1/2 top-3 z-30 flex -translate-x-1/2 items-center gap-2 rounded-md border border-border bg-card/95 px-2.5 py-1.5 text-xs text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.04)] backdrop-blur-xl"
+      initial={{ opacity: 0, y: -6 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -6 }}
+      transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.stopPropagation()}
+    >
+      <span className="size-2 rounded-full bg-primary" />
+      <span className="font-medium">Select an image on the canvas to use as reference.</span>
+      <button
+        type="button"
+        aria-label="Exit canvas reference picking"
+        className="ml-1 grid size-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+        onClick={onCancel}
+      >
+        <X size={13} strokeWidth={1.85} />
+      </button>
+    </motion.div>
   );
 }
 

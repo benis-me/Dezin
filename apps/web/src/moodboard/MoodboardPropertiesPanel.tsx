@@ -246,6 +246,7 @@ function PropertiesPanelFrame({ children, actions }: { children: ReactNode; acti
       data-moodboard-floating-occluder
       className="app-no-drag absolute bottom-4 right-3 top-3 z-20 flex select-none flex-col overflow-hidden rounded-md border border-border bg-card/95 text-popover-foreground shadow-[0_1px_2px_rgba(0,0,0,0.03)] backdrop-blur-xl"
       style={{ width }}
+      onContextMenu={(event) => event.stopPropagation()}
       initial={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
       animate={reducedMotion ? { opacity: 1 } : { opacity: 1, x: 0 }}
       exit={reducedMotion ? { opacity: 0 } : { opacity: 0, x: 8 }}
@@ -283,9 +284,9 @@ function ImageActionDock({
           Edit
         </Button>
         {canUsePrompt ? (
-          <Button size="sm" variant="outline" aria-label="Use Prompt" className="h-8 gap-1.5 text-xs" onClick={() => onUsePrompt?.(node)}>
+          <Button size="sm" variant="outline" aria-label="Reuse Prompt" className="h-8 gap-1.5 text-xs" onClick={() => onUsePrompt?.(node)}>
             <CopyPlus size={13} strokeWidth={1.75} />
-            Use Prompt
+            Reuse Prompt
           </Button>
         ) : null}
       </div>

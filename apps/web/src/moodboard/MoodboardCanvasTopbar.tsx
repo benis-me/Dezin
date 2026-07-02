@@ -41,7 +41,7 @@ export function MoodboardCanvasTopbar({
     <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
       <div className="min-w-0 flex-1" />
       <TooltipProvider delayDuration={120}>
-        <div className="app-no-drag flex items-center gap-1">
+        <div className="app-no-drag flex items-center gap-0.5">
           {loading ? (
             <>
               <div className="h-8 w-8 rounded-lg bg-surface-2" />
