@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require("electron")
 const { spawn } = require("node:child_process");
 const { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } = require("node:fs");
 const { join, dirname } = require("node:path");
+const { isAllowedAppNavigation, isSafeExternalUrl } = require("./navigation-policy.js");
 const { readWindowState, writeWindowState } = require("./window-state.js");
 
 const ROOT = join(__dirname, "..", "..");
@@ -21,6 +22,18 @@ const DEV = process.env.DEZIN_DEV === "1";
 
 let daemon = null;
 let win = null;
+
+function openSafeExternal(url) {
+  if (!isSafeExternalUrl(url)) return;
+  try {
+    const opened = shell.openExternal(url);
+    if (opened && typeof opened.catch === "function") {
+      opened.catch((e) => console.error("[desktop] failed to open external URL:", e && e.message));
+    }
+  } catch (e) {
+    console.error("[desktop] failed to open external URL:", e && e.message);
+  }
+}
 
 function startDaemon() {
   mkdirSync(dirname(PORTFILE), { recursive: true });
@@ -176,8 +189,13 @@ async function createWindow() {
   }
 
   win.webContents.setWindowOpenHandler(({ url: u }) => {
-    shell.openExternal(u);
+    openSafeExternal(u);
     return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, targetUrl) => {
+    if (isAllowedAppNavigation(targetUrl, url)) return;
+    event.preventDefault();
+    openSafeExternal(targetUrl);
   });
   win.once("ready-to-show", () => win.show());
   await win.loadURL(url);
