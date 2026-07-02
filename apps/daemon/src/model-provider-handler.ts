@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import type { AppDeps } from "./app.ts";
+import { providerRuntimeConfig } from "./provider-profile-config.ts";
 
 type ProviderModel = {
   id: string;
@@ -44,14 +45,6 @@ function selectedProviderId(body: unknown, settings: Settings): string {
     : settings.aiProviderId;
 }
 
-function providerBaseUrl(settings: Settings, providerId: string): string {
-  return (settings.imageApiBaseUrl || settings.apiBaseUrl || DEFAULT_BASE_URLS[providerId] || "").trim();
-}
-
-function providerApiKey(settings: Settings): string {
-  return (settings.imageApiKey || settings.apiKey).trim();
-}
-
 function modelsEndpoint(baseUrl: string): string {
   const url = new URL(baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
   const path = url.pathname.replace(/\/+$/, "");
@@ -80,12 +73,12 @@ function azureOpenAiBaseUrl(baseUrl: string): URL {
   return url;
 }
 
-function azureModelsEndpoint(baseUrl: string, settings: Settings): string {
+function azureModelsEndpoint(baseUrl: string, apiVersion: string): string {
   const url = azureOpenAiBaseUrl(baseUrl);
   const path = url.pathname.replace(/\/+$/, "");
   url.pathname = `${path}/models`;
   url.search = "";
-  url.searchParams.set("api-version", settings.aiProviderOrganization.trim() || "2025-04-01-preview");
+  url.searchParams.set("api-version", apiVersion.trim() || "2025-04-01-preview");
   return url.toString();
 }
 
@@ -151,12 +144,13 @@ async function fetchJsonModels(url: string, headers: Record<string, string>, pro
   return models.slice(0, 200);
 }
 
-function assertConnectionSettings(settings: Settings, providerId: string): { baseUrl: string; apiKey: string } {
-  const baseUrl = providerBaseUrl(settings, providerId);
+function assertConnectionSettings(settings: Settings, providerId: string): { baseUrl: string; apiKey: string; organization: string } {
+  const runtime = providerRuntimeConfig(settings, providerId, DEFAULT_BASE_URLS[providerId] || "");
+  const baseUrl = runtime.baseUrl;
   if (!baseUrl) throw new Error("Missing base URL.");
-  const apiKey = providerApiKey(settings);
+  const apiKey = runtime.apiKey;
   if (!apiKey && providerId !== "ollama") throw new Error("Missing API key.");
-  return { baseUrl, apiKey };
+  return { baseUrl, apiKey, organization: runtime.organization };
 }
 
 async function fetchProviderModels(settings: Settings, providerId: string, fetchImpl: typeof fetch): Promise<ProviderModel[]> {
@@ -171,8 +165,8 @@ async function fetchProviderModels(settings: Settings, providerId: string, fetch
   }
 
   if (providerId === "azure-openai") {
-    const { baseUrl, apiKey } = assertConnectionSettings(settings, providerId);
-    return fetchJsonModels(azureModelsEndpoint(baseUrl, settings), { accept: "application/json", "api-key": apiKey }, providerId, fetchImpl);
+    const { baseUrl, apiKey, organization } = assertConnectionSettings(settings, providerId);
+    return fetchJsonModels(azureModelsEndpoint(baseUrl, organization), { accept: "application/json", "api-key": apiKey }, providerId, fetchImpl);
   }
 
   if (providerId === "gemini") {

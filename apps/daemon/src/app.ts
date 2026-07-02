@@ -62,6 +62,7 @@ import {
 } from "./moodboard-handler.ts";
 import type { MoodboardAgentTextRunner } from "./moodboard-agent.ts";
 import { assertSafeId, redactSettings, requireDaemonRequest, type DaemonSecurityOptions } from "./security.ts";
+import { mergeProviderProfilesForUpdate } from "./provider-profile-config.ts";
 
 export interface AppDeps {
   store: Store;
@@ -227,7 +228,11 @@ const routes: Route[] = [
       if (body === null || typeof body !== "object" || Array.isArray(body)) {
         return sendError(res, 400, "settings body must be an object");
       }
-      sendJson(res, 200, redactSettings(store.updateSettings(body as Partial<Settings>)));
+      const patch = body as Partial<Settings>;
+      if (typeof patch.aiProviderProfiles === "string") {
+        patch.aiProviderProfiles = mergeProviderProfilesForUpdate(store.getSettings().aiProviderProfiles, patch.aiProviderProfiles);
+      }
+      sendJson(res, 200, redactSettings(store.updateSettings(patch)));
     },
   },
   {

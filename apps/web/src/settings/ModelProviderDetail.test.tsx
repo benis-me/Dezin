@@ -54,10 +54,6 @@ test("ModelProviderDetail autosaves connection edits without a Save configuratio
     {
       apiKey: "sk-test",
       apiKeyConfigured: true,
-      imageApiKey: "sk-test",
-      imageApiKeyConfigured: true,
-      videoApiKey: "sk-test",
-      videoApiKeyConfigured: true,
     },
     true,
   );
@@ -118,10 +114,6 @@ test("ModelProviderDetail saves a replacement API key after clearing the configu
     {
       apiKey: "sk-replacement",
       apiKeyConfigured: true,
-      imageApiKey: "sk-replacement",
-      imageApiKeyConfigured: true,
-      videoApiKey: "sk-replacement",
-      videoApiKeyConfigured: true,
     },
     true,
   );

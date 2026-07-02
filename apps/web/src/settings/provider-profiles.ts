@@ -5,6 +5,8 @@ import { inferCapabilities, parseModelEntries, serializeModelEntries } from "./m
 export interface ProviderProfile {
   enabled?: boolean;
   baseUrl: string;
+  apiKey?: string;
+  apiKeyConfigured?: boolean;
   models: string;
   organization: string;
 }
@@ -37,6 +39,8 @@ export function parseProviderProfiles(value: string | undefined): ProviderProfil
       profiles[id] = {
         ...(enabled === undefined ? {} : { enabled }),
         baseUrl: stringField(profile.baseUrl) ?? "",
+        apiKey: stringField(profile.apiKey) ?? "",
+        apiKeyConfigured: booleanField(profile.apiKeyConfigured) ?? Boolean(stringField(profile.apiKey)?.trim()),
         models: stringField(profile.models) ?? "",
         organization: stringField(profile.organization) ?? "",
       };
@@ -53,6 +57,8 @@ export function serializeProviderProfiles(profiles: ProviderProfiles): string {
     clean[id] = {
       enabled: Boolean(profile.enabled),
       baseUrl: profile.baseUrl ?? "",
+      apiKey: profile.apiKey ?? "",
+      apiKeyConfigured: Boolean(profile.apiKey?.trim() || profile.apiKeyConfigured),
       models: profile.models ?? "",
       organization: profile.organization ?? "",
     };
@@ -71,6 +77,18 @@ export function providerProfile(settings: Settings, provider: ProviderPreset): R
   return {
     enabled: stored && hasOwn(stored, "enabled") ? Boolean(stored.enabled) : selected ? settings.aiProviderEnabled : false,
     baseUrl: stored && hasOwn(stored, "baseUrl") ? stored.baseUrl : selected ? settings.imageApiBaseUrl || settings.apiBaseUrl : provider.baseUrl,
+    apiKey:
+      stored && hasOwn(stored, "apiKey")
+        ? stored.apiKey
+        : selected
+          ? settings.imageApiKey || settings.apiKey
+          : "",
+    apiKeyConfigured:
+      stored && hasOwn(stored, "apiKeyConfigured")
+        ? Boolean(stored.apiKeyConfigured)
+        : selected
+          ? Boolean(settings.imageApiKeyConfigured || settings.apiKeyConfigured || settings.imageApiKey || settings.apiKey)
+          : false,
     models: stored && hasOwn(stored, "models") ? stored.models : selected && settings.aiProviderModels ? settings.aiProviderModels : defaultModels(provider),
     organization:
       stored && hasOwn(stored, "organization") ? stored.organization : selected ? settings.aiProviderOrganization : "",
@@ -106,6 +124,10 @@ export function patchSelectedProviderProfile(
   const next: ProviderProfile = {
     enabled: patch.aiProviderEnabled ?? Boolean(current.enabled),
     baseUrl: patch.apiBaseUrl ?? patch.imageApiBaseUrl ?? current.baseUrl,
+    apiKey: patch.apiKey ?? current.apiKey ?? "",
+    apiKeyConfigured:
+      patch.apiKeyConfigured ??
+      (patch.apiKey !== undefined ? Boolean(patch.apiKey.trim()) : Boolean(current.apiKey?.trim() || current.apiKeyConfigured)),
     models: patch.aiProviderModels ?? current.models,
     organization: patch.aiProviderOrganization ?? current.organization,
   };
@@ -115,10 +137,32 @@ export function patchSelectedProviderProfile(
     ? patch
     : Object.fromEntries(
         Object.entries(patch).filter(
-          ([key]) => !["apiBaseUrl", "imageApiBaseUrl", "videoApiBaseUrl", "aiProviderModels", "aiProviderOrganization", "imageModel"].includes(key),
+          ([key]) =>
+            ![
+              "apiBaseUrl",
+              "apiKey",
+              "apiKeyConfigured",
+              "imageApiBaseUrl",
+              "imageApiKey",
+              "imageApiKeyConfigured",
+              "videoApiBaseUrl",
+              "videoApiKey",
+              "videoApiKeyConfigured",
+              "aiProviderModels",
+              "aiProviderOrganization",
+              "imageModel",
+            ].includes(key),
         ),
       );
   const syncedPatch: Partial<Settings> = { ...globalPatch, aiProviderProfiles: serializeProviderProfiles(profiles) };
+  if (active && patch.apiKey !== undefined) {
+    const configured = Boolean(patch.apiKey.trim());
+    syncedPatch.apiKeyConfigured = configured;
+    if (provider.imageRuntime) {
+      syncedPatch.imageApiKey = patch.apiKey;
+      syncedPatch.imageApiKeyConfigured = configured;
+    }
+  }
   if (active && !provider.imageRuntime) {
     syncedPatch.imageApiBaseUrl = "";
     syncedPatch.videoApiBaseUrl = "";
@@ -131,7 +175,7 @@ export function patchSelectedProviderProfile(
 
 function syncProviderToRuntime(settings: Settings, provider: ProviderPreset, profile: ProviderProfile): Partial<Settings> {
   const imageModel = preferredImageModel(profile.models, provider, settings.imageModel);
-  return {
+  const patch: Partial<Settings> = {
     aiProviderId: provider.id,
     aiProviderEnabled: Boolean(profile.enabled),
     aiProviderModels: profile.models,
@@ -141,6 +185,15 @@ function syncProviderToRuntime(settings: Settings, provider: ProviderPreset, pro
     videoApiBaseUrl: "",
     imageModel,
   };
+  if (profile.apiKey?.trim()) {
+    patch.apiKey = profile.apiKey;
+    patch.apiKeyConfigured = true;
+    if (provider.imageRuntime) {
+      patch.imageApiKey = profile.apiKey;
+      patch.imageApiKeyConfigured = true;
+    }
+  }
+  return patch;
 }
 
 export function enabledProviderIds(settings: Settings, providers: ProviderPreset[]): Set<string> {

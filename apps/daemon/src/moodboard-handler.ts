@@ -16,6 +16,7 @@ import {
 import type { AppDeps } from "./app.ts";
 import { readJsonBody, send, sendError, sendJson } from "./http-util.ts";
 import { buildAgentEnv } from "./agent-env.ts";
+import { providerRuntimeConfig } from "./provider-profile-config.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -420,7 +421,10 @@ export async function handleGenerateMoodboardImage(
 ): Promise<void> {
   if (!store.getMoodboard(id!)) return sendError(res, 404, "moodboard not found");
   const settings = store.getSettings();
-  if (!settings.imageApiBaseUrl || !settings.imageApiKey) return sendError(res, 409, "image generation is not configured");
+  const runtime = providerRuntimeConfig(settings, settings.aiProviderId);
+  const imageBaseUrl = runtime.baseUrl || settings.imageApiBaseUrl;
+  const imageApiKey = runtime.apiKey || settings.imageApiKey;
+  if (!imageBaseUrl || !imageApiKey) return sendError(res, 409, "image generation is not configured");
   const body = asObject(await readJsonBody(req));
   const prompt = stringValue(body.prompt);
   if (!prompt) return sendError(res, 400, "prompt is required");
@@ -437,11 +441,11 @@ export async function handleGenerateMoodboardImage(
   if (sourceAsset && !existsSync(sourceFile)) return sendError(res, 404, "source asset file not found");
 
   const imageOpts = {
-    baseUrl: settings.imageApiBaseUrl,
-    apiKey: settings.imageApiKey,
+    baseUrl: imageBaseUrl,
+    apiKey: imageApiKey,
     model,
     providerId: settings.aiProviderId,
-    apiVersion: settings.aiProviderOrganization,
+    apiVersion: runtime.organization || settings.aiProviderOrganization,
   };
   const statusMessages = notifyConversation
     ? [store.addMoodboardMessage(id!, "assistant", `${sourceAsset ? "Editing" : "Generating"} image: ${prompt}`, notifyConversation.id)]

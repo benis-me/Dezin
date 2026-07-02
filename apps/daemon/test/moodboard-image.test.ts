@@ -140,3 +140,139 @@ test("POST /api/moodboards/:id/generate-image can notify an agent conversation w
     store.close();
   }
 });
+
+test("POST /api/moodboards/:id/generate-image uses the active Gemini provider profile", async () => {
+  const store = new Store(":memory:");
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-moodboard-image-"));
+  const board = store.createMoodboard({ name: "Board" });
+  store.updateSettings({
+    aiProviderId: "gemini",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "",
+    imageApiKey: "",
+    imageModel: "gemini-2.5-flash-image",
+    aiProviderProfiles: JSON.stringify({
+      gemini: {
+        enabled: true,
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        apiKey: "gemini-profile-key",
+        models: JSON.stringify({ id: "gemini-2.5-flash-image", capabilities: ["Image"] }),
+        organization: "",
+      },
+    }),
+  });
+
+  const imageRequests: Array<{ url: string; init?: RequestInit }> = [];
+  const previousFetch = globalThis.fetch;
+  const httpFetch = previousFetch.bind(globalThis);
+  globalThis.fetch = (async (input, init) => {
+    imageRequests.push({ url: String(input), init });
+    return new Response(
+      JSON.stringify({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: "image/png",
+                    data: Buffer.from("GEMINI").toString("base64"),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  const server = createApp({ store, dataDir });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await httpFetch(`http://127.0.0.1:${port}/api/moodboards/${board.id}/generate-image`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "warm editorial lamp",
+        model: "gemini-2.5-flash-image",
+      }),
+    });
+    const text = await res.text();
+    assert.equal(res.status, 201, text);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    globalThis.fetch = previousFetch;
+    store.close();
+  }
+
+  assert.equal(
+    imageRequests[0]?.url,
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent",
+  );
+  const headers = new Headers(imageRequests[0]?.init?.headers);
+  assert.equal(headers.get("x-goog-api-key"), "gemini-profile-key");
+});
+
+test("POST /api/moodboards/:id/generate-image uses the active Azure provider profile", async () => {
+  const store = new Store(":memory:");
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-moodboard-image-"));
+  const board = store.createMoodboard({ name: "Board" });
+  store.updateSettings({
+    aiProviderId: "azure-openai",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "",
+    imageApiKey: "",
+    imageModel: "gpt-image-2-deployment",
+    aiProviderOrganization: "",
+    aiProviderProfiles: JSON.stringify({
+      "azure-openai": {
+        enabled: true,
+        baseUrl: "https://dezin-resource.openai.azure.com",
+        apiKey: "azure-profile-key",
+        models: JSON.stringify({ id: "gpt-image-2-deployment", capabilities: ["Image"] }),
+        organization: "2025-04-01-preview",
+      },
+    }),
+  });
+
+  const imageRequests: Array<{ url: string; init?: RequestInit }> = [];
+  const previousFetch = globalThis.fetch;
+  const httpFetch = previousFetch.bind(globalThis);
+  globalThis.fetch = (async (input, init) => {
+    imageRequests.push({ url: String(input), init });
+    return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("AZURE").toString("base64") }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const server = createApp({ store, dataDir });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await httpFetch(`http://127.0.0.1:${port}/api/moodboards/${board.id}/generate-image`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "warm editorial lamp",
+        model: "gpt-image-2-deployment",
+      }),
+    });
+    const text = await res.text();
+    assert.equal(res.status, 201, text);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    globalThis.fetch = previousFetch;
+    store.close();
+  }
+
+  assert.equal(
+    imageRequests[0]?.url,
+    "https://dezin-resource.openai.azure.com/openai/deployments/gpt-image-2-deployment/images/generations?api-version=2025-04-01-preview",
+  );
+  const headers = new Headers(imageRequests[0]?.init?.headers);
+  assert.equal(headers.get("api-key"), "azure-profile-key");
+});

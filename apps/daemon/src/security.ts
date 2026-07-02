@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import type { Settings } from "../../../packages/core/src/index.ts";
 import { HttpError } from "./http-util.ts";
+import { redactProviderProfiles } from "./provider-profile-config.ts";
 
 export interface DaemonSecurityOptions {
   token?: string;
@@ -80,5 +81,6 @@ export function redactSettings(settings: Settings): Settings {
     imageApiKey: "",
     videoApiKeyConfigured: settings.videoApiKey.length > 0,
     videoApiKey: "",
+    aiProviderProfiles: redactProviderProfiles(settings.aiProviderProfiles),
   };
 }

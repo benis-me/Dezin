@@ -31,10 +31,17 @@ export function ModelProviderSettings({
     [query],
   );
   const profile = providerProfile(settings, selected);
-  const detailSettings = { ...settings, aiProviderEnabled: profile.enabled, aiProviderModels: profile.models, aiProviderOrganization: profile.organization };
+  const detailSettings = {
+    ...settings,
+    aiProviderEnabled: profile.enabled,
+    aiProviderModels: profile.models,
+    aiProviderOrganization: profile.organization,
+    apiKey: profile.apiKey ?? "",
+    apiKeyConfigured: profile.apiKeyConfigured,
+  };
   const modelText = profile.models;
   const baseUrl = profile.baseUrl;
-  const apiKey = settings.imageApiKey || settings.apiKey;
+  const apiKey = profile.apiKey ?? "";
   const enabledIds = enabledProviderIds(settings, VISIBLE_MODEL_PROVIDERS);
 
   const patchModelSettings = (patch: Partial<Settings>, save = false) => {

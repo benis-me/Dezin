@@ -241,6 +241,54 @@ test("POST /api/model-providers/models uses the Google AI Studio model list endp
   assert.equal(new Headers(calls[0]?.init?.headers).get("authorization"), null);
 });
 
+test("POST /api/model-providers/models uses the selected provider profile API key", async () => {
+  const calls: FetchCall[] = [];
+  await withServer(
+    {
+      modelProviderFetch: async (input, init) => {
+        calls.push({ url: String(input), init });
+        return new Response(JSON.stringify({ models: [{ name: "models/gemini-2.5-flash-image", displayName: "Gemini Image" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+    async (base) => {
+      await putSettings(base, {
+        aiProviderId: "openai",
+        aiProviderEnabled: true,
+        apiBaseUrl: "https://api.openai.com/v1",
+        apiKey: "openai-global-key",
+        aiProviderProfiles: JSON.stringify({
+          openai: {
+            enabled: true,
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "openai-profile-key",
+            models: "gpt-image-1",
+            organization: "",
+          },
+          gemini: {
+            enabled: true,
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+            apiKey: "gemini-profile-key",
+            models: "gemini-2.5-flash-image",
+            organization: "",
+          },
+        }),
+      });
+
+      const res = await fetch(`${base}/api/model-providers/models`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerId: "gemini" }),
+      });
+      await assertOk(res);
+    },
+  );
+
+  assert.equal(calls[0]?.url, "https://generativelanguage.googleapis.com/v1beta/models?key=gemini-profile-key");
+});
+
 test("POST /api/model-providers/test returns provider JSON error messages cleanly", async () => {
   await withServer(
     {
