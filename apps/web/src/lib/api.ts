@@ -135,6 +135,27 @@ export interface MoodboardConversation {
   turns?: number;
 }
 
+export type ImageGenerationParams = {
+  quality?: "auto" | "low" | "medium" | "high";
+  size?: `${number}x${number}`;
+  aspectRatio?: `${number}:${number}`;
+  background?: "auto" | "transparent" | "opaque";
+  outputFormat?: "png" | "jpeg" | "webp";
+  outputCompression?: number;
+  moderation?: "auto" | "low";
+  count?: number;
+};
+
+export interface GenerateMoodboardImageOptions {
+  x?: number;
+  y?: number;
+  generatorId?: string;
+  model?: string;
+  sourceAssetId?: string;
+  conversationId?: string;
+  params?: ImageGenerationParams;
+}
+
 export interface MoodboardDetail extends Moodboard {
   assets: MoodboardAsset[];
   nodes: MoodboardNode[];
@@ -432,7 +453,7 @@ export interface ApiClient {
   generateMoodboardImage(
     id: string,
     prompt: string,
-    options?: { x?: number; y?: number; generatorId?: string; model?: string; sourceAssetId?: string; conversationId?: string },
+    options?: GenerateMoodboardImageOptions,
   ): Promise<{
     asset: MoodboardAsset & { url: string };
     nodes: MoodboardNode[];

@@ -141,6 +141,85 @@ test("POST /api/moodboards/:id/generate-image can notify an agent conversation w
   }
 });
 
+test("POST /api/moodboards/:id/generate-image replaces a submitted generator with the generated image node", async () => {
+  const store = new Store(":memory:");
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-moodboard-image-"));
+  const board = store.createMoodboard({ name: "Board" });
+  store.updateSettings({
+    aiProviderId: "azure-openai",
+    aiProviderEnabled: true,
+    imageApiBaseUrl: "https://dezin-resource.openai.azure.com/openai",
+    imageApiKey: "azure-key",
+    imageModel: "gpt-image-2",
+    aiProviderOrganization: "2025-04-01-preview",
+    aiProviderProfiles: "",
+  });
+  store.replaceMoodboardNodes(board.id, [
+    {
+      id: "gen1",
+      type: "image-generator",
+      x: 20,
+      y: 30,
+      width: 512,
+      height: 320,
+      rotation: 8,
+      zIndex: 4,
+      data: { generatorPrompt: "old prompt", generatorModel: "gpt-image-2", generatorStatus: "ready" },
+    },
+  ]);
+
+  const previousFetch = globalThis.fetch;
+  const httpFetch = previousFetch.bind(globalThis);
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("GENERATED").toString("base64") }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch;
+
+  const server = createApp({ store, dataDir });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  let responseBody!: { nodes: Array<{ id: string; type: string; data: Record<string, unknown>; x: number; y: number; width: number; height: number; rotation: number; zIndex: number }> };
+  try {
+    const res = await httpFetch(`http://127.0.0.1:${port}/api/moodboards/${board.id}/generate-image`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "warm editorial lamp",
+        generatorId: "gen1",
+        model: "gpt-image-2",
+        params: { quality: "medium", aspectRatio: "16:9", size: "1536x1024" },
+      }),
+    });
+    const text = await res.text();
+    assert.equal(res.status, 201, text);
+    responseBody = JSON.parse(text) as typeof responseBody;
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    globalThis.fetch = previousFetch;
+    store.close();
+  }
+
+  assert.equal(responseBody.nodes.length, 1);
+  assert.equal(responseBody.nodes[0]?.id, "gen1");
+  assert.equal(responseBody.nodes[0]?.type, "image");
+  assert.deepEqual(
+    {
+      x: responseBody.nodes[0]?.x,
+      y: responseBody.nodes[0]?.y,
+      width: responseBody.nodes[0]?.width,
+      height: responseBody.nodes[0]?.height,
+      rotation: responseBody.nodes[0]?.rotation,
+      zIndex: responseBody.nodes[0]?.zIndex,
+    },
+    { x: 20, y: 30, width: 512, height: 320, rotation: 8, zIndex: 4 },
+  );
+  assert.equal(responseBody.nodes[0]?.data.prompt, "warm editorial lamp");
+  assert.equal(responseBody.nodes[0]?.data.model, "gpt-image-2");
+  assert.deepEqual(responseBody.nodes[0]?.data.generationParams, { quality: "medium", aspectRatio: "16:9", size: "1536x1024" });
+  assert.equal(responseBody.nodes[0]?.data.source, "generated");
+});
+
 test("POST /api/moodboards/:id/generate-image uses the active Gemini provider profile", async () => {
   const store = new Store(":memory:");
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-moodboard-image-"));

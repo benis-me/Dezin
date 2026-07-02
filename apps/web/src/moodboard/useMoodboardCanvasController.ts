@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import type { ImageGenerationParams, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import {
   allMoodboardNodeIds,
   buildLayerTree,
@@ -40,14 +40,15 @@ export interface MoodboardCanvasProps {
   busy?: boolean;
   imageModels?: string[];
   imageModel?: string;
+  imageProviderId?: string;
   onImageModelChange?: (model: string) => void;
   onSelectIds: (ids: string[]) => void;
   onNodesChange: (nodes: SaveMoodboardNodeInput[]) => void;
   onAddNote: (point?: { x: number; y: number }) => void;
   onAddSection: (point?: { x: number; y: number; width?: number; height?: number }) => void;
-  onAddImageGenerator: (point?: { x: number; y: number }) => void;
+  onAddImageGenerator: (point?: { x: number; y: number }, data?: Record<string, unknown>) => void;
   onUploadFiles: (files: FileList | null, point?: { x: number; y: number }) => void;
-  onGenerateImage: (node: MoodboardNode, prompt: string, options?: { sourceAssetId?: string }) => Promise<void>;
+  onGenerateImage: (node: MoodboardNode, prompt: string, options?: { sourceAssetId?: string; params?: ImageGenerationParams }) => Promise<void>;
   onTopbarControlsChange?: (controls: MoodboardCanvasTopbarControls | null) => void;
 }
 
@@ -560,9 +561,9 @@ export function useMoodboardCanvasController({
   );
 
   const addImageGeneratorAt = useCallback(
-    (point?: { x: number; y: number }) => {
+    (point?: { x: number; y: number }, data?: Record<string, unknown>) => {
       recordHistory();
-      onAddImageGeneratorRef.current(point);
+      onAddImageGeneratorRef.current(point, data);
       setContextMenu(null);
     },
     [recordHistory],

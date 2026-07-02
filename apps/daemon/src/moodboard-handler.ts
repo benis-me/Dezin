@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { Moodboard, MoodboardAsset, MoodboardConversation, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
-import { requestImage, requestImageEdit } from "./image-gen.ts";
+import { requestImage, requestImageEdit, type ImageGenerationParams } from "./image-gen.ts";
 import {
   buildMoodboardAgentContext,
   buildMoodboardAgentPrompt,
@@ -52,6 +52,42 @@ function numberValue(value: unknown, fallback: number): number {
 
 function asObject(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
+}
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value) ? (value as T) : undefined;
+}
+
+function normalizeImageParams(value: unknown): ImageGenerationParams {
+  const input = asObject(value);
+  const params: ImageGenerationParams = {};
+  const quality = enumValue(input.quality, ["auto", "low", "medium", "high"] as const);
+  const background = enumValue(input.background, ["auto", "transparent", "opaque"] as const);
+  const outputFormat = enumValue(input.outputFormat, ["png", "jpeg", "webp"] as const);
+  const moderation = enumValue(input.moderation, ["auto", "low"] as const);
+  const size = typeof input.size === "string" && /^\d{2,5}x\d{2,5}$/.test(input.size) ? (input.size as `${number}x${number}`) : undefined;
+  const aspectRatio =
+    typeof input.aspectRatio === "string" && /^\d{1,2}:\d{1,2}$/.test(input.aspectRatio)
+      ? (input.aspectRatio as `${number}:${number}`)
+      : undefined;
+  const outputCompression =
+    typeof input.outputCompression === "number" && Number.isFinite(input.outputCompression)
+      ? Math.max(0, Math.min(100, Math.round(input.outputCompression)))
+      : undefined;
+  const count = typeof input.count === "number" && Number.isFinite(input.count) ? Math.max(1, Math.min(4, Math.round(input.count))) : undefined;
+  if (quality) params.quality = quality;
+  if (size) params.size = size;
+  if (aspectRatio) params.aspectRatio = aspectRatio;
+  if (background) params.background = background;
+  if (outputFormat) params.outputFormat = outputFormat;
+  if (outputCompression !== undefined) params.outputCompression = outputCompression;
+  if (moderation) params.moderation = moderation;
+  if (count !== undefined) params.count = count;
+  return params;
+}
+
+function hasImageParams(params: ImageGenerationParams): boolean {
+  return Object.keys(params).length > 0;
 }
 
 function extForMime(mimeType: string): string {
@@ -431,6 +467,8 @@ export async function handleGenerateMoodboardImage(
   if (!prompt) return sendError(res, 400, "prompt is required");
   const generatorId = stringValue(body.generatorId);
   const model = stringValue(body.model) || settings.imageModel;
+  const params = normalizeImageParams(body.params);
+  const hasParams = hasImageParams(params);
   const conversationId = stringValue(body.conversationId);
   const notifyConversation = conversationId ? conversationForBoard(store.getMoodboardConversation(conversationId), id!) : null;
   if (conversationId && !notifyConversation) return sendError(res, 404, "moodboard conversation not found");
@@ -447,6 +485,7 @@ export async function handleGenerateMoodboardImage(
     model,
     providerId: settings.aiProviderId,
     apiVersion: runtime.organization || settings.aiProviderOrganization,
+    ...(hasParams ? { params } : {}),
   };
   const statusMessages = notifyConversation
     ? [store.addMoodboardMessage(id!, "assistant", `${sourceAsset ? "Editing" : "Generating"} image: ${prompt}`, notifyConversation.id)]
@@ -490,49 +529,68 @@ export async function handleGenerateMoodboardImage(
   const x = numberValue(body.x, generator ? generator.x + generator.width + 24 : 80 + nodes.length * 24);
   const y = numberValue(body.y, generator ? generator.y : 80 + nodes.length * 24);
   const maxZ = Math.max(0, ...nodes.map((node) => node.zIndex ?? 0));
-  const updatedNodes = generator
-    ? nodes.map((node) =>
+  const replaceGenerator = Boolean(generator && !sourceAsset);
+  const imageData = {
+    assetId: asset.id,
+    url: assetUrl(id!, asset.id),
+    prompt,
+    model,
+    source: sourceAsset ? "edited" : "generated",
+    ...(hasParams ? { generationParams: params } : {}),
+    ...(sourceAsset ? { sourceAssetId } : {}),
+  };
+  const updatedNodes: SaveMoodboardNodeInput[] = generator
+    ? nodes.map<SaveMoodboardNodeInput>((node) =>
         node.id === generator.id
-          ? {
-              type: node.type,
-              x: node.x,
-              y: node.y,
-              width: node.width,
-              height: node.height,
-              rotation: node.rotation,
-              zIndex: node.zIndex,
-              id: node.id,
-              data: {
-                ...node.data,
-                generatorPrompt: prompt,
-                generatorModel: model,
-                generatorStatus: "done",
-                resultAssetId: asset.id,
-                resultUrl: assetUrl(id!, asset.id),
-              },
-            }
+          ? replaceGenerator
+            ? {
+                type: "image",
+                x: node.x,
+                y: node.y,
+                width: node.width,
+                height: node.height,
+                rotation: node.rotation,
+                zIndex: node.zIndex,
+                id: node.id,
+                data: imageData,
+              }
+            : {
+                type: node.type,
+                x: node.x,
+                y: node.y,
+                width: node.width,
+                height: node.height,
+                rotation: node.rotation,
+                zIndex: node.zIndex,
+                id: node.id,
+                data: {
+                  ...node.data,
+                  generatorPrompt: prompt,
+                  generatorModel: model,
+                  generatorStatus: "done",
+                  resultAssetId: asset.id,
+                  resultUrl: assetUrl(id!, asset.id),
+                  ...(hasParams ? { generationParams: params } : {}),
+                },
+              }
           : node,
       )
     : nodes;
-  const saved = store.replaceMoodboardNodes(id!, [
-    ...updatedNodes,
-    {
-      type: "image",
-      x,
-      y,
-      width: generator ? Math.max(180, generator.width) : 320,
-      height: generator ? Math.max(180, generator.height) : 320,
-      zIndex: maxZ + 1,
-      data: {
-        assetId: asset.id,
-        url: assetUrl(id!, asset.id),
-        prompt,
-        model,
-        source: sourceAsset ? "edited" : "generated",
-        ...(sourceAsset ? { sourceAssetId } : {}),
-      },
-    },
-  ]);
+  const appendedImageNode: SaveMoodboardNodeInput = {
+    type: "image",
+    x,
+    y,
+    width: generator ? Math.max(180, generator.width) : 320,
+    height: generator ? Math.max(180, generator.height) : 320,
+    zIndex: maxZ + 1,
+    data: imageData,
+  };
+  const saved = store.replaceMoodboardNodes(
+    id!,
+    replaceGenerator
+      ? updatedNodes
+      : [...updatedNodes, appendedImageNode],
+  );
   if (notifyConversation) {
     statusMessages.push(
       store.addMoodboardMessage(

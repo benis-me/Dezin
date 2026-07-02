@@ -1501,6 +1501,76 @@ test("MoodboardPropertiesPanel exposes object identity and state controls", () =
   expect(onPatchData).toHaveBeenCalledWith({ locked: true });
 });
 
+test("MoodboardPropertiesPanel pins image actions at the bottom and reuses generated prompts", () => {
+  const onEditImage = vi.fn();
+  const onUsePrompt = vi.fn();
+  const node: MoodboardNode = {
+    id: "img1",
+    boardId: "b1",
+    type: "image",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 4,
+    data: {
+      assetId: "asset-1",
+      url: "dezin://assets/generated.png",
+      prompt: "warm editorial lamp",
+      model: "gpt-image-2",
+      source: "generated",
+      generationParams: { quality: "medium", aspectRatio: "16:9", size: "1536x1024" },
+    },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <MoodboardPropertiesPanel
+      node={node}
+      onPatch={() => {}}
+      onPatchData={() => {}}
+      onGenerate={() => {}}
+      onEditImage={onEditImage}
+      onUsePrompt={onUsePrompt}
+    />,
+  );
+
+  expect(screen.getByTestId("moodboard-properties-panel")).toHaveClass("bottom-4");
+  expect(screen.getByTestId("moodboard-properties-actions")).toHaveClass("sticky");
+  expect(screen.getByRole("button", { name: "Edit image" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Use Prompt" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Edit image" }));
+  fireEvent.click(screen.getByRole("button", { name: "Use Prompt" }));
+
+  expect(onEditImage).toHaveBeenCalledOnce();
+  expect(onUsePrompt).toHaveBeenCalledOnce();
+});
+
+test("MoodboardPropertiesPanel only shows edit action for ordinary images", () => {
+  const node: MoodboardNode = {
+    id: "img1",
+    boardId: "b1",
+    type: "image",
+    x: 120,
+    y: 140,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 4,
+    data: { assetId: "asset-1", url: "dezin://assets/upload.png", source: "upload" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(<MoodboardPropertiesPanel node={node} onPatch={() => {}} onPatchData={() => {}} onGenerate={() => {}} onEditImage={() => {}} />);
+
+  expect(screen.getByRole("button", { name: "Edit image" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Use Prompt" })).toBeNull();
+});
+
 test("MoodboardMultiPropertiesPanel exposes selected layer summary and batch actions", () => {
   const onSetVisible = vi.fn();
   const onSetLocked = vi.fn();
@@ -2082,6 +2152,56 @@ test("GeneratorPromptToolbar exposes a compact image model selector", () => {
   fireEvent.click(screen.getByLabelText("Image generation model"));
   fireEvent.click(screen.getByRole("button", { name: /gpt-image-2/ }));
   expect(onModelChange).toHaveBeenCalledWith("gpt-image-2");
+});
+
+test("GeneratorPromptToolbar exposes model parameters and submits them with the prompt", async () => {
+  const onGenerate = vi.fn().mockResolvedValue(undefined);
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light", generationParams: { quality: "medium", aspectRatio: "1:1", size: "1024x1024" } },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <GeneratorPromptToolbar
+      node={node}
+      busy={false}
+      imageProviderId="openai"
+      models={["gpt-image-2"]}
+      model="gpt-image-2"
+      onModelChange={() => {}}
+      onPromptChange={() => {}}
+      onGenerate={onGenerate}
+    />,
+  );
+
+  fireEvent.click(screen.getByLabelText("Image generation parameters"));
+  expect(screen.getByText("Image settings")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "High" }));
+  fireEvent.click(screen.getByRole("button", { name: "16:9" }));
+  fireEvent.click(screen.getByRole("button", { name: "1536 x 1024" }));
+  fireEvent.click(screen.getByRole("button", { name: "Generate" }));
+
+  await waitFor(() =>
+    expect(onGenerate).toHaveBeenCalledWith(
+      "soft light",
+      expect.objectContaining({
+        quality: "high",
+        aspectRatio: "16:9",
+        size: "1536x1024",
+        count: 1,
+      }),
+    ),
+  );
 });
 
 test("GeneratorPromptToolbar enters a disabled loading state while generating", async () => {

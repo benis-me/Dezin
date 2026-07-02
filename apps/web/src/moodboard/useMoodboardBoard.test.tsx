@@ -365,6 +365,89 @@ test("generateImage keeps canvas generation out of the agent loading state and c
   expect(board.messages).toEqual([]);
 });
 
+test("generateImage sends generation parameters to the daemon", async () => {
+  let capturedOptions: Parameters<ReturnType<typeof makeFakeApi>["generateMoodboardImage"]>[2] | undefined;
+  const generator: MoodboardNode = {
+    id: "gen-params",
+    boardId: "board-1",
+    type: "image-generator",
+    x: 10,
+    y: 20,
+    width: 240,
+    height: 180,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light", generatorModel: "gpt-image-2" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const params = { quality: "high" as const, aspectRatio: "16:9" as const, size: "1536x1024" as const, count: 1 };
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [generator],
+      assets: [],
+      messages: [],
+    }),
+    getSettings: async () =>
+      settings({
+        aiProviderId: "openai",
+        aiProviderEnabled: true,
+        aiProviderModels: JSON.stringify({ id: "gpt-image-2", capabilities: ["Image"] }),
+        imageModel: "gpt-image-2",
+      }),
+    generateMoodboardImage: async (_id, _prompt, options) => {
+      capturedOptions = options;
+      return {
+        asset: {
+          id: "asset-1",
+          boardId: "board-1",
+          kind: "image",
+          fileName: "generated.png",
+          mimeType: "image/png",
+          width: 1536,
+          height: 1024,
+          source: "generated",
+          createdAt: 2,
+          url: "/api/moodboards/board-1/assets/asset-1",
+        },
+        nodes: [{ ...generator, type: "image", data: { assetId: "asset-1", prompt: "soft light", model: "gpt-image-2", generationParams: params }, updatedAt: 3 }],
+        messages: [],
+      };
+    },
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+
+  await act(async () => {
+    await board.generateImage(generator, "soft light", { params });
+  });
+
+  expect(capturedOptions).toEqual(
+    expect.objectContaining({
+      model: "gpt-image-2",
+      params,
+    }),
+  );
+  expect(board.nodes[0]?.data).toEqual(expect.objectContaining({ generationParams: params }));
+});
+
 test("generateImage notifies the active agent conversation for agent-created generators", async () => {
   let capturedConversationId = "";
   const generator: MoodboardNode = {

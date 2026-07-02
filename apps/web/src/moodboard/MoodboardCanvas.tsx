@@ -24,6 +24,7 @@ import {
   type CanvasRect,
   type FloatingRect,
 } from "./canvas-utils.ts";
+import { imageGenerationParamsFromNode, hasReusableImagePrompt } from "./image-generation-params.ts";
 import type { MoodboardCanvasTopbarControls } from "./MoodboardCanvasTopbar.tsx";
 import { MOODBOARD_LEAFER_EDITOR_CONFIG } from "./moodboard-canvas-config.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
@@ -34,6 +35,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     busy = false,
     imageModels = [],
     imageModel = "",
+    imageProviderId = "",
     onImageModelChange = () => {},
     onGenerateImage,
     onTopbarControlsChange,
@@ -169,6 +171,23 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
       canvas.uploadFiles(files, { x: node.x + node.width + 32, y: node.y });
     },
     [canvas.uploadFiles],
+  );
+
+  const usePromptFromImage = useCallback(
+    (node: MoodboardNode) => {
+      if (!hasReusableImagePrompt(node)) return;
+      canvas.recordHistory();
+      canvas.addImageGeneratorAt(
+        { x: node.x + node.width + 24, y: node.y },
+        {
+          generatorPrompt: String(node.data.prompt ?? ""),
+          generatorModel: generatorModel(node) || imageModel,
+          generatorStatus: "ready",
+          generationParams: imageGenerationParamsFromNode(node),
+        },
+      );
+    },
+    [canvas.addImageGeneratorAt, canvas.recordHistory, imageModel],
   );
 
   return (
@@ -320,14 +339,18 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 busy={busy}
                 models={imageModels}
                 model={selectedGeneratorModel || imageModel}
+                imageProviderId={imageProviderId}
                 onModelChange={(model) => {
                   canvas.patchNodeData(canvas.selected!.id, { generatorModel: model });
                   onImageModelChange(model);
                 }}
+                onParamsChange={(params) => {
+                  canvas.patchNodeData(canvas.selected!.id, { generationParams: params });
+                }}
                 onPromptChange={(prompt) => canvas.patchNodeData(canvas.selected!.id, { generatorPrompt: prompt, generatorStatus: prompt ? "ready" : "" })}
-                onGenerate={(prompt) => {
+                onGenerate={(prompt, params) => {
                   canvas.recordHistory();
-                  return onGenerateImage(canvas.selected!, prompt);
+                  return onGenerateImage(canvas.selected!, prompt, { params });
                 }}
                 onUploadFiles={(files) => uploadFilesNearNode(files, canvas.selected!)}
               />
@@ -432,8 +455,10 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               onGenerate={() => {
                 if (canvas.selected?.type !== "image-generator") return;
                 canvas.recordHistory();
-                void onGenerateImage(canvas.selected, selectedGeneratorPrompt);
+                void onGenerateImage(canvas.selected, selectedGeneratorPrompt, { params: imageGenerationParamsFromNode(canvas.selected) });
               }}
+              onEditImage={openQuickEdit}
+              onUsePrompt={usePromptFromImage}
             />
           ) : canvas.selectedNodes.length > 1 && !presentationMode ? (
             <MoodboardMultiPropertiesPanel

@@ -20,11 +20,12 @@ import {
   Presentation,
   Plus,
   Scissors,
+  SlidersHorizontal,
   SquareDashedMousePointer,
   StickyNote,
   Trash2,
 } from "lucide-react";
-import type { MoodboardNode } from "../lib/api.ts";
+import type { ImageGenerationParams, MoodboardNode } from "../lib/api.ts";
 import {
   Button,
   DropdownMenu,
@@ -43,6 +44,20 @@ import {
 } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import { generatorPrompt, type MoodboardAlignType, type MoodboardCanvasTool } from "./canvas-utils.ts";
+import {
+  IMAGE_ASPECT_RATIO_OPTIONS,
+  IMAGE_BACKGROUND_OPTIONS,
+  IMAGE_FORMAT_OPTIONS,
+  IMAGE_QUALITY_OPTIONS,
+  IMAGE_SIZE_OPTIONS,
+  imageGenerationParamsForNode,
+  sizeForAspectRatio,
+  supportsImageBackground,
+  supportsImageModeration,
+  supportsImageOutputFormat,
+  supportsImageQuality,
+  supportsImageSize,
+} from "./image-generation-params.ts";
 import { ImageModelPicker } from "./ImageModelPicker.tsx";
 
 const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg-primary hover:!text-primary-foreground";
@@ -428,7 +443,9 @@ export function GeneratorPromptToolbar({
   busy,
   models,
   model,
+  imageProviderId = "",
   onModelChange,
+  onParamsChange,
   onPromptChange,
   onGenerate,
   onUploadFiles,
@@ -437,12 +454,15 @@ export function GeneratorPromptToolbar({
   busy: boolean;
   models: string[];
   model: string;
+  imageProviderId?: string;
   onModelChange: (model: string) => void;
+  onParamsChange?: (params: ImageGenerationParams) => void;
   onPromptChange: (prompt: string) => void;
-  onGenerate: (prompt: string) => Promise<void>;
+  onGenerate: (prompt: string, params: ImageGenerationParams) => Promise<void>;
   onUploadFiles?: (files: FileList) => void;
 }) {
   const [prompt, setPrompt] = useState(generatorPrompt(node));
+  const [params, setParams] = useState(() => imageGenerationParamsForNode(node, imageProviderId));
   const [submitting, setSubmitting] = useState(false);
   const generating = busy || submitting;
 
@@ -450,13 +470,24 @@ export function GeneratorPromptToolbar({
     setPrompt(generatorPrompt(node));
   }, [node]);
 
+  useEffect(() => {
+    setParams(imageGenerationParamsForNode(node, imageProviderId));
+  }, [imageProviderId, node]);
+
+  const patchParams = (patch: ImageGenerationParams) => {
+    const next = imageGenerationParamsForNode({ ...node, data: { ...node.data, generationParams: { ...params, ...patch } } }, imageProviderId);
+    setParams(next);
+    onParamsChange?.(next);
+  };
+
   const submit = async () => {
     const next = prompt.trim();
     if (!next || generating) return;
     onPromptChange(next);
+    onParamsChange?.(params);
     setSubmitting(true);
     try {
-      await onGenerate(next);
+      await onGenerate(next, params);
     } finally {
       setSubmitting(false);
     }
@@ -498,13 +529,182 @@ export function GeneratorPromptToolbar({
         />
       </div>
       <div className="flex h-10 items-center justify-between gap-2 border-t border-border/70 px-2">
-        <ImageModelPicker model={model} options={modelOptions} disabled={generating} onModelChange={onModelChange} />
+        <div className="min-w-0 flex items-center gap-1.5">
+          <ImageModelPicker model={model} options={modelOptions} disabled={generating} onModelChange={onModelChange} />
+          <ImageGenerationParamsControl providerId={imageProviderId} params={params} disabled={generating} onChange={patchParams} />
+        </div>
         <Button size="sm" disabled={generating || prompt.trim().length === 0} onClick={() => void submit()} className="h-7 px-2.5 text-xs">
           {generating ? <Loader2 size={13} strokeWidth={1.75} className="animate-spin" /> : null}
           {generating ? "Generating" : "Generate"}
         </Button>
       </div>
     </div>
+  );
+}
+
+function ImageGenerationParamsControl({
+  providerId,
+  params,
+  disabled,
+  onChange,
+}: {
+  providerId: string;
+  params: ImageGenerationParams;
+  disabled: boolean;
+  onChange: (patch: ImageGenerationParams) => void;
+}) {
+  const summary = `${params.quality ?? "medium"} · ${params.aspectRatio ?? "1:1"} · ${params.count ?? 1}`;
+  return (
+    <Popover modal={false}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={disabled}
+          aria-label="Image generation parameters"
+          className="h-7 max-w-36 gap-1.5 rounded-full bg-surface px-2 text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          <SlidersHorizontal size={12} strokeWidth={1.75} />
+          <span className="truncate">{summary}</span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        data-moodboard-toolbar
+        side="top"
+        align="start"
+        className="w-[304px] p-3"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        onPointerDown={stopToolbarEvent}
+        onPointerUp={stopToolbarEvent}
+        onMouseDown={stopToolbarEvent}
+        onMouseUp={stopToolbarEvent}
+        onClick={stopToolbarEvent}
+        onPointerDownOutside={(event) => {
+          if (isToolbarEventTarget(event.target)) event.preventDefault();
+        }}
+      >
+        <div className="space-y-4">
+          <div>
+            <p className="text-xs font-medium text-foreground">Image settings</p>
+          </div>
+          {supportsImageQuality(providerId) ? (
+            <ParamGroup label="Quality">
+              <div className="grid grid-cols-4 gap-1.5">
+                {IMAGE_QUALITY_OPTIONS.map((option) => (
+                  <ParamButton
+                    key={option.value}
+                    active={(params.quality ?? "medium") === option.value}
+                    label={option.label}
+                    onClick={() => onChange({ quality: option.value })}
+                  />
+                ))}
+              </div>
+            </ParamGroup>
+          ) : null}
+          {supportsImageSize(providerId) ? (
+            <ParamGroup label="Size">
+              <div className="grid grid-cols-3 gap-1.5">
+                {IMAGE_SIZE_OPTIONS.map((option) => (
+                  <ParamButton
+                    key={option.value}
+                    active={(params.size ?? "1024x1024") === option.value}
+                    label={option.label}
+                    onClick={() => onChange({ size: option.value })}
+                  />
+                ))}
+              </div>
+            </ParamGroup>
+          ) : null}
+          <ParamGroup label="Aspect ratio">
+            <div className="grid grid-cols-4 gap-1.5">
+              {IMAGE_ASPECT_RATIO_OPTIONS.map((option) => (
+                <ParamButton
+                  key={option.value}
+                  active={(params.aspectRatio ?? "1:1") === option.value}
+                  label={option.label}
+                  onClick={() => onChange({ aspectRatio: option.value, size: sizeForAspectRatio(option.value) })}
+                />
+              ))}
+            </div>
+          </ParamGroup>
+          {supportsImageBackground(providerId) ? (
+            <ParamGroup label="Background">
+              <div className="grid grid-cols-3 gap-1.5">
+                {IMAGE_BACKGROUND_OPTIONS.map((option) => (
+                  <ParamButton
+                    key={option.value}
+                    active={(params.background ?? "auto") === option.value}
+                    label={option.label}
+                    onClick={() => onChange({ background: option.value })}
+                  />
+                ))}
+              </div>
+            </ParamGroup>
+          ) : null}
+          {supportsImageOutputFormat(providerId) ? (
+            <ParamGroup label="Output">
+              <div className="grid grid-cols-3 gap-1.5">
+                {IMAGE_FORMAT_OPTIONS.map((option) => (
+                  <ParamButton
+                    key={option.value}
+                    active={params.outputFormat === option.value}
+                    label={option.label}
+                    onClick={() => onChange({ outputFormat: option.value })}
+                  />
+                ))}
+              </div>
+            </ParamGroup>
+          ) : null}
+          {supportsImageOutputFormat(providerId) && params.outputFormat && params.outputFormat !== "png" ? (
+            <ParamGroup label="Compression">
+              <div className="grid grid-cols-3 gap-1.5">
+                {[70, 85, 95].map((value) => (
+                  <ParamButton
+                    key={value}
+                    active={(params.outputCompression ?? 85) === value}
+                    label={`${value}`}
+                    onClick={() => onChange({ outputCompression: value })}
+                  />
+                ))}
+              </div>
+            </ParamGroup>
+          ) : null}
+          {supportsImageModeration(providerId) ? (
+            <ParamGroup label="Moderation">
+              <div className="grid grid-cols-2 gap-1.5">
+                <ParamButton active={(params.moderation ?? "auto") === "auto"} label="Auto" onClick={() => onChange({ moderation: "auto" })} />
+                <ParamButton active={params.moderation === "low"} label="Low" onClick={() => onChange({ moderation: "low" })} />
+              </div>
+            </ParamGroup>
+          ) : null}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function ParamGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
+      {children}
+    </div>
+  );
+}
+
+function ParamButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "h-8 rounded-md border border-border bg-card px-2 text-[11px] font-medium text-foreground transition-colors hover:bg-surface-2",
+        active && "border-foreground bg-foreground text-background hover:bg-foreground",
+      )}
+      onClick={onClick}
+    >
+      {label}
+    </button>
   );
 }
 

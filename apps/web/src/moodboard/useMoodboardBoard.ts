@@ -1,12 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentInfo, MoodboardConversation, MoodboardDetail, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
+import type {
+  AgentInfo,
+  ImageGenerationParams,
+  MoodboardConversation,
+  MoodboardDetail,
+  MoodboardMessage,
+  MoodboardNode,
+  SaveMoodboardNodeInput,
+  Settings,
+} from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { useToast } from "../components/Toast.tsx";
 import { MODEL_PROVIDERS } from "../settings/model-provider-registry.ts";
 import { inferCapabilities, parseModelEntries } from "../settings/model-provider-ui-utils.tsx";
 import { providerProfile } from "../settings/provider-profiles.ts";
-import { toInput } from "./canvas-utils.ts";
+import { generatorModel, toInput } from "./canvas-utils.ts";
+import { imageGenerationParamsFromNode } from "./image-generation-params.ts";
 import {
   appendInputs,
   createImageGeneratorNode,
@@ -54,6 +64,7 @@ export function useMoodboardBoard(boardId: string) {
   const [runModel, setRunModel] = useState("");
   const [imageModels, setImageModels] = useState<string[]>([]);
   const [imageModel, setImageModel] = useState("");
+  const [imageProviderId, setImageProviderId] = useState("");
   const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
@@ -97,6 +108,7 @@ export function useMoodboardBoard(boardId: string) {
   const applyImageSettings = useCallback((settings: Settings) => {
     const models = imageModelOptions(settings);
     const configuredImageModel = settings.imageModel.trim();
+    setImageProviderId(settings.aiProviderId.trim());
     setImageModels(models);
     setImageModel((current) =>
       configuredImageModel && models.includes(configuredImageModel)
@@ -199,8 +211,8 @@ export function useMoodboardBoard(boardId: string) {
   );
 
   const addImageGenerator = useCallback(
-    (point?: { x: number; y: number }) => {
-      const node = createImageGeneratorNode(nodes.length, point);
+    (point?: { x: number; y: number }, data?: Record<string, unknown>) => {
+      const node = createImageGeneratorNode(nodes.length, point, data);
       appendNodes([node]);
       setSelectedIds(node.id ? [node.id] : []);
     },
@@ -236,9 +248,9 @@ export function useMoodboardBoard(boardId: string) {
   );
 
   const generateImage = useCallback(
-    async (node: MoodboardNode, prompt: string, options: { sourceAssetId?: string } = {}) => {
-      const selectedModel =
-        typeof node.data.generatorModel === "string" && node.data.generatorModel.trim() ? node.data.generatorModel.trim() : imageModel;
+    async (node: MoodboardNode, prompt: string, options: { sourceAssetId?: string; params?: ImageGenerationParams } = {}) => {
+      const selectedModel = generatorModel(node) || imageModel;
+      const generationParams = options.params ?? imageGenerationParamsFromNode(node);
       const agentConversationId =
         typeof node.data.agentConversationId === "string" && node.data.agentConversationId.trim()
           ? node.data.agentConversationId.trim()
@@ -247,7 +259,16 @@ export function useMoodboardBoard(boardId: string) {
       setNodes((prev) =>
         prev.map((item) =>
           item.id === node.id
-            ? { ...item, data: { ...item.data, generatorPrompt: prompt, generatorModel: selectedModel, generatorStatus: "running" } }
+            ? {
+                ...item,
+                data: {
+                  ...item.data,
+                  generatorPrompt: prompt,
+                  generatorModel: selectedModel,
+                  generatorStatus: "running",
+                  generationParams,
+                },
+              }
             : item,
         ),
       );
@@ -257,6 +278,7 @@ export function useMoodboardBoard(boardId: string) {
           model: selectedModel || undefined,
           conversationId: agentConversationId || undefined,
           sourceAssetId: options.sourceAssetId,
+          params: generationParams,
           x: node.x + node.width + 24,
           y: node.y,
         });
@@ -386,6 +408,7 @@ export function useMoodboardBoard(boardId: string) {
     runModel,
     imageModels,
     imageModel,
+    imageProviderId,
     loading,
     agentBusy,
     imageBusy,

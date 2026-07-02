@@ -74,6 +74,87 @@ test("requestImage routes Azure v1 image generation with the deployment model in
   });
 });
 
+test("requestImage passes supported Azure GPT image parameters through provider options", async () => {
+  const calls: Array<{ url: string; init?: Parameters<FetchLike>[1] }> = [];
+  const imageBase64 = Buffer.from("PNG64").toString("base64");
+  const fetcher: FetchLike = async (input, init) => {
+    calls.push({ url: String(input), init });
+    return new Response(JSON.stringify({ data: [{ b64_json: imageBase64 }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await requestImage(
+    {
+      baseUrl: "https://dezin-resource.openai.azure.com/openai/v1/",
+      apiKey: "azure-key",
+      model: "gpt-image-2",
+      providerId: "azure-openai",
+      apiVersion: "2025-04-01-preview",
+      params: {
+        quality: "high",
+        size: "1536x1024",
+        background: "transparent",
+        moderation: "low",
+        count: 1,
+      },
+    },
+    "a desk lamp",
+    fetcher,
+  );
+
+  const body = JSON.parse(String(calls[0]?.init?.body));
+  assert.deepEqual(body, {
+    model: "gpt-image-2",
+    prompt: "a desk lamp",
+    n: 1,
+    size: "1536x1024",
+    quality: "high",
+    background: "transparent",
+    moderation: "low",
+  });
+});
+
+test("requestImage passes OpenAI output format parameters through provider options", async () => {
+  const calls: Array<{ url: string; init?: Parameters<FetchLike>[1] }> = [];
+  const imageBase64 = Buffer.from("PNG64").toString("base64");
+  const fetcher: FetchLike = async (input, init) => {
+    calls.push({ url: String(input), init });
+    return new Response(JSON.stringify({ data: [{ b64_json: imageBase64 }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await requestImage(
+    {
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "openai-key",
+      model: "gpt-image-2",
+      providerId: "openai",
+      params: {
+        size: "1536x1024",
+        outputFormat: "webp",
+        outputCompression: 80,
+      },
+    },
+    "a desk lamp",
+    fetcher,
+  );
+
+  const body = JSON.parse(String(calls[0]?.init?.body));
+  assert.deepEqual(body, {
+    model: "gpt-image-2",
+    prompt: "a desk lamp",
+    n: 1,
+    size: "1536x1024",
+    output_format: "webp",
+    output_compression: 80,
+    response_format: "b64_json",
+  });
+});
+
 test("requestImageEdit sends the source image as multipart form data", async () => {
   const calls: Array<{ url: string; init?: Parameters<FetchLike>[1] }> = [];
   const imageBase64 = Buffer.from("EDIT64").toString("base64");

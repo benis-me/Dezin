@@ -12,12 +12,24 @@ import { createGoogle } from "@ai-sdk/google";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateImage, type GenerateImageResult, type ImageModel } from "ai";
 
+export type ImageGenerationParams = {
+  quality?: "auto" | "low" | "medium" | "high";
+  size?: `${number}x${number}`;
+  aspectRatio?: `${number}:${number}`;
+  background?: "auto" | "transparent" | "opaque";
+  outputFormat?: "png" | "jpeg" | "webp";
+  outputCompression?: number;
+  moderation?: "auto" | "low";
+  count?: number;
+};
+
 export interface ImageGenOpts {
   baseUrl: string;
   apiKey: string;
   model: string;
   providerId?: string;
   apiVersion?: string;
+  params?: ImageGenerationParams;
 }
 
 export type SourceImageInput = {
@@ -29,6 +41,9 @@ export type SourceImageInput = {
 export type FetchLike = typeof fetch;
 
 type ImageOperation = "generate" | "edit";
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | { [key: string]: JsonValue | undefined } | JsonValue[];
+type ProviderOptions = Record<string, { [key: string]: JsonValue | undefined }>;
 
 interface ImageRequestLogContext {
   operation: ImageOperation;
@@ -156,8 +171,46 @@ function imageModel(opts: ImageGenOpts, fetchImpl: FetchLike): ImageModel {
   }).imageModel(model);
 }
 
-function generationSettings(opts: ImageGenOpts): { n: 1; maxRetries: 0; size?: "1024x1024"; aspectRatio?: "1:1" } {
-  return isGoogle(opts) ? { n: 1, maxRetries: 0, aspectRatio: "1:1" } : { n: 1, maxRetries: 0, size: "1024x1024" };
+function clampCount(value: number | undefined): 1 {
+  return value === 1 ? 1 : 1;
+}
+
+function imageProviderOptions(opts: ImageGenOpts): ProviderOptions | undefined {
+  const params = opts.params;
+  if (!params || isGoogle(opts)) return undefined;
+  const openaiOptions: { [key: string]: JsonValue | undefined } = {};
+  if (params.quality && params.quality !== "auto") openaiOptions.quality = params.quality;
+  if (params.background && params.background !== "auto") openaiOptions.background = params.background;
+  if (params.outputFormat) openaiOptions.output_format = params.outputFormat;
+  if (typeof params.outputCompression === "number" && Number.isFinite(params.outputCompression)) {
+    openaiOptions.output_compression = Math.max(0, Math.min(100, Math.round(params.outputCompression)));
+  }
+  if (params.moderation && params.moderation !== "auto") openaiOptions.moderation = params.moderation;
+  if (!Object.keys(openaiOptions).length) return undefined;
+  return { openai: openaiOptions };
+}
+
+function generationSettings(opts: ImageGenOpts): {
+  n: 1;
+  maxRetries: 0;
+  size?: `${number}x${number}`;
+  aspectRatio?: `${number}:${number}`;
+  providerOptions?: ProviderOptions;
+} {
+  const params = opts.params;
+  if (isGoogle(opts)) {
+    return {
+      n: clampCount(params?.count),
+      maxRetries: 0,
+      aspectRatio: params?.aspectRatio ?? "1:1",
+    };
+  }
+  return {
+    n: clampCount(params?.count),
+    maxRetries: 0,
+    size: params?.size ?? "1024x1024",
+    providerOptions: imageProviderOptions(opts),
+  };
 }
 
 function base64FromResult(result: GenerateImageResult): string {

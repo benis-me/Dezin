@@ -127,6 +127,7 @@ export function MoodboardScreen({
               selectedIds={board.selectedIds}
               imageModels={board.imageModels}
               imageModel={board.imageModel}
+              imageProviderId={board.imageProviderId}
               onImageModelChange={board.setImageModel}
               onSelectIds={board.setSelectedIds}
               onNodesChange={board.updateNodes}

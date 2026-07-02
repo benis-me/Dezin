@@ -207,7 +207,9 @@ export function generatorStatus(node: MoodboardNode): string {
 
 export function generatorModel(node: MoodboardNode): string {
   const model = node.data.generatorModel;
-  return typeof model === "string" ? model : "";
+  if (typeof model === "string" && model.trim()) return model.trim();
+  const imageModel = node.data.model;
+  return typeof imageModel === "string" ? imageModel.trim() : "";
 }
 
 export const MOODBOARD_LAYERS_OPEN_KEY = "dezin:moodboard:layers-open";
