@@ -15,6 +15,7 @@ import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 
 afterEach(() => {
   localStorage.removeItem("dezin.shell.sidebar.width");
+  localStorage.removeItem("dezin.home.composer");
   cleanup();
 });
 
@@ -207,6 +208,29 @@ test("HomeScreen Build passes the brief, skillId, and designSystemId", async () 
   expect(onNewProject).toHaveBeenCalledWith("a dashboard", "deck", "editorial", "prototype");
 });
 
+test("HomeScreen remembers the selected input parameters after remount", async () => {
+  const user = userEvent.setup();
+  const overrides = {
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+  };
+
+  const { unmount } = renderWithApi(<HomeScreen projects={[]} />, overrides);
+  await user.click(await screen.findByRole("button", { name: "Template" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Slides" }));
+  await user.click(screen.getByRole("button", { name: "Design system" }));
+  await user.click(await screen.findByText("Editorial"));
+  await user.click(screen.getByRole("button", { name: "Mode" }));
+  await user.click(await screen.findByRole("menuitem", { name: /^Standard/ }));
+
+  unmount();
+  renderWithApi(<HomeScreen projects={[]} />, overrides);
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Template" })).toHaveTextContent("Slides"));
+  expect(screen.getByRole("button", { name: "Design system" })).toHaveTextContent("Editorial");
+  expect(screen.getByRole("button", { name: "Mode" })).toHaveTextContent("Standard");
+});
+
 test("HomeScreen optimizes the prompt with the selected agent and lets the user reject or accept it", async () => {
   const user = userEvent.setup();
   const onNewProject = vi.fn();
@@ -219,7 +243,7 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
     .mockImplementationOnce(() => firstOptimization)
     .mockResolvedValueOnce({ prompt: "Accepted optimized shader brief" });
 
-  renderWithApiAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+  const { container } = renderWithApiAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
     listAgents: async () => [{ id: "codebuddy", command: "codebuddy", available: true, models: ["hunyuan"] }],
     getSettings: async () => settingsFixture({ agentCommand: "codebuddy", model: "hunyuan" }),
     listSkills: async () => SKILLS,
@@ -245,6 +269,9 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
     ),
   );
   expect(textarea).toBeDisabled();
+  const loadingGradient = container.querySelector(".prompt-loading-gradient");
+  expect(loadingGradient).not.toBeNull();
+  expect(loadingGradient).toHaveClass("motion-safe:animate-prompt-loading-gradient");
 
   await act(async () => {
     resolveFirst({ prompt: "Create a finished shader microsite with sourced assets." });
