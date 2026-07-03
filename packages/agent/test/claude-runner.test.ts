@@ -215,3 +215,17 @@ test("ClaudeCodeRunner rejects stale artifacts from a successful no-op turn", as
     /artifact.*not updated/i,
   );
 });
+
+test("ClaudeCodeRunner can return an unchanged artifact when update enforcement is disabled", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-claude-standard-"));
+  const html = "<div id=\"root\"></div><script type=\"module\" src=\"/src/main.jsx\"></script>";
+  await writeFile(join(dir, "index.html"), html, "utf8");
+  const spawner: ProcessSpawner = {
+    run: async () => ({ stdout: STREAM, exitCode: 0 }),
+  };
+  const runner = new ClaudeCodeRunner({ spawner, enforceArtifactUpdate: false });
+
+  const result = await runner.runTurn({ systemPrompt: "S", message: "update src/App.jsx", projectDir: dir });
+
+  assert.equal(result.artifactHtml, html);
+});

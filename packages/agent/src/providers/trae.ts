@@ -13,6 +13,6 @@ export const traeProvider: AgentProvider = {
   label: "Trae CLI",
   seedModels: [],
   genericConfig: config,
-  createRunner: ({ command, model }) => new GenericCliRunner({ id: "trae", command, model, config }),
+  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "trae", command, model, config, enforceArtifactUpdate }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };

@@ -158,6 +158,8 @@ export interface ClaudeCodeRunnerOptions {
   spawner?: ProcessSpawner;
   /** Canonical artifact file the agent writes, default "index.html". */
   artifactPath?: string;
+  /** Require the canonical artifact file to change during the turn. */
+  enforceArtifactUpdate?: boolean;
 }
 
 export class ClaudeCodeRunner implements AgentRunner {
@@ -166,12 +168,14 @@ export class ClaudeCodeRunner implements AgentRunner {
   readonly command: string;
   /** The model override, if any. */
   readonly model: string | undefined;
+  readonly enforceArtifactUpdate: boolean;
   private opts: ClaudeCodeRunnerOptions;
 
   constructor(opts: ClaudeCodeRunnerOptions = {}) {
     this.opts = opts;
     this.command = opts.command ?? "claude";
     this.model = opts.model;
+    this.enforceArtifactUpdate = opts.enforceArtifactUpdate ?? true;
   }
 
   buildArgs(systemPrompt: string): string[] {
@@ -231,7 +235,9 @@ export class ClaudeCodeRunner implements AgentRunner {
     if (parsed.isError) {
       throw new Error(`${command} returned an error result${parsed.result ? `: ${parsed.result}` : ""}`);
     }
-    const artifactHtml = await readUpdatedArtifactHtml(input.projectDir, artifactPath, beforeArtifact, command);
+    const artifactHtml = await readUpdatedArtifactHtml(input.projectDir, artifactPath, beforeArtifact, command, {
+      enforceArtifactUpdate: this.enforceArtifactUpdate,
+    });
 
     return { text: parsed.text, artifactHtml, artifactPath };
   }

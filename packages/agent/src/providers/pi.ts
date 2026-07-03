@@ -13,6 +13,6 @@ export const piProvider: AgentProvider = {
   label: "Pi",
   seedModels: [],
   genericConfig: config,
-  createRunner: ({ command, model }) => new GenericCliRunner({ id: "pi", command, model, config }),
+  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "pi", command, model, config, enforceArtifactUpdate }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };

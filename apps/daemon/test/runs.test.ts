@@ -1214,6 +1214,68 @@ test("standard run persists visual QA findings and score when enabled", async ()
   );
 });
 
+test("standard run with a production CLI runner can change src files without touching index.html", async () => {
+  let visualQaCalls = 0;
+  await withRunServer(
+    undefined,
+    async ({ base, dataDir, store }) => {
+      const root = mkdtempSync(join(tmpdir(), "dezin-standard-cli-"));
+      const cliPath = join(root, "standard-agent");
+      writeFileSync(
+        cliPath,
+        `#!/usr/bin/env node
+const fs = require("fs");
+const path = require("path");
+fs.mkdirSync(path.join(process.cwd(), "src"), { recursive: true });
+fs.writeFileSync(
+  path.join(process.cwd(), "src", "App.jsx"),
+  "export default function App(){ return <main>Updated by CLI</main> }\\n",
+);
+console.log("updated src/App.jsx");
+`,
+        { mode: 0o755 },
+      );
+      store.updateSettings({ agentCommand: cliPath, visualQaEnabled: true, autoImproveEnabled: false });
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(join(dir, "src"), { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/main.jsx"></script>`);
+      writeFileSync(join(dir, "src", "main.jsx"), `import App from "./App.jsx";`);
+      writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>Before</main> }`);
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      const beforeIndex = readFileSync(join(dir, "index.html"), "utf8");
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "update the React app" }),
+      });
+      const events = parseSse(await res.text());
+      const done = events.find((e) => e.type === "run-done")!;
+      assert.equal(done.mode, "standard");
+      assert.equal(done.passed, true);
+      assert.equal(events.some((e) => e.type === "visual-qa"), true);
+      assert.equal(readFileSync(join(dir, "index.html"), "utf8"), beforeIndex);
+      assert.match(readFileSync(join(dir, "src", "App.jsx"), "utf8"), /Updated by CLI/);
+      const run = store.getRun(done.runId as string)!;
+      assert.equal(run.status, "succeeded");
+      assert.ok(run.commitHash, "standard run persisted a git snapshot");
+      assert.equal(visualQaCalls, 1);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => {
+        visualQaCalls += 1;
+        return [];
+      },
+    },
+  );
+});
+
 test("standard run auto-improves visual QA findings without a manual button", async () => {
   let turn = 0;
   const calls: Array<{ message: string; isRepair?: boolean }> = [];

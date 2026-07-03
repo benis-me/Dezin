@@ -13,6 +13,6 @@ export const hermesProvider: AgentProvider = {
   label: "Hermes",
   seedModels: [],
   genericConfig: config,
-  createRunner: ({ command, model }) => new GenericCliRunner({ id: "hermes", command, model, config }),
+  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "hermes", command, model, config, enforceArtifactUpdate }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };

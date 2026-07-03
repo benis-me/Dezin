@@ -25,7 +25,13 @@ export function assertSuccessfulExit(label: string, output: SpawnOutput): void {
   throw new Error(`${label} exited with exit code ${output.exitCode}${stderr ? `: ${stderr}` : ""}`);
 }
 
-export async function readUpdatedArtifactHtml(projectDir: string, artifactPath: string, before: ArtifactSnapshot, label: string): Promise<string> {
+export async function readUpdatedArtifactHtml(
+  projectDir: string,
+  artifactPath: string,
+  before: ArtifactSnapshot,
+  label: string,
+  options: { enforceArtifactUpdate?: boolean } = {},
+): Promise<string> {
   const after = await readArtifactSnapshot(projectDir, artifactPath);
   if (!after.exists || after.html === null) {
     throw new Error(`${label} artifact missing: ${artifactPath}`);
@@ -33,7 +39,7 @@ export async function readUpdatedArtifactHtml(projectDir: string, artifactPath: 
   if (!after.html.trim()) {
     throw new Error(`${label} artifact empty: ${artifactPath}`);
   }
-  if (before.exists && after.html === before.html) {
+  if ((options.enforceArtifactUpdate ?? true) && before.exists && after.html === before.html) {
     throw new Error(`${label} artifact not updated: ${artifactPath}`);
   }
   return after.html;

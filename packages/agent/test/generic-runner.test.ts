@@ -89,3 +89,24 @@ test("runTurn rejects stale artifacts from a successful no-op turn", async () =>
     /artifact.*not updated/i,
   );
 });
+
+test("runTurn can return an unchanged artifact when update enforcement is disabled", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "dezin-generic-standard-"));
+  const html = "<div id=\"root\"></div><script type=\"module\" src=\"/src/main.jsx\"></script>";
+  await writeFile(join(dir, "index.html"), html, "utf8");
+  const fakeSpawner: ProcessSpawner = {
+    async run() {
+      return { stdout: "updated src/App.jsx", exitCode: 0 };
+    },
+  };
+  const runner = new GenericCliRunner({
+    command: "codex",
+    config: GENERIC_AGENTS.codex!,
+    spawner: fakeSpawner,
+    enforceArtifactUpdate: false,
+  });
+
+  const result = await runner.runTurn({ systemPrompt: "SYS", message: "update src/App.jsx", projectDir: dir });
+
+  assert.equal(result.artifactHtml, html);
+});

@@ -38,6 +38,6 @@ export const cursorAgentProvider: AgentProvider = {
     const r = await runCapture(command, ["models"], 5000);
     return r ? parseCursorModels(r.out) : [];
   },
-  createRunner: ({ command, model }) => new GenericCliRunner({ id: "cursor-agent", command, model, config }),
+  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "cursor-agent", command, model, config, enforceArtifactUpdate }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };

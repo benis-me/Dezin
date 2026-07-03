@@ -47,17 +47,28 @@ function skills(): SkillInfo[] {
 }
 
 /** Build the production agent runner from settings (BYOK). */
-export function buildRunner(settings: Settings, override: { agentCommand?: string; model?: string } = {}): AgentRunner {
+export function buildRunner(
+  settings: Settings,
+  override: { agentCommand?: string; model?: string } = {},
+  options: { enforceArtifactUpdate?: boolean } = {},
+): AgentRunner {
   const command = override.agentCommand || settings.agentCommand || "claude";
   const model = override.model || settings.model || undefined;
+  const enforceArtifactUpdate = options.enforceArtifactUpdate ?? true;
 
   // Each agent's runner (stream-json for Claude/CodeBuddy, generic CLI for the rest) is
   // defined by its provider; an unknown CLI falls back to a best-effort positional prompt.
   const provider = getProvider(command);
-  if (provider) return provider.createRunner({ command, model });
+  if (provider) return provider.createRunner({ command, model, enforceArtifactUpdate });
 
   const base = (command.split(/[\\/]/).pop() ?? command).replace(/\.(?:exe|cmd|bat|ps1)$/i, "");
-  return new GenericCliRunner({ id: base, command, model, config: { buildArgs: (m, p) => [...(m ? ["--model", m] : []), p] } });
+  return new GenericCliRunner({
+    id: base,
+    command,
+    model,
+    config: { buildArgs: (m, p) => [...(m ? ["--model", m] : []), p] },
+    enforceArtifactUpdate,
+  });
 }
 
 /**
@@ -338,11 +349,16 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const imageRuntime = providerRuntimeConfig(settings, settings.aiProviderId);
   const imageBaseUrl = imageRuntime.baseUrl || settings.imageApiBaseUrl;
   const imageApiKey = imageRuntime.apiKey || settings.imageApiKey;
-  // deps.runner is the test override; production builds from settings (live changes apply).
-  const runner = deps.runner ?? buildRunner(settings, { agentCommand: body.agentCommand, model: body.model });
-
   const project = store.getProject(body.projectId);
   if (!project) return sendError(res, 404, "project not found");
+  // deps.runner is the test override; production builds from settings (live changes apply).
+  const runner =
+    deps.runner ??
+    buildRunner(
+      settings,
+      { agentCommand: body.agentCommand, model: body.model },
+      { enforceArtifactUpdate: project.mode !== "standard" },
+    );
 
   let conversation = body.conversationId ? store.getConversation(body.conversationId) : null;
   if (body.conversationId && !conversation) return sendError(res, 404, "conversation not found");

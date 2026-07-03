@@ -25,7 +25,7 @@ export interface AgentProvider {
    *  slow methods (e.g. a PTY scrape) that should only run on an explicit rescan, not at boot. */
   discoverModels?(command: string, deep?: boolean): Promise<string[]>;
   /** Build the generation runner. */
-  createRunner(opts: { command: string; model?: string }): AgentRunner;
+  createRunner(opts: { command: string; model?: string; enforceArtifactUpdate?: boolean }): AgentRunner;
   /** Argv for a one-shot prompt that reads files in cwd (used by the image analyzer). */
   oneShotArgs(model: string | undefined, prompt: string): string[];
 }

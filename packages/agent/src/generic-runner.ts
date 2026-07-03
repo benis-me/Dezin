@@ -36,12 +36,14 @@ export interface GenericCliRunnerOptions {
   config: GenericAgentConfig;
   spawner?: ProcessSpawner;
   artifactPath?: string;
+  enforceArtifactUpdate?: boolean;
 }
 
 export class GenericCliRunner implements AgentRunner {
   readonly id: string;
   readonly command: string;
   readonly model: string | undefined;
+  readonly enforceArtifactUpdate: boolean;
   private opts: GenericCliRunnerOptions;
 
   constructor(opts: GenericCliRunnerOptions) {
@@ -49,6 +51,7 @@ export class GenericCliRunner implements AgentRunner {
     this.id = opts.id ?? opts.command;
     this.command = opts.command;
     this.model = opts.model;
+    this.enforceArtifactUpdate = opts.enforceArtifactUpdate ?? true;
   }
 
   /** The argv this runner spawns for a given combined prompt (inspectable for tests). */
@@ -72,7 +75,9 @@ export class GenericCliRunner implements AgentRunner {
       env: input.env,
     });
     assertSuccessfulExit(this.command, output);
-    const artifactHtml = await readUpdatedArtifactHtml(input.projectDir, artifactPath, beforeArtifact, this.command);
+    const artifactHtml = await readUpdatedArtifactHtml(input.projectDir, artifactPath, beforeArtifact, this.command, {
+      enforceArtifactUpdate: this.enforceArtifactUpdate,
+    });
 
     // No structured stream — surface a trimmed tail of stdout as the assistant text.
     const text = output.stdout.trim().split("\n").slice(-12).join("\n").slice(0, 2000);

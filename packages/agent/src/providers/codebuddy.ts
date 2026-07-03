@@ -120,6 +120,6 @@ export const codebuddyProvider: AgentProvider = {
     if (deep) return scrapeModelList(command);
     return [];
   },
-  createRunner: ({ command, model }) => new ClaudeCodeRunner({ command, model }),
+  createRunner: ({ command, model, enforceArtifactUpdate }) => new ClaudeCodeRunner({ command, model, enforceArtifactUpdate }),
   oneShotArgs: (model, prompt) => ["-p", prompt, "--permission-mode", "bypassPermissions", ...(model ? ["--model", model] : [])],
 };

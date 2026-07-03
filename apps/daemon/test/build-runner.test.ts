@@ -54,3 +54,22 @@ test("buildRunner falls back to claude with no model", () => {
   assert.equal(r.model, undefined);
   assert.ok(!r.buildArgs("X").includes("--model"));
 });
+
+test("buildRunner can disable artifact update enforcement for standard projects", () => {
+  const claude = buildRunner(
+    settings({ agentCommand: "codebuddy", model: "claude-opus-4.8" }),
+    {},
+    { enforceArtifactUpdate: false },
+  );
+  assert.ok(claude instanceof ClaudeCodeRunner);
+  assert.equal(claude.command, "codebuddy");
+  assert.equal(claude.enforceArtifactUpdate, false);
+
+  const generic = buildRunner(
+    settings({ agentCommand: "codex", model: "gpt-5-codex" }),
+    {},
+    { enforceArtifactUpdate: false },
+  );
+  assert.ok(generic instanceof GenericCliRunner);
+  assert.equal(generic.enforceArtifactUpdate, false);
+});

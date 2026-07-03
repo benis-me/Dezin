@@ -13,6 +13,6 @@ export const kimiProvider: AgentProvider = {
   label: "Kimi CLI",
   seedModels: [],
   genericConfig: config,
-  createRunner: ({ command, model }) => new GenericCliRunner({ id: "kimi", command, model, config }),
+  createRunner: ({ command, model, enforceArtifactUpdate }) => new GenericCliRunner({ id: "kimi", command, model, config, enforceArtifactUpdate }),
   oneShotArgs: (model, prompt) => config.buildArgs(model, prompt),
 };
