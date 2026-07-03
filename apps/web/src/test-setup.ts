@@ -1,7 +1,45 @@
 import "@testing-library/jest-dom";
 
+function createMemoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear() {
+      values.clear();
+    },
+    getItem(key: string) {
+      return values.has(key) ? values.get(key)! : null;
+    },
+    key(index: number) {
+      return Array.from(values.keys())[index] ?? null;
+    },
+    removeItem(key: string) {
+      values.delete(key);
+    },
+    setItem(key: string, value: string) {
+      values.set(key, String(value));
+    },
+  };
+}
+
+const memoryStorage = createMemoryStorage();
+
+function installMemoryStorage(target: object): void {
+  const descriptor = Object.getOwnPropertyDescriptor(target, "localStorage");
+  if (descriptor && !descriptor.get && descriptor.value !== undefined) return;
+  Object.defineProperty(target, "localStorage", {
+    configurable: true,
+    value: memoryStorage,
+  });
+}
+
+installMemoryStorage(globalThis);
+
 // jsdom polyfills for Radix UI primitives (shadcn) used in tests.
 if (typeof window !== "undefined") {
+  installMemoryStorage(window);
   if (!("ResizeObserver" in window)) {
     (window as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
       observe() {}

@@ -531,6 +531,40 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       let score = 100;
       let passed = true;
       const repairSnapshotCommits = new Set<string>();
+      let livePreviewUrl: string | null = null;
+      const emitStandardPreviewUpdate = async (eventRound: number): Promise<void> => {
+        try {
+          const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId));
+          livePreviewUrl = url;
+          sse({
+            type: "preview-update",
+            runId: run.id,
+            mode: "standard",
+            variantId: targetVariantId,
+            previewUrl: url,
+            t: Date.now(),
+            round: eventRound,
+          });
+        } catch (err) {
+          sse({
+            type: "preview-update",
+            runId: run.id,
+            mode: "standard",
+            variantId: targetVariantId,
+            t: Date.now(),
+            round: eventRound,
+          });
+          sse({
+            type: "activity",
+            round: eventRound,
+            activity: {
+              kind: "tool",
+              name: "preview",
+              summary: `Preview server is not ready yet - ${err instanceof Error ? err.message : "dev server unavailable"}`,
+            },
+          });
+        }
+      };
 
       while (true) {
         const isRepair = round > 0;
@@ -591,6 +625,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         }
         if (!commit.committed) throw new Error("Project files changed, but Dezin could not commit a version snapshot.");
         commitHash = commit.commitHash;
+        store.updateRun(run.id, { commitHash, repairRounds });
+        await emitStandardPreviewUpdate(round);
 
         const staticSurface = await collectStandardLintSurface(dir);
         const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface, { mode: "standard" }) : []) as QualityFinding[];
@@ -602,7 +638,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           let renderUrl: string | undefined;
           if (!deps.visualQa) {
             try {
-              renderUrl = (await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId))).url;
+              renderUrl = livePreviewUrl ?? (await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId))).url;
             } catch (err) {
               visualFindings = [
                 {
@@ -628,6 +664,14 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         findings = [...staticFindings, ...visualFindings];
         score = lintScore(findings);
         passed = !findings.some((f) => f.severity === "P0");
+        store.updateRun(run.id, {
+          commitHash,
+          repairRounds,
+          lintPassed: passed,
+          score,
+          findings: withResolvedVisualReviewHistory(findings, visualReviewHistory),
+        });
+        await emitStandardPreviewUpdate(round);
 
         if (!shouldAutoRepair(settings, findings, repairRounds, maxRepairRounds)) break;
         const nextRound = repairRounds + 1;
@@ -647,6 +691,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             createdAt: Math.max(0, run.createdAt - (maxRepairRounds - round + 1)),
             finishedAt: Date.now(),
           });
+          await emitStandardPreviewUpdate(round);
         }
         if (visualReviewRecords.length) persistTranscript(finalAssistantText);
         round = nextRound;

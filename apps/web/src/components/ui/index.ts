@@ -1,6 +1,6 @@
 // shadcn/ui primitives
-export { Button, buttonVariants } from "./button.tsx";
-export { Badge, badgeVariants } from "./badge.tsx";
+export { Button, buttonVariants } from "./Button.tsx";
+export { Badge, badgeVariants } from "./Badge.tsx";
 export {
   Card,
   CardHeader,
@@ -9,7 +9,7 @@ export {
   CardAction,
   CardDescription,
   CardContent,
-} from "./card.tsx";
+} from "./Card.tsx";
 export { Input, SearchInput } from "./input.tsx";
 export { Textarea } from "./textarea.tsx";
 export { Label } from "./label.tsx";
@@ -43,7 +43,7 @@ export {
 export { Dialog } from "./overlay.tsx";
 export { Popover, PopoverTrigger, PopoverContent, PopoverAnchor } from "./popover.tsx";
 export { Tabs, type TabItem } from "./segmented.tsx";
-export { Field } from "./field.tsx";
+export { Field } from "./Field.tsx";
 
 // Dezin-only helpers built on shadcn primitives
 export { IconButton, Kbd } from "./IconButton.tsx";
