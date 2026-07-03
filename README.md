@@ -28,7 +28,7 @@ Three ideas do the work:
 - **Agent visual review with runtime evidence.** When enabled, a reviewer agent inspects rendered screenshots, viewport geometry, current conversation context, and browser runtime signals such as console errors, page errors, failed requests, and HTTP error responses. The reviewer can inherit the project agent/model or use its own Agent + model.
 - **One source of truth.** The linter's rule lists generate the craft doc (`content/craft/anti-ai-slop.md`); a drift test fails if they diverge, so the prompt and the linter can never disagree.
 
-The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that does not trip its own linter.
+The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that does not trip its own linter. And Dezin holds its own UI to the same bar — neutral, restrained, borders over shadows, nothing louder than it needs to be — so the tool practices the taste it enforces ([`docs/SELF-DESIGN.md`](./docs/SELF-DESIGN.md)).
 
 <div align="center">
   <img src="./docs/assets/workspace.png" alt="A Dezin Standard run in the workspace" width="900" />
@@ -46,7 +46,7 @@ The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that d
 - **Files and Versions workspace.** Browse generated files with an in-pane source preview, and review per-branch versions grouped by branch with View, Diff, Compare, Restore, and Chat jump actions.
 - **Durable run state.** Run events are persisted and replayed when you reopen a project or navigate back. In-app navigation can reconnect to a running agent; if the desktop app quits, the interrupted run reopens at its last known state.
 - **Moodboards.** Collect references before a design starts on a high-performance, AI-native infinite canvas — pan and zoom across image, note, section, and image-generator nodes, generate visual material inline, and drive it all from a board-scoped Agent. Built on the Leafer engine for a fluid, Lovart-style canvas experience, entirely local.
-- **Reference real work.** Attach another project as a reference (its actual artifact is handed to the agent), reference a Moodboard with budgeted canvas context and asset paths, pull in a built-in or custom Effect, drop in screenshots to recreate, or paste local paths.
+- **Reference real work.** The composer's `+` menu pulls context in from anywhere: attach files or a whole folder (the local agent reads them in place), upload a `.fig` and import its design, reference another Dezin project (its real artifact is handed to the agent), reference a Moodboard (budgeted canvas context + asset paths), or pull in a built-in or custom Effect. You can also point the agent at a specific element in the live preview, or drop in screenshots to recreate.
 - **Live process view.** The agent's reasoning and file writes stream into the chat as it works; the artifact renders in a sandboxed iframe; export downloads a `.zip`.
 - **Desktop app.** An Electron shell (`apps/desktop`) with native window chrome and pixel-perfect off-screen capture for previews.
 - **Chrome extension.** Capture a cover image from Dribbble / Behance / Pinterest and send it straight to the composer (`apps/extension`).
@@ -73,6 +73,10 @@ The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that d
   <img src="./docs/assets/moodboard-canvas.png" alt="A Dezin moodboard canvas" width="900" />
   <p><em>The moodboard canvas — a high-performance, AI-native infinite canvas of image, note, section, and image-generator nodes, with a board-scoped Agent panel.</em></p>
 </div>
+
+## Composable by design
+
+None of Dezin's surfaces is a silo — they feed each other. A single run weaves a **skill** (what to build) and a **design system** (the brand) together with anything you attach: reference files or a folder, a `.fig`, another generated project, a **Moodboard**, and one or more **Effects**. Outputs loop back as inputs — a finished design becomes a reference for the next, and images you generate on a moodboard canvas become assets a design can pull in. The `+` menu on every composer is where it all comes together.
 
 ## Quick start
 
@@ -157,5 +161,7 @@ Dezin was built from scratch; its direction was informed by ideas from these pro
 
 - [open-design](https://github.com/nexu-io/open-design) — for the anti-AI-slop craft direction and the idea of composing generation from a brand/system content model.
 - [Claude Design](https://claude.ai) — Anthropic's Claude interface, a touchstone for the restrained, content-first product aesthetic Dezin aims for.
+- [shadcn/ui](https://github.com/shadcn-ui/ui) — the component approach (Radix primitives + CVA + `tailwind-merge`) behind Dezin's own UI, and one of the built-in design systems.
 - [simple-icons](https://github.com/simple-icons/simple-icons) — the brand marks used for the built-in design systems.
 - [Paper Shaders](https://github.com/paper-design/shaders) — the shader presets and parameter defaults behind Dezin's built-in `@Paper` effects (Apache-2.0).
+- [Leafer UI](https://github.com/leaferjs/leafer-ui) — the high-performance canvas engine that powers the Moodboard's infinite canvas.

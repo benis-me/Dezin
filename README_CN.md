@@ -28,7 +28,7 @@ Dezin 刻意保持极简 —— 没有遥测，没有托管自动化，没有连
 - **带运行时证据的 Agent 视觉评审。** 启用后，评审 Agent 会检查渲染出的截图、视口几何、当前对话上下文，以及浏览器运行时信号 —— 例如控制台错误、页面错误、失败的请求和 HTTP 错误响应。评审方可以沿用项目的 Agent/模型，也可以用它自己的 Agent + 模型。
 - **单一事实来源。** linter 的规则清单会生成工艺文档（`content/craft/anti-ai-slop.md`）；一个漂移测试会在两者出现分歧时失败，因此提示词和 linter 永远不会各说各话。
 
-默认品牌（`modern-minimal`）是一套 Linear/Vercel 风格的中性灰阶，不会触发它自己的 linter。
+默认品牌（`modern-minimal`）是一套 Linear/Vercel 风格的中性灰阶，不会触发它自己的 linter。而 Dezin 也把自己的 UI 约束在同一条线上 —— 中性、克制、以描边取代阴影，不做任何多余的喧哗 —— 让工具本身践行它所强制的品味（见 [`docs/SELF-DESIGN.md`](./docs/SELF-DESIGN.md)）。
 
 <div align="center">
   <img src="./docs/assets/workspace.png" alt="工作区中的一次 Dezin Standard 运行" width="900" />
@@ -46,7 +46,7 @@ Dezin 刻意保持极简 —— 没有遥测，没有托管自动化，没有连
 - **文件与版本工作区。** 浏览生成的文件，并在面板内预览源码；按分支查看每个分支的版本，支持查看、Diff、对比、还原以及跳转到对话等操作。
 - **持久化的运行状态。** 运行事件会被持久化，并在你重新打开项目或返回时回放。应用内导航可以重新连接到正在运行的 Agent；如果桌面应用退出了，被打断的运行会在它最后的已知状态处重新打开。
 - **情绪板（Moodboard）。** 在设计开始前，于一块高性能、AI 原生的无限画布上收集参考 —— 在图片、便签、区块和图像生成器节点之间自由平移缩放，就地生成视觉素材，并由一个板级 Agent 统一驱动。基于 Leafer 引擎打造，带来流畅、接近 Lovart 的画布体验，且完全本地。
-- **引用真实成果。** 把另一个项目作为参考附上（它真实的产物会交给 Agent）、引用一块情绪板（带预算的画布上下文与素材路径）、拉入一个内置或自定义特效、丢入截图来复刻，或者粘贴本地路径。
+- **引用真实成果。** 输入框的 `+` 菜单能把上下文从任何地方拉进来：附上文件或整个文件夹（本地 Agent 就地读取）、上传一个 `.fig` 并导入它的设计、引用另一个 Dezin 项目（它真实的产物会交给 Agent）、引用一块情绪板（带预算的画布上下文与素材路径），或拉入一个内置或自定义特效。你也可以让 Agent 对准实时预览里的某个具体元素，或者丢入截图来复刻。
 - **实时过程视图。** Agent 工作时，它的推理和文件写入会实时流入对话；产物在沙箱化的 iframe 中渲染；导出会下载一个 `.zip`。
 - **桌面应用。** 一个 Electron 外壳（`apps/desktop`），带原生窗口边框，以及用于预览的像素级精确离屏截图。
 - **Chrome 扩展。** 从 Dribbble / Behance / Pinterest 抓取一张封面图，直接发送到输入框（`apps/extension`）。
@@ -73,6 +73,10 @@ Dezin 刻意保持极简 —— 没有遥测，没有托管自动化，没有连
   <img src="./docs/assets/moodboard-canvas.png" alt="一块 Dezin 情绪板画布" width="900" />
   <p><em>情绪板画布 —— 一块高性能、AI 原生的无限画布，容纳图片、便签、区块和图像生成器节点，配一个板级 Agent 面板。</em></p>
 </div>
+
+## 一切皆可组合
+
+Dezin 的各个界面并不是彼此孤立的孤岛 —— 它们相互喂养。一次运行会把一个 **skill**（构建什么）和一个**设计系统**（品牌）与你附上的任何东西编织在一起：参考文件或文件夹、一个 `.fig`、另一个已生成的项目、一块**情绪板**，以及一个或多个**特效**。产物又会回流成输入 —— 一个做完的设计会成为下一个设计的参考，你在情绪板画布上生成的图像也会成为设计可以拉取的素材。每个输入框上的 `+` 菜单，就是这一切汇聚的地方。
 
 ## 快速开始
 
@@ -157,5 +161,7 @@ Dezin 从零构建；它的方向受到了以下项目的启发：
 
 - [open-design](https://github.com/nexu-io/open-design) —— 反 AI 塑料感的工艺方向，以及从品牌/系统内容模型来组合生成的思路。
 - [Claude Design](https://claude.ai) —— Anthropic 的 Claude 界面，是 Dezin 所追求的那种克制、以内容为先的产品美学的标杆。
+- [shadcn/ui](https://github.com/shadcn-ui/ui) —— Dezin 自身 UI 所采用的组件范式（Radix 基础组件 + CVA + `tailwind-merge`），同时也是内置设计系统之一。
 - [simple-icons](https://github.com/simple-icons/simple-icons) —— 内置设计系统所用的品牌图标。
 - [Paper Shaders](https://github.com/paper-design/shaders) —— Dezin 内置 `@Paper` 特效背后的着色器预设与参数默认值（Apache-2.0）。
+- [Leafer UI](https://github.com/leaferjs/leafer-ui) —— 驱动情绪板无限画布的高性能画布引擎。
