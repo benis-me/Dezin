@@ -321,7 +321,7 @@ test("sending a brief streams events into the chat and shows the preview + expor
 });
 
 test("project agent composer cards serialize context at send time", async () => {
-  const streamRun = vi.fn((input: { brief: string; moodboardRefs?: Array<{ id: string; name?: string }> }) =>
+  const streamRun = vi.fn((_input: { brief: string; moodboardRefs?: Array<{ id: string; name?: string }> }) =>
     (async function* (): AsyncGenerator<RunEvent> {
       yield { type: "run-start", runId: "r-context", conversationId: "c1" };
       yield { type: "run-done", runId: "r-context", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
