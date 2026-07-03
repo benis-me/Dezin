@@ -190,7 +190,7 @@ type RunCardStackPosition = "single" | "first" | "middle" | "last";
 type TranscriptRow = { kind: "single"; message: Msg } | { kind: "stack"; messages: Msg[] };
 type TranscriptBlock =
   | { kind: "row"; row: TranscriptRow }
-  | { kind: "assistant-turn"; message: Msg; stack?: Msg[] };
+  | { kind: "assistant-turn"; prelude?: Msg[]; message: Msg; stack?: Msg[] };
 
 /** A live, ordered chunk of the agent's turn — assistant prose or a tool step — so the two
  *  render interleaved (chronologically) during generation, not split into separate blocks. */
@@ -216,6 +216,14 @@ function isRunCardMessage(message: Msg): boolean {
 
 function isStepsMessage(message: Msg | undefined): message is Msg {
   return message?.kind === "process" && (message.steps?.length ?? 0) > 0;
+}
+
+function isTurnProcessMessage(message: Msg | undefined): message is Msg {
+  return message?.kind === "process" && (message.items?.length ?? 0) > 0;
+}
+
+function shouldSplitRunCardStack(current: Msg, next: Msg): boolean {
+  return current.kind === "visual-review" && isTurnProcessMessage(next);
 }
 
 function processSummaryText(message: Msg): string {
@@ -264,7 +272,12 @@ function groupRunCardMessages(source: Msg[]): TranscriptRow[] {
       continue;
     }
     const start = i;
-    while (i + 1 < messages.length && isRunCardMessage(messages[i + 1])) i++;
+    while (
+      i + 1 < messages.length &&
+      isRunCardMessage(messages[i + 1]) &&
+      !shouldSplitRunCardStack(messages[i]!, messages[i + 1]!)
+    )
+      i++;
     const group = messages.slice(start, i + 1);
     rows.push(group.length > 1 ? { kind: "stack", messages: group } : { kind: "single", message });
   }
@@ -275,6 +288,20 @@ function groupAssistantTurns(rows: TranscriptRow[]): TranscriptBlock[] {
   const blocks: TranscriptBlock[] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
+    if (row.kind === "single" && isTurnProcessMessage(row.message)) {
+      const next = rows[i + 1];
+      if (next?.kind === "single" && next.message.kind === "assistant") {
+        const after = rows[i + 2];
+        if (after?.kind === "stack") {
+          blocks.push({ kind: "assistant-turn", prelude: [row.message], message: next.message, stack: after.messages });
+          i += 2;
+        } else {
+          blocks.push({ kind: "assistant-turn", prelude: [row.message], message: next.message });
+          i++;
+        }
+        continue;
+      }
+    }
     if (row.kind === "single" && row.message.kind === "assistant") {
       const next = rows[i + 1];
       if (next?.kind === "stack") {
@@ -2170,6 +2197,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const queueRef = useRef<QueuedPrompt[]>(queue);
   const activeRunIdRef = useRef<string | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
+  const turnStartedAtRef = useRef<number | null>(null);
   const selectionModeRef = useRef<"markup" | "inspect" | null>(null);
   const versionPreviewRequestRef = useRef(0);
   const inspectedTargetRef = useRef<MarkupTarget | null>(null);
@@ -2495,7 +2523,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const items = liveItemsRef.current;
     const text = finalSummaryTextRef.current.trim() || liveText(items);
     const steps = items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool").map((i) => i.summary);
-    const elapsedMs = runStartedAtRef.current ? Date.now() - runStartedAtRef.current : undefined;
+    const elapsedStart = turnStartedAtRef.current ?? runStartedAtRef.current;
+    const elapsedMs = elapsedStart != null ? Math.max(0, Date.now() - elapsedStart) : undefined;
     const processItems = summaryBoundaryRef.current ? items : items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool");
     const next: Msg[] = processItems.length ? [{ id: msgId.current++, kind: "process", text: "", items: processItems, elapsedMs }] : [];
     if (emitSummary && text) next.push({ id: msgId.current++, kind: "assistant", text });
@@ -2505,6 +2534,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     currentTurnTextRef.current = "";
     finalSummaryTextRef.current = "";
     summaryBoundaryRef.current = false;
+    turnStartedAtRef.current = null;
     setLiveItems([]);
     return text;
   };
@@ -2611,6 +2641,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "run-start":
         terminalEventRef.current = false;
         runStartedAtRef.current = Date.now();
+        turnStartedAtRef.current = null;
         if (typeof ev.runId === "string") activeRunIdRef.current = ev.runId;
         if (typeof ev.conversationId === "string") {
           const cid = ev.conversationId;
@@ -2635,6 +2666,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         setLiveStatus("Starting…");
         break;
       case "turn-start":
+        turnStartedAtRef.current = Date.now();
         gotTurnText.current = false;
         currentTurnTextRef.current = "";
         summaryBoundaryRef.current = false;
@@ -3698,8 +3730,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     ) : (
       <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} stackPosition={stackPosition} />
     );
-  const renderRunCardStack = (stack: Msg[], separated = false): ReactNode => (
-    <div data-testid="run-card-stack" className={cn(separated && "mt-3")}>
+  const renderRunCardStack = (stack: Msg[], separated = false, testId = "run-card-stack"): ReactNode => (
+    <div data-testid={testId} className={cn(separated && "mt-3")}>
       {stack.map((m, index) => (
         <Fragment key={m.id}>{renderTranscriptMessage(m, runCardStackPosition(index, stack.length))}</Fragment>
       ))}
@@ -3820,8 +3852,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               {transcriptBlocks.map((block) => {
                 const row = block.kind === "row" ? block.row : undefined;
                 const rowMessages =
-                  block.kind === "assistant-turn" ? [block.message, ...(block.stack ?? [])] : row!.kind === "stack" ? row!.messages : [row!.message];
-                const firstMessage = rowMessages[0];
+                  block.kind === "assistant-turn"
+                    ? [...(block.prelude ?? []), block.message, ...(block.stack ?? [])]
+                    : row!.kind === "stack"
+                      ? row!.messages
+                      : [row!.message];
+                const firstMessage = block.kind === "assistant-turn" ? block.message : rowMessages[0];
                 const highlighted = highlightAt != null && rowMessages.some((m) => m.at === highlightAt);
                 return (
                   <FadeIn
@@ -3843,6 +3879,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     >
                       {block.kind === "assistant-turn" ? (
                         <>
+                          {block.prelude ? <div className="mb-3">{renderRunCardStack(block.prelude, false, "turn-process-stack")}</div> : null}
                           <AssistantMessage message={block.message} />
                           {block.stack ? renderRunCardStack(block.stack, true) : null}
                           <MessageActions

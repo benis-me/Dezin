@@ -453,6 +453,59 @@ test("summary-boundary runs keep process text folded and final summary outside",
   expect(screen.getByText("Writing App.tsx")).toBeInTheDocument();
 });
 
+test("live process timers reset for each assistant turn", async () => {
+  let now = 1_000;
+  const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-turn-elapsed", conversationId: "c1" };
+      yield { type: "turn-start", round: 0, isRepair: false };
+      yield { type: "activity", activity: { kind: "tool", name: "Write", summary: "Drafting App.tsx" } };
+      now = 61_000;
+      yield { type: "turn-end", round: 0, text: "Draft complete.", summaryBoundary: true };
+      yield {
+        type: "visual-qa-start",
+        runId: "r-turn-elapsed",
+        enabled: true,
+        round: 0,
+        agentCommand: "codebuddy",
+        model: "hunyuan",
+        screenshotUrl: "/projects/p1/preview/.visual-qa/screenshot.png",
+      };
+      yield {
+        type: "visual-qa",
+        runId: "r-turn-elapsed",
+        enabled: true,
+        round: 0,
+        findings: [{ severity: "P1", id: "visual-copy-wrap", message: "Copy wraps poorly.", fix: "Let the copy wrap." }],
+      };
+      now = 121_000;
+      yield { type: "turn-start", round: 1, isRepair: true };
+      yield { type: "activity", activity: { kind: "tool", name: "Edit", summary: "Fixing App.tsx" } };
+      now = 126_000;
+      yield { type: "turn-end", round: 1, text: "Repair complete.", summaryBoundary: true };
+      yield { type: "run-done", runId: "r-turn-elapsed", passed: true, rounds: 1, score: 100, findings: [] };
+    },
+  });
+
+  try {
+    render(
+      <ApiProvider client={fake}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "make a page" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    expect(await screen.findByRole("button", { name: "Processed 1m 00s" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Processed 5s" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Processed 2m 05s" })).toBeNull();
+  } finally {
+    dateNow.mockRestore();
+  }
+});
+
 test("reopening old transcripts keeps final steps with the stopped card below the summary", async () => {
   const user = userEvent.setup();
   const fake = makeFakeApi({
@@ -496,6 +549,81 @@ test("reopening old transcripts keeps final steps with the stopped card below th
   await user.click(processed);
   expect(await screen.findByText("Editing hero.tsx")).toBeInTheDocument();
   expect(screen.getAllByText("Partial output before stop.")).toHaveLength(1);
+});
+
+test("reopening auto-improve transcripts keeps the next turn process with the next assistant summary", async () => {
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [
+      { id: "m1", conversationId: "c1", role: "user" as const, content: "make it better", createdAt: 1 },
+      { id: "m2", conversationId: "c1", role: "assistant" as const, content: "Draft complete.", createdAt: 2 },
+      { id: "m3", conversationId: "c1", role: "system" as const, content: JSON.stringify({ steps: ["Drafting App.tsx"] }), createdAt: 3 },
+      {
+        id: "m4",
+        conversationId: "c1",
+        role: "system" as const,
+        content: JSON.stringify({
+          visualReview: {
+            status: "complete",
+            enabled: true,
+            round: 0,
+            agentCommand: "codebuddy",
+            model: "hunyuan",
+            summary: "codebuddy / hunyuan reviewed the screenshot and reported 1 issue.",
+            findings: [{ severity: "P1", id: "visual-copy-wrap", message: "Copy wraps poorly.", fix: "Let the copy wrap." }],
+            process: [{ type: "tool", summary: "Reviewing screenshot with codebuddy / hunyuan" }],
+          },
+        }),
+        createdAt: 4,
+      },
+      {
+        id: "m5",
+        conversationId: "c1",
+        role: "system" as const,
+        content: JSON.stringify({ process: { items: [{ type: "tool", summary: "Fixing App.tsx" }], elapsedMs: 5_000 } }),
+        createdAt: 5,
+      },
+      { id: "m6", conversationId: "c1", role: "assistant" as const, content: "Repair complete.", createdAt: 6 },
+      { id: "m7", conversationId: "c1", role: "system" as const, content: JSON.stringify({ steps: ["Fixing App.tsx"] }), createdAt: 7 },
+      {
+        id: "m8",
+        conversationId: "c1",
+        role: "system" as const,
+        content: JSON.stringify({
+          visualReview: {
+            status: "complete",
+            enabled: true,
+            round: 1,
+            agentCommand: "codebuddy",
+            model: "hunyuan",
+            summary: "Screenshot review completed with no visible layout issues reported.",
+            findings: [],
+            process: [{ type: "tool", summary: "Reviewing screenshot with codebuddy / hunyuan" }],
+          },
+        }),
+        createdAt: 8,
+      },
+    ],
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const firstVisualReview = (await screen.findAllByTestId("visual-review-message"))[0]!;
+  const firstVisualStack = firstVisualReview.closest("[data-testid='run-card-stack']");
+  expect(firstVisualStack).toBeInstanceOf(HTMLElement);
+  const firstStackElement = firstVisualStack as HTMLElement;
+  expect(within(firstStackElement).getByRole("button", { name: "1 step" })).toBeInTheDocument();
+  expect(within(firstStackElement).queryByRole("button", { name: /Processed/ })).toBeNull();
+
+  const nextTurnProcess = screen.getByRole("button", { name: "Processed 5s" });
+  const repairSummary = screen.getByText("Repair complete.");
+  expect(nextTurnProcess.closest("[data-testid='turn-process-stack']")).toBeInTheDocument();
+  expect(nextTurnProcess.closest("[data-testid='run-card-stack']")).not.toBe(firstStackElement);
+  expect(nextTurnProcess.compareDocumentPosition(repairSummary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
 test("assistant copy and fork actions sit below the final cards in a completed message", async () => {

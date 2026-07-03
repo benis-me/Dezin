@@ -1504,6 +1504,84 @@ test("standard auto-improve persists each turn summary before its visual review"
   );
 });
 
+test("standard auto-improve persists process elapsed time per turn", async () => {
+  let turn = 0;
+  let now = 10_000;
+  const realNow = Date.now;
+  Date.now = () => now;
+  const runner: AgentRunner = {
+    id: "standard-round-process-elapsed",
+    async runTurn(input) {
+      turn += 1;
+      input.onActivity?.({ kind: "tool", name: turn === 1 ? "Write" : "Edit", summary: turn === 1 ? "Drafting App.jsx" : "Fixing App.jsx" });
+      now += turn === 1 ? 60_000 : 5_000;
+      mkdirSync(join(input.projectDir, "src"), { recursive: true });
+      writeFileSync(join(input.projectDir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>Round ${turn}</main> }`);
+      writeFileSync(join(input.projectDir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      return { text: turn === 1 ? "round zero summary" : "round one summary", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  let visualQaCalls = 0;
+  try {
+    await withRunServer(
+      runner,
+      async ({ base, dataDir, store }) => {
+        store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: true });
+        const project = store.createProject({ name: "Std", mode: "standard" });
+        const dir = join(dataDir, "projects", project.id);
+        mkdirSync(dir, { recursive: true });
+        execFileSync("git", ["init", "-q"], { cwd: dir });
+        writeFileSync(join(dir, "package.json"), "{}");
+        execFileSync("git", ["add", "-A"], { cwd: dir });
+        execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+        const res = await fetch(`${base}/api/runs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+        });
+        const events = parseSse(await res.text());
+        const done = events.find((e) => e.type === "run-done")!;
+        const conversationId = events.find((e) => e.type === "run-start")?.conversationId as string;
+        assert.equal(done.rounds, 1);
+
+        const processElapsed = store
+          .listMessages(conversationId)
+          .flatMap((message): number[] => {
+            if (message.role !== "system") return [];
+            try {
+              const parsed = JSON.parse(message.content) as { process?: { elapsedMs?: unknown } };
+              return typeof parsed.process?.elapsedMs === "number" ? [parsed.process.elapsedMs] : [];
+            } catch {
+              return [];
+            }
+          });
+        assert.equal(processElapsed.length, 2);
+        assert.ok(processElapsed[0]! >= 60_000);
+        assert.ok(processElapsed[1]! < processElapsed[0]!);
+      },
+      {
+        visualQa: async () => {
+          visualQaCalls += 1;
+          return visualQaCalls === 1
+            ? [
+                {
+                  severity: "P2",
+                  id: "visual-spacing",
+                  message: "Spacing needs polish.",
+                  fix: "Tighten the vertical rhythm.",
+                },
+              ]
+            : [];
+        },
+      },
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test("the composed prompt includes the active skill body and design-system tokens", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN] });
   await withRunServer(runner, async ({ base, store }) => {
