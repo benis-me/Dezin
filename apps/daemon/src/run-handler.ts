@@ -144,7 +144,7 @@ interface RunBody {
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
 
 const DEFAULT_AUTO_IMPROVE_MAX_ROUNDS = 8;
-const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"]);
+const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1", "P2"]);
 
 function autoImproveMaxRounds(settings: Settings, override?: number): number {
   const raw = typeof override === "number" ? override : settings.autoImproveMaxRounds;
@@ -518,6 +518,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       let visualReviewHistory: QualityFinding[] = [];
       let score = 100;
       let passed = true;
+      const repairSnapshotCommits = new Set<string>();
 
       while (true) {
         const isRepair = round > 0;
@@ -582,7 +583,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         commitHash = commit.commitHash;
 
         const staticSurface = await collectStandardLintSurface(dir);
-        const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface) : []) as QualityFinding[];
+        const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface, { mode: "standard" }) : []) as QualityFinding[];
         if (staticFindings.length) sse({ type: "static-quality", round, findings: staticFindings });
         let visualFindings: QualityFinding[] = [];
         if (settings.visualQaEnabled) {
@@ -622,6 +623,21 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         const nextRound = repairRounds + 1;
         const repairPrompt = standardRepairPrompt(findings, nextRound, maxRepairRounds, score);
         if (!repairPrompt) break;
+        if (commitHash && !repairSnapshotCommits.has(commitHash)) {
+          repairSnapshotCommits.add(commitHash);
+          store.createImportedRun(project.id, conversation.id, {
+            variantId: targetVariantId,
+            userMessageId: userMessage.id,
+            commitHash,
+            status: "succeeded",
+            repairRounds,
+            lintPassed: passed,
+            score,
+            findings: withResolvedVisualReviewHistory(findings, visualReviewHistory),
+            createdAt: Math.max(0, run.createdAt - (maxRepairRounds - round + 1)),
+            finishedAt: Date.now(),
+          });
+        }
         round = nextRound;
         turnMessage = repairPrompt;
       }
