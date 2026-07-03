@@ -377,6 +377,8 @@ export interface QualityFinding {
   screenshotPath?: string;
   screenshotUrl?: string;
   reviewSummary?: string;
+  reviewStatus?: "active" | "resolved";
+  reviewRound?: number;
 }
 
 export interface RunSummary {

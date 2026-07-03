@@ -1478,7 +1478,7 @@ test("the Files tab lists project files and previews the selected file's source"
   expect(await screen.findByText(/--accent:#101010/)).toBeInTheDocument();
 });
 
-test("the Versions tab groups branch versions with View, set cover, and Restore", async () => {
+test("the Versions dropdown groups branch versions with switching, set cover, and Restore", async () => {
   const restoreVersion = vi.fn(async () => {});
   const setVersionCover = vi.fn(async () => ({ captured: true }));
   const fake = makeFakeApi({
@@ -1501,15 +1501,87 @@ test("the Versions tab groups branch versions with View, set cover, and Restore"
     </ApiProvider>,
   );
   expect(screen.queryByRole("tab", { name: "History" })).toBeNull();
-  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+  expect(screen.queryByRole("tab", { name: "Versions" })).toBeNull();
+  expect(await screen.findByTestId("versions-tabs-separator")).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   expect(await screen.findByText("Main")).toBeInTheDocument();
   expect((await screen.findAllByText("Exploration")).length).toBeGreaterThan(0);
   expect(await screen.findByText("92/100")).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Switch to Main v1" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Set Main v1 as cover" }));
   await waitFor(() => expect(setVersionCover).toHaveBeenCalledWith("p1", "r1"));
   // the active branch's newest version has no Restore (it IS current); the older branch version does
   fireEvent.click(screen.getByRole("button", { name: "Restore Main v1" }));
   await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith("p1", "r1"));
+});
+
+test("switching a version updates Preview, Files, and Quality to that run", async () => {
+  const getVersionPreview = vi.fn(async (_projectId: string, runId: string) => ({ url: `/api/projects/p1/versions/${runId}`, mode: "prototype" as const }));
+  const getVersionText = vi.fn(async (_projectId: string, runId: string) =>
+    runId === "r-old" ? "<html><body><h1>Older version file</h1></body></html>" : "<html><body><h1>Latest version file</h1></body></html>",
+  );
+  const fake = makeFakeApi({
+    listFiles: async () => [{ path: "index.html", size: 31 }],
+    getFileText: async () => "<html><body><h1>Current live file</h1></body></html>",
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [
+      {
+        id: "r-new",
+        variantId: "main",
+        status: "succeeded" as const,
+        score: 100,
+        repairRounds: 0,
+        lintPassed: true,
+        createdAt: 1700000001000,
+        finishedAt: 1700000001001,
+        findings: [],
+      },
+      {
+        id: "r-old",
+        variantId: "main",
+        status: "succeeded" as const,
+        score: 88,
+        repairRounds: 1,
+        lintPassed: true,
+        createdAt: 1700000000000,
+        finishedAt: 1700000000001,
+        findings: [
+          {
+            severity: "P1",
+            id: "visual-ai-review-1",
+            message: "The old mobile CTA is clipped.",
+            fix: "Reduce the mobile hero height.",
+            reviewSummary: "codebuddy / hunyuan reviewed the older screenshot and reported 1 issue.",
+            screenshotUrl: "/projects/p1/preview/.visual-qa/old.png",
+          },
+        ],
+      },
+    ],
+    getVersionPreview,
+    getVersionText,
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
+
+  await waitFor(() => expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-old"));
+  expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/));
+
+  fireEvent.click(screen.getByRole("tab", { name: "Files" }));
+  expect(await screen.findByText(/Older version file/)).toBeInTheDocument();
+  expect(screen.queryByText(/Current live file/)).toBeNull();
+
+  fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
+  expect(await screen.findByText("88/100")).toBeInTheDocument();
+  expect(screen.getByText(/old mobile CTA is clipped/)).toBeInTheDocument();
+  expect(screen.getByText(/reviewed the older screenshot/)).toBeInTheDocument();
 });
 
 test("version compare uses the active branch's newest run as current even when runs arrive unsorted", async () => {
@@ -1528,8 +1600,8 @@ test("version compare uses the active branch's newest run as current even when r
     </ApiProvider>,
   );
 
-  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
-  expect(await screen.findByRole("button", { name: "View Main v2" })).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+  expect(await screen.findByRole("button", { name: "Switch to Main v2" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Compare Main v1 visually" }));
 
   const oldFrame = await screen.findByTitle("Main v1");
@@ -1567,8 +1639,8 @@ test("refreshing a viewed standard version keeps the version preview instead of 
   );
 
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(1));
-  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
-  fireEvent.click(await screen.findByRole("button", { name: "View Main v1" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/)));
 
   fireEvent.click(screen.getByLabelText("Refresh preview"));
@@ -1611,8 +1683,8 @@ test("viewing a standard version resolves the dev-server URL before rendering th
     </ApiProvider>,
   );
 
-  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
-  fireEvent.click(await screen.findByRole("button", { name: "View Main v1" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
 
   expect(getVersionPreview).toHaveBeenCalledWith("p1", "r1");
   expect(await screen.findByText("Loading version preview")).toBeInTheDocument();
@@ -1658,7 +1730,7 @@ test("standard version compare resolves both dev-server URLs before opening the 
     </ApiProvider>,
   );
 
-  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Compare Main v1 visually" }));
 
   await waitFor(() => expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-old"));
@@ -1712,7 +1784,7 @@ test("standard project version Diff uses the commit diff endpoint", async () => 
     </ApiProvider>,
   );
 
-  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Diff Main v1" }));
 
   await waitFor(() => expect(getVersionDiff).toHaveBeenCalledWith("p1", "r1"));
@@ -1946,6 +2018,32 @@ test("static quality stream events update the Quality pane while a run is still 
     fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
     expect(await screen.findByText(/raw hex values/)).toBeInTheDocument();
     expect(screen.queryByText(/No quality issues\. Clean/)).toBeNull();
+  } finally {
+    release?.();
+  }
+});
+
+test("prototype preview-update stream events refresh the preview during generation", async () => {
+  let release: (() => void) | undefined;
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-preview", conversationId: "c1" };
+      yield { type: "preview-update", runId: "r-preview", t: 123456 };
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  try {
+    fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+    expect(await screen.findByTitle("Artifact preview")).toHaveAttribute("src", "/projects/p1/preview/?t=123456");
   } finally {
     release?.();
   }

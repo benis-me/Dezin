@@ -471,13 +471,16 @@ test("prototype run auto-improves visual QA findings after screenshot review", a
       assert.equal(done.score, 100);
       assert.equal(visualQaCalls.length, 2);
       assert.equal(runner.calls[1]?.isRepair, true);
-      assert.match(runner.calls[1]?.message ?? "", /visual-fixed-offscreen/);
-      assert.match(runner.calls[1]?.message ?? "", /Clamp the toolbar/);
+      assert.match(runner.calls[1]?.message ?? "", /visual-ai-review-1/);
+      assert.match(runner.calls[1]?.message ?? "", /Allow wrapping inside the viewport/);
 
       const run = store.getRun(done.runId as string)!;
       assert.equal(run.repairRounds, 1);
       assert.equal(run.lintPassed, true);
-      assert.deepEqual(run.findings, []);
+      assert.equal(run.findings.length, 1);
+      assert.equal(run.findings[0]?.id, "visual-ai-review-1");
+      assert.equal(run.findings[0]?.message, "The mobile CTA clips.");
+      assert.equal((run.findings[0] as { reviewStatus?: string } | undefined)?.reviewStatus, "resolved");
     },
     {
       visualQa: async () => {
@@ -486,9 +489,9 @@ test("prototype run auto-improves visual QA findings after screenshot review", a
           ? [
               {
                 severity: "P1",
-                id: "visual-fixed-offscreen",
-                message: "A fixed toolbar is outside the viewport.",
-                fix: "Clamp the toolbar inside the viewport.",
+                id: "visual-ai-review-1",
+                message: "The mobile CTA clips.",
+                fix: "Allow wrapping inside the viewport.",
               },
             ]
           : [];
@@ -1252,13 +1255,15 @@ test("standard run auto-improves visual QA findings without a manual button", as
       assert.equal(done.score, 100);
       assert.equal(calls.length, 2);
       assert.equal(calls[1]?.isRepair, true);
-      assert.match(calls[1]?.message ?? "", /visual-fixed-offscreen/);
-      assert.match(calls[1]?.message ?? "", /Clamp the toolbar/);
+      assert.match(calls[1]?.message ?? "", /visual-ai-review-1/);
+      assert.match(calls[1]?.message ?? "", /Allow wrapping inside the viewport/);
       assert.equal(visualQaCalls.length, 2);
       const run = store.getRun(done.runId as string)!;
       assert.equal(run.repairRounds, 1);
       assert.equal(run.lintPassed, true);
-      assert.equal(run.findings.length, 0);
+      assert.equal(run.findings.length, 1);
+      assert.equal(run.findings[0]?.id, "visual-ai-review-1");
+      assert.equal((run.findings[0] as { reviewStatus?: string } | undefined)?.reviewStatus, "resolved");
     },
     {
       visualQa: async () => {
@@ -1267,9 +1272,9 @@ test("standard run auto-improves visual QA findings without a manual button", as
           ? [
               {
                 severity: "P1",
-                id: "visual-fixed-offscreen",
-                message: "A fixed toolbar is outside the viewport.",
-                fix: "Clamp the toolbar inside the viewport.",
+                id: "visual-ai-review-1",
+                message: "The mobile CTA clips.",
+                fix: "Allow wrapping inside the viewport.",
               },
             ]
           : [];

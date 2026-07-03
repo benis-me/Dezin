@@ -160,6 +160,27 @@ function withVisualScreenshotUrl(findings: QualityFinding[], screenshotUrl: stri
   );
 }
 
+function markVisualReviewRound(findings: QualityFinding[], round: number): QualityFinding[] {
+  return findings.map((finding) => (finding.id.startsWith("visual-") ? { ...finding, reviewStatus: "active", reviewRound: round } : finding));
+}
+
+function findingKey(finding: QualityFinding): string {
+  return `${finding.id}\n${finding.message}`;
+}
+
+function withResolvedVisualReviewHistory(finalFindings: QualityFinding[], history: QualityFinding[]): QualityFinding[] {
+  if (!history.length) return finalFindings;
+  const active = new Set(finalFindings.map(findingKey));
+  const seen = new Set<string>();
+  const resolved = history.flatMap((finding): QualityFinding[] => {
+    const key = findingKey(finding);
+    if (active.has(key) || seen.has(key)) return [];
+    seen.add(key);
+    return [{ ...finding, reviewStatus: "resolved" }];
+  });
+  return resolved.length ? [...finalFindings, ...resolved] : finalFindings;
+}
+
 function visualQaStartPayload(
   round: number,
   settings: Settings,
@@ -218,6 +239,7 @@ function processMessage(items: ProcessItem[], elapsedMs?: number): string {
 }
 
 function visualReviewMessage(input: {
+  runId: string;
   round: number;
   enabled: boolean;
   settings: Settings;
@@ -234,6 +256,7 @@ function visualReviewMessage(input: {
   return JSON.stringify({
     visualReview: {
       status: "complete",
+      runId: input.runId,
       enabled: input.enabled,
       round: input.round,
       agentCommand,
@@ -457,7 +480,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   };
   const queueVisualReviewRecord = (round: number, enabled: boolean, findings: QualityFinding[], screenshotUrl?: string, screenshotPath?: string): void => {
     if (!enabled) return;
-    visualReviewRecords.push(visualReviewMessage({ round, enabled, settings, agentCommand: runAgentCommand, model: runModel, screenshotUrl, screenshotPath, findings }));
+    visualReviewRecords.push(visualReviewMessage({ runId: run.id, round, enabled, settings, agentCommand: runAgentCommand, model: runModel, screenshotUrl, screenshotPath, findings }));
   };
   const persistVisualReviews = (): void => {
     for (const record of visualReviewRecords.splice(0)) store.addMessage(conversation.id, "system", record);
@@ -476,6 +499,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       let finalAssistantText = "";
       let commitHash: string | null = null;
       let findings: QualityFinding[] = [];
+      let visualReviewHistory: QualityFinding[] = [];
       let score = 100;
       let passed = true;
 
@@ -547,7 +571,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         let visualFindings: QualityFinding[] = [];
         if (settings.visualQaEnabled) {
           const screenshotUrl = `/api/projects/${project.id}/variants/${targetVariantId}/preview/.visual-qa/screenshot.png`;
-          sse(visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl));
+          sse({ ...visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl), runId: run.id });
           let renderUrl: string | undefined;
           if (!deps.visualQa) {
             try {
@@ -569,8 +593,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
               renderUrl,
             });
           }
-          visualFindings = withVisualScreenshotUrl(visualFindings, screenshotUrl);
-          sse({ type: "visual-qa", round, enabled: settings.visualQaEnabled, findings: visualFindings });
+          visualFindings = markVisualReviewRound(withVisualScreenshotUrl(visualFindings, screenshotUrl), round);
+          visualReviewHistory = [...visualReviewHistory, ...visualFindings];
+          sse({ type: "visual-qa", runId: run.id, round, enabled: settings.visualQaEnabled, findings: visualFindings });
           queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
         }
         findings = [...staticFindings, ...visualFindings];
@@ -593,17 +618,18 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
       const message = passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
       store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds }));
+      const persistedFindings = withResolvedVisualReviewHistory(findings, visualReviewHistory);
       store.updateRun(run.id, {
         status: "succeeded",
         repairRounds,
         lintPassed: passed,
         score,
-        findings,
+        findings: persistedFindings,
         assistantMessageId: assistantMessage.id,
         commitHash,
         finishedAt: Date.now(),
       });
-      sse({ type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", findings });
+      sse({ type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", findings: persistedFindings });
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
         void (async () => {
@@ -689,6 +715,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     let generatedTotal = 0;
     let repairRounds = result.rounds;
     let finalFindings: QualityFinding[] = result.findings as QualityFinding[];
+    let visualReviewHistory: QualityFinding[] = [];
     let score = lintScore(finalFindings);
     const maxRepairRounds = autoImproveMaxRounds(settings, body.maxRounds);
     const repairHistory: Array<{ role: "user" | "assistant"; content: string }> = [
@@ -719,12 +746,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     };
     const reviewCurrentArtifact = async (round: number, staticFindings: QualityFinding[]): Promise<void> => {
       const screenshotUrl = `${previewUrl}.visual-qa/screenshot.png`;
-      if (settings.visualQaEnabled) sse(visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl));
-      const visualFindings = withVisualScreenshotUrl(await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
+      if (settings.visualQaEnabled) sse({ ...visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl), runId: run.id });
+      const visualFindings = markVisualReviewRound(withVisualScreenshotUrl(await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
         projectRoot: dir,
         renderUrl,
-      }), screenshotUrl);
-      sse({ type: "visual-qa", round, enabled: settings.visualQaEnabled, findings: visualFindings });
+      }), screenshotUrl), round);
+      visualReviewHistory = [...visualReviewHistory, ...visualFindings];
+      sse({ type: "visual-qa", runId: run.id, round, enabled: settings.visualQaEnabled, findings: visualFindings });
       queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
       finalFindings = [...staticFindings, ...visualFindings];
       score = lintScore(finalFindings);
@@ -803,12 +831,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       "system",
       resultMessage(text, { passed, score, rounds: repairRounds, materialSources: generatedTotal > 0 ? [`Generated image assets (${generatedTotal})`] : [] }),
     );
+    const persistedFindings = withResolvedVisualReviewHistory(finalFindings, visualReviewHistory);
     store.updateRun(run.id, {
       status: "succeeded",
       repairRounds,
       lintPassed: passed,
       score,
-      findings: finalFindings,
+      findings: persistedFindings,
       assistantMessageId: assistantMessage.id,
       finishedAt: Date.now(),
     });
@@ -821,7 +850,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       rounds: repairRounds,
       score,
       previewUrl: `/projects/${project.id}/preview/`,
-      findings: finalFindings,
+      findings: persistedFindings,
     });
     // Headless-screenshot the finished artifact as the gallery cover (best-effort, async).
     void captureCover(join(dir, artifactPath), join(dir, ".cover.png"));
