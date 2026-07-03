@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import type { ImageGenerationParams, MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import type { ImageActionModelField } from "../lib/image-action-defaults.ts";
 import {
   allMoodboardNodeIds,
   buildLayerTree,
@@ -41,8 +42,10 @@ export interface MoodboardCanvasProps {
   imageModels?: string[];
   imageModel?: string;
   imageProviderId?: string;
+  imageActionModels?: Partial<Record<ImageActionModelField, string>>;
   moodboardAssets?: MoodboardAsset[];
   onImageModelChange?: (model: string) => void;
+  onConfigureImageActionModel?: (action: string) => void;
   onSelectIds: (ids: string[]) => void;
   onNodesChange: (nodes: SaveMoodboardNodeInput[]) => void;
   onAddNote: (point?: { x: number; y: number }) => void;

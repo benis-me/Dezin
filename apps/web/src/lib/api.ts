@@ -243,6 +243,9 @@ export interface Settings {
   imageApiKey: string;
   imageApiKeyConfigured?: boolean;
   imageModel: string;
+  removeBackgroundModel: string;
+  editRegionModel: string;
+  extractLayerModel: string;
   videoApiBaseUrl: string;
   videoApiKey: string;
   videoApiKeyConfigured?: boolean;

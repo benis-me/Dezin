@@ -13,6 +13,7 @@ import type {
 import { useApi } from "../lib/api-context.tsx";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
+import type { ImageActionModelField } from "../lib/image-action-defaults.ts";
 import { useToast } from "../components/Toast.tsx";
 import { MODEL_PROVIDERS } from "../settings/model-provider-registry.ts";
 import { inferCapabilities, parseModelEntries } from "../settings/model-provider-ui-utils.tsx";
@@ -76,6 +77,11 @@ export function useMoodboardBoard(boardId: string) {
   const [imageModels, setImageModels] = useState<string[]>([]);
   const [imageModel, setImageModel] = useState("");
   const [imageProviderId, setImageProviderId] = useState("");
+  const [imageActionModels, setImageActionModels] = useState<Record<ImageActionModelField, string>>({
+    removeBackgroundModel: "",
+    editRegionModel: "",
+    extractLayerModel: "",
+  });
   const [loading, setLoading] = useState(true);
   const [agentBusy, setAgentBusy] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
@@ -120,6 +126,11 @@ export function useMoodboardBoard(boardId: string) {
     const configuredImageModel = settings.imageModel.trim();
     setImageProviderId(settings.aiProviderId.trim());
     setImageModels(models);
+    setImageActionModels({
+      removeBackgroundModel: settings.removeBackgroundModel.trim(),
+      editRegionModel: settings.editRegionModel.trim(),
+      extractLayerModel: settings.extractLayerModel.trim(),
+    });
     setImageModel((current) =>
       configuredImageModel && models.includes(configuredImageModel)
         ? configuredImageModel
@@ -502,6 +513,7 @@ export function useMoodboardBoard(boardId: string) {
     imageModels,
     imageModel,
     imageProviderId,
+    imageActionModels,
     loading,
     agentBusy,
     imageBusy,

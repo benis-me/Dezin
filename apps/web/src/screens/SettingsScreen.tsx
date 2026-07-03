@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Eye, Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
 import { Button, Picker, Textarea, Loading, Badge, ScrollArea, Switch, Input } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
@@ -11,6 +11,8 @@ import { publishSettingsUpdated } from "../lib/settings-events.ts";
 import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
 import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
 import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
+import { IMAGE_ACTION_DEFAULTS, IMAGE_ACTION_MODEL_FIELDS, type ImageActionModelField } from "../lib/image-action-defaults.ts";
+import { imageModelOptions } from "../moodboard/useMoodboardBoard.ts";
 
 type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
@@ -35,6 +37,16 @@ const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
   { id: "about", label: "About", icon: Info },
 ];
 
+function parseInitialSettingsTarget(initialSection?: string): { section: SectionId; focusTarget: ImageActionModelField | null } {
+  const normalized = initialSection === "connection" || initialSection === "media" ? "models" : initialSection;
+  if (!normalized) return { section: "appearance", focusTarget: null };
+  const [sectionPart, focusPart] = normalized.split(":");
+  const section = SECTIONS.some((s) => s.id === sectionPart) ? (sectionPart as SectionId) : "appearance";
+  const focusTarget =
+    section === "defaults" && IMAGE_ACTION_MODEL_FIELDS.includes(focusPart as ImageActionModelField) ? (focusPart as ImageActionModelField) : null;
+  return { section, focusTarget };
+}
+
 export function SettingsScreen({
   dark,
   onToggleDark,
@@ -46,15 +58,16 @@ export function SettingsScreen({
 }) {
   const api = useApi();
   const { toast } = useToast();
-  const normalizedInitialSection = initialSection === "connection" || initialSection === "media" ? "models" : initialSection;
-  const [section, setSection] = useState<SectionId>(
-    SECTIONS.some((s) => s.id === normalizedInitialSection) ? (normalizedInitialSection as SectionId) : "appearance",
-  );
+  const initialTarget = parseInitialSettingsTarget(initialSection);
+  const [section, setSection] = useState<SectionId>(initialTarget.section);
+  const [defaultsFocusTarget, setDefaultsFocusTarget] = useState<ImageActionModelField | null>(initialTarget.focusTarget);
   const [settings, setSettings] = useState<Settings | null>(null);
   const { agents, loading: agentsInitial, scanning, status: scanStatus, rescan } = useAgents();
   const agentsLoading = agentsInitial || scanning;
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
   const [version, setVersion] = useState<string>("");
+  const defaultsModelRefs = useRef<Partial<Record<ImageActionModelField, HTMLDivElement | null>>>({});
+  const focusedDefaultsTargetRef = useRef<ImageActionModelField | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -65,6 +78,23 @@ export function SettingsScreen({
       alive = false;
     };
   }, [api]);
+
+  useEffect(() => {
+    const next = parseInitialSettingsTarget(initialSection);
+    setSection(next.section);
+    setDefaultsFocusTarget(next.focusTarget);
+    focusedDefaultsTargetRef.current = null;
+  }, [initialSection]);
+
+  useEffect(() => {
+    if (!defaultsFocusTarget || section !== "defaults" || !settings) return;
+    if (focusedDefaultsTargetRef.current === defaultsFocusTarget) return;
+    const control = defaultsModelRefs.current[defaultsFocusTarget]?.querySelector<HTMLElement>("[role='combobox'], button, input, select, textarea");
+    if (!control) return;
+    focusedDefaultsTargetRef.current = defaultsFocusTarget;
+    control.focus();
+    control.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  }, [defaultsFocusTarget, section, settings]);
 
   const setLocal = (key: keyof Settings, value: string | boolean | number) =>
     setSettings((s) => {
@@ -112,6 +142,17 @@ export function SettingsScreen({
     { value: "", label: "Same as project model" },
     ...((visualReviewAgent?.models ?? []).map((model) => ({ value: model, label: model }))),
   ];
+  const imageActionModelOptions = useMemo(() => {
+    if (!settings) return [{ value: "", label: "None" }];
+    const models = new Set(imageModelOptions(settings));
+    const configuredImageModel = settings.imageModel.trim();
+    if (configuredImageModel) models.add(configuredImageModel);
+    for (const item of IMAGE_ACTION_DEFAULTS) {
+      const configured = settings[item.field].trim();
+      if (configured) models.add(configured);
+    }
+    return [{ value: "", label: "None" }, ...[...models].map((model) => ({ value: model, label: model }))];
+  }, [settings]);
   const clampRounds = (value: string | number) => {
     const n = Number(value);
     return Number.isFinite(n) ? Math.max(0, Math.min(20, Math.trunc(n))) : 0;
@@ -255,7 +296,7 @@ export function SettingsScreen({
             )}
 
             {section === "defaults" && (
-              <SettingsPanel title="Defaults" desc="Applied when a project pins no design system.">
+              <SettingsPanel title="Defaults" desc="Applied when projects and moodboard tools do not override their own defaults.">
                 <SettingsRows>
                   <SettingRow label="Design system" desc="The brand new projects start from.">
                     <Picker
@@ -269,6 +310,23 @@ export function SettingsScreen({
                       ).map((s) => ({ value: s.id, label: s.name }))}
                     />
                   </SettingRow>
+                  {IMAGE_ACTION_DEFAULTS.map((item) => (
+                    <SettingRow key={item.field} label={item.label} desc={item.desc}>
+                      <div
+                        ref={(node) => {
+                          defaultsModelRefs.current[item.field] = node;
+                        }}
+                      >
+                        <Picker
+                          ariaLabel={item.label}
+                          className="w-56"
+                          value={settings[item.field]}
+                          onChange={(value) => save(item.field, value)}
+                          options={imageActionModelOptions}
+                        />
+                      </div>
+                    </SettingRow>
+                  ))}
                 </SettingsRows>
               </SettingsPanel>
             )}

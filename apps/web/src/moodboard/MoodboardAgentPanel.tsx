@@ -8,6 +8,7 @@ import {
   upsertContextItems,
   type AgentComposerContextItem,
 } from "../components/AgentComposerContext.tsx";
+import { AgentOutputText } from "../components/AgentOutputText.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import { ConversationSelect } from "../components/ConversationSelect.tsx";
@@ -564,7 +565,7 @@ function MoodboardMessageRow({
   return (
     <div className="group/moodboard-assistant -mx-2 rounded-xl px-2 py-1">
       <div data-message-kind="assistant" className="dz-selectable text-sm leading-relaxed text-foreground">
-        <Markdown>{message.content}</Markdown>
+        <AgentOutputText text={message.content} />
       </div>
       {!busy ? (
         <TooltipProvider delayDuration={120}>

@@ -59,6 +59,9 @@ function settingsFixture(patch: Partial<Settings> = {}): Settings {
     imageApiBaseUrl: "",
     imageApiKey: "",
     imageModel: "",
+    removeBackgroundModel: "",
+    editRegionModel: "",
+    extractLayerModel: "",
     videoApiBaseUrl: "",
     videoApiKey: "",
     videoModel: "",
@@ -400,6 +403,9 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
       imageApiBaseUrl: "",
       imageApiKey: "",
       imageModel: "gpt-image-1",
+      removeBackgroundModel: "",
+      editRegionModel: "",
+      extractLayerModel: "",
       videoApiBaseUrl: "",
       videoApiKey: "",
       videoModel: "",
@@ -738,6 +744,9 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
     imageApiBaseUrl: "",
     imageApiKey: "",
     imageModel: "",
+    removeBackgroundModel: "",
+    editRegionModel: "",
+    extractLayerModel: "",
     videoApiBaseUrl: "",
     videoApiKey: "",
     videoModel: "",
@@ -798,6 +807,44 @@ test("SettingsScreen sidebar lists sections; Agents + Defaults show daemon data"
   expect(screen.getByRole("button", { name: /Gemini/ })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Defaults" }));
   expect(await screen.findByRole("combobox", { name: "Default design system" })).toHaveTextContent("Modern Minimal");
+});
+
+test("SettingsScreen Defaults configures function-specific image models", async () => {
+  const user = userEvent.setup();
+  let current = settingsFixture({
+    aiProviderEnabled: true,
+    aiProviderModels: JSON.stringify({ id: "gpt-image-1", capabilities: ["Image"] }),
+    imageModel: "gpt-image-1",
+  });
+  const updateSettings = vi.fn(async (patch: Partial<Settings>) => {
+    current = { ...current, ...patch };
+    return current;
+  });
+  renderSettings({ getSettings: async () => current, updateSettings });
+
+  fireEvent.click(screen.getByRole("button", { name: "Defaults" }));
+
+  expect(await screen.findByRole("combobox", { name: "Remove background model" })).toHaveTextContent("None");
+  expect(screen.getByRole("combobox", { name: "Edit region model" })).toHaveTextContent("None");
+  expect(screen.getByRole("combobox", { name: "Extract layer model" })).toHaveTextContent("None");
+
+  await user.click(screen.getByRole("combobox", { name: "Remove background model" }));
+  await user.click(await screen.findByRole("option", { name: "gpt-image-1" }));
+
+  expect(updateSettings).toHaveBeenCalledWith({ removeBackgroundModel: "gpt-image-1" });
+});
+
+test("SettingsScreen initial Defaults focus targets a function model field", async () => {
+  render(
+    <ApiProvider client={makeFakeApi({ listAgents: async () => AGENTS, rescanAgents: async () => AGENTS, listDesignSystems: async () => DSYS })}>
+      <AgentsProvider>
+        <SettingsScreen dark={false} onToggleDark={() => {}} initialSection="defaults:editRegionModel" />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+
+  const target = await screen.findByRole("combobox", { name: "Edit region model" });
+  await waitFor(() => expect(target).toHaveFocus());
 });
 
 test("SettingsScreen persists the chosen provider and custom instructions", async () => {

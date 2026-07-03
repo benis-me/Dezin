@@ -1,8 +1,10 @@
 import { useCallback, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { Button, Spinner } from "../components/ui/index.ts";
+import { useToast } from "../components/Toast.tsx";
 import type { AgentComposerContextItem } from "../components/AgentComposerContext.tsx";
 import type { MoodboardNode } from "../lib/api.ts";
+import { imageActionDefaultForField, imageActionModelField, imageActionSettingsTarget } from "../lib/image-action-defaults.ts";
 import { panelPercentFromPixels, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { MoodboardAgentPanel, type MoodboardComposerInsertion } from "../moodboard/MoodboardAgentPanel.tsx";
 import { MoodboardCanvas } from "../moodboard/MoodboardCanvas.tsx";
@@ -26,6 +28,7 @@ export function MoodboardScreen({
   const agentPercent =
     readStoredPanelPercent(MOODBOARD_AGENT_WIDTH_KEY, 20, 44) ??
     panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 28, 20, 44);
+  const { toast } = useToast();
   const board = useMoodboardBoard(boardId);
   const [canvasTopbarControls, setCanvasTopbarControls] = useState<MoodboardCanvasTopbarControls | null>(null);
   const composerInsertionSeq = useRef(0);
@@ -38,6 +41,19 @@ export function MoodboardScreen({
       items: nodes.map(formatMoodboardNodeAgentCard),
     });
   }, []);
+  const configureImageActionModel = useCallback(
+    (action: string) => {
+      const field = imageActionModelField(action);
+      if (!field) {
+        onOpenSettings("defaults");
+        return;
+      }
+      const item = imageActionDefaultForField(field);
+      onOpenSettings(imageActionSettingsTarget(field));
+      toast(`Choose a ${item.action} model in Defaults first.`);
+    },
+    [onOpenSettings, toast],
+  );
 
   if (board.loading) {
     return (
@@ -143,7 +159,9 @@ export function MoodboardScreen({
               imageModels={board.imageModels}
               imageModel={board.imageModel}
               imageProviderId={board.imageProviderId}
+              imageActionModels={board.imageActionModels}
               onImageModelChange={board.setImageModel}
+              onConfigureImageActionModel={configureImageActionModel}
               onSelectIds={board.setSelectedIds}
               onNodesChange={board.updateNodes}
               onAddNote={board.addNote}

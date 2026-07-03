@@ -206,6 +206,12 @@ export interface Settings {
   imageApiKeyConfigured?: boolean;
   /** Optional image model, e.g. "gpt-image-1" / "dall-e-3". */
   imageModel: string;
+  /** Optional model used by image background-removal actions. */
+  removeBackgroundModel: string;
+  /** Optional model used by image region-edit actions. */
+  editRegionModel: string;
+  /** Optional model used by image layer-extraction actions. */
+  extractLayerModel: string;
   /** Optional video-generation endpoint. Reserved for Moodboard video generation. */
   videoApiBaseUrl: string;
   /** Optional video-generation API key. Stored locally; never leaves the machine. */

@@ -37,6 +37,7 @@ import { ConversationSelect } from "../components/ConversationSelect.tsx";
 import { VersionCompare } from "../components/VersionCompare.tsx";
 import { VariantSwitcher } from "../components/VariantSwitcher.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
+import { AgentOutputText } from "../components/AgentOutputText.tsx";
 import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { Markdown } from "../components/Markdown.tsx";
@@ -2014,7 +2015,7 @@ function MessageActions({
 function AssistantMessage({ message }: { message: Msg }) {
   return (
     <div data-message-kind="assistant">
-      <Markdown>{message.text}</Markdown>
+      <AgentOutputText text={message.text} className="space-y-2" />
     </div>
   );
 }

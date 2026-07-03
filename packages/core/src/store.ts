@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS settings (
   image_api_base_url TEXT,
   image_api_key TEXT,
   image_model TEXT,
+  remove_background_model TEXT,
+  edit_region_model TEXT,
+  extract_layer_model TEXT,
   video_api_base_url TEXT,
   video_api_key TEXT,
   video_model TEXT,
@@ -176,6 +179,9 @@ const DEFAULT_SETTINGS: Settings = {
   imageApiBaseUrl: "",
   imageApiKey: "",
   imageModel: "",
+  removeBackgroundModel: "",
+  editRegionModel: "",
+  extractLayerModel: "",
   videoApiBaseUrl: "",
   videoApiKey: "",
   videoModel: "",
@@ -384,6 +390,9 @@ export class Store {
     ensureColumn("settings", "image_api_base_url", "image_api_base_url TEXT");
     ensureColumn("settings", "image_api_key", "image_api_key TEXT");
     ensureColumn("settings", "image_model", "image_model TEXT");
+    ensureColumn("settings", "remove_background_model", "remove_background_model TEXT");
+    ensureColumn("settings", "edit_region_model", "edit_region_model TEXT");
+    ensureColumn("settings", "extract_layer_model", "extract_layer_model TEXT");
     ensureColumn("settings", "video_api_base_url", "video_api_base_url TEXT");
     ensureColumn("settings", "video_api_key", "video_api_key TEXT");
     ensureColumn("settings", "video_model", "video_model TEXT");
@@ -1065,6 +1074,9 @@ export class Store {
       imageApiBaseUrl: str(r.image_api_base_url, DEFAULT_SETTINGS.imageApiBaseUrl),
       imageApiKey: str(r.image_api_key, DEFAULT_SETTINGS.imageApiKey),
       imageModel: str(r.image_model, DEFAULT_SETTINGS.imageModel),
+      removeBackgroundModel: str(r.remove_background_model, DEFAULT_SETTINGS.removeBackgroundModel),
+      editRegionModel: str(r.edit_region_model, DEFAULT_SETTINGS.editRegionModel),
+      extractLayerModel: str(r.extract_layer_model, DEFAULT_SETTINGS.extractLayerModel),
       videoApiBaseUrl: str(r.video_api_base_url, DEFAULT_SETTINGS.videoApiBaseUrl),
       videoApiKey: str(r.video_api_key, DEFAULT_SETTINGS.videoApiKey),
       videoModel: str(r.video_model, DEFAULT_SETTINGS.videoModel),
@@ -1093,6 +1105,9 @@ export class Store {
       imageApiBaseUrl: patch.imageApiBaseUrl ?? cur.imageApiBaseUrl,
       imageApiKey: patch.imageApiKey ?? cur.imageApiKey,
       imageModel: patch.imageModel ?? cur.imageModel,
+      removeBackgroundModel: patch.removeBackgroundModel ?? cur.removeBackgroundModel,
+      editRegionModel: patch.editRegionModel ?? cur.editRegionModel,
+      extractLayerModel: patch.extractLayerModel ?? cur.extractLayerModel,
       videoApiBaseUrl: patch.videoApiBaseUrl ?? cur.videoApiBaseUrl,
       videoApiKey: patch.videoApiKey ?? cur.videoApiKey,
       videoModel: patch.videoModel ?? cur.videoModel,
@@ -1110,11 +1125,11 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO settings (id, agent_command, model, api_base_url, api_key, default_design_system_id, custom_instructions,
-                               image_api_base_url, image_api_key, image_model,
+                               image_api_base_url, image_api_key, image_model, remove_background_model, edit_region_model, extract_layer_model,
                                video_api_base_url, video_api_key, video_model,
                                ai_provider_id, ai_provider_enabled, ai_provider_models, ai_provider_organization, ai_provider_profiles,
                                visual_qa_enabled, visual_qa_agent_command, visual_qa_model, auto_improve_enabled, auto_improve_max_rounds)
-         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            agent_command = excluded.agent_command,
            model = excluded.model,
@@ -1125,6 +1140,9 @@ export class Store {
            image_api_base_url = excluded.image_api_base_url,
            image_api_key = excluded.image_api_key,
            image_model = excluded.image_model,
+           remove_background_model = excluded.remove_background_model,
+           edit_region_model = excluded.edit_region_model,
+           extract_layer_model = excluded.extract_layer_model,
            video_api_base_url = excluded.video_api_base_url,
            video_api_key = excluded.video_api_key,
            video_model = excluded.video_model,
@@ -1149,6 +1167,9 @@ export class Store {
         next.imageApiBaseUrl,
         next.imageApiKey,
         next.imageModel,
+        next.removeBackgroundModel,
+        next.editRegionModel,
+        next.extractLayerModel,
         next.videoApiBaseUrl,
         next.videoApiKey,
         next.videoModel,

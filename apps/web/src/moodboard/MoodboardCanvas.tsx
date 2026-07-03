@@ -6,6 +6,7 @@ import type { Frame } from "leafer-editor";
 import { useToast } from "../components/Toast.tsx";
 import type { MoodboardNode } from "../lib/api.ts";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
+import { imageActionDefaultForField, imageActionModelField } from "../lib/image-action-defaults.ts";
 import { cn } from "../lib/utils.ts";
 import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
 import {
@@ -52,8 +53,10 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     imageModels = [],
     imageModel = "",
     imageProviderId = "",
+    imageActionModels = {},
     moodboardAssets = [],
     onImageModelChange = () => {},
+    onConfigureImageActionModel,
     onGenerateImage,
     onSendToAgent,
     onUploadReferenceFiles,
@@ -310,6 +313,15 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   };
 
   const unavailableImageAction = (action: string): void => {
+    const field = imageActionModelField(action);
+    if (field && !imageActionModels[field]?.trim()) {
+      if (onConfigureImageActionModel) {
+        onConfigureImageActionModel(imageActionDefaultForField(field).action);
+        return;
+      }
+      toast(`Choose a ${imageActionDefaultForField(field).action} model in Defaults first.`);
+      return;
+    }
     toast(`${action} needs image-edit provider support.`, { variant: "error" });
   };
 
