@@ -55,6 +55,41 @@ import type { DesignSystemCard, Project, ProjectMode, Settings, SkillCard } from
 
 const DEFAULT_SKILL = "frontend-design";
 const DEFAULT_DS = "modern-minimal";
+const HOME_COMPOSER_KEY = "dezin.home.composer";
+
+interface HomeComposerPrefs {
+  skillId?: string;
+  designSystemId?: string;
+  mode?: ProjectMode;
+}
+
+function isProjectMode(value: unknown): value is ProjectMode {
+  return value === "prototype" || value === "standard";
+}
+
+function readHomeComposerPrefs(): HomeComposerPrefs {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(HOME_COMPOSER_KEY) ?? "{}") as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const record = parsed as Record<string, unknown>;
+    return {
+      skillId: typeof record.skillId === "string" ? record.skillId : undefined,
+      designSystemId: typeof record.designSystemId === "string" ? record.designSystemId : undefined,
+      mode: isProjectMode(record.mode) ? record.mode : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writeHomeComposerPrefs(patch: HomeComposerPrefs): void {
+  try {
+    const next = { ...readHomeComposerPrefs(), ...patch };
+    localStorage.setItem(HOME_COMPOSER_KEY, JSON.stringify(next));
+  } catch {
+    /* localStorage may be unavailable */
+  }
+}
 
 interface Template {
   label: string;
@@ -143,19 +178,20 @@ export function HomeScreen({
 }) {
   const api = useApi();
   const { toast } = useToast();
+  const [initialComposerPrefs] = useState<HomeComposerPrefs>(() => readHomeComposerPrefs());
   const [brief, setBrief] = useState("");
   const [optimizingPrompt, setOptimizingPrompt] = useState(false);
   const [optimizedOriginalPrompt, setOptimizedOriginalPrompt] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillCard[]>([]);
-  const [skillId, setSkillId] = useState(DEFAULT_SKILL);
+  const [skillId, setSkillIdState] = useState(initialComposerPrefs.skillId ?? DEFAULT_SKILL);
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
   const { agents, rescan: rescanAgents } = useAgents();
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
   const [settingsModel, setSettingsModel] = useState("");
   const [homeAgent, setHomeAgent] = useState("");
   const [homeModel, setHomeModel] = useState("");
-  const [designSystemId, setDesignSystemId] = useState(DEFAULT_DS);
-  const [mode, setMode] = useState<ProjectMode>("prototype");
+  const [designSystemId, setDesignSystemIdState] = useState(initialComposerPrefs.designSystemId ?? DEFAULT_DS);
+  const [mode, setModeState] = useState<ProjectMode>(initialComposerPrefs.mode ?? "prototype");
   const [projects, setProjects] = useState<Project[]>(projectsOverride ?? []);
   const [loading, setLoading] = useState(!projectsOverride);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -169,6 +205,21 @@ export function HomeScreen({
   const imgInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
+
+  const setSkillId = useCallback((value: string) => {
+    setSkillIdState(value);
+    writeHomeComposerPrefs({ skillId: value });
+  }, []);
+
+  const setDesignSystemId = useCallback((value: string) => {
+    setDesignSystemIdState(value);
+    writeHomeComposerPrefs({ designSystemId: value });
+  }, []);
+
+  const setMode = useCallback((value: ProjectMode) => {
+    setModeState(value);
+    writeHomeComposerPrefs({ mode: value });
+  }, []);
 
   const refresh = useCallback(() => {
     if (projectsOverride) return;
@@ -562,7 +613,7 @@ export function HomeScreen({
                 {optimizingPrompt ? (
                   <div
                     aria-hidden
-                    className="pointer-events-none absolute inset-x-2 bottom-0 top-0 rounded-xl bg-[linear-gradient(110deg,transparent_0%,color-mix(in_oklch,var(--primary)_10%,transparent)_45%,transparent_70%)] opacity-70 animate-pulse"
+                    className="prompt-loading-gradient motion-safe:animate-prompt-loading-gradient pointer-events-none absolute inset-x-2 bottom-0 top-0 rounded-xl opacity-70"
                   />
                 ) : null}
                 <textarea

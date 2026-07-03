@@ -1866,6 +1866,91 @@ test("visual review stream events render a titled transcript record with collaps
   expect(within(record).getByText(/Reviewing screenshot with codebuddy \/ hunyuan/)).toBeInTheDocument();
 });
 
+test("reopening a project restores persisted visual review transcript records", async () => {
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [
+      { id: "m1", conversationId: "c1", role: "user" as const, content: "make a campaign page", createdAt: 1 },
+      {
+        id: "m2",
+        conversationId: "c1",
+        role: "system" as const,
+        content: JSON.stringify({
+          visualReview: {
+            status: "complete",
+            enabled: true,
+            round: 0,
+            agentCommand: "codebuddy",
+            model: "hunyuan",
+            screenshotUrl: "/projects/p1/preview/.visual-qa/screenshot.png",
+            summary: "codebuddy / hunyuan reviewed the screenshot and reported 1 issue.",
+            findings: [
+              {
+                severity: "P1",
+                id: "visual-ai-review-1",
+                message: "Hero image overlaps the navigation.",
+                fix: "Move the navigation above the image layer.",
+                screenshotUrl: "/projects/p1/preview/.visual-qa/screenshot.png",
+              },
+            ],
+            process: [
+              { type: "tool", summary: "Captured preview screenshot" },
+              { type: "tool", summary: "Reviewing screenshot with codebuddy / hunyuan" },
+            ],
+          },
+        }),
+        createdAt: 2,
+      },
+    ],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const record = await screen.findByTestId("visual-review-message");
+  expect(within(record).getByText("Visual Review")).toBeInTheDocument();
+  expect(within(record).getByText(/reviewed the screenshot and reported 1 issue/)).toBeInTheDocument();
+  expect(within(record).getByText(/Hero image overlaps the navigation/)).toBeInTheDocument();
+
+  fireEvent.click(within(record).getByRole("button", { name: /Visual Review process/ }));
+  expect(within(record).getByText(/Reviewing screenshot with codebuddy \/ hunyuan/)).toBeInTheDocument();
+});
+
+test("static quality stream events update the Quality pane while a run is still active", async () => {
+  let release: (() => void) | undefined;
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-static-quality", conversationId: "c1" };
+      yield {
+        type: "static-quality",
+        runId: "r-static-quality",
+        round: 0,
+        findings: [{ severity: "P2", id: "raw-hex", message: "2 raw hex values outside :root.", fix: "Move colours into tokens." }],
+      };
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  try {
+    fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+    fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
+    expect(await screen.findByText(/raw hex values/)).toBeInTheDocument();
+    expect(screen.queryByText(/No quality issues\. Clean/)).toBeNull();
+  } finally {
+    release?.();
+  }
+});
+
 test("the Agent visual review quality lane shows the screenshot review summary", async () => {
   const fake = makeFakeApi({
     streamRun: async function* (): AsyncGenerator<RunEvent> {

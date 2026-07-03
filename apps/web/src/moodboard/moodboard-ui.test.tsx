@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MoodboardConversation, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
@@ -932,7 +933,31 @@ test("MoodboardCanvasNode renders image generators without a dashed border and w
 
   expect(container.querySelectorAll("[dashpattern], [dashPattern]")).toHaveLength(0);
   expect(container.querySelectorAll("rect")).toHaveLength(1);
-  expect(container.querySelector("image")).toHaveAttribute("url", expect.stringContaining("IconImageMountainFill18"));
+  const icon = container.querySelector("image");
+  expect(icon).toHaveAttribute("url", expect.stringContaining("IconImageMountainFill18"));
+  expect(icon).toHaveAttribute("width", "36");
+  expect(icon).toHaveAttribute("height", "36");
+});
+
+test("MoodboardCanvasNode renders a loading sweep while an image generator is generating", () => {
+  const generator: MoodboardNode = {
+    id: "generator-1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 320,
+    height: 180,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light", generatorStatus: "generating" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  const { container } = render(<MoodboardCanvasNode node={generator} />);
+
+  expect(container.querySelectorAll('rect[data-loading-sweep="true"]')).toHaveLength(3);
 });
 
 test("MoodboardSectionLabels lets section titles be edited outside the canvas node", () => {
@@ -2459,9 +2484,10 @@ test("GeneratorPromptToolbar exposes model parameters and submits them with the 
   );
 });
 
-test("GeneratorPromptToolbar resizes the generator node when the aspect ratio changes", () => {
+test("GeneratorPromptToolbar keeps aspect ratio buttons selected across repeated changes", () => {
   const onResizeNode = vi.fn();
-  const node: MoodboardNode = {
+  const onParamsChange = vi.fn();
+  const initialNode: MoodboardNode = {
     id: "g1",
     boardId: "b1",
     type: "image-generator",
@@ -2476,24 +2502,50 @@ test("GeneratorPromptToolbar resizes the generator node when the aspect ratio ch
     updatedAt: 1,
   };
 
-  render(
-    <GeneratorPromptToolbar
-      node={node}
-      busy={false}
-      imageProviderId="openai"
-      models={["gpt-image-2"]}
-      model="gpt-image-2"
-      onModelChange={() => {}}
-      onPromptChange={() => {}}
-      onResizeNode={onResizeNode}
-      onGenerate={async () => {}}
-    />,
-  );
+  function ToolbarProbe() {
+    const [node, setNode] = useState(initialNode);
+    return (
+      <GeneratorPromptToolbar
+        node={node}
+        busy={false}
+        imageProviderId="openai"
+        models={["gpt-image-2"]}
+        model="gpt-image-2"
+        onModelChange={() => {}}
+        onPromptChange={() => {}}
+        onParamsChange={(params) => {
+          onParamsChange(params);
+          setNode((current) => ({ ...current, data: { ...current.data, generationParams: params } }));
+        }}
+        onResizeNode={(size) => {
+          onResizeNode(size);
+          setNode((current) => ({ ...current, ...size }));
+        }}
+        onGenerate={async () => {}}
+      />
+    );
+  }
+
+  render(<ToolbarProbe />);
 
   fireEvent.click(screen.getByLabelText("Image generation parameters"));
-  fireEvent.click(screen.getByRole("button", { name: "16:9" }));
+  const square = screen.getByRole("button", { name: "1:1" });
+  const wide = screen.getByRole("button", { name: "16:9" });
+  const tall = screen.getByRole("button", { name: "9:16" });
+
+  expect(square).toHaveAttribute("aria-pressed", "true");
+
+  fireEvent.click(wide);
+  expect(wide).toHaveAttribute("aria-pressed", "true");
+  expect(square).toHaveAttribute("aria-pressed", "false");
+
+  fireEvent.click(tall);
+  expect(tall).toHaveAttribute("aria-pressed", "true");
+  expect(wide).toHaveAttribute("aria-pressed", "false");
 
   expect(onResizeNode).toHaveBeenCalledWith({ width: 360, height: 203 });
+  expect(onResizeNode).toHaveBeenLastCalledWith({ width: 120, height: 213 });
+  expect(onParamsChange).toHaveBeenLastCalledWith(expect.objectContaining({ aspectRatio: "9:16", size: "1024x1536" }));
 });
 
 test("GeneratorPromptToolbar shows reference image previews from supplied board assets", () => {

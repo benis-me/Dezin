@@ -1151,6 +1151,7 @@ function ParamButton({ active, label, onClick }: { active: boolean; label: strin
   return (
     <button
       type="button"
+      aria-pressed={active}
       className={cn(
         "h-8 rounded-md border border-border bg-card px-2 text-[11px] font-medium text-foreground transition-colors hover:bg-surface-2",
         active && "border-foreground bg-foreground text-background hover:bg-foreground",

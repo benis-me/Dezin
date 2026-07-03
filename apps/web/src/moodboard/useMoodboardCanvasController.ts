@@ -102,7 +102,7 @@ export function useMoodboardCanvasController({
 
   useEffect(() => {
     nodesRef.current = nodes;
-    currentInputsRef.current = nodes.map(toInput);
+    currentInputsRef.current = cloneMoodboardNodeInputs(nodes.map(toInput));
     setDraftInputs(null);
   }, [nodes]);
 
@@ -157,14 +157,16 @@ export function useMoodboardCanvasController({
 
   const restoreHistorySnapshot = useCallback((snapshot: MoodboardHistorySnapshot) => {
     const nextSnapshot = cloneMoodboardSnapshot(snapshot);
+    const nextInputs = cloneMoodboardNodeInputs(nextSnapshot.nodes);
     const nextSelectedIds = commitSelectionIds(
       nextSnapshot.selectedIds,
-      nextSnapshot.nodes.map((node) => node.id),
+      nextInputs.map((node) => node.id),
     );
-    currentInputsRef.current = nextSnapshot.nodes;
-    onNodesChangeRef.current(nextSnapshot.nodes);
-    syncNodeInputsInRuntimeRef.current(nextSnapshot.nodes, nextSelectedIds);
-    window.requestAnimationFrame(() => syncNodeInputsInRuntimeRef.current(nextSnapshot.nodes, nextSelectedIds));
+    currentInputsRef.current = nextInputs;
+    nodesRef.current = moodboardNodesFromInputs(nodesRef.current, nextInputs);
+    onNodesChangeRef.current(nextInputs);
+    syncNodeInputsInRuntimeRef.current(nextInputs, nextSelectedIds);
+    window.requestAnimationFrame(() => syncNodeInputsInRuntimeRef.current(nextInputs, nextSelectedIds));
   }, [commitSelectionIds]);
 
   const undoCanvas = useCallback(() => {
@@ -188,8 +190,10 @@ export function useMoodboardCanvasController({
     if (options.recordHistory !== false && !sameMoodboardNodeInputs(current, next)) {
       historyRef.current = pushMoodboardUndo(historyRef.current, createMoodboardHistorySnapshot(current, selectedIdsRef.current));
     }
-    currentInputsRef.current = next.map((node) => ({ ...node, data: { ...node.data } }));
-    onNodesChangeRef.current(next);
+    const nextInputs = cloneMoodboardNodeInputs(next);
+    currentInputsRef.current = nextInputs;
+    nodesRef.current = moodboardNodesFromInputs(nodesRef.current, nextInputs);
+    onNodesChangeRef.current(nextInputs);
   }, []);
 
   const syncInputsAndSelectionInRuntime = useCallback((inputs: SaveMoodboardNodeInput[], idsToReselect: string[]) => {
@@ -902,12 +906,44 @@ export function mergeDraftMoodboardNodes(nodes: MoodboardNode[], draftInputs: Sa
     if (!draft) return node;
     return {
       ...node,
+      type: draft.type,
       x: draft.x,
       y: draft.y,
       width: draft.width,
       height: draft.height,
       rotation: draft.rotation ?? 0,
       zIndex: draft.zIndex ?? node.zIndex,
+      data: draft.data ?? node.data,
     };
   });
+}
+
+function cloneMoodboardNodeInputs(inputs: SaveMoodboardNodeInput[]): SaveMoodboardNodeInput[] {
+  return inputs.map((node) => ({ ...node, data: { ...node.data } }));
+}
+
+function moodboardNodesFromInputs(currentNodes: MoodboardNode[], inputs: SaveMoodboardNodeInput[]): MoodboardNode[] {
+  const currentById = new Map(currentNodes.map((node) => [node.id, node]));
+  const fallback = currentNodes[0] ?? null;
+  const now = Date.now();
+  return inputs
+    .filter((input): input is SaveMoodboardNodeInput & { id: string } => Boolean(input.id))
+    .map((input, index) => {
+      const current = currentById.get(input.id);
+      const createdAt = current?.createdAt ?? now + index;
+      return {
+        id: input.id,
+        boardId: current?.boardId ?? fallback?.boardId ?? "",
+        type: input.type,
+        x: input.x,
+        y: input.y,
+        width: input.width,
+        height: input.height,
+        rotation: input.rotation ?? current?.rotation ?? 0,
+        zIndex: input.zIndex ?? current?.zIndex ?? 0,
+        data: input.data ? { ...input.data } : current?.data ? { ...current.data } : {},
+        createdAt,
+        updatedAt: current?.updatedAt ?? createdAt,
+      };
+    });
 }

@@ -217,6 +217,39 @@ function processMessage(items: ProcessItem[], elapsedMs?: number): string {
   return JSON.stringify({ process: { items, elapsedMs } });
 }
 
+function visualReviewMessage(input: {
+  round: number;
+  enabled: boolean;
+  settings: Settings;
+  agentCommand: string;
+  model?: string;
+  screenshotUrl?: string;
+  screenshotPath?: string;
+  findings: QualityFinding[];
+}): string {
+  const agentCommand = reviewerAgentCommand(input.settings, input.agentCommand);
+  const model = reviewerModel(input.settings, input.model);
+  const reviewer = [agentCommand, model].filter((value): value is string => !!value && value.trim().length > 0).join(" / ") || "selected reviewer";
+  const summary = input.findings.find((finding) => typeof finding.reviewSummary === "string" && finding.reviewSummary.trim())?.reviewSummary;
+  return JSON.stringify({
+    visualReview: {
+      status: "complete",
+      enabled: input.enabled,
+      round: input.round,
+      agentCommand,
+      model,
+      screenshotUrl: input.screenshotUrl,
+      screenshotPath: input.screenshotPath,
+      summary,
+      findings: input.findings,
+      process: [
+        { type: "tool", summary: input.screenshotUrl || input.screenshotPath ? "Captured preview screenshot" : "Preparing preview screenshot" },
+        { type: "tool", summary: `Reviewing screenshot with ${reviewer}` },
+      ],
+    },
+  });
+}
+
 function messageToAgentTurn(m: { role: string; content: string }): { role: "user" | "assistant"; content: string }[] {
   if (m.role === "user" || m.role === "assistant") return [{ role: m.role, content: m.content }];
   if (m.role !== "system") return [];
@@ -384,6 +417,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // navigation/restart without losing streamed text or the original tool order.
   const steps: string[] = [];
   const processItems: ProcessItem[] = [];
+  const visualReviewRecords: string[] = [];
   let summaryBoundarySeen = false;
   const recordActivity = (activity: unknown): unknown | null => {
     const a = activity as { kind?: string; summary?: string } | undefined;
@@ -420,6 +454,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   };
   const persistSteps = (): void => {
     if (steps.length) store.addMessage(conversation.id, "system", JSON.stringify({ steps }));
+  };
+  const queueVisualReviewRecord = (round: number, enabled: boolean, findings: QualityFinding[], screenshotUrl?: string, screenshotPath?: string): void => {
+    if (!enabled) return;
+    visualReviewRecords.push(visualReviewMessage({ round, enabled, settings, agentCommand: runAgentCommand, model: runModel, screenshotUrl, screenshotPath, findings }));
+  };
+  const persistVisualReviews = (): void => {
+    for (const record of visualReviewRecords.splice(0)) store.addMessage(conversation.id, "system", record);
   };
 
   // Standard mode: the agent edits a real Vite project (src/*), not a single HTML.
@@ -474,6 +515,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           persistProcess();
           if (asked.text) store.addMessage(conversation.id, "assistant", asked.text);
           persistSteps();
+          persistVisualReviews();
           store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
           store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
           sse({ type: "ask-user-question", runId: run.id, question: asked.question });
@@ -529,6 +571,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           }
           visualFindings = withVisualScreenshotUrl(visualFindings, screenshotUrl);
           sse({ type: "visual-qa", round, enabled: settings.visualQaEnabled, findings: visualFindings });
+          queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
         }
         findings = [...staticFindings, ...visualFindings];
         score = lintScore(findings);
@@ -545,6 +588,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       persistProcess();
       const assistantMessage = store.addMessage(conversation.id, "assistant", finalAssistantText);
       persistSteps();
+      persistVisualReviews();
       const quality = `, quality ${score}/100`;
       const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
       const message = passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
@@ -578,6 +622,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const partial = processAssistantText();
       if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
       persistSteps();
+      persistVisualReviews();
       const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
       store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
       sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
@@ -631,6 +676,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       persistProcess();
       if (assistantText) store.addMessage(conversation.id, "assistant", assistantText);
       persistSteps();
+      persistVisualReviews();
       store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
       store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
       sse({ type: "ask-user-question", runId: run.id, question: asked.question });
@@ -679,6 +725,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         renderUrl,
       }), screenshotUrl);
       sse({ type: "visual-qa", round, enabled: settings.visualQaEnabled, findings: visualFindings });
+      queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
       finalFindings = [...staticFindings, ...visualFindings];
       score = lintScore(finalFindings);
     };
@@ -723,6 +770,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         persistProcess();
         if (repairedFinal.summaryText) store.addMessage(conversation.id, "assistant", repairedFinal.summaryText);
         persistSteps();
+        persistVisualReviews();
         store.addMessage(conversation.id, "system", questionMessage(repairedAsked.question, run.id));
         store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
         sse({ type: "ask-user-question", runId: run.id, question: repairedAsked.question });
@@ -746,6 +794,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     persistProcess();
     const assistantMessage = store.addMessage(conversation.id, "assistant", assistantText);
     persistSteps();
+    persistVisualReviews();
     const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
     const quality = `, quality ${score}/100`;
     const text = passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`;
@@ -783,6 +832,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const partial = processAssistantText();
     if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
     persistSteps();
+    persistVisualReviews();
     const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
     store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
     sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });

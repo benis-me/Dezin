@@ -153,6 +153,55 @@ test("visual QA run emits a start event before visual QA results", async () => {
   );
 });
 
+test("visual QA run persists a visual review transcript record", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      store.updateSettings({ visualQaEnabled: true, visualQaAgentCommand: "codebuddy", visualQaModel: "hunyuan" });
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+
+      const conversation = store.listConversations(project.id)[0];
+      assert.ok(conversation);
+      const visualReviewMessage = store.listMessages(conversation.id).find((message) => {
+        if (message.role !== "system") return false;
+        try {
+          return Boolean((JSON.parse(message.content) as { visualReview?: unknown }).visualReview);
+        } catch {
+          return false;
+        }
+      });
+      assert.ok(visualReviewMessage);
+      const parsed = JSON.parse(visualReviewMessage.content) as {
+        visualReview?: {
+          status?: string;
+          agentCommand?: string;
+          model?: string;
+          screenshotUrl?: string;
+          findings?: Array<{ message?: string }>;
+          process?: Array<{ type?: string; summary?: string }>;
+        };
+      };
+      assert.equal(parsed.visualReview?.status, "complete");
+      assert.equal(parsed.visualReview?.agentCommand, "codebuddy");
+      assert.equal(parsed.visualReview?.model, "hunyuan");
+      assert.match(parsed.visualReview?.screenshotUrl ?? "", /\.visual-qa\/screenshot\.png$/);
+      assert.equal(parsed.visualReview?.findings?.[0]?.message, "CTA clips.");
+      assert.match(parsed.visualReview?.process?.[1]?.summary ?? "", /codebuddy \/ hunyuan/);
+    },
+    {
+      visualQa: async () => [{ severity: "P2", id: "visual-ai-review-1", message: "CTA clips.", fix: "Allow wrapping." }],
+    },
+  );
+});
+
 test("POST /api/runs rejects a concurrent run for the same project variant", async () => {
   let releaseTurn!: () => void;
   const runner: AgentRunner = {

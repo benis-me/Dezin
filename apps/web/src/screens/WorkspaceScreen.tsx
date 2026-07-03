@@ -611,6 +611,22 @@ function normalizeLiveItems(value: unknown): LiveItem[] {
   });
 }
 
+function normalizeVisualReview(value: unknown): VisualReviewState | null {
+  if (!isRecord(value)) return null;
+  return {
+    status: value.status === "running" ? "running" : "complete",
+    enabled: typeof value.enabled === "boolean" ? value.enabled : undefined,
+    round: typeof value.round === "number" ? value.round : undefined,
+    agentCommand: optionalString(value.agentCommand),
+    model: optionalString(value.model),
+    screenshotUrl: optionalString(value.screenshotUrl),
+    screenshotPath: optionalString(value.screenshotPath),
+    summary: optionalString(value.summary),
+    findings: normalizeFindings(value.findings),
+    process: normalizeLiveItems(value.process),
+  };
+}
+
 function briefToName(brief: string): string {
   const t = brief.trim().replace(/\s+/g, " ");
   return t.length === 0 ? "Untitled" : t.length > 48 ? `${t.slice(0, 48)}…` : t;
@@ -642,6 +658,10 @@ function toMsg(m: Message, id: number): Msg {
         const items = normalizeLiveItems(parsed.process.items);
         const elapsedMs = typeof parsed.process.elapsedMs === "number" ? parsed.process.elapsedMs : undefined;
         return { id, dbId: m.id, kind: "process", text: "", items, elapsedMs, at: m.createdAt };
+      }
+      if (isRecord(parsed) && isRecord(parsed.visualReview)) {
+        const visualReview = normalizeVisualReview(parsed.visualReview);
+        if (visualReview) return { id, dbId: m.id, kind: "visual-review", text: "", visualReview, at: m.createdAt };
       }
       if (isRecord(parsed) && Array.isArray(parsed.steps)) return { id, dbId: m.id, kind: "process", text: "", steps: parsed.steps as string[], at: m.createdAt };
     } catch {
@@ -2425,8 +2445,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         }
         gotTurnText.current = false;
         break;
-      case "lint": {
-        const findings = Array.isArray(ev.findings) ? (ev.findings as QualityFinding[]) : [];
+      case "lint":
+      case "static-quality": {
+        const findings = Array.isArray(ev.findings) ? normalizeFindings(ev.findings) : [];
         setLintFindings(findings);
         updateQualityChecks((current) => ({ ...current, staticRan: true, source: "live" }));
         setLiveStatus(`Found ${findings.length} issue${findings.length === 1 ? "" : "s"}, repairing`);

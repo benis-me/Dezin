@@ -244,11 +244,44 @@
   animation: dezin-shiny-text 2.2s linear infinite;
 }
 
+@keyframes prompt-loading-gradient {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+.prompt-loading-gradient {
+  background:
+    linear-gradient(
+      110deg,
+      transparent 0%,
+      color-mix(in oklch, var(--primary) 9%, transparent) 36%,
+      color-mix(in oklch, var(--foreground) 8%, transparent) 50%,
+      color-mix(in oklch, var(--primary) 10%, transparent) 64%,
+      transparent 100%
+    );
+  background-size: 260% 100%;
+  background-position: 120% 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .motion-safe\:animate-prompt-loading-gradient {
+    animation: prompt-loading-gradient 1.8s cubic-bezier(0.23, 1, 0.32, 1) infinite;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .shiny-text {
     animation: none;
     background: none;
     color: currentColor;
+  }
+
+  .prompt-loading-gradient {
+    background-position: 50% 0;
   }
 }
 
