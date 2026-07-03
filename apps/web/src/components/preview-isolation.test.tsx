@@ -1,7 +1,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { PreviewModal } from "./PreviewModal.tsx";
-import { VersionCompare } from "./VersionCompare.tsx";
+import { bindFrameScroll, VersionCompare } from "./VersionCompare.tsx";
 
 afterEach(cleanup);
 
@@ -70,4 +70,25 @@ test("VersionCompare synchronizes iframe scroll bridge messages in both directio
   );
 
   await waitFor(() => expect(currentPostMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "sync-scroll", top: 42, left: 4 }, "*"));
+});
+
+test("VersionCompare iframe scroll cleanup tolerates cross-origin WindowProxy errors", () => {
+  const sourceWindow = {
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(() => {
+      throw new DOMException("Blocked a frame from accessing a cross-origin frame.", "SecurityError");
+    }),
+  } as unknown as Window;
+  const sourceDoc = new EventTarget() as Document;
+  Object.defineProperties(sourceDoc, {
+    defaultView: { configurable: true, value: sourceWindow },
+    scrollingElement: { configurable: true, value: document.createElement("main") },
+    documentElement: { configurable: true, value: document.createElement("html") },
+    body: { configurable: true, value: document.createElement("body") },
+  });
+
+  const cleanupScroll = bindFrameScroll(sourceDoc, null, { current: false });
+
+  expect(sourceWindow.addEventListener).toHaveBeenCalledWith("scroll", expect.any(Function), { passive: true });
+  expect(() => cleanupScroll()).not.toThrow();
 });

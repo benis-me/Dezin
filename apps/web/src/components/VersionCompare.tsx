@@ -49,7 +49,23 @@ function syncFrameScroll(frame: HTMLIFrameElement | null, top: number, left: num
   postScrollSync(frame, top, left);
 }
 
-function bindFrameScroll(sourceDoc: Document, targetFrame: HTMLIFrameElement | null, syncingRef: MutableRefObject<boolean>): () => void {
+function addFrameScrollListener(win: Window | null, onScroll: EventListener): void {
+  try {
+    win?.addEventListener("scroll", onScroll, { passive: true });
+  } catch {
+    // The iframe may have navigated cross-origin between attach and cleanup.
+  }
+}
+
+function removeFrameScrollListener(win: Window | null, onScroll: EventListener): void {
+  try {
+    win?.removeEventListener("scroll", onScroll);
+  } catch {
+    // WindowProxy can throw SecurityError after the iframe has navigated cross-origin.
+  }
+}
+
+export function bindFrameScroll(sourceDoc: Document, targetFrame: HTMLIFrameElement | null, syncingRef: MutableRefObject<boolean>): () => void {
   const sourceWindow = sourceDoc.defaultView;
   const onScroll = (): void => {
     if (syncingRef.current) return;
@@ -61,11 +77,19 @@ function bindFrameScroll(sourceDoc: Document, targetFrame: HTMLIFrameElement | n
       syncingRef.current = false;
     }, 0);
   };
-  sourceWindow?.addEventListener("scroll", onScroll, { passive: true });
-  sourceDoc.addEventListener("scroll", onScroll, true);
+  addFrameScrollListener(sourceWindow, onScroll);
+  try {
+    sourceDoc.addEventListener("scroll", onScroll, true);
+  } catch {
+    // Detached/cross-origin frame documents are best-effort for scroll sync.
+  }
   return () => {
-    sourceWindow?.removeEventListener("scroll", onScroll);
-    sourceDoc.removeEventListener("scroll", onScroll, true);
+    removeFrameScrollListener(sourceWindow, onScroll);
+    try {
+      sourceDoc.removeEventListener("scroll", onScroll, true);
+    } catch {
+      // Ignore iframe teardown races; postMessage bridge still handles live frames.
+    }
   };
 }
 
@@ -83,7 +107,13 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
     if (!open) return;
     let frameCleanups: Array<() => void> = [];
     const cleanupFrameScroll = (): void => {
-      for (const cleanup of frameCleanups) cleanup();
+      for (const cleanup of frameCleanups) {
+        try {
+          cleanup();
+        } catch {
+          // Never let iframe teardown errors unmount the app.
+        }
+      }
       frameCleanups = [];
     };
     const attachFrameScroll = (): void => {
