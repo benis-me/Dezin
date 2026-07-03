@@ -721,7 +721,7 @@ export function HomeScreen({
                     onClick={submit}
                     disabled={optimizingPrompt || (brief.trim().length === 0 && images.length === 0)}
                     aria-label="Build"
-                    className="rounded-xl px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
+                    className="px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
                   >
                     Build
                     <ArrowRight size={16} strokeWidth={2} />

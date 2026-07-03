@@ -827,9 +827,9 @@ function UserMessage({
         </TooltipProvider>
       ) : null}
       {body ? (
-        <span className="dz-selectable max-w-[88%] rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground">
-          {body}
-        </span>
+        <div className="max-w-[88%] rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground">
+          <Markdown className="space-y-1.5 text-foreground">{body}</Markdown>
+        </div>
       ) : null}
     </div>
   );
@@ -4132,10 +4132,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               onCompare={(runId, label) => void openVersionCompare(runId, label)}
               onRestore={(runId) => void restoreVersion(runId)}
             />
-            <span data-testid="versions-tabs-separator" className="mx-1 h-5 w-px shrink-0 bg-border" aria-hidden />
+            <span data-testid="versions-tabs-separator" className="mx-0.5 h-5 w-px shrink-0 bg-border" aria-hidden />
             <Tabs
               aria-label="Artifact views"
-              className="[&_[role=tab]]:px-2.5"
+              className="[&_[role=tab]]:px-2"
               items={tabItems}
               value={tab}
               onChange={(v) => setTab(v as Tab)}

@@ -1,13 +1,14 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { cn } from "../lib/utils.ts";
 
 /**
  * Render agent prose as markdown — headings, lists, code, bold, links — with the
  * app's typography. Kept compact for the chat column.
  */
-export function Markdown({ children }: { children: string }) {
+export function Markdown({ children, className }: { children: string; className?: string }) {
   return (
-    <div className="dz-selectable space-y-2.5 text-sm leading-relaxed text-foreground/90">
+    <div className={cn("dz-selectable space-y-2.5 text-sm leading-relaxed text-foreground/90", className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

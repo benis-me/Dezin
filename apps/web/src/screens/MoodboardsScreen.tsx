@@ -392,7 +392,7 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
                   aria-label={startMode === "generate" ? "Generate board" : "Start board"}
                   onClick={() => void startBoard()}
                   disabled={starting || generateNeedsModel || (!promptText && promptImages.length === 0)}
-                  className="rounded-xl px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_48%,transparent)]"
+                  className="px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_48%,transparent)]"
                 >
                   {startMode === "generate" ? "Generate" : "Start board"}
                   <ArrowRight size={16} strokeWidth={2} />

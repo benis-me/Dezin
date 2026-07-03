@@ -109,6 +109,11 @@ test("Shell sidebar can be resized outside project pages", () => {
   expect(resize.className).not.toContain("focus-visible");
   expect(resize.className).not.toContain("w-1");
   expect(screen.getByRole("button", { name: "Design" })).toBeInTheDocument();
+  const design = screen.getByRole("button", { name: "Design" });
+  const designSystems = screen.getByRole("button", { name: "Design Systems" });
+  const moodboard = screen.getByRole("button", { name: "Moodboard" });
+  expect(design.compareDocumentPosition(designSystems) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(designSystems.compareDocumentPosition(moodboard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Home" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Browser extension" })).toBeNull();
 });
@@ -201,6 +206,8 @@ test("HomeScreen Build passes the brief, skillId, and designSystemId", async () 
   await user.click(await screen.findByText("Editorial"));
 
   const build = screen.getByLabelText("Build");
+  expect(build).toHaveClass("rounded-lg");
+  expect(build).not.toHaveClass("rounded-xl");
   expect(build).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Describe your design"), { target: { value: "a dashboard" } });
   expect(build).not.toBeDisabled();
@@ -322,7 +329,10 @@ test("MoodboardsScreen uses a Home-like prompt to start a board with initial dir
   expect(screen.getByRole("button", { name: "Agent" })).toHaveAttribute("aria-pressed", "true");
   expect(screen.getByRole("button", { name: "Agent and model" })).toBeInTheDocument();
   fireEvent.change(prompt, { target: { value: "Warm editorial references for a boutique hotel" } });
-  fireEvent.click(screen.getByRole("button", { name: "Start board" }));
+  const start = screen.getByRole("button", { name: "Start board" });
+  expect(start).toHaveClass("rounded-lg");
+  expect(start).not.toHaveClass("rounded-xl");
+  fireEvent.click(start);
 
   await waitFor(() => expect(createMoodboard).toHaveBeenCalledWith({ name: "Warm editorial references" }));
   expect(postMoodboardMessage).toHaveBeenCalledWith(

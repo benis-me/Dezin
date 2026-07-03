@@ -16,8 +16,8 @@ interface NavLink {
 
 const NAV: NavLink[] = [
   { label: "Design", path: "/", icon: Palette, match: (r) => r.name === "home" },
+  { label: "Design Systems", path: "/design-systems", icon: Shapes, match: (r) => r.name === "design-systems" },
   { label: "Moodboard", path: "/moodboards", icon: Images, match: (r) => r.name === "moodboards" || r.name === "moodboard" },
-  { label: "Design systems", path: "/design-systems", icon: Shapes, match: (r) => r.name === "design-systems" },
 ];
 
 const SHELL_SIDEBAR_WIDTH_KEY = "dezin.shell.sidebar.width";

@@ -272,6 +272,22 @@ test("opening a project scrolls the restored conversation to the bottom", async 
   }
 });
 
+test("restored user chat bubbles render markdown", async () => {
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [{ id: "m1", conversationId: "c1", role: "user", content: "Make this **important** with `tokens`.", createdAt: 1 }],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const strong = await screen.findByText("important");
+  expect(strong.tagName).toBe("STRONG");
+  expect(screen.getByText("tokens").tagName).toBe("CODE");
+});
+
 test("sending a brief streams events into the chat and shows the preview + export menu", async () => {
   const user = userEvent.setup();
   const fake = makeFakeApi({
@@ -1463,7 +1479,7 @@ test("the Files tab lists project files and previews the selected file's source"
     </ApiProvider>,
   );
   expect(screen.queryByRole("tab", { name: "Code" })).toBeNull();
-  expect((await screen.findByRole("tablist", { name: "Artifact views" })).className).toContain("[&_[role=tab]]:px-2.5");
+  expect((await screen.findByRole("tablist", { name: "Artifact views" })).className).toContain("[&_[role=tab]]:px-2");
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
   const fileResize = await screen.findByRole("separator", { name: "Resize file browser" });
   expect(fileResize).toHaveAttribute("data-separator");
@@ -1747,6 +1763,20 @@ test("standard version compare resolves both dev-server URLs before opening the 
   expect(oldFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(currentFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(screen.queryByText("Loading version comparison")).toBeNull();
+});
+
+test("artifact header keeps Versions, divider, and tabs tight", async () => {
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByRole("button", { name: "Versions" });
+  const separator = screen.getByTestId("versions-tabs-separator");
+  expect(separator).toHaveClass("mx-0.5");
+  expect(separator).not.toHaveClass("mx-1");
+  expect(screen.getByRole("tablist", { name: "Artifact views" })).toHaveClass("[&_[role=tab]]:px-2");
 });
 
 test("standard project version Diff uses the commit diff endpoint", async () => {
