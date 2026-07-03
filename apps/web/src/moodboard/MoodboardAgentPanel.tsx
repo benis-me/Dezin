@@ -541,10 +541,22 @@ function MoodboardMessageRow({
 }) {
   if (message.role === "user") {
     return (
-      <div className="flex flex-col items-end gap-1.5">
-        <span className="dz-selectable max-w-[88%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground">
-          {message.content}
-        </span>
+      <div className="group/moodboard-user flex flex-col items-end gap-1.5" data-message-kind="user">
+        <div className="dz-selectable max-w-[88%] rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground">
+          <Markdown className="space-y-1.5 text-foreground">{message.content}</Markdown>
+        </div>
+        <TooltipProvider delayDuration={120}>
+          <div className="-mt-0.5 flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover/moodboard-user:opacity-100 focus-within:opacity-100">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <IconButton aria-label="Copy message" className="h-7 w-7 rounded-md" onClick={() => onCopy(message.content)}>
+                  <Copy size={13} strokeWidth={1.8} />
+                </IconButton>
+              </TooltipTrigger>
+              <TooltipContent sideOffset={2}>Copy</TooltipContent>
+            </Tooltip>
+          </div>
+        </TooltipProvider>
       </div>
     );
   }

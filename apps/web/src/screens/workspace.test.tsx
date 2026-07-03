@@ -984,6 +984,35 @@ test("idle assistant messages expose copy and fork actions on hover", async () =
   }
 });
 
+test("idle user messages expose a copy action below the bubble", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn(async () => {});
+  const originalClipboard = navigator.clipboard;
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
+    listMessages: async () => [{ id: "m1", conversationId: "c1", role: "user" as const, content: "Make it **bolder**.", createdAt: 1 }],
+  });
+
+  try {
+    render(
+      <ApiProvider client={fake}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    const bubbleText = await screen.findByText("bolder");
+    const actions = await screen.findByTestId("user-message-actions");
+    const copy = within(actions).getByRole("button", { name: "Copy message" });
+    expect(bubbleText.compareDocumentPosition(copy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(copy);
+    expect(writeText).toHaveBeenCalledWith("Make it **bolder**.");
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+  }
+});
+
 test("user message shows attached images as thumbnails, not the .refs path text", async () => {
   const fake = makeFakeApi({
     listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],

@@ -1728,7 +1728,7 @@ test("MoodboardMultiPropertiesPanel exposes selected layer summary and batch act
   expect(onArrange).toHaveBeenCalledOnce();
 });
 
-test("MoodboardAgentPanel renders project-style assistant messages with copy actions", () => {
+test("MoodboardAgentPanel renders project-style messages with copy actions", () => {
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
 
@@ -1758,7 +1758,13 @@ test("MoodboardAgentPanel renders project-style assistant messages with copy act
   expect(screen.getByText("Use warmer texture.")).toBeInTheDocument();
   expect(screen.getByLabelText("Add files and context")).toBeInTheDocument();
 
-  fireEvent.click(screen.getByLabelText("Copy message"));
+  const copyButtons = screen.getAllByLabelText("Copy message");
+  expect(copyButtons).toHaveLength(2);
+
+  fireEvent.click(copyButtons[0]!);
+  expect(writeText).toHaveBeenCalledWith("Collect warm references");
+
+  fireEvent.click(copyButtons[1]!);
   expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
 });
 

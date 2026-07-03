@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, type AppDeps } from "../src/index.ts";
+import { optimizePrompt } from "../src/prompt-optimize.ts";
 
 async function withServer(fn: (base: string) => Promise<void>, extraDeps: Partial<AppDeps> = {}): Promise<void> {
   const store = new Store(":memory:");
@@ -70,4 +71,25 @@ test("POST /api/prompts/optimize rejects an empty prompt", async () => {
     assert.equal(res.status, 400);
     assert.match(await res.text(), /prompt is required/);
   });
+});
+
+test("optimizePrompt asset rules allow real local, open-source, and sourced online assets", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-prompt-cli-"));
+  const command = join(dir, "echo-prompt.mjs");
+  writeFileSync(command, "#!/usr/bin/env node\nconsole.log(process.argv[3] || \"\");\n");
+  chmodSync(command, 0o755);
+
+  const prompt = await optimizePrompt({
+    prompt: "Use shadcn, @fontsource, lucide icons, and my local ./refs/home.png screenshot.",
+    agentCommand: command,
+    mode: "standard",
+    skillId: "frontend-design",
+    designSystemId: "modern-minimal",
+    cwd: dir,
+  });
+
+  assert.match(prompt, /user-provided local files/i);
+  assert.match(prompt, /open-source component, icon, font, and asset libraries/i);
+  assert.match(prompt, /only to prevent placeholders from being presented as real assets/i);
+  assert.doesNotMatch(prompt, /avoid external dependencies/i);
 });

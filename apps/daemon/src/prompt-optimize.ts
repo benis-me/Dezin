@@ -24,8 +24,9 @@ Rules:
 - Return ONLY the improved prompt text. No preamble, no markdown fence, no explanation.
 - Preserve the user's core intent, domain, language constraints, and any named technologies.
 - Make vague requests concrete: name the experience, audience, sections, interaction/motion expectations, asset expectations, quality bar, and verification checks.
-- Do not invent source URLs, local files, or claims that assets already exist.
-- If the user asks for online assets, explicitly require real sourced assets and source notes.
+- Asset expectations must distinguish provenance from restriction: allowed assets include user-provided local files, real sourced online materials, and open-source component, icon, font, and asset libraries already in or appropriate for the target stack.
+- The asset rule is only to prevent placeholders from being presented as real assets: do not invent source URLs, local file paths, filenames, source notes, or claims that assets already exist.
+- When requesting external or generated assets, ask for source notes only for concrete third-party materials; never rewrite this as a blanket ban on local files, online assets, external dependencies, open-source libraries, fonts, or component libraries.
 - Keep it concise enough to paste into Dezin: normally 250-650 words.
 - Prefer decisive instructions over optional suggestions.
 

@@ -795,14 +795,16 @@ function UserMessage({
   text,
   srcFor,
   onTargetClick,
+  onCopy,
 }: {
   text: string;
   srcFor: (refPath: string) => string;
   onTargetClick?: (target: MarkupTarget) => void;
+  onCopy?: (text: string) => void;
 }) {
   const { body, images, targets } = parseUserMessage(text);
   return (
-    <div className="flex flex-col items-end gap-1.5">
+    <div className="group/user-message flex flex-col items-end gap-1.5" data-message-kind="user">
       <MarkupTargetCards targets={targets} onTargetClick={onTargetClick} />
       {images.length ? (
         <TooltipProvider delayDuration={120}>
@@ -827,6 +829,20 @@ function UserMessage({
         <div className="max-w-[88%] rounded-2xl rounded-br-md bg-surface-2 px-3.5 py-2 text-sm leading-relaxed text-foreground">
           <Markdown className="space-y-1.5 text-foreground">{body}</Markdown>
         </div>
+      ) : null}
+      {body && onCopy ? (
+        <TooltipProvider delayDuration={120}>
+          <div
+            data-testid="user-message-actions"
+            className="-mt-0.5 flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover/user-message:opacity-100 focus-within:opacity-100"
+          >
+            <ToolbarTooltip label="Copy">
+              <IconButton aria-label="Copy message" className="h-7 w-7 rounded-md" onClick={() => onCopy(body)}>
+                <Copy size={13} strokeWidth={1.8} />
+              </IconButton>
+            </ToolbarTooltip>
+          </div>
+        </TooltipProvider>
       ) : null}
     </div>
   );
@@ -2444,7 +2460,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
-  const copyAssistantMessage = async (text: string): Promise<void> => {
+  const copyTranscriptMessage = async (text: string): Promise<void> => {
     try {
       await navigator.clipboard.writeText(text);
       toast("Copied.");
@@ -3664,7 +3680,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const messageBottomPadding = composerOverlayH + MESSAGE_BOTTOM_CLEARANCE_PX;
   const renderTranscriptMessage = (m: Msg, stackPosition: RunCardStackPosition = "single"): ReactNode =>
     m.kind === "user" ? (
-      <UserMessage text={m.text} srcFor={(p) => api.refUrl(projectId, p)} onTargetClick={focusMarkupTarget} />
+      <UserMessage
+        text={m.text}
+        srcFor={(p) => api.refUrl(projectId, p)}
+        onTargetClick={focusMarkupTarget}
+        onCopy={(text) => void copyTranscriptMessage(text)}
+      />
     ) : m.kind === "assistant" ? (
       <AssistantMessage message={m} />
     ) : m.kind === "process" ? (
@@ -3826,7 +3847,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                           <MessageActions
                             message={block.message}
                             disabled={running}
-                            onCopy={(text) => void copyAssistantMessage(text)}
+                            onCopy={(text) => void copyTranscriptMessage(text)}
                             onFork={(msg) => void forkAssistantMessage(msg)}
                           />
                         </>
