@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { Button, Spinner } from "../components/ui/index.ts";
+import type { AgentComposerContextItem } from "../components/AgentComposerContext.tsx";
 import type { MoodboardNode } from "../lib/api.ts";
 import { panelPercentFromPixels, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { MoodboardAgentPanel, type MoodboardComposerInsertion } from "../moodboard/MoodboardAgentPanel.tsx";
@@ -34,7 +35,7 @@ export function MoodboardScreen({
     composerInsertionSeq.current += 1;
     setComposerInsertion({
       id: composerInsertionSeq.current,
-      text: formatMoodboardNodeAgentContext(nodes),
+      items: nodes.map(formatMoodboardNodeAgentCard),
     });
   }, []);
 
@@ -169,6 +170,20 @@ export function formatMoodboardNodeAgentContext(nodes: MoodboardNode[]): string 
     return `${index + 1}. ${label} [${type}, id:${node.id}] at x:${Math.round(node.x)}, y:${Math.round(node.y)}, ${Math.round(node.width)}x${Math.round(node.height)}`;
   });
   return [title, ...lines].join("\n");
+}
+
+function formatMoodboardNodeAgentCard(node: MoodboardNode): AgentComposerContextItem {
+  const label = layerLabel(node).replace(/\s+/g, " ").trim() || node.type;
+  const type = node.type.replace(/-/g, " ");
+  return {
+    id: `canvas-node:${node.id}`,
+    type: "canvas-node",
+    title: label,
+    subtitle: type,
+    nodeId: node.id,
+    nodeType: node.type,
+    body: `${label} [${type}, id:${node.id}] at x:${Math.round(node.x)}, y:${Math.round(node.y)}, ${Math.round(node.width)}x${Math.round(node.height)}`,
+  };
 }
 
 function LoadingCanvasChrome() {

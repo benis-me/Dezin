@@ -1714,12 +1714,11 @@ test("MoodboardAgentPanel renders project-style assistant messages with copy act
   expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
 });
 
-test("MoodboardAgentPanel inserts external canvas context into the composer and focuses it", async () => {
+test("MoodboardAgentPanel renders canvas insertion as a removable sendable context card", async () => {
   const onSend = vi.fn().mockResolvedValue(undefined);
-  const Panel = MoodboardAgentPanel as any;
   const { rerender } = render(
     <ApiProvider client={makeFakeApi()}>
-      <Panel
+      <MoodboardAgentPanel
         boardName="Material board"
         messages={[]}
         busy={false}
@@ -1737,14 +1736,27 @@ test("MoodboardAgentPanel inserts external canvas context into the composer and 
 
   rerender(
     <ApiProvider client={makeFakeApi()}>
-      <Panel
+      <MoodboardAgentPanel
         boardName="Material board"
         messages={[]}
         busy={false}
         agents={[]}
         agent=""
         model=""
-        composerInsertion={{ id: 1, text: "Selected moodboard nodes:\n- note-1: Material tone" }}
+        composerInsertion={{
+          id: 1,
+          items: [
+            {
+              id: "canvas-node:note-1",
+              type: "canvas-node",
+              title: "Material tone",
+              subtitle: "note",
+              nodeId: "note-1",
+              nodeType: "note",
+              body: "Material tone [note, id:note-1] at x:10, y:20, 180x80",
+            },
+          ],
+        }}
         onBack={() => {}}
         onAgentChange={() => {}}
         onModelChange={() => {}}
@@ -1756,10 +1768,16 @@ test("MoodboardAgentPanel inserts external canvas context into the composer and 
 
   const message = screen.getByLabelText("Message") as HTMLTextAreaElement;
   await waitFor(() => expect(message).toHaveFocus());
-  expect(message).toHaveValue("Selected moodboard nodes:\n- note-1: Material tone");
+  expect(message).toHaveValue("");
+  expect(screen.getByLabelText("Agent context cards")).toBeInTheDocument();
+  expect(screen.getByText("Material tone")).toBeInTheDocument();
+  expect(screen.getByText("· note")).toBeInTheDocument();
 
   fireEvent.keyDown(message, { key: "Enter" });
-  await waitFor(() => expect(onSend).toHaveBeenCalledWith("Selected moodboard nodes:\n- note-1: Material tone"));
+  await waitFor(() =>
+    expect(onSend).toHaveBeenCalledWith("Selected moodboard node:\n1. Material tone [note, id:note-1] at x:10, y:20, 180x80"),
+  );
+  await waitFor(() => expect(screen.queryByLabelText("Agent context cards")).toBeNull());
 });
 
 test("MoodboardAgentPanel exposes moodboard conversations in the project conversation control", () => {

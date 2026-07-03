@@ -2,6 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardConversation, MoodboardMessage } from "../lib/api.ts";
+import {
+  AgentComposerContextCards,
+  removeContextItem,
+  upsertContextItems,
+  type AgentComposerContextItem,
+} from "../components/AgentComposerContext.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import { ConversationSelect } from "../components/ConversationSelect.tsx";
@@ -15,7 +21,7 @@ const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
 
 export type MoodboardComposerInsertion = {
   id: number;
-  text: string;
+  items: AgentComposerContextItem[];
 };
 
 export function MoodboardAgentPanel({
@@ -62,6 +68,7 @@ export function MoodboardAgentPanel({
   composerInsertion?: MoodboardComposerInsertion | null;
 }) {
   const [text, setText] = useState("");
+  const [contextItems, setContextItems] = useState<AgentComposerContextItem[]>([]);
   const [composerH, setComposerH] = useState(92);
   const [dragging, setDragging] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
@@ -74,6 +81,7 @@ export function MoodboardAgentPanel({
   const messageBottomPadding = composerOverlayH + MESSAGE_BOTTOM_CLEARANCE_PX;
   const scrollToBottomBottom = composerOverlayH + SCROLL_TO_BOTTOM_GAP_PX;
   const hasConversationContent = !loading && (messages.length > 0 || busy);
+  const hasComposerContext = contextItems.length > 0;
 
   useEffect(() => {
     const element = composerRef.current;
@@ -122,9 +130,10 @@ export function MoodboardAgentPanel({
   }, [messages.length, busy, composerH]);
 
   const submit = async () => {
-    const content = text.trim();
+    const content = [text.trim(), serializeMoodboardComposerContext(contextItems)].filter(Boolean).join("\n\n");
     if (!content || busy) return;
     setText("");
+    setContextItems([]);
     await onSend(content);
   };
 
@@ -144,17 +153,16 @@ export function MoodboardAgentPanel({
     textarea.setSelectionRange(end, end);
   }, []);
 
-  const appendContext = useCallback((context: string) => {
-    setText((current) => `${current}${current.trim() ? "\n\n" : ""}${context}`);
+  const addContextItems = useCallback((items: AgentComposerContextItem[]) => {
+    setContextItems((current) => upsertContextItems(current, items));
   }, []);
 
   useEffect(() => {
-    const context = composerInsertion?.text.trim();
-    if (!context) return;
-    appendContext(context);
+    if (!composerInsertion?.items.length) return;
+    addContextItems(composerInsertion.items);
     const frame = window.requestAnimationFrame(focusComposerEnd);
     return () => window.cancelAnimationFrame(frame);
-  }, [appendContext, composerInsertion?.id, composerInsertion?.text, focusComposerEnd]);
+  }, [addContextItems, composerInsertion?.id, composerInsertion?.items, focusComposerEnd]);
 
   const attachFiles = (files: FileList | null) => {
     onUploadFiles?.(files);
@@ -344,6 +352,11 @@ export function MoodboardAgentPanel({
               </div>
             ) : (
               <>
+                <AgentComposerContextCards
+                  items={contextItems}
+                  onChange={setContextItems}
+                  onRemove={(id) => setContextItems((items) => removeContextItem(items, id))}
+                />
                 <textarea
                   ref={textareaRef}
                   aria-label="Message"
@@ -363,9 +376,52 @@ export function MoodboardAgentPanel({
                   <div className="flex items-center gap-0.5">
                     <AttachMenu
                       onAttachFile={onUploadFiles ? () => fileInputRef.current?.click() : undefined}
-                      onPickPaths={(paths) => appendContext(`Reference local paths: ${paths.join(", ")}`)}
-                      onContext={appendContext}
-                      onReference={(project) => appendContext(`Reference Dezin project: ${project.name} (${project.id})`)}
+                      onPickPaths={(paths) =>
+                        addContextItems(
+                          paths.map((path) => ({
+                            id: `local-path:${path}`,
+                            type: "local-path",
+                            title: contextTitleForPath(path),
+                            subtitle: path,
+                            path,
+                          })),
+                        )
+                      }
+                      onContext={(body) =>
+                        addContextItems([
+                          {
+                            id: `text-context:${Date.now()}`,
+                            type: "text-context",
+                            title: "Design context",
+                            subtitle: "Imported .fig",
+                            body,
+                          },
+                        ])
+                      }
+                      onReference={(project) =>
+                        addContextItems([
+                          {
+                            id: `project:${project.id}`,
+                            type: "project",
+                            title: project.name,
+                            subtitle: "Project",
+                            projectId: project.id,
+                            name: project.name,
+                          },
+                        ])
+                      }
+                      onReferenceMoodboard={(board) =>
+                        addContextItems([
+                          {
+                            id: `moodboard:${board.id}`,
+                            type: "moodboard",
+                            title: board.name,
+                            subtitle: "Moodboard",
+                            moodboardId: board.id,
+                            name: board.name,
+                          },
+                        ])
+                      }
                     />
                   </div>
                   <TooltipProvider delayDuration={120}>
@@ -381,7 +437,13 @@ export function MoodboardAgentPanel({
                       />
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <Button aria-label="Send" size="icon-sm" disabled={busy || text.trim().length === 0} onClick={() => void submit()} className="ml-0.5 rounded-lg">
+                          <Button
+                            aria-label="Send"
+                            size="icon-sm"
+                            disabled={busy || (text.trim().length === 0 && !hasComposerContext)}
+                            onClick={() => void submit()}
+                            className="ml-0.5 rounded-lg"
+                          >
                             <ArrowUp size={15} strokeWidth={2} />
                           </Button>
                         </TooltipTrigger>
@@ -397,6 +459,69 @@ export function MoodboardAgentPanel({
       </div>
     </aside>
   );
+}
+
+function contextTitleForPath(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
+function serializeMoodboardComposerContext(items: AgentComposerContextItem[]): string {
+  const sections: string[] = [];
+  const emitted = new Set<AgentComposerContextItem["type"]>();
+
+  for (const item of items) {
+    switch (item.type) {
+      case "canvas-node": {
+        if (emitted.has(item.type)) break;
+        emitted.add(item.type);
+        const nodes = items.filter((candidate): candidate is Extract<AgentComposerContextItem, { type: "canvas-node" }> => candidate.type === "canvas-node");
+        sections.push(
+          [
+            nodes.length === 1 ? "Selected moodboard node:" : `Selected moodboard nodes (${nodes.length}):`,
+            ...nodes.map((node, index) => `${index + 1}. ${node.body}`),
+          ].join("\n"),
+        );
+        break;
+      }
+      case "file": {
+        if (emitted.has(item.type)) break;
+        emitted.add(item.type);
+        const files = items.filter((candidate): candidate is Extract<AgentComposerContextItem, { type: "file" }> => candidate.type === "file");
+        sections.push(`Reference files: ${files.map((file) => file.path).join(", ")}`);
+        break;
+      }
+      case "local-path": {
+        if (emitted.has(item.type)) break;
+        emitted.add(item.type);
+        const paths = items.filter((candidate): candidate is Extract<AgentComposerContextItem, { type: "local-path" }> => candidate.type === "local-path");
+        sections.push(`Reference local paths: ${paths.map((path) => path.path).join(", ")}`);
+        break;
+      }
+      case "project": {
+        if (emitted.has(item.type)) break;
+        emitted.add(item.type);
+        const projects = items.filter((candidate): candidate is Extract<AgentComposerContextItem, { type: "project" }> => candidate.type === "project");
+        sections.push(`Reference Dezin projects: ${projects.map((project) => `${project.name} (${project.projectId})`).join(", ")}`);
+        break;
+      }
+      case "moodboard": {
+        if (emitted.has(item.type)) break;
+        emitted.add(item.type);
+        const moodboards = items.filter((candidate): candidate is Extract<AgentComposerContextItem, { type: "moodboard" }> => candidate.type === "moodboard");
+        sections.push(`Reference moodboards: ${moodboards.map((board) => `${board.name ?? board.title} (${board.moodboardId})`).join(", ")}`);
+        break;
+      }
+      case "preview-target":
+        sections.push(`Selected preview element: ${item.title}${item.subtitle ? ` (${item.subtitle})` : ""}`);
+        break;
+      case "text-context":
+        sections.push(`${item.title}:\n${item.body}`);
+        break;
+    }
+  }
+
+  return sections.join("\n\n");
 }
 
 function MoodboardMessageRow({
