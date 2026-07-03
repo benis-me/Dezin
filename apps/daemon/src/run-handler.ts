@@ -34,6 +34,7 @@ import { projectDir } from "./serve-static.ts";
 import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
+import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
@@ -139,6 +140,7 @@ interface RunBody {
   model?: string;
   variantId?: string;
   moodboardRefs?: unknown;
+  effectRefs?: unknown;
 }
 
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
@@ -405,6 +407,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
 
   const brief = body.brief.trim();
   const moodboardRefs = normalizeProjectMoodboardRefs(body.moodboardRefs);
+  const effectRefs = normalizeProjectEffectRefs(body.effectRefs);
+  const origin = requestOrigin(req);
   // Prior turns in this conversation become the agent's chat context (captured before we add
   // the new user message). System/process records are excluded.
   const history = store
@@ -418,8 +422,14 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     refs: moodboardRefs,
     request: brief,
   });
-  const visibleBrief = appendMoodboardReferenceLine(brief, moodboardContext.labels);
-  const agentBrief = moodboardContext.promptBlock ? `${visibleBrief}\n\n${moodboardContext.promptBlock}` : visibleBrief;
+  const effectContext = buildProjectEffectContext({
+    store,
+    refs: effectRefs,
+    request: brief,
+    origin: origin ?? "",
+  });
+  const visibleBrief = appendEffectReferenceLine(appendMoodboardReferenceLine(brief, moodboardContext.labels), effectContext.labels);
+  const agentBrief = [visibleBrief, moodboardContext.promptBlock, effectContext.promptBlock].filter(Boolean).join("\n\n");
   const userMessage = store.addMessage(conversation.id, "user", visibleBrief);
   store.updateRun(run.id, { status: "running", userMessageId: userMessage.id });
 
@@ -449,8 +459,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   req.on("close", unsubscribe);
   const sse = (event: unknown): void => pushEvent(run.id, event);
   sse({ type: "run-start", runId: run.id, conversationId: conversation.id, variantId: targetVariantId });
-
-  const origin = requestOrigin(req);
 
   // Record the agent's interleaved process so the conversation can be restored after
   // navigation/restart without losing streamed text or the original tool order.

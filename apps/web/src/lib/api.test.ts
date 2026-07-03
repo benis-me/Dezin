@@ -90,13 +90,16 @@ test("createApiClient sends the daemon token header on SSE requests", async () =
   const fetchImpl = vi.fn<FetchLike>(async () => new Response(sseStream([`data: {"type":"run-done"}\n\n`]), { status: 200 }));
   const api = createApiClient({ fetchImpl, daemonToken: "tok_123" });
 
-  for await (const _ of api.streamRun({ projectId: "p1", brief: "make a hero" })) {
+  for await (const _ of api.streamRun({ projectId: "p1", brief: "make a hero", effectRefs: [{ id: "paper-texture", name: "paper texture" }] })) {
     // consume stream
   }
 
   expect(fetchImpl).toHaveBeenCalledWith(
     "/api/runs",
-    expect.objectContaining({ headers: { "content-type": "application/json", "x-dezin-daemon-token": "tok_123" } }),
+    expect.objectContaining({
+      headers: { "content-type": "application/json", "x-dezin-daemon-token": "tok_123" },
+      body: JSON.stringify({ projectId: "p1", brief: "make a hero", effectRefs: [{ id: "paper-texture", name: "paper texture" }] }),
+    }),
   );
 });
 
@@ -419,6 +422,38 @@ test("moodboard client methods hit first-class board endpoints", async () => {
       body: JSON.stringify({ prompt: "make it warmer", sourceAssetId: "asset-1", model: "gpt-image-2" }),
     }),
   );
+});
+
+test("effect client methods hit the first-class effect endpoints", async () => {
+  const effect = {
+    id: "fx-1",
+    name: "Glass ribbon",
+    origin: "custom" as const,
+    category: "Custom",
+    summary: "A local editable effect.",
+    parameters: [],
+    presets: [{ id: "default", name: "Default", values: {} }],
+    code: "function renderEffect(ctx) { ctx.clearRect(0,0,10,10); }",
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const fetchImpl = vi.fn<FetchLike>(async (url, init) => {
+    if (url.endsWith("/api/effects") && init?.method === "POST") return jsonResponse(effect, 201);
+    if (url.endsWith("/api/effects/fx-1") && init?.method === "PATCH") return jsonResponse({ ...effect, name: "Glass ribbon v2" });
+    if (url.endsWith("/api/effects")) return jsonResponse([effect]);
+    return jsonResponse(effect);
+  });
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  await expect(api.listEffects()).resolves.toEqual([effect]);
+  await expect(api.createEffect({ name: "Glass ribbon" })).resolves.toEqual(effect);
+  await expect(api.getEffect("fx-1")).resolves.toEqual(effect);
+  await expect(api.updateEffect("fx-1", { name: "Glass ribbon v2" })).resolves.toMatchObject({ name: "Glass ribbon v2" });
+
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/effects", undefined);
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/effects", expect.objectContaining({ method: "POST" }));
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/effects/fx-1", undefined);
+  expect(fetchImpl).toHaveBeenCalledWith("http://d/api/effects/fx-1", expect.objectContaining({ method: "PATCH" }));
 });
 
 test("parseSseBlock ignores non-data noise", () => {

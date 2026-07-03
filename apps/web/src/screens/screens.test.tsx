@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, vi } from "vitest";
 import { HomeScreen } from "./HomeScreen.tsx";
 import { MoodboardsScreen } from "./MoodboardsScreen.tsx";
+import { EffectsScreen } from "./EffectsScreen.tsx";
+import { EffectScreen } from "./EffectScreen.tsx";
 import { DesignSystemsScreen } from "./DesignSystemsScreen.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { DesignSystemNewScreen } from "./DesignSystemNewScreen.tsx";
@@ -126,9 +128,11 @@ test("Shell sidebar can be resized outside project pages", () => {
   expect(screen.getByRole("button", { name: "Design" })).toBeInTheDocument();
   const design = screen.getByRole("button", { name: "Design" });
   const designSystems = screen.getByRole("button", { name: "Design Systems" });
+  const effects = screen.getByRole("button", { name: "Effects" });
   const moodboard = screen.getByRole("button", { name: "Moodboard" });
   expect(design.compareDocumentPosition(designSystems) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(designSystems.compareDocumentPosition(moodboard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(designSystems.compareDocumentPosition(effects) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(effects.compareDocumentPosition(moodboard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Home" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Browser extension" })).toBeNull();
 });
@@ -584,6 +588,108 @@ test("DesignSystemsScreen lists systems and links to a detail page", async () =>
     listDesignSystems: async () => [{ id: "modern-minimal", name: "Modern Minimal", category: "Modern & Minimal", summary: "neutral" }],
   });
   expect(await screen.findByText("Modern Minimal")).toBeInTheDocument();
+});
+
+test("EffectsScreen displays built-in effects and creates a custom effect from the modal", async () => {
+  const user = userEvent.setup();
+  const created = {
+    id: "custom-1",
+    name: "Glass ribbon",
+    origin: "custom" as const,
+    category: "Custom",
+    summary: "Editable local effect.",
+    parameters: [],
+    presets: [{ id: "default", name: "Default", values: {} }],
+    code: "function renderEffect(ctx) { ctx.clearRect(0, 0, 10, 10); }",
+  };
+  const createEffect = vi.fn(async () => created);
+  renderWithApi(<EffectsScreen />, {
+    listEffects: async () => [
+      {
+        id: "paper-texture",
+        name: "paper texture",
+        origin: "built-in",
+        category: "@Paper",
+        summary: "Paper grain",
+        previewUrl: "/effects/previews/paper-texture.jpg",
+      },
+      {
+        id: "mesh-gradient",
+        name: "mesh gradient",
+        origin: "built-in",
+        category: "@Paper",
+        summary: "Color mesh",
+        previewUrl: "/effects/previews/mesh-gradient.jpg",
+      },
+    ],
+    createEffect,
+  });
+
+  expect(await screen.findByRole("heading", { name: "Effects" })).toBeInTheDocument();
+  expect(screen.getByText("paper texture")).toBeInTheDocument();
+  expect(screen.getByText("mesh gradient")).toBeInTheDocument();
+  expect(screen.getAllByText("@Paper")).toHaveLength(2);
+  expect(screen.getByTestId("effect-card-preview-paper-texture")).toHaveClass("aspect-[4/3]");
+  expect(screen.getByRole("img", { name: "paper texture preview" })).toHaveAttribute("src", "/effects/previews/paper-texture.jpg");
+  expect(screen.queryByText("Preview")).toBeNull();
+  expect(screen.queryByText("Image Filter")).toBeNull();
+  expect(screen.queryByText("Paper grain")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "New Effect" }));
+  fireEvent.change(screen.getByLabelText("Effect Name"), { target: { value: "Glass ribbon" } });
+  await user.click(screen.getByRole("button", { name: "Create" }));
+
+  await waitFor(() => expect(createEffect).toHaveBeenCalledWith({ name: "Glass ribbon" }));
+  expect(window.location.pathname).toBe("/effects/custom-1");
+});
+
+test("EffectScreen renders the playground with agent, preview, parameters, presets, and export", async () => {
+  const updateSettings = vi.fn(async (patch: Partial<Settings>) => settingsFixture({ ...patch }));
+  renderWithApiAndAgents(<EffectScreen effectId="paper-texture" onBack={() => {}} />, {
+    listAgents: async () => AGENTS,
+    rescanAgents: async () => AGENTS,
+    getSettings: async () => settingsFixture({ agentCommand: "claude", model: "claude-sonnet-4-6" }),
+    updateSettings,
+    getEffect: async () => ({
+      id: "paper-texture",
+      name: "paper texture",
+      origin: "built-in" as const,
+      category: "@Paper",
+      summary: "Paper grain",
+      parameters: [
+        {
+          id: "image",
+          label: "Image",
+          type: "image" as const,
+          defaultValue: "/effects/demo-landscape.jpg",
+          options: [{ label: "Landscape", value: "/effects/demo-landscape.jpg" }],
+        },
+        { id: "roughness", label: "Roughness", type: "number" as const, min: 0, max: 1, step: 0.01, defaultValue: 0.4 },
+        { id: "colorBack", label: "Paper", type: "color" as const, defaultValue: "#f7f2e8" },
+      ],
+      presets: [{ id: "default", name: "Default", values: { image: "/effects/demo-landscape.jpg", roughness: 0.4, colorBack: "#f7f2e8" } }],
+      code: "@paper-design/shaders-react:paper-texture",
+    }),
+  });
+
+  expect(await screen.findByRole("button", { name: "Back to effects" })).toBeInTheDocument();
+  expect(screen.getByRole("complementary", { name: "Effect Agent" })).toBeInTheDocument();
+  expect(screen.getByRole("separator", { name: "Resize effect agent panel" })).toHaveAttribute("data-separator");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("Claude Code"));
+  expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("claude-sonnet-4-6");
+  expect(screen.getByTestId("effect-agent-composer")).not.toHaveClass("border-t");
+  expect(screen.getByText(/Describe the texture, motion, color, or image treatment/)).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Effect preview" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Effect parameters" })).toBeInTheDocument();
+  expect(screen.getByRole("separator", { name: "Resize effect parameters panel" })).toHaveAttribute("data-separator");
+  expect(screen.getByRole("combobox", { name: "Presets" })).toHaveTextContent("Default");
+  expect(screen.getByRole("combobox", { name: "Image" })).toHaveTextContent("Landscape");
+  expect(screen.getByLabelText("Roughness")).toHaveAttribute("type", "range");
+  expect(screen.getByLabelText("Roughness value")).toHaveValue(0.4);
+  expect(screen.getByLabelText("Paper")).toHaveValue("#f7f2e8");
+  expect(screen.getByRole("button", { name: "Export image" })).toBeInTheDocument();
+  expect(screen.queryByText("Live preview")).toBeNull();
+  expect(screen.queryByText("Canvas")).toBeNull();
+  expect(screen.queryByText("Image Filter")).toBeNull();
 });
 
 test("DesignSystemDetailScreen loads a system and sets it as default", async () => {

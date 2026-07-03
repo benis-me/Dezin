@@ -10,6 +10,9 @@ import type { AnchorHTMLAttributes, ReactNode, MouseEvent } from "react";
 export type Route =
   | { name: "home" }
   | { name: "project"; id: string }
+  | { name: "effects" }
+  | { name: "effect-new" }
+  | { name: "effect"; id: string }
   | { name: "moodboards" }
   | { name: "moodboard"; id: string }
   | { name: "design-systems" }
@@ -23,6 +26,9 @@ export function parsePath(pathname: string): Route {
   const segs = pathname.split("/").filter(Boolean);
   if (segs.length === 0) return { name: "home" };
   if (segs[0] === "projects" && segs[1]) return { name: "project", id: decodeURIComponent(segs[1]) };
+  if (segs[0] === "effects" && segs[1] === "new") return { name: "effect-new" };
+  if (segs[0] === "effects" && segs[1]) return { name: "effect", id: decodeURIComponent(segs[1]) };
+  if (segs[0] === "effects") return { name: "effects" };
   if (segs[0] === "moodboards" && segs[1]) return { name: "moodboard", id: decodeURIComponent(segs[1]) };
   if (segs[0] === "moodboards") return { name: "moodboards" };
   if (segs[0] === "design-systems" && segs[1] === "new") return { name: "design-system-new" };
@@ -36,6 +42,12 @@ export function routeToPath(route: Route): string {
   switch (route.name) {
     case "project":
       return `/projects/${encodeURIComponent(route.id)}`;
+    case "effects":
+      return "/effects";
+    case "effect-new":
+      return "/effects/new";
+    case "effect":
+      return `/effects/${encodeURIComponent(route.id)}`;
     case "moodboards":
       return "/moodboards";
     case "moodboard":

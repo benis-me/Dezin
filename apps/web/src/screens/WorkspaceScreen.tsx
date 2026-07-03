@@ -48,7 +48,7 @@ import { navigate } from "../router.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
-import type { Conversation, Variant, DesignSystemCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, Settings as AppSettings, SetupPhase } from "../lib/api.ts";
+import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, Settings as AppSettings, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { previewBridgeOriginForSrc, previewSandboxForSrc } from "../lib/preview-sandbox.ts";
@@ -59,8 +59,10 @@ type Tab = (typeof TABS)[number];
 
 type Device = "desktop" | "tablet" | "mobile";
 const DEVICE_WIDTH: Record<Device, string> = { desktop: "100%", tablet: "768px", mobile: "390px" };
-type MoodboardRunRef = { id: string; name?: string };
-type QueuedPrompt = { text: string; moodboardRefs?: MoodboardRunRef[] };
+type RunReference = { id: string; name?: string };
+type MoodboardRunRef = RunReference;
+type EffectRunRef = RunReference;
+type QueuedPrompt = { text: string; moodboardRefs?: MoodboardRunRef[]; effectRefs?: EffectRunRef[] };
 type PreviewBusyState = { title: string; detail?: string };
 type WorkspaceContextItem = AgentComposerContextItem<MarkupTarget>;
 
@@ -90,6 +92,20 @@ function queueKey(projectId: string): string {
   return `dezin.workspace.queue.${projectId}`;
 }
 
+function parseRunRefs(value: unknown): RunReference[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((ref): RunReference | null => {
+      if (!ref || typeof ref !== "object" || Array.isArray(ref)) return null;
+      const refRecord = ref as Record<string, unknown>;
+      const id = typeof refRecord.id === "string" ? refRecord.id.trim() : "";
+      if (!id) return null;
+      const name = typeof refRecord.name === "string" && refRecord.name.trim() ? refRecord.name.trim() : undefined;
+      return { id, name };
+    })
+    .filter((ref): ref is RunReference => ref !== null);
+}
+
 function readQueue(projectId: string): QueuedPrompt[] {
   if (projectId === "new") return [];
   try {
@@ -105,19 +121,13 @@ function readQueue(projectId: string): QueuedPrompt[] {
         const record = item as Record<string, unknown>;
         const text = typeof record.text === "string" ? record.text.trim() : "";
         if (!text) return null;
-        const refs = Array.isArray(record.moodboardRefs)
-          ? record.moodboardRefs
-              .map((ref): MoodboardRunRef | null => {
-                if (!ref || typeof ref !== "object" || Array.isArray(ref)) return null;
-                const refRecord = ref as Record<string, unknown>;
-                const id = typeof refRecord.id === "string" ? refRecord.id.trim() : "";
-                if (!id) return null;
-                const name = typeof refRecord.name === "string" && refRecord.name.trim() ? refRecord.name.trim() : undefined;
-                return { id, name };
-              })
-              .filter((ref): ref is MoodboardRunRef => ref !== null)
-          : [];
-        return refs.length ? { text, moodboardRefs: refs } : { text };
+        const moodboardRefs = parseRunRefs(record.moodboardRefs);
+        const effectRefs = parseRunRefs(record.effectRefs);
+        return {
+          text,
+          ...(moodboardRefs.length ? { moodboardRefs } : {}),
+          ...(effectRefs.length ? { effectRefs } : {}),
+        };
       })
       .filter((item): item is QueuedPrompt => item !== null);
   } catch {
@@ -152,6 +162,12 @@ function moodboardReferenceLine(refs: MoodboardRunRef[]): string {
   if (!refs.length) return "";
   const names = refs.map((ref) => `${ref.name?.trim() || "Untitled moodboard"} (${ref.id})`).join(", ");
   return `\n\nMoodboard references (available to the Agent at run time): ${names}`;
+}
+
+function effectReferenceLine(refs: EffectRunRef[]): string {
+  if (!refs.length) return "";
+  const names = refs.map((ref) => `${ref.name?.trim() || "Untitled effect"} (${ref.id})`).join(", ");
+  return `\n\nEffect references (available to the Agent at run time): ${names}`;
 }
 
 function writeQueue(projectId: string, queue: QueuedPrompt[]): void {
@@ -2243,6 +2259,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const selectedMoodboardRefs = contextItems
     .filter((item): item is Extract<WorkspaceContextItem, { type: "moodboard" }> => item.type === "moodboard")
     .map((item) => ({ id: item.moodboardId, name: item.name }));
+  const selectedEffectRefs = contextItems
+    .filter((item): item is Extract<WorkspaceContextItem, { type: "effect" }> => item.type === "effect")
+    .map((item) => ({ id: item.effectId, name: item.name }));
   const hasComposerContext = contextItems.length > 0;
 
   const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "auto"): void => {
@@ -2861,7 +2880,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
-  const runBrief = async (brief: string, agentOverride?: string, modelOverride?: string, refs: MoodboardRunRef[] = []): Promise<void> => {
+  const runBrief = async (
+    brief: string,
+    agentOverride?: string,
+    modelOverride?: string,
+    refs: MoodboardRunRef[] = [],
+    effectRefs: EffectRunRef[] = [],
+  ): Promise<void> => {
     const text = brief.trim();
     if (!text || runningRef.current) return;
 
@@ -2895,6 +2920,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           agentCommand: agentOverride || runAgent || undefined,
           model: modelOverride || runModel || undefined,
           moodboardRefs: refs.length ? refs : undefined,
+          effectRefs: effectRefs.length ? effectRefs : undefined,
         },
         ctrl.signal,
       );
@@ -3008,7 +3034,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (loading || runningRef.current || queueRef.current.length === 0) return;
     const [next, ...rest] = queueRef.current;
     updateQueue(rest);
-    if (next?.text.trim()) void runBrief(next.text, undefined, undefined, next.moodboardRefs ?? []);
+    if (next?.text.trim()) void runBrief(next.text, undefined, undefined, next.moodboardRefs ?? [], next.effectRefs ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, running, queue, updateQueue]);
 
@@ -3499,19 +3525,28 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       ? `\n\n${textContextItems.map((item) => `${item.title}:\n${item.body}`).join("\n\n")}`
       : "";
     const boardRefs = moodboardReferenceLine(selectedMoodboardRefs);
+    const effectRefs = effectReferenceLine(selectedEffectRefs);
     const targets = scoped
       ? `\n\nScoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n${selectedTargets
           .map(formatMarkupTarget)
           .join("\n")}`
       : "";
     const base = input.trim() || (scoped ? "Refine the marked element(s) per the notes." : "");
-    const text = base + targets + fileRefs + localPathRefs + textContextRefs + boardRefs;
+    const text = base + targets + fileRefs + localPathRefs + textContextRefs + boardRefs + effectRefs;
     if (!text.trim()) return;
     setInput("");
     setContextItems([]);
     // While a run is in flight, queue the prompt to run when it finishes.
-    if (runningRef.current) updateQueue((q) => [...q, selectedMoodboardRefs.length ? { text, moodboardRefs: selectedMoodboardRefs } : { text }]);
-    else void runBrief(text, undefined, undefined, selectedMoodboardRefs);
+    if (runningRef.current)
+      updateQueue((q) => [
+        ...q,
+        {
+          text,
+          ...(selectedMoodboardRefs.length ? { moodboardRefs: selectedMoodboardRefs } : {}),
+          ...(selectedEffectRefs.length ? { effectRefs: selectedEffectRefs } : {}),
+        },
+      ]);
+    else void runBrief(text, undefined, undefined, selectedMoodboardRefs, selectedEffectRefs);
   };
 
   const updateQueuedPrompt = (index: number, value: string): void => {
@@ -3571,6 +3606,20 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       },
     ]);
     toast(`Referencing ${board.name}.`);
+  };
+
+  const referenceEffect = (effect: EffectCard): void => {
+    addContextItems([
+      {
+        id: `effect:${effect.id}`,
+        type: "effect",
+        title: effect.name || "Untitled effect",
+        subtitle: effect.origin === "built-in" ? `${effect.category || "@Paper"} Effect` : "Custom Effect",
+        effectId: effect.id,
+        name: effect.name,
+      },
+    ]);
+    toast(`Referencing ${effect.name}.`);
   };
 
   const [dragging, setDragging] = useState(false);
@@ -4126,6 +4175,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   }
                   onReference={isExisting ? (p) => void referenceProject(p) : undefined}
                   onReferenceMoodboard={isExisting ? referenceMoodboard : undefined}
+                  onReferenceEffect={isExisting ? referenceEffect : undefined}
                 />
               </div>
               <TooltipProvider delayDuration={120}>

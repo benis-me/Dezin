@@ -163,6 +163,57 @@ export interface CreateMoodboardInput {
   name: string;
 }
 
+export type EffectOrigin = "custom";
+export type EffectParamKind = "number" | "color" | "select" | "boolean" | "image";
+export type EffectParamValue = string | number | boolean;
+
+export interface EffectParamOption {
+  label: string;
+  value: string;
+}
+
+export interface EffectParamDefinition {
+  id: string;
+  label: string;
+  type: EffectParamKind;
+  defaultValue: EffectParamValue;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: EffectParamOption[];
+  description?: string;
+}
+
+export interface EffectPreset {
+  id: string;
+  name: string;
+  values: Record<string, EffectParamValue>;
+}
+
+export interface Effect {
+  id: string;
+  name: string;
+  origin: EffectOrigin;
+  category: string;
+  summary: string;
+  parameters: EffectParamDefinition[];
+  presets: EffectPreset[];
+  code: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateEffectInput {
+  name: string;
+  category?: string;
+  summary?: string;
+  parameters?: EffectParamDefinition[];
+  presets?: EffectPreset[];
+  code?: string;
+}
+
+export type UpdateEffectInput = Partial<Omit<CreateEffectInput, "name"> & { name: string }>;
+
 export interface SaveMoodboardNodeInput {
   id?: string;
   type: MoodboardNodeType;

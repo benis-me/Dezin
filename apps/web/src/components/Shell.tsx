@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { Images, Moon, Palette, Shapes, Settings, Sun, type LucideIcon } from "lucide-react";
+import { Eclipse, Images, Moon, Palette, Shapes, Settings, Sun, type LucideIcon } from "lucide-react";
 import { useRoute, navigate, type Route } from "../router.tsx";
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
@@ -17,6 +17,7 @@ interface NavLink {
 const NAV: NavLink[] = [
   { label: "Design", path: "/", icon: Palette, match: (r) => r.name === "home" },
   { label: "Design Systems", path: "/design-systems", icon: Shapes, match: (r) => r.name === "design-systems" },
+  { label: "Effects", path: "/effects", icon: Eclipse, match: (r) => r.name === "effects" || r.name === "effect" || r.name === "effect-new" },
   { label: "Moodboard", path: "/moodboards", icon: Images, match: (r) => r.name === "moodboards" || r.name === "moodboard" },
 ];
 
@@ -114,7 +115,7 @@ export function Shell({
           <Panel id={SHELL_CONTENT_PANEL} minSize="520px">
             <main className="relative h-full overflow-hidden">
               {/* Draggable title strip over the content top (screens without their own top bar). */}
-              {native?.isElectron && (route.name === "home" || route.name === "moodboards" || route.name === "design-systems") ? (
+              {native?.isElectron && (route.name === "home" || route.name === "moodboards" || route.name === "design-systems" || route.name === "effects") ? (
                 <div className="app-drag absolute inset-x-0 top-0 z-30 h-8" aria-hidden />
               ) : null}
               {children}

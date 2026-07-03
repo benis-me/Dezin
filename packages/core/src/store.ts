@@ -19,13 +19,18 @@ import type {
   MoodboardAsset,
   MoodboardConversation,
   MoodboardMessage,
+  Effect,
+  EffectParamDefinition,
+  EffectPreset,
   MessageRole,
   QualityFinding,
   RunStatus,
   CreateProjectInput,
   CreateMoodboardInput,
+  CreateEffectInput,
   SaveMoodboardNodeInput,
   Settings,
+  UpdateEffectInput,
 } from "./types.ts";
 
 const SCHEMA = `
@@ -162,6 +167,17 @@ CREATE TABLE IF NOT EXISTS moodboard_messages (
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS custom_effects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  code TEXT NOT NULL,
+  parameters_json TEXT NOT NULL DEFAULT '[]',
+  presets_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_moodboard_nodes_board ON moodboard_nodes(board_id);
 CREATE INDEX IF NOT EXISTS idx_moodboard_assets_board ON moodboard_assets(board_id);
@@ -352,6 +368,80 @@ function asMoodboardMessage(r: Row): MoodboardMessage {
     role: r.role as MessageRole,
     content: r.content as string,
     createdAt: Number(r.created_at),
+  };
+}
+function asEffectParamValue(value: unknown): string | number | boolean {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : "";
+}
+function asEffectParameters(value: unknown): EffectParamDefinition[] {
+  if (typeof value !== "string" || !value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((param): EffectParamDefinition[] => {
+      const record = asJsonObject(JSON.stringify(param));
+      const id = typeof record.id === "string" ? record.id.trim() : "";
+      const label = typeof record.label === "string" ? record.label.trim() : "";
+      const type =
+        record.type === "color" || record.type === "select" || record.type === "boolean" || record.type === "number"
+          ? record.type
+          : "number";
+      if (!id || !label) return [];
+      const options = Array.isArray(record.options)
+        ? record.options.flatMap((option): Array<{ label: string; value: string }> => {
+            const optionRecord = option && typeof option === "object" && !Array.isArray(option) ? (option as Record<string, unknown>) : {};
+            const valueText = typeof optionRecord.value === "string" ? optionRecord.value : "";
+            const labelText = typeof optionRecord.label === "string" ? optionRecord.label : valueText;
+            return valueText ? [{ label: labelText, value: valueText }] : [];
+          })
+        : undefined;
+      return [
+        {
+          id,
+          label,
+          type,
+          defaultValue: asEffectParamValue(record.defaultValue),
+          ...(typeof record.min === "number" ? { min: record.min } : {}),
+          ...(typeof record.max === "number" ? { max: record.max } : {}),
+          ...(typeof record.step === "number" ? { step: record.step } : {}),
+          ...(options?.length ? { options } : {}),
+          ...(typeof record.description === "string" ? { description: record.description } : {}),
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+function asEffectPresets(value: unknown): EffectPreset[] {
+  if (typeof value !== "string" || !value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((preset): EffectPreset[] => {
+      const record = preset && typeof preset === "object" && !Array.isArray(preset) ? (preset as Record<string, unknown>) : {};
+      const id = typeof record.id === "string" ? record.id.trim() : "";
+      const name = typeof record.name === "string" ? record.name.trim() : "";
+      const rawValues = record.values && typeof record.values === "object" && !Array.isArray(record.values) ? (record.values as Record<string, unknown>) : {};
+      if (!id || !name) return [];
+      return [{ id, name, values: Object.fromEntries(Object.entries(rawValues).map(([key, val]) => [key, asEffectParamValue(val)])) }];
+    });
+  } catch {
+    return [];
+  }
+}
+function asEffect(r: Row): Effect {
+  return {
+    id: r.id as string,
+    name: r.name as string,
+    origin: "custom",
+    category: r.category as string,
+    summary: r.summary as string,
+    code: r.code as string,
+    parameters: asEffectParameters(r.parameters_json),
+    presets: asEffectPresets(r.presets_json),
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
   };
 }
 
@@ -696,6 +786,66 @@ export class Store {
       .prepare(`SELECT * FROM moodboard_messages WHERE board_id = ? AND conversation_id = ? ORDER BY created_at ASC, rowid ASC`)
       .all(boardId, conversation.id) as Row[];
     return rows.map(asMoodboardMessage);
+  }
+
+  // ── custom effects ─────────────────────────────────────────────────────────
+  createEffect(input: CreateEffectInput): Effect {
+    const id = this.clock.id();
+    const now = this.clock.now();
+    const name = input.name.trim() || "Untitled effect";
+    this.db
+      .prepare(
+        `INSERT INTO custom_effects (id, name, category, summary, code, parameters_json, presets_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        name,
+        input.category?.trim() || "Custom",
+        input.summary?.trim() || "Editable local effect.",
+        input.code?.trim() || "function renderEffect(ctx) { ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height); }",
+        JSON.stringify(input.parameters ?? []),
+        JSON.stringify(input.presets ?? []),
+        now,
+        now,
+      );
+    return this.getEffect(id)!;
+  }
+
+  getEffect(id: string): Effect | null {
+    const r = this.db.prepare(`SELECT * FROM custom_effects WHERE id = ?`).get(id) as Row | undefined;
+    return r ? asEffect(r) : null;
+  }
+
+  listEffects(): Effect[] {
+    const rows = this.db.prepare(`SELECT * FROM custom_effects ORDER BY updated_at DESC, rowid DESC`).all() as Row[];
+    return rows.map(asEffect);
+  }
+
+  updateEffect(id: string, patch: UpdateEffectInput): Effect {
+    const cur = this.getEffect(id);
+    if (!cur) throw new Error(`effect not found: ${id}`);
+    this.db
+      .prepare(
+        `UPDATE custom_effects
+         SET name = ?, category = ?, summary = ?, code = ?, parameters_json = ?, presets_json = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        patch.name !== undefined ? patch.name.trim() || cur.name : cur.name,
+        patch.category !== undefined ? patch.category.trim() || cur.category : cur.category,
+        patch.summary !== undefined ? patch.summary.trim() : cur.summary,
+        patch.code !== undefined ? patch.code : cur.code,
+        JSON.stringify(patch.parameters ?? cur.parameters),
+        JSON.stringify(patch.presets ?? cur.presets),
+        this.clock.now(),
+        id,
+      );
+    return this.getEffect(id)!;
+  }
+
+  deleteEffect(id: string): void {
+    this.db.prepare(`DELETE FROM custom_effects WHERE id = ?`).run(id);
   }
 
   // ── variants (design branches) ──────────────────────────────────────────────

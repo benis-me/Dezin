@@ -1019,6 +1019,51 @@ test("composer references a moodboard for the next project run", async () => {
   expect(screen.queryByLabelText("Remove Warm references")).toBeNull();
 });
 
+test("composer references an effect for the next project run", async () => {
+  const user = userEvent.setup();
+  const streamRun = vi.fn((input: { brief?: string; effectRefs?: Array<{ id: string; name?: string }> }) =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-effect", conversationId: "c1" };
+      yield { type: "turn-end", round: 0, text: `Used ${input.effectRefs?.[0]?.name ?? "no effect"}.` };
+      yield { type: "run-done", runId: "r-effect", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+    })(),
+  );
+
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        listEffects: async () => [{ id: "paper-texture", name: "paper texture", origin: "built-in", category: "@Paper", summary: "Paper grain" }],
+        streamRun: streamRun as never,
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const addMenu = await screen.findByRole("button", { name: "Add files and context" });
+  addMenu.focus();
+  fireEvent.pointerDown(addMenu, { button: 0, ctrlKey: false });
+  fireEvent.keyDown(addMenu, { key: "Enter" });
+  await user.click(await screen.findByText("Reference an effect"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "paper texture" }));
+
+  expect(await screen.findByLabelText("Remove paper texture")).toBeInTheDocument();
+
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "Use this tactile grain treatment" } });
+  await user.click(screen.getByLabelText("Send"));
+
+  await waitFor(() =>
+    expect(streamRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brief: expect.stringContaining("Effect references"),
+        effectRefs: [{ id: "paper-texture", name: "paper texture" }],
+      }),
+      expect.anything(),
+    ),
+  );
+  expect(screen.queryByLabelText("Remove paper texture")).toBeNull();
+});
+
 test("queued moodboard references are preserved for the next project run", async () => {
   const user = userEvent.setup();
   let releaseFirstRun!: () => void;

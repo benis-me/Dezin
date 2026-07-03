@@ -172,6 +172,7 @@ export interface RunInput {
   variantId?: string;
   maxRounds?: number;
   moodboardRefs?: Array<{ id: string; name?: string }>;
+  effectRefs?: Array<{ id: string; name?: string }>;
   /** Per-run overrides (fall back to Settings). */
   agentCommand?: string;
   model?: string;
@@ -210,6 +211,56 @@ export interface DesignSystemDetail extends DesignSystemCard {
   designMd: string;
   tokensCss: string;
 }
+
+export type EffectOrigin = "built-in" | "custom";
+export type EffectParamKind = "number" | "color" | "select" | "boolean" | "image";
+export type EffectParamValue = string | number | boolean;
+
+export interface EffectParamOption {
+  label: string;
+  value: string;
+}
+
+export interface EffectParamDefinition {
+  id: string;
+  label: string;
+  type: EffectParamKind;
+  defaultValue: EffectParamValue;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: EffectParamOption[];
+  description?: string;
+}
+
+export interface EffectPreset {
+  id: string;
+  name: string;
+  values: Record<string, EffectParamValue>;
+}
+
+export interface EffectCard {
+  id: string;
+  name: string;
+  origin: EffectOrigin;
+  category: string;
+  summary: string;
+  previewUrl?: string;
+}
+
+export interface EffectDetail extends EffectCard {
+  parameters: EffectParamDefinition[];
+  presets: EffectPreset[];
+  code: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface CreateEffectInput {
+  name: string;
+}
+
+export type UpdateEffectInput = Partial<Pick<EffectDetail, "name" | "category" | "summary" | "code" | "parameters" | "presets">>;
 
 export interface BrandImportInput {
   name: string;
@@ -432,6 +483,10 @@ export interface ApiClient {
   listDesignSystems(): Promise<DesignSystemCard[]>;
   getDesignSystem(id: string): Promise<DesignSystemDetail>;
   importBrand(input: BrandImportInput): Promise<DesignSystemCard>;
+  listEffects(options?: { query?: string }): Promise<EffectCard[]>;
+  getEffect(id: string): Promise<EffectDetail>;
+  createEffect(input: CreateEffectInput): Promise<EffectDetail>;
+  updateEffect(id: string, patch: UpdateEffectInput): Promise<EffectDetail>;
   listSkills(): Promise<SkillCard[]>;
   getSettings(): Promise<Settings>;
   updateSettings(patch: Partial<Settings>): Promise<Settings>;
@@ -646,6 +701,10 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     listDesignSystems: () => json<DesignSystemCard[]>("/api/design-systems"),
     getDesignSystem: (id) => json<DesignSystemDetail>(`/api/design-systems/${enc(id)}`),
     importBrand: (input) => json<DesignSystemCard>("/api/design-systems/import", jsonInit("POST", input)),
+    listEffects: (options) => json<EffectCard[]>(`/api/effects${options?.query?.trim() ? `?query=${enc(options.query.trim())}` : ""}`),
+    getEffect: (id) => json<EffectDetail>(`/api/effects/${enc(id)}`),
+    createEffect: (input) => json<EffectDetail>("/api/effects", jsonInit("POST", input)),
+    updateEffect: (id, patch) => json<EffectDetail>(`/api/effects/${enc(id)}`, jsonInit("PATCH", patch)),
     listSkills: () => json<SkillCard[]>("/api/skills"),
     getSettings: () => json<Settings>("/api/settings"),
     updateSettings: (patch) => json<Settings>("/api/settings", jsonInit("PUT", patch)),

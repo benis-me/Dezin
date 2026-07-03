@@ -304,6 +304,54 @@
   );
 }
 
+.effect-param-slider {
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 999px;
+  --effect-param-track: color-mix(in oklch, var(--foreground) 16%, transparent);
+  --effect-param-fill: color-mix(in oklch, var(--foreground) 68%, var(--primary));
+}
+.effect-param-slider::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--effect-param-fill) 0 var(--effect-param-progress), var(--effect-param-track) var(--effect-param-progress) 100%);
+}
+.effect-param-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -5px;
+  border: 1px solid var(--card);
+  border-radius: 999px;
+  background: var(--foreground);
+}
+.effect-param-slider::-moz-range-track {
+  height: 2px;
+  border-radius: 999px;
+  background: var(--effect-param-track);
+}
+.effect-param-slider::-moz-range-progress {
+  height: 2px;
+  border-radius: 999px;
+  background: var(--effect-param-fill);
+}
+.effect-param-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--card);
+  border-radius: 999px;
+  background: var(--foreground);
+}
+.effect-param-number {
+  appearance: textfield;
+}
+.effect-param-number::-webkit-inner-spin-button,
+.effect-param-number::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
 .dezin-resize-separator {
   position: relative;
   z-index: 40;

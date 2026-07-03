@@ -11,6 +11,8 @@ import { WorkspaceScreen } from "./screens/WorkspaceScreen.tsx";
 import { DesignSystemsScreen } from "./screens/DesignSystemsScreen.tsx";
 import { DesignSystemDetailScreen } from "./screens/DesignSystemDetailScreen.tsx";
 import { DesignSystemNewScreen } from "./screens/DesignSystemNewScreen.tsx";
+import { EffectsScreen } from "./screens/EffectsScreen.tsx";
+import { EffectScreen } from "./screens/EffectScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
 import { OnboardingScreen } from "./screens/OnboardingScreen.tsx";
 import { MoodboardsScreen } from "./screens/MoodboardsScreen.tsx";
@@ -44,6 +46,12 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
       return <DesignSystemDetailScreen id={route.id} />;
     case "design-system-new":
       return <DesignSystemNewScreen />;
+    case "effects":
+      return <EffectsScreen />;
+    case "effect-new":
+      return <EffectsScreen startNew />;
+    case "effect":
+      return <EffectScreen effectId={route.id} onBack={() => navigate("/effects")} />;
     case "home":
     default:
       return (

@@ -305,6 +305,37 @@ test("moodboards persist nodes, assets, and messages", () => {
   s.close();
 });
 
+test("custom effects persist editable code, parameters, and presets", () => {
+  const s = freshStore();
+  const effect = s.createEffect({
+    name: "Glass ribbon",
+    code: "function renderEffect(ctx, params) { ctx.clearRect(0, 0, params.width, params.height); }",
+    parameters: [{ id: "strength", label: "Strength", type: "number", min: 0, max: 1, step: 0.01, defaultValue: 0.5 }],
+    presets: [{ id: "default", name: "Default", values: { strength: 0.5 } }],
+  });
+
+  assert.equal(effect.id, "id-1");
+  assert.equal(effect.origin, "custom");
+  assert.equal(s.listEffects().length, 1);
+  assert.equal(s.getEffect(effect.id)?.parameters[0]?.id, "strength");
+
+  const updated = s.updateEffect(effect.id, {
+    name: "Glass ribbon v2",
+    code: "function renderEffect(ctx, params) { ctx.fillRect(0, 0, params.width, params.height); }",
+    presets: [
+      { id: "default", name: "Default", values: { strength: 0.5 } },
+      { id: "dense", name: "Dense", values: { strength: 0.9 } },
+    ],
+  });
+  assert.equal(updated.name, "Glass ribbon v2");
+  assert.equal(updated.presets.length, 2);
+  assert.ok(updated.updatedAt > effect.updatedAt);
+
+  s.deleteEffect(effect.id);
+  assert.equal(s.getEffect(effect.id), null);
+  s.close();
+});
+
 test("moodboard conversations isolate messages per board conversation", () => {
   const s = freshStore();
   const board = s.createMoodboard({ name: "Material board" });
