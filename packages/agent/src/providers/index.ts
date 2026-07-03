@@ -14,7 +14,10 @@ import { cursorAgentProvider } from "./cursor-agent.ts";
 import { copilotProvider } from "./copilot.ts";
 import { qwenProvider } from "./qwen.ts";
 import { opencodeProvider } from "./opencode.ts";
-import { aiderProvider } from "./aider.ts";
+import { kimiProvider } from "./kimi.ts";
+import { traeProvider } from "./trae.ts";
+import { piProvider } from "./pi.ts";
+import { hermesProvider } from "./hermes.ts";
 
 // Order is the display/scan order (claude/codex/gemini lead).
 export const AGENT_PROVIDERS: ReadonlyArray<AgentProvider> = [
@@ -26,7 +29,10 @@ export const AGENT_PROVIDERS: ReadonlyArray<AgentProvider> = [
   copilotProvider,
   qwenProvider,
   opencodeProvider,
-  aiderProvider,
+  kimiProvider,
+  traeProvider,
+  piProvider,
+  hermesProvider,
 ];
 
 function commandBase(command: string): string {

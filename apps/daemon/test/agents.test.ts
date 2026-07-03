@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -36,6 +36,36 @@ test("GET /api/agents reports availability via the injected prober", async () =>
     assert.equal(claude.available, true);
     assert.equal(claude.version, "claude 1.2.3");
     assert.equal(agents.find((a) => a.id === "gemini")!.available, false);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    store.close();
+  }
+});
+
+test("GET /api/agents reconciles a persisted scan with the current provider registry", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-agents-persisted-"));
+  writeFileSync(
+    join(dataDir, "agents.json"),
+    JSON.stringify([
+      { id: "claude", command: "claude", available: true, version: "claude cached", models: ["opus"] },
+      { id: "aider", command: "aider", available: true, version: "aider cached", models: [] },
+    ]),
+  );
+  const store = new Store(":memory:");
+  const server = createApp({ store, dataDir, agentProber: onlyClaude });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/agents`);
+    assert.equal(res.status, 200);
+    const agents = (await res.json()) as AgentInfo[];
+
+    assert.equal(agents.some((a) => a.id === "aider"), false);
+    assert.ok(agents.some((a) => a.id === "kimi"));
+    assert.ok(agents.some((a) => a.id === "trae"));
+    assert.ok(agents.some((a) => a.id === "pi"));
+    assert.ok(agents.some((a) => a.id === "hermes"));
+    assert.equal(agents.find((a) => a.id === "claude")?.version, "claude cached");
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
     store.close();

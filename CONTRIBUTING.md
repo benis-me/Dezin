@@ -4,7 +4,7 @@ Thanks for taking a look. Dezin is small and opinionated by design — contribut
 
 ## Setup
 
-Prerequisites: **Node ≥ 22.12**, **pnpm 11**. For real generation you also need a coding-agent CLI on your PATH (Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, or Aider), authenticated.
+Prerequisites: **Node ≥ 22.12**, **pnpm 11**. For real generation you also need a coding-agent CLI on your PATH (Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, or Hermes), authenticated.
 
 ```sh
 pnpm install

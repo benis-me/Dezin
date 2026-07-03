@@ -90,7 +90,7 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
             <div className="py-8 text-center text-sm text-muted-foreground">
               <p className="font-medium text-foreground">No coding agents found</p>
               <p className="mx-auto mt-1.5 max-w-xs leading-relaxed">
-                Install one — Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, or Aider — and authenticate it, then Rescan.
+                Install one — Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, or Hermes — and authenticate it, then Rescan.
               </p>
             </div>
           ) : (

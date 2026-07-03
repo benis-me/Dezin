@@ -15,7 +15,7 @@ Describe what you want; Dezin drives the coding-agent CLI you already have to bu
 
 Dezin is deliberately minimal — no telemetry, no hosted automation, no connectors, no paid model router, no plugin marketplace. Just the local loops that make generation good.
 
-**BYOK, nothing leaves your machine.** Dezin shells out to a coding-agent CLI you already have installed and authenticated — Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, or Aider. There is no Dezin account, no hosted inference, no API key to paste. The daemon binds to `127.0.0.1` and writes everything under `~/.dezin`.
+**BYOK, nothing leaves your machine.** Dezin shells out to a coding-agent CLI you already have installed and authenticated — Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, or Hermes. There is no Dezin account, no hosted inference, no API key to paste. The daemon binds to `127.0.0.1` and writes everything under `~/.dezin`.
 
 ## What makes it work
 

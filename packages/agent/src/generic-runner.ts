@@ -1,6 +1,6 @@
 /**
  * GenericCliRunner — drives non-Claude coding-agent CLIs (codex, gemini,
- * cursor-agent, aider, opencode, …) as an AgentRunner.
+ * cursor-agent, opencode, kimi, trae, pi, hermes, …) as an AgentRunner.
  *
  * Every coding agent shares the same contract Dezin needs: given a system prompt
  * and a message, edit files in the cwd. Only the invocation differs. This runner

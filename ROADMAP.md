@@ -5,7 +5,7 @@ Dezin is an early open-source release. The core loop — describe → generate �
 ## Shipped
 
 - Closed anti-slop **lint → repair loop** with a single source of truth (linter rules generate the craft doc; a drift test enforces it).
-- **Multi-agent BYOK** — Claude Code, Codex, Gemini CLI, Cursor Agent, opencode, Aider — scanned from PATH, picked per run, with the agent's real version.
+- **Multi-agent BYOK** — Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, Hermes — scanned from PATH, picked per run, with the agent's real version.
 - **Prototype** (single HTML) and **Standard** (Vite + React + GSAP project) build modes.
 - **33 built-in design systems** with brand marks; import your own from a code folder or a `.fig` file.
 - **Variant branches**: fork, iterate independently, and **compare** with a draggable slider.

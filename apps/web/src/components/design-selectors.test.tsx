@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import { DesignSystemSelect } from "./DesignSystemSelect.tsx";
 import { AgentModelSelect } from "./AgentModelSelect.tsx";
+import { AgentLogo, agentLabel } from "./agent-logos.tsx";
 
 afterEach(cleanup);
 
@@ -51,4 +52,22 @@ test("AgentModelSelect uses the lighter bottom divider", async () => {
   await user.click(screen.getByRole("button", { name: "Agent and model" }));
   const rescan = await screen.findByRole("button", { name: "Rescan agents" });
   expect(rescan.parentElement?.className).toContain("border-border/60");
+});
+
+test("agent labels cover supported CLIs and no longer special-case Aider", () => {
+  expect(agentLabel("kimi")).toBe("Kimi CLI");
+  expect(agentLabel("trae")).toBe("Trae CLI");
+  expect(agentLabel("pi")).toBe("Pi");
+  expect(agentLabel("hermes")).toBe("Hermes");
+  expect(agentLabel("codebuddy")).toBe("CodeBuddy");
+  expect(agentLabel("opencode")).toBe("opencode");
+  expect(agentLabel("aider")).toBe("aider");
+});
+
+test("AgentLogo renders the supported brand IDs", () => {
+  for (const id of ["kimi", "trae", "pi", "hermes", "codebuddy", "opencode"]) {
+    const { container, unmount } = render(<AgentLogo id={id} className="size-4" />);
+    expect(container.querySelector("svg")).toBeInTheDocument();
+    unmount();
+  }
 });

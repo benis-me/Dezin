@@ -72,12 +72,35 @@ function loadPersisted(): AgentInfo[] | null {
   try {
     const data: unknown = JSON.parse(readFileSync(persistPath, "utf8"));
     if (Array.isArray(data) && data.every((a) => a && typeof a.id === "string" && Array.isArray(a.models))) {
-      return data as AgentInfo[];
+      return reconcilePersisted(data as AgentInfo[]);
     }
   } catch {
     /* none yet / unreadable */
   }
   return null;
+}
+
+function reconcilePersisted(agents: AgentInfo[]): AgentInfo[] {
+  const byId = new Map(agents.map((agent) => [agent.id, agent]));
+  return AGENT_PROVIDERS.map((provider) => {
+    const cached = byId.get(provider.id);
+    if (!cached) {
+      return {
+        id: provider.id,
+        command: provider.command,
+        available: false,
+        models: provider.seedModels,
+      };
+    }
+    const models = cached.models.filter((model): model is string => typeof model === "string");
+    return {
+      id: provider.id,
+      command: provider.command,
+      available: cached.available === true,
+      version: typeof cached.version === "string" ? cached.version : undefined,
+      models: models.length ? models : provider.seedModels,
+    };
+  });
 }
 
 export async function getAgents(prober: AgentProber, force = false): Promise<AgentInfo[]> {

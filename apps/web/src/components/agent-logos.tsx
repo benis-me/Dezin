@@ -1,4 +1,9 @@
-import { Bot, MessageSquareCode, SquareTerminal, Terminal } from "lucide-react";
+import codeBuddySvg from "@lobehub/icons-static-svg/icons/codebuddy-color.svg?raw";
+import hermesSvg from "@lobehub/icons-static-svg/icons/hermesagent.svg?raw";
+import kimiSvg from "@lobehub/icons-static-svg/icons/kimi-color.svg?raw";
+import openCodeSvg from "@lobehub/icons-static-svg/icons/opencode.svg?raw";
+import traeSvg from "@lobehub/icons-static-svg/icons/trae-color.svg?raw";
+import { Pi as PiIcon, Terminal } from "lucide-react";
 import { siGithubcopilot, siQwen } from "simple-icons";
 
 // Brand marks (simple-icons paths, 24×24). Agents without a public mark fall back to a
@@ -21,11 +26,24 @@ const LABELS: Record<string, string> = {
   gemini: "Gemini CLI",
   "cursor-agent": "Cursor Agent",
   opencode: "opencode",
-  aider: "Aider",
+  kimi: "Kimi CLI",
+  trae: "Trae CLI",
+  pi: "Pi",
+  hermes: "Hermes",
 };
 
 export function agentLabel(id: string): string {
   return LABELS[id] ?? id;
+}
+
+function BrandSvg({ svg, className }: { svg: string; className: string }) {
+  return (
+    <span
+      className={`${className} inline-block [&>svg]:block [&>svg]:h-full [&>svg]:w-full`}
+      aria-hidden
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
 }
 
 export function AgentLogo({ id, className = "size-5" }: { id: string; className?: string }) {
@@ -59,7 +77,7 @@ export function AgentLogo({ id, className = "size-5" }: { id: string; className?
         <path d={CURSOR} />
       </svg>
     );
-  if (id === "codebuddy") return <MessageSquareCode className={className} strokeWidth={1.75} aria-hidden />;
+  if (id === "codebuddy") return <BrandSvg svg={codeBuddySvg} className={className} />;
   if (id === "copilot")
     return (
       <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
@@ -72,7 +90,10 @@ export function AgentLogo({ id, className = "size-5" }: { id: string; className?
         <path d={siQwen.path} />
       </svg>
     );
-  if (id === "opencode") return <SquareTerminal className={className} strokeWidth={1.75} aria-hidden />;
-  if (id === "aider") return <Bot className={className} strokeWidth={1.75} aria-hidden />;
+  if (id === "opencode") return <BrandSvg svg={openCodeSvg} className={className} />;
+  if (id === "kimi") return <BrandSvg svg={kimiSvg} className={className} />;
+  if (id === "trae") return <BrandSvg svg={traeSvg} className={className} />;
+  if (id === "pi") return <PiIcon className={className} strokeWidth={1.75} aria-hidden />;
+  if (id === "hermes") return <BrandSvg svg={hermesSvg} className={className} />;
   return <Terminal className={className} strokeWidth={1.75} aria-hidden />;
 }
