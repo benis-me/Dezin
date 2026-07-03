@@ -490,9 +490,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const persistProcess = (includeText = summaryBoundarySeen): void => {
     const items = processRecordItems(includeText);
     if (items.length) store.addMessage(conversation.id, "system", processMessage(items, Math.max(0, Date.now() - run.createdAt)));
+    processItems.splice(0);
+    summaryBoundarySeen = false;
   };
   const persistSteps = (): void => {
     if (steps.length) store.addMessage(conversation.id, "system", JSON.stringify({ steps }));
+    steps.splice(0);
   };
   const queueVisualReviewRecord = (round: number, enabled: boolean, findings: QualityFinding[], screenshotUrl?: string, screenshotPath?: string): void => {
     if (!enabled) return;
@@ -500,6 +503,14 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   };
   const persistVisualReviews = (): void => {
     for (const record of visualReviewRecords.splice(0)) store.addMessage(conversation.id, "system", record);
+  };
+  const persistTranscript = (assistantText?: string): string | null => {
+    persistProcess();
+    const trimmed = assistantText?.trim() ?? "";
+    const assistantMessage = trimmed ? store.addMessage(conversation.id, "assistant", trimmed) : null;
+    persistSteps();
+    persistVisualReviews();
+    return assistantMessage?.id ?? null;
   };
 
   // Standard mode: the agent edits a real Vite project (src/*), not a single HTML.
@@ -553,10 +564,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         if (final.hadBoundary) summaryBoundarySeen = true;
         sse({ type: "turn-end", round, text: final.summaryText, summaryBoundary: final.hadBoundary });
         if (asked.question) {
-          persistProcess();
-          if (asked.text) store.addMessage(conversation.id, "assistant", asked.text);
-          persistSteps();
-          persistVisualReviews();
+          persistTranscript(asked.text);
           store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
           store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
           sse({ type: "ask-user-question", runId: run.id, question: asked.question });
@@ -638,14 +646,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             finishedAt: Date.now(),
           });
         }
+        if (visualReviewRecords.length) persistTranscript(finalAssistantText);
         round = nextRound;
         turnMessage = repairPrompt;
       }
 
-      persistProcess();
-      const assistantMessage = store.addMessage(conversation.id, "assistant", finalAssistantText);
-      persistSteps();
-      persistVisualReviews();
+      const assistantMessageId = persistTranscript(finalAssistantText);
       const quality = `, quality ${score}/100`;
       const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
       const message = passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
@@ -657,7 +663,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         lintPassed: passed,
         score,
         findings: persistedFindings,
-        assistantMessageId: assistantMessage.id,
+        assistantMessageId,
         commitHash,
         finishedAt: Date.now(),
       });
@@ -676,8 +682,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     } catch (err) {
       const cancelled = ctrl.signal.aborted || isAbortError(err);
       store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
-      persistProcess();
       const partial = processAssistantText();
+      persistProcess();
       if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
       persistSteps();
       persistVisualReviews();
@@ -731,10 +737,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     if (final.hadBoundary) summaryBoundarySeen = true;
     let assistantText = final.summaryText;
     if (asked.question) {
-      persistProcess();
-      if (assistantText) store.addMessage(conversation.id, "assistant", assistantText);
-      persistSteps();
-      persistVisualReviews();
+      persistTranscript(assistantText);
       store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
       store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
       sse({ type: "ask-user-question", runId: run.id, question: asked.question });
@@ -797,6 +800,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const nextRound = repairRounds + 1;
       const repairPrompt = prototypeRepairPrompt(finalFindings, nextRound, maxRepairRounds, score);
       if (!repairPrompt) break;
+      if (visualReviewRecords.length) persistTranscript(assistantText);
       sse({ type: "turn-start", round: nextRound, isRepair: true });
       const repaired = await runTurnWithRetry(
         runner,
@@ -827,10 +831,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       if (repairedFinal.hadBoundary) summaryBoundarySeen = true;
       sse({ type: "turn-end", round: nextRound, text: repairedFinal.summaryText, summaryBoundary: repairedFinal.hadBoundary });
       if (repairedAsked.question) {
-        persistProcess();
-        if (repairedFinal.summaryText) store.addMessage(conversation.id, "assistant", repairedFinal.summaryText);
-        persistSteps();
-        persistVisualReviews();
+        persistTranscript(repairedFinal.summaryText);
         store.addMessage(conversation.id, "system", questionMessage(repairedAsked.question, run.id));
         store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
         sse({ type: "ask-user-question", runId: run.id, question: repairedAsked.question });
@@ -851,10 +852,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
 
     const passed = !finalFindings.some((f) => f.severity === "P0");
     store.recordArtifact(project.id, artifactPath, passed);
-    persistProcess();
-    const assistantMessage = store.addMessage(conversation.id, "assistant", assistantText);
-    persistSteps();
-    persistVisualReviews();
+    const assistantMessageId = persistTranscript(assistantText);
     const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
     const quality = `, quality ${score}/100`;
     const text = passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`;
@@ -870,7 +868,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       lintPassed: passed,
       score,
       findings: persistedFindings,
-      assistantMessageId: assistantMessage.id,
+      assistantMessageId,
       finishedAt: Date.now(),
     });
 
@@ -889,8 +887,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   } catch (err) {
     const cancelled = ctrl.signal.aborted || isAbortError(err);
     store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
-    persistProcess(); // keep the partial process record + whatever the agent wrote to disk
     const partial = processAssistantText();
+    persistProcess(); // keep the partial process record + whatever the agent wrote to disk
     if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
     persistSteps();
     persistVisualReviews();
