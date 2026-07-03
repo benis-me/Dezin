@@ -18,6 +18,8 @@ export interface Finding {
 }
 
 export interface LintOptions {
+  /** Artifact runtime mode. Prototype checks assume a single sandboxed HTML file; standard checks scan source files. */
+  mode?: "prototype" | "standard";
   /** Treat the artifact as a slide deck (enables deck-only checks). Default false. */
   isDeck?: boolean;
   /**

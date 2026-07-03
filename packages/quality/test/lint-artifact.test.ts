@@ -26,6 +26,25 @@ test("empty or shell-only artifacts are blocking P0", () => {
   }
 });
 
+test("standard mode skips prototype-only iframe and shell checks", () => {
+  const standardSurface = `
+/* file: index.html */
+<div id="root"></div><script type="module" src="/src/main.jsx"></script>
+/* file: src/App.jsx */
+export default function App() {
+  messagesEndRef.current?.scrollIntoView({ block: "end" });
+  return <main><h1>Chat</h1><p>Real React content renders from source.</p></main>;
+}
+`;
+  const standardFindings = lintArtifact(standardSurface, { mode: "standard" });
+  assert.ok(!has(standardFindings, "empty-artifact"), "Vite shell should not be treated as an empty artifact");
+  assert.ok(!has(standardFindings, "scroll-into-view"), "app-local scrollIntoView is valid in standard dev-server mode");
+
+  const prototypeFindings = lintArtifact(`<script>messagesEndRef.current.scrollIntoView()</script>`);
+  assert.ok(has(prototypeFindings, "empty-artifact"), "prototype mode still blocks shell-only output");
+  assert.ok(has(prototypeFindings, "scroll-into-view"), "prototype iframe mode still blocks document scroll hijacking");
+});
+
 test("sloppy artifact trips the cardinal sins", () => {
   const f = lintArtifact(SLOPPY_ARTIFACT);
   assert.ok(has(f, "ai-default-indigo"), "indigo");

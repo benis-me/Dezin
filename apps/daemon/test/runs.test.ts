@@ -1345,6 +1345,87 @@ test("standard run auto-improves visual QA findings without a manual button", as
   );
 });
 
+test("standard auto-improve creates a version before repairing P2 visual findings", async () => {
+  let turn = 0;
+  const calls: Array<{ message: string; isRepair?: boolean }> = [];
+  const runner: AgentRunner = {
+    id: "standard-p2-versioned-auto-improve",
+    async runTurn(input) {
+      turn += 1;
+      calls.push({ message: input.message, isRepair: input.isRepair });
+      mkdirSync(join(input.projectDir, "src"), { recursive: true });
+      writeFileSync(join(input.projectDir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>${turn === 1 ? "Draft" : "Fixed"}</main> }`);
+      writeFileSync(join(input.projectDir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      return { text: turn === 1 ? "draft complete" : "fixed complete", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  const visualQaCalls: string[] = [];
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: true });
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), "{}");
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+      });
+      const events = parseSse(await res.text());
+      const done = events.find((e) => e.type === "run-done")!;
+      assert.equal(done.mode, "standard");
+      assert.equal(done.passed, true);
+      assert.equal(done.rounds, 1);
+      assert.equal(done.score, 100);
+      assert.equal(calls.length, 2);
+      assert.equal(calls[1]?.isRepair, true);
+      assert.match(calls[1]?.message ?? "", /visual-copy-wrap/);
+      assert.match(calls[1]?.message ?? "", /Let the heading wrap/);
+      assert.equal(visualQaCalls.length, 2);
+
+      const versionRuns = store.listRuns(project.id).filter((run) => run.commitHash);
+      assert.equal(versionRuns.length, 2);
+      const finalRun = store.getRun(done.runId as string)!;
+      assert.equal(versionRuns[0]?.id, finalRun.id, "the completed run remains the newest version");
+      const snapshot = versionRuns.find((run) => run.id !== finalRun.id)!;
+      assert.equal(snapshot.status, "succeeded");
+      assert.equal(snapshot.repairRounds, 0);
+      assert.equal(snapshot.score, 97);
+      assert.equal(snapshot.findings[0]?.id, "visual-copy-wrap");
+      assert.equal((snapshot.findings[0] as { reviewStatus?: string } | undefined)?.reviewStatus, "active");
+      assert.notEqual(snapshot.commitHash, finalRun.commitHash);
+
+      assert.equal(finalRun.repairRounds, 1);
+      assert.equal(finalRun.lintPassed, true);
+      assert.equal(finalRun.score, 100);
+      assert.equal(finalRun.findings[0]?.id, "visual-copy-wrap");
+      assert.equal((finalRun.findings[0] as { reviewStatus?: string } | undefined)?.reviewStatus, "resolved");
+    },
+    {
+      visualQa: async () => {
+        visualQaCalls.push(`call-${visualQaCalls.length + 1}`);
+        return visualQaCalls.length === 1
+          ? [
+              {
+                severity: "P2",
+                id: "visual-copy-wrap",
+                message: "The heading clips on mobile.",
+                fix: "Let the heading wrap inside the viewport.",
+              },
+            ]
+          : [];
+      },
+    },
+  );
+});
+
 test("the composed prompt includes the active skill body and design-system tokens", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN] });
   await withRunServer(runner, async ({ base, store }) => {

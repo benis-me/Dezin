@@ -625,9 +625,10 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
   const accentCap = options.accentOveruseCap ?? ACCENT_OVERUSE_CAP;
   const maxRadius = options.maxRadiusPx ?? MAX_RADIUS_PX;
   const banned = options.bannedAccentHexes ?? [];
+  const prototypeOnly = (options.mode ?? "prototype") !== "standard";
 
   const findings: Finding[] = [
-    ...checkEmptyArtifact(html),
+    ...(prototypeOnly ? checkEmptyArtifact(html) : []),
     ...checkIndigo(html, banned),
     ...checkPurpleGradient(html),
     ...checkTrustGradient(html),
@@ -646,7 +647,7 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
       message: "Filler/placeholder copy (lorem ipsum, 'feature one/two/three').",
       fix: "Write real copy. An empty section is a composition problem, not a word-inventing one.",
     }),
-    ...checkScrollIntoView(html),
+    ...(prototypeOnly ? checkScrollIntoView(html) : []),
     ...checkDeck(html, options.isDeck ?? false),
     ...checkAllCapsTracking(html),
     ...checkJustify(html),
