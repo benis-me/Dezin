@@ -1,0 +1,13 @@
+{
+  "name": "@dezin/effects",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Built-in Dezin reusable visual effects and Paper shader metadata.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'"
+  }
+}

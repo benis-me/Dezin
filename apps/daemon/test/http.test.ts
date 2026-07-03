@@ -287,6 +287,45 @@ test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
   });
 });
 
+test("effect registry exposes built-ins and persists custom effects over HTTP", async () => {
+  await withServer(async ({ base }) => {
+    const list = (await (await fetch(`${base}/api/effects`)).json()) as Array<{ id: string; name: string; origin: string; previewUrl?: string }>;
+    assert.ok(
+      list.some(
+        (effect) =>
+          effect.id === "paper-texture" && effect.origin === "built-in" && effect.previewUrl === "/effects/previews/paper-texture.jpg",
+      ),
+    );
+
+    const builtIn = await fetch(`${base}/api/effects/paper-texture`);
+    assert.equal(builtIn.status, 200);
+    const detail = (await builtIn.json()) as { id: string; code: string; parameters: unknown[]; previewUrl?: string };
+    assert.equal(detail.id, "paper-texture");
+    assert.equal(detail.code, "@paper-design/shaders-react:paper-texture");
+    assert.equal(detail.previewUrl, "/effects/previews/paper-texture.jpg");
+    assert.ok(detail.parameters.length > 0);
+
+    const created = await fetch(`${base}/api/effects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Glass ribbon" }),
+    });
+    assert.equal(created.status, 201);
+    const custom = (await created.json()) as { id: string; name: string; origin: string; code: string };
+    assert.equal(custom.name, "Glass ribbon");
+    assert.equal(custom.origin, "custom");
+    assert.ok(custom.code.includes("#version 300 es"));
+
+    const patched = await fetch(`${base}/api/effects/${custom.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Glass ribbon v2", presets: [{ id: "default", name: "Default", values: { intensity: 0.7 } }] }),
+    });
+    assert.equal(patched.status, 200);
+    assert.equal(((await patched.json()) as { name: string }).name, "Glass ribbon v2");
+  });
+});
+
 test("moodboard agent structured context is budgeted instead of a raw full-canvas dump", () => {
   const board = { id: "b1", name: "Large board", createdAt: 1, updatedAt: 2, archivedAt: null, coverAssetId: null };
   const nodes = Array.from({ length: 80 }, (_, index) => ({

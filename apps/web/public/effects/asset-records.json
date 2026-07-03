@@ -1,0 +1,26 @@
+[
+  {
+    "file": "demo-landscape.jpg",
+    "title": "File:1 lake louise pano 2019.jpg",
+    "url": "https://commons.wikimedia.org/wiki/File:1_lake_louise_pano_2019.jpg",
+    "source_image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6c/1_lake_louise_pano_2019.jpg/960px-1_lake_louise_pano_2019.jpg",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "artist": "Chensiyuan",
+    "bytes": 183103,
+    "width": 960,
+    "height": 539
+  },
+  {
+    "file": "demo-architecture.jpg",
+    "title": "File:Alcatraz recreation yard, NW view.jpg",
+    "url": "https://commons.wikimedia.org/wiki/File:Alcatraz_recreation_yard,_NW_view.jpg",
+    "source_image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/22/Alcatraz_recreation_yard%2C_NW_view.jpg/960px-Alcatraz_recreation_yard%2C_NW_view.jpg",
+    "license": "Public domain",
+    "license_url": "",
+    "artist": "Photograph:  Radomianin",
+    "bytes": 182418,
+    "width": 960,
+    "height": 611
+  }
+]

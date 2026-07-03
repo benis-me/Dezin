@@ -8,6 +8,9 @@ test("parsePath maps URLs to typed routes", () => {
   expect(parsePath("/")).toEqual({ name: "home" });
   expect(parsePath("/projects/abc")).toEqual({ name: "project", id: "abc" });
   expect(parsePath("/projects/a%20b")).toEqual({ name: "project", id: "a b" });
+  expect(parsePath("/effects")).toEqual({ name: "effects" });
+  expect(parsePath("/effects/new")).toEqual({ name: "effect-new" });
+  expect(parsePath("/effects/paper-texture")).toEqual({ name: "effect", id: "paper-texture" });
   expect(parsePath("/design-systems")).toEqual({ name: "design-systems" });
   expect(parsePath("/settings")).toEqual({ name: "settings" });
   expect(parsePath("/totally/unknown")).toEqual({ name: "home" });
@@ -17,6 +20,9 @@ test("routeToPath round-trips through parsePath", () => {
   const routes: Route[] = [
     { name: "home" },
     { name: "project", id: "p1" },
+    { name: "effects" },
+    { name: "effect-new" },
+    { name: "effect", id: "paper-texture" },
     { name: "design-systems" },
     { name: "settings" },
   ];

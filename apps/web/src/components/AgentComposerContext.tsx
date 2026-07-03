@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { useSortable } from "@dnd-kit/react/sortable";
-import { FileText, FolderOpen, GripVertical, Image as ImageIcon, Images, Layers, MousePointerClick, Paperclip, X } from "lucide-react";
+import { FileText, FolderOpen, GripVertical, Image as ImageIcon, Images, Layers, MousePointerClick, Paperclip, Sparkles, X } from "lucide-react";
 import { cn } from "../lib/utils.ts";
 
 export type AgentComposerContextItem<PreviewTarget = unknown> =
@@ -9,6 +9,7 @@ export type AgentComposerContextItem<PreviewTarget = unknown> =
   | { id: string; type: "local-path"; title: string; subtitle?: string; path: string }
   | { id: string; type: "project"; title: string; subtitle?: string; projectId: string; name: string; referencePath?: string }
   | { id: string; type: "moodboard"; title: string; subtitle?: string; moodboardId: string; name?: string }
+  | { id: string; type: "effect"; title: string; subtitle?: string; effectId: string; name?: string }
   | { id: string; type: "preview-target"; title: string; subtitle?: string; selector: string; note?: string; target: PreviewTarget }
   | { id: string; type: "canvas-node"; title: string; subtitle?: string; nodeId: string; nodeType: string; body: string }
   | { id: string; type: "text-context"; title: string; subtitle?: string; body: string };
@@ -39,7 +40,7 @@ export function moveContextItem<T extends AgentComposerContextItem>(items: T[], 
   return next;
 }
 
-type ContextIconKind = "file" | "folder" | "image" | "project" | "moodboard" | "preview-target" | "canvas-node" | "text-context";
+type ContextIconKind = "file" | "folder" | "image" | "project" | "moodboard" | "effect" | "preview-target" | "canvas-node" | "text-context";
 
 const IMAGE_FILE_EXTENSIONS = new Set(["avif", "gif", "heic", "jpeg", "jpg", "png", "svg", "webp"]);
 
@@ -63,6 +64,8 @@ function contextIconKind(item: AgentComposerContextItem): ContextIconKind {
       return "project";
     case "moodboard":
       return "moodboard";
+    case "effect":
+      return "effect";
     case "preview-target":
       return "preview-target";
     case "canvas-node":
@@ -84,6 +87,8 @@ function contextIcon(kind: ContextIconKind): ReactNode {
       return <Layers size={12} strokeWidth={1.75} />;
     case "moodboard":
       return <Images size={12} strokeWidth={1.75} />;
+    case "effect":
+      return <Sparkles size={12} strokeWidth={1.75} />;
     case "preview-target":
       return <MousePointerClick size={12} strokeWidth={1.75} />;
     case "canvas-node":

@@ -34,6 +34,7 @@ import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } from "./project-runtime.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
+import { handleCreateEffect, handleGetEffect, handleListEffects, handleUpdateEffect } from "./effects-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
 import { handleListModelProviderModels, handleTestModelProvider } from "./model-provider-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
@@ -314,6 +315,26 @@ const routes: Route[] = [
     method: "GET",
     pattern: "/api/design-systems/:id",
     handler: (_req, res, params, deps) => handleGetDesignSystem(res, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/effects",
+    handler: (req, res, _p, deps) => handleListEffects(req, res, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/effects",
+    handler: (req, res, _p, deps) => handleCreateEffect(req, res, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/effects/:id",
+    handler: (_req, res, params, deps) => handleGetEffect(res, params, deps),
+  },
+  {
+    method: "PATCH",
+    pattern: "/api/effects/:id",
+    handler: (req, res, params, deps) => handleUpdateEffect(req, res, params, deps),
   },
   {
     method: "GET",

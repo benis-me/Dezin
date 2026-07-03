@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FileUp, FolderGit2, FolderPlus, Images, Layers, Paperclip, Plus } from "lucide-react";
+import { FileUp, FolderGit2, FolderPlus, Images, Layers, Paperclip, Plus, Sparkles } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,7 +14,7 @@ import {
 import { useToast } from "./Toast.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { native } from "../lib/native.ts";
-import type { Moodboard, Project } from "../lib/api.ts";
+import type { EffectCard, Moodboard, Project } from "../lib/api.ts";
 
 /**
  * The "+" add menu on a composer — Files / Code / Designs. In Electron, file/folder
@@ -28,18 +28,21 @@ export function AttachMenu({
   onContext,
   onReference,
   onReferenceMoodboard,
+  onReferenceEffect,
 }: {
   onAttachFile?: () => void;
   onPickPaths?: (paths: string[]) => void;
   onContext?: (text: string) => void;
   onReference?: (project: Project) => void;
   onReferenceMoodboard?: (board: Moodboard) => void;
+  onReferenceEffect?: (effect: EffectCard) => void;
 }) {
   const { toast } = useToast();
   const api = useApi();
   const figInputRef = useRef<HTMLInputElement>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [moodboards, setMoodboards] = useState<Moodboard[]>([]);
+  const [effects, setEffects] = useState<EffectCard[]>([]);
   useEffect(() => {
     let alive = true;
     void api.listProjects().then((p) => alive && setProjects(p.filter((x) => !x.archivedAt))).catch(() => {});
@@ -57,6 +60,17 @@ export function AttachMenu({
       alive = false;
     };
   }, [api]);
+  useEffect(() => {
+    if (!onReferenceEffect) return;
+    let alive = true;
+    void api
+      .listEffects()
+      .then((items) => alive && setEffects(items))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [api, onReferenceEffect]);
   const soon = (what: string) => toast(`${what} isn't available yet.`);
   const pick = async (kind: "files" | "folder", label: string): Promise<void> => {
     if (!native) return onAttachFile ? onAttachFile() : soon(label);
@@ -139,6 +153,25 @@ export function AttachMenu({
                 moodboards.map((board) => (
                   <DropdownMenuItem key={board.id} onClick={() => onReferenceMoodboard(board)}>
                     <span className="truncate">{board.name}</span>
+                  </DropdownMenuItem>
+                ))
+              )}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ) : null}
+        {onReferenceEffect ? (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger className="whitespace-nowrap">
+              <Sparkles size={15} strokeWidth={1.75} />
+              Reference an effect
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="max-h-72 w-56 overflow-y-auto">
+              {effects.length === 0 ? (
+                <DropdownMenuItem disabled>No effects</DropdownMenuItem>
+              ) : (
+                effects.map((effect) => (
+                  <DropdownMenuItem key={effect.id} onClick={() => onReferenceEffect(effect)}>
+                    <span className="truncate">{effect.name}</span>
                   </DropdownMenuItem>
                 ))
               )}

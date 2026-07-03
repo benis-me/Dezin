@@ -32,6 +32,10 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     listDesignSystems: async () => [],
     getDesignSystem: notImpl as ApiClient["getDesignSystem"],
     importBrand: notImpl as ApiClient["importBrand"],
+    listEffects: async () => [],
+    getEffect: notImpl as ApiClient["getEffect"],
+    createEffect: notImpl as ApiClient["createEffect"],
+    updateEffect: notImpl as ApiClient["updateEffect"],
     listSkills: async () => [],
     getSettings: async () => ({
       agentCommand: "claude",
