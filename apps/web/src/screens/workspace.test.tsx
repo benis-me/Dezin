@@ -737,34 +737,37 @@ test("/projects/new preserves the selected agent and model for the first run", a
     createdAt: 1,
     updatedAt: 1,
   }));
+  const settings = {
+    agentCommand: "claude",
+    model: "",
+    apiBaseUrl: "",
+    apiKey: "",
+    defaultDesignSystemId: "modern-minimal",
+    customInstructions: "",
+    imageApiBaseUrl: "",
+    imageApiKey: "",
+    imageModel: "",
+    videoApiBaseUrl: "",
+    videoApiKey: "",
+    videoModel: "",
+    aiProviderId: "openai",
+    aiProviderEnabled: false,
+    aiProviderModels: "gpt-image-1",
+    aiProviderOrganization: "",
+    aiProviderProfiles: "",
+    visualQaEnabled: false,
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+    autoImproveEnabled: true,
+    autoImproveMaxRounds: 8,
+  };
+  const updateSettings = vi.fn(async (patch) => ({ ...settings, ...patch }));
   const fake = makeFakeApi({
     createProject,
     listAgents: async () => AGENTS,
     rescanAgents: async () => AGENTS,
-    getSettings: async () => ({
-      agentCommand: "claude",
-      model: "",
-      apiBaseUrl: "",
-      apiKey: "",
-      defaultDesignSystemId: "modern-minimal",
-      customInstructions: "",
-      imageApiBaseUrl: "",
-      imageApiKey: "",
-      imageModel: "",
-      videoApiBaseUrl: "",
-      videoApiKey: "",
-      videoModel: "",
-      aiProviderId: "openai",
-      aiProviderEnabled: false,
-      aiProviderModels: "gpt-image-1",
-      aiProviderOrganization: "",
-      aiProviderProfiles: "",
-      visualQaEnabled: false,
-      visualQaAgentCommand: "",
-      visualQaModel: "",
-      autoImproveEnabled: true,
-      autoImproveMaxRounds: 8,
-    }),
+    getSettings: async () => settings,
+    updateSettings,
   });
   const user = userEvent.setup();
 
@@ -785,6 +788,7 @@ test("/projects/new preserves the selected agent and model for the first run", a
   await waitFor(() => expect(createProject).toHaveBeenCalled());
   expect(takePendingAgent()).toBe("codex");
   expect(takePendingModel()).toBe("gpt-5");
+  expect(updateSettings).toHaveBeenLastCalledWith({ agentCommand: "codex", model: "gpt-5" });
 });
 
 test("rehydrates the prior transcript and reuses the conversation on the next run", async () => {

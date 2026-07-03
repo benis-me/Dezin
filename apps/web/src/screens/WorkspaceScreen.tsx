@@ -41,8 +41,9 @@ import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
+import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
-import type { Conversation, Variant, DesignSystemCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, SetupPhase } from "../lib/api.ts";
+import type { Conversation, Variant, DesignSystemCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, Settings as AppSettings, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { previewBridgeOriginForSrc, previewSandboxForSrc } from "../lib/preview-sandbox.ts";
@@ -2760,6 +2761,33 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (useSaved && settingsModel) setRunModel((cur) => cur || settingsModel);
   }, [agents, settingsAgent, settingsModel]);
 
+  const saveAgentModelDefaults = useCallback(
+    (patch: Pick<AppSettings, "agentCommand" | "model">) => {
+      persistAgentModelDefaults(api, patch, () => toast("Couldn't save settings.", { variant: "error" }));
+    },
+    [api, toast],
+  );
+
+  const changeRunAgent = useCallback(
+    (command: string) => {
+      setRunAgent(command);
+      setRunModel("");
+      setSettingsAgent(command);
+      setSettingsModel("");
+      saveAgentModelDefaults({ agentCommand: command, model: "" });
+    },
+    [saveAgentModelDefaults],
+  );
+
+  const changeRunModel = useCallback(
+    (model: string) => {
+      setRunModel(model);
+      setSettingsModel(model);
+      if (runAgent) saveAgentModelDefaults({ agentCommand: runAgent, model });
+    },
+    [runAgent, saveAgentModelDefaults],
+  );
+
   // Rehydrate the project's conversations + latest transcript, then run any pending brief.
   useEffect(() => {
     if (projectId === "new") return;
@@ -3765,11 +3793,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     agent={runAgent}
                     model={runModel}
                     dropUp
-                    onAgentChange={(v) => {
-                      setRunAgent(v);
-                      setRunModel("");
-                    }}
-                    onModelChange={setRunModel}
+                    onAgentChange={changeRunAgent}
+                    onModelChange={changeRunModel}
                     onRescan={rescanAgents}
                   />
                   {SHOW_VARIANT_FANOUT_BUTTON ? (

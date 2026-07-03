@@ -25,6 +25,7 @@ import {
   generatorModel,
   generatorPrompt,
   isEditableShortcutTarget,
+  originalContentSizeForNode,
   referenceAssetIds,
   rectFromBounds,
   resolveFloatingChromeRect,
@@ -158,6 +159,11 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     canvas.fitNodes([quickEditNode.id], { padding: 140, maxScale: 2.2 });
     window.requestAnimationFrame(() => setQuickEditOpen(true));
   }, [canvas.fitNodes, quickEditNode]);
+
+  const restoreSelectedOriginalSize = useCallback(() => {
+    if (!canvas.selected) return;
+    canvas.patchNode(canvas.selected.id, originalContentSizeForNode(canvas.selected, moodboardAssets));
+  }, [canvas, moodboardAssets]);
 
   const sendNodesToAgent = useCallback(
     (targetNodes: MoodboardNode[]) => {
@@ -454,6 +460,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 node={canvas.selected}
                 onDuplicate={() => canvas.duplicateNode(canvas.selected!.id)}
                 onDelete={() => canvas.deleteNode(canvas.selected!.id)}
+                onRestoreOriginalSize={restoreSelectedOriginalSize}
                 onImageAction={unavailableImageAction}
                 onQuickEdit={openQuickEdit}
                 onSendToAgent={onSendToAgent ? () => sendNodesToAgent([canvas.selected!]) : undefined}
@@ -510,6 +517,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 onParamsChange={(params) => {
                   canvas.patchNodeData(canvas.selected!.id, { generationParams: params });
                 }}
+                onResizeNode={(size) => canvas.patchNode(canvas.selected!.id, size)}
                 onPromptChange={(prompt) => canvas.patchNodeData(canvas.selected!.id, { generatorPrompt: prompt, generatorStatus: prompt ? "ready" : "" })}
                 onReferenceAssetIdsChange={(assetIds) => canvas.patchNodeData(canvas.selected!.id, { referenceAssetIds: assetIds })}
                 onGenerate={(prompt, params, options) => {

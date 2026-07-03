@@ -7,7 +7,7 @@ import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import type { DesignSystemCard, Settings } from "../lib/api.ts";
 import { agentLabel } from "../components/agent-logos.tsx";
-import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
+import { publishSettingsUpdated } from "../lib/settings-events.ts";
 import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
 import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
 import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
@@ -15,12 +15,6 @@ import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui
 type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" | "instructions" | "extension" | "about";
 
 const SECRET_SETTING_KEYS = ["apiKey", "imageApiKey", "videoApiKey"] as const;
-
-function publishSettingsUpdate(settings: Settings): void {
-  queueMicrotask(() => {
-    window.dispatchEvent(new CustomEvent<Settings>(SETTINGS_UPDATED_EVENT, { detail: settings }));
-  });
-}
 
 function mergeSettingsSaveResponse(current: Settings | null, next: Settings): Settings {
   const merged = { ...next };
@@ -76,14 +70,14 @@ export function SettingsScreen({
     setSettings((s) => {
       if (!s) return s;
       const next = { ...s, [key]: value };
-      publishSettingsUpdate(next);
+      publishSettingsUpdated(next);
       return next;
     });
   const setLocalPatch = (patch: Partial<Settings>) =>
     setSettings((s) => {
       if (!s) return s;
       const next = { ...s, ...patch };
-      publishSettingsUpdate(next);
+      publishSettingsUpdated(next);
       return next;
     });
   const save = (key: keyof Settings, value: string | boolean | number) => {
@@ -97,7 +91,7 @@ export function SettingsScreen({
       .then((next) =>
         setSettings((current) => {
           const merged = mergeSettingsSaveResponse(current, next);
-          publishSettingsUpdate(merged);
+          publishSettingsUpdated(merged);
           return merged;
         }),
       )

@@ -46,11 +46,12 @@ import { FieldSelect } from "../components/FieldSelect.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { takePendingComposer } from "../lib/pending-composer.ts";
 import { setPendingImages, setPendingAgent, setPendingRefs } from "../lib/pending-brief.ts";
 import { fetchProjectArtifact, toBase64 } from "../lib/project-ref.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
-import type { DesignSystemCard, Project, ProjectMode, SkillCard } from "../lib/api.ts";
+import type { DesignSystemCard, Project, ProjectMode, Settings, SkillCard } from "../lib/api.ts";
 
 const DEFAULT_SKILL = "frontend-design";
 const DEFAULT_DS = "modern-minimal";
@@ -264,6 +265,33 @@ export function HomeScreen({
     setHomeAgent((cur) => cur || (useSaved ? settingsAgent : avail[0]!.command));
     if (useSaved && settingsModel) setHomeModel((cur) => cur || settingsModel);
   }, [agents, settingsAgent, settingsModel]);
+
+  const saveAgentModelDefaults = useCallback(
+    (patch: Pick<Settings, "agentCommand" | "model">) => {
+      persistAgentModelDefaults(api, patch, () => toast("Couldn't save settings.", { variant: "error" }));
+    },
+    [api, toast],
+  );
+
+  const changeHomeAgent = useCallback(
+    (command: string) => {
+      setHomeAgent(command);
+      setHomeModel("");
+      setSettingsAgent(command);
+      setSettingsModel("");
+      saveAgentModelDefaults({ agentCommand: command, model: "" });
+    },
+    [saveAgentModelDefaults],
+  );
+
+  const changeHomeModel = useCallback(
+    (model: string) => {
+      setHomeModel(model);
+      setSettingsModel(model);
+      if (homeAgent) saveAgentModelDefaults({ agentCommand: homeAgent, model });
+    },
+    [homeAgent, saveAgentModelDefaults],
+  );
 
   const addImages = async (files: FileList | null): Promise<void> => {
     if (!files) return;
@@ -633,11 +661,8 @@ export function HomeScreen({
                     agents={agents}
                     agent={homeAgent}
                     model={homeModel}
-                    onAgentChange={(v) => {
-                      setHomeAgent(v);
-                      setHomeModel("");
-                    }}
-                    onModelChange={setHomeModel}
+                    onAgentChange={changeHomeAgent}
+                    onModelChange={changeHomeModel}
                     onRescan={rescanAgents}
                   />
                   <Button

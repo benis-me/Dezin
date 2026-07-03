@@ -13,7 +13,6 @@ import {
   nodeStroke,
   nodeText,
   nodeTitle,
-  promptText,
 } from "./canvas-utils.ts";
 
 export function MoodboardCanvasNode({ node }: { node: MoodboardNode }) {
@@ -55,23 +54,6 @@ function NodeBody({ node, data }: { node: MoodboardNode; data: Record<string, un
         <Rect x={0} y={0} width={node.width} height={node.height} fill={nodeFill(node)} data={data} />
         {assetUrl(node) ? (
           <Img url={assetUrl(node)} x={0} y={0} width={node.width} height={node.height} draggable={false} data={data} />
-        ) : null}
-        {promptText(node) ? (
-          <>
-            <Rect x={0} y={Math.max(0, node.height - 44)} width={node.width} height={44} fill="rgba(255,255,255,0.86)" data={data} />
-            <Txt
-              text={promptText(node)}
-              x={10}
-              y={Math.max(0, node.height - 36)}
-              width={Math.max(24, node.width - 20)}
-              fontSize={11}
-              lineHeight={15}
-              fill="#5f5f5f"
-              hittable={false}
-              draggable={false}
-              data={data}
-            />
-          </>
         ) : null}
       </>
     );

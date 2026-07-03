@@ -128,6 +128,20 @@ export function sizeForAspectRatio(aspectRatio: NonNullable<ImageGenerationParam
   return IMAGE_ASPECT_RATIO_OPTIONS.find((option) => option.value === aspectRatio)?.size ?? "1024x1024";
 }
 
+export function imageGeneratorNodeSizeForAspectRatio(
+  node: Pick<MoodboardNode, "width" | "height">,
+  aspectRatio: NonNullable<ImageGenerationParams["aspectRatio"]>,
+): { width: number; height: number } {
+  const ratio = parseAspectRatio(aspectRatio);
+  if (!ratio) return { width: Math.round(node.width), height: Math.round(node.height) };
+  if (ratio >= 1) {
+    const width = Math.max(120, Math.round(node.width));
+    return { width, height: Math.max(120, Math.round(width / ratio)) };
+  }
+  const height = Math.max(120, Math.round(node.height));
+  return { width: Math.max(120, Math.round(height * ratio)), height };
+}
+
 function isGeminiProvider(providerId: ImageProviderId): boolean {
   return providerId === "gemini" || providerId === "google" || providerId === "google-ai-studio";
 }
@@ -150,4 +164,10 @@ function isSize(value: unknown): value is NonNullable<ImageGenerationParams["siz
 
 function isAspectRatio(value: unknown): value is NonNullable<ImageGenerationParams["aspectRatio"]> {
   return typeof value === "string" && /^\d{1,2}:\d{1,2}$/.test(value);
+}
+
+function parseAspectRatio(value: string): number | null {
+  const [rawWidth, rawHeight] = value.split(":").map(Number);
+  if (!rawWidth || !rawHeight || !Number.isFinite(rawWidth) || !Number.isFinite(rawHeight)) return null;
+  return rawWidth / rawHeight;
 }

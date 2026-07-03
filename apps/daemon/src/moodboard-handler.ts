@@ -104,6 +104,33 @@ function hasImageParams(params: ImageGenerationParams): boolean {
   return Object.keys(params).length > 0;
 }
 
+function parseImageSize(value: unknown): { width: number; height: number } | null {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{2,5})x(\d{2,5})$/);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0 ? { width, height } : null;
+}
+
+function parseAspectRatioSize(value: unknown): { width: number; height: number } | null {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (!match) return null;
+  const widthRatio = Number(match[1]);
+  const heightRatio = Number(match[2]);
+  if (!Number.isFinite(widthRatio) || !Number.isFinite(heightRatio) || widthRatio <= 0 || heightRatio <= 0) return null;
+  if (widthRatio >= heightRatio) return { width: 1024, height: Math.max(1, Math.round(1024 * (heightRatio / widthRatio))) };
+  return { width: Math.max(1, Math.round(1024 * (widthRatio / heightRatio))), height: 1024 };
+}
+
+function generatedImageSize(params: ImageGenerationParams, sourceAsset: MoodboardAsset | null): { width: number; height: number } {
+  const sourceWidth = typeof sourceAsset?.width === "number" && sourceAsset.width > 0 ? sourceAsset.width : null;
+  const sourceHeight = typeof sourceAsset?.height === "number" && sourceAsset.height > 0 ? sourceAsset.height : null;
+  if (sourceWidth && sourceHeight) return { width: sourceWidth, height: sourceHeight };
+  return parseImageSize(params.size) ?? parseAspectRatioSize(params.aspectRatio) ?? { width: 1024, height: 1024 };
+}
+
 function extForMime(mimeType: string): string {
   if (mimeType === "image/jpeg") return ".jpg";
   if (mimeType === "image/webp") return ".webp";
@@ -541,12 +568,13 @@ export async function handleGenerateMoodboardImage(
     }
     throw err;
   }
+  const outputSize = generatedImageSize(params, sourceAsset);
   const asset = store.createMoodboardAsset(id!, {
     kind: "image",
     fileName: sourceAsset ? "edited.png" : "generated.png",
     mimeType: "image/png",
-    width: sourceAsset?.width ?? 1024,
-    height: sourceAsset?.height ?? 1024,
+    width: outputSize.width,
+    height: outputSize.height,
     source: sourceAsset ? "edited" : "generated",
   });
   const dir = moodboardAssetsDir(dataDir, id!);
@@ -565,6 +593,8 @@ export async function handleGenerateMoodboardImage(
     prompt,
     model,
     source: sourceAsset ? "edited" : "generated",
+    originalWidth: outputSize.width,
+    originalHeight: outputSize.height,
     ...(hasParams ? { generationParams: params } : {}),
     ...(sourceAsset ? { sourceAssetId } : {}),
     ...(referenceAssetIds.length ? { referenceAssetIds } : {}),
@@ -577,8 +607,8 @@ export async function handleGenerateMoodboardImage(
                 type: "image",
                 x: node.x,
                 y: node.y,
-                width: node.width,
-                height: node.height,
+                width: outputSize.width,
+                height: outputSize.height,
                 rotation: node.rotation,
                 zIndex: node.zIndex,
                 id: node.id,
@@ -611,8 +641,8 @@ export async function handleGenerateMoodboardImage(
     type: "image",
     x,
     y,
-    width: generator ? Math.max(180, generator.width) : 320,
-    height: generator ? Math.max(180, generator.height) : 320,
+    width: outputSize.width,
+    height: outputSize.height,
     zIndex: maxZ + 1,
     data: imageData,
   };

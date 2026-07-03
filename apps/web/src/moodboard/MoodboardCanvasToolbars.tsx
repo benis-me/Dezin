@@ -18,6 +18,7 @@ import {
   Layers,
   Loader2,
   Maximize2,
+  MoreHorizontal,
   Minus,
   MousePointer2,
   Paperclip,
@@ -36,6 +37,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
   IconButton,
   Popover,
@@ -56,6 +58,7 @@ import {
   IMAGE_QUALITY_OPTIONS,
   IMAGE_SIZE_OPTIONS,
   imageGenerationParamsForNode,
+  imageGeneratorNodeSizeForAspectRatio,
   sizeForAspectRatio,
   supportsImageBackground,
   supportsImageModeration,
@@ -475,6 +478,7 @@ export function SelectionToolbar({
   node,
   onDuplicate,
   onDelete,
+  onRestoreOriginalSize,
   onImageAction,
   onQuickEdit,
   onSendToAgent,
@@ -482,6 +486,7 @@ export function SelectionToolbar({
   node: MoodboardNode;
   onDuplicate: () => void;
   onDelete: () => void;
+  onRestoreOriginalSize?: () => void;
   onImageAction?: (action: string) => void;
   onQuickEdit?: () => void;
   onSendToAgent?: () => void;
@@ -532,9 +537,34 @@ export function SelectionToolbar({
         <ToolButton label="Duplicate" onClick={onDuplicate}>
           <Copy size={14} strokeWidth={1.75} />
         </ToolButton>
-        <ToolButton label="Delete" onClick={onDelete}>
-          <Trash2 size={14} strokeWidth={1.75} />
-        </ToolButton>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <IconButton aria-label="More node actions" title="More node actions">
+              <MoreHorizontal size={14} strokeWidth={1.75} />
+            </IconButton>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            data-moodboard-toolbar
+            side="top"
+            align="end"
+            className="w-48"
+            onPointerDown={stopToolbarEvent}
+            onPointerUp={stopToolbarEvent}
+            onMouseDown={stopToolbarEvent}
+            onMouseUp={stopToolbarEvent}
+            onClick={stopToolbarEvent}
+          >
+            <DropdownMenuItem disabled={!onRestoreOriginalSize} onClick={onRestoreOriginalSize}>
+              <Maximize2 size={14} strokeWidth={1.75} />
+              Restore original size
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onClick={onDelete}>
+              <Trash2 size={14} strokeWidth={1.75} />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </ToolbarChrome>
     </TooltipProvider>
   );
@@ -668,9 +698,29 @@ export function MultiSelectionToolbar({
         <ToolButton label="Arrange selected" onClick={onArrange}>
           <LayoutGrid size={14} strokeWidth={1.75} />
         </ToolButton>
-        <ToolButton label="Delete selected" onClick={onDelete}>
-          <Trash2 size={14} strokeWidth={1.75} />
-        </ToolButton>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <IconButton aria-label="More selected actions" title="More selected actions">
+              <MoreHorizontal size={14} strokeWidth={1.75} />
+            </IconButton>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            data-moodboard-toolbar
+            side="top"
+            align="end"
+            className="w-44"
+            onPointerDown={stopToolbarEvent}
+            onPointerUp={stopToolbarEvent}
+            onMouseDown={stopToolbarEvent}
+            onMouseUp={stopToolbarEvent}
+            onClick={stopToolbarEvent}
+          >
+            <DropdownMenuItem variant="destructive" onClick={onDelete}>
+              <Trash2 size={14} strokeWidth={1.75} />
+              Delete selected
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </ToolbarChrome>
     </TooltipProvider>
   );
@@ -814,6 +864,7 @@ export function GeneratorPromptToolbar({
   onModelChange,
   onParamsChange,
   onPromptChange,
+  onResizeNode,
   onReferenceAssetIdsChange,
   onGenerate,
   onUploadFiles,
@@ -830,6 +881,7 @@ export function GeneratorPromptToolbar({
   onModelChange: (model: string) => void;
   onParamsChange?: (params: ImageGenerationParams) => void;
   onPromptChange: (prompt: string) => void;
+  onResizeNode?: (size: { width: number; height: number }) => void;
   onReferenceAssetIdsChange?: (assetIds: string[]) => void;
   onGenerate: (prompt: string, params: ImageGenerationParams, options: ImageGenerateOptions) => Promise<void>;
   onUploadFiles?: (files: FileList) => void;
@@ -867,6 +919,7 @@ export function GeneratorPromptToolbar({
     const next = imageGenerationParamsForNode({ ...node, data: { ...node.data, generationParams: { ...params, ...patch } } }, imageProviderId);
     setParams(next);
     onParamsChange?.(next);
+    if (patch.aspectRatio) onResizeNode?.(imageGeneratorNodeSizeForAspectRatio(node, patch.aspectRatio));
   };
 
   const submit = async () => {

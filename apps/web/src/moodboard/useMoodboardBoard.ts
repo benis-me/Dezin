@@ -12,6 +12,7 @@ import type {
 } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
+import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { useToast } from "../components/Toast.tsx";
 import { MODEL_PROVIDERS } from "../settings/model-provider-registry.ts";
 import { inferCapabilities, parseModelEntries } from "../settings/model-provider-ui-utils.tsx";
@@ -71,6 +72,7 @@ export function useMoodboardBoard(boardId: string) {
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
+  const [agentDefaults, setAgentDefaults] = useState<Pick<Settings, "agentCommand" | "model"> | null>(null);
   const [imageModels, setImageModels] = useState<string[]>([]);
   const [imageModel, setImageModel] = useState("");
   const [imageProviderId, setImageProviderId] = useState("");
@@ -106,8 +108,6 @@ export function useMoodboardBoard(boardId: string) {
       .then((next) => {
         if (!alive) return;
         setAgents(next);
-        const available = next.filter((agent) => agent.available);
-        setRunAgent((current) => current || available[0]?.command || "");
       })
       .catch(() => {});
     return () => {
@@ -134,12 +134,18 @@ export function useMoodboardBoard(boardId: string) {
     void api
       .getSettings()
       .then((settings) => {
-        if (alive) applyImageSettings(settings);
+        if (!alive) return;
+        setAgentDefaults({ agentCommand: settings.agentCommand, model: settings.model });
+        applyImageSettings(settings);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (alive) setAgentDefaults({ agentCommand: "", model: "" });
+      });
     const onSettingsUpdated = (event: Event) => {
       const settings = (event as CustomEvent<Settings>).detail;
-      if (settings) applyImageSettings(settings);
+      if (!settings) return;
+      setAgentDefaults({ agentCommand: settings.agentCommand, model: settings.model });
+      applyImageSettings(settings);
     };
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated);
     return () => {
@@ -147,6 +153,15 @@ export function useMoodboardBoard(boardId: string) {
       window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated);
     };
   }, [api, applyImageSettings]);
+
+  useEffect(() => {
+    if (agentDefaults === null) return;
+    const available = agents.filter((agent) => agent.available);
+    if (!available.length) return;
+    const useSaved = agentDefaults.agentCommand !== "" && available.some((agent) => agent.command === agentDefaults.agentCommand);
+    setRunAgent((current) => current || (useSaved ? agentDefaults.agentCommand : available[0]!.command));
+    if (useSaved && agentDefaults.model) setRunModel((current) => current || agentDefaults.model);
+  }, [agentDefaults, agents]);
 
   useEffect(() => {
     return () => {
@@ -442,6 +457,33 @@ export function useMoodboardBoard(boardId: string) {
     setRunAgent((current) => current || available[0]?.command || "");
   }, [api]);
 
+  const saveAgentModelDefaults = useCallback(
+    (patch: Pick<Settings, "agentCommand" | "model">) => {
+      persistAgentModelDefaults(api, patch, () => toast("Couldn't save settings.", { variant: "error" }));
+    },
+    [api, toast],
+  );
+
+  const setRunAgentDefault = useCallback(
+    (command: string) => {
+      setRunAgent(command);
+      setRunModel("");
+      setAgentDefaults({ agentCommand: command, model: "" });
+      saveAgentModelDefaults({ agentCommand: command, model: "" });
+    },
+    [saveAgentModelDefaults],
+  );
+
+  const setRunModelDefault = useCallback(
+    (model: string) => {
+      setRunModel(model);
+      if (!runAgent) return;
+      setAgentDefaults({ agentCommand: runAgent, model });
+      saveAgentModelDefaults({ agentCommand: runAgent, model });
+    },
+    [runAgent, saveAgentModelDefaults],
+  );
+
   const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
   const setSelectedId = useCallback((id: string | null) => setSelectedIds(id ? [id] : []), []);
 
@@ -466,8 +508,8 @@ export function useMoodboardBoard(boardId: string) {
     busy,
     setSelectedId,
     setSelectedIds,
-    setRunAgent,
-    setRunModel,
+    setRunAgent: setRunAgentDefault,
+    setRunModel: setRunModelDefault,
     setImageModel,
     switchConversation,
     createConversation,

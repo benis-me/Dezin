@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MoodboardConversation, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
@@ -887,6 +888,28 @@ test("MoodboardCanvasNode renders node bodies with square corners", () => {
   );
 
   expect(container.querySelectorAll("[cornerradius], [cornerRadius]")).toHaveLength(0);
+});
+
+test("MoodboardCanvasNode keeps generated image prompts out of the canvas node body", () => {
+  const image: MoodboardNode = {
+    id: "image-1",
+    boardId: "b1",
+    type: "image",
+    x: 120,
+    y: 140,
+    width: 320,
+    height: 180,
+    rotation: 0,
+    zIndex: 0,
+    data: { url: "/asset.png", assetId: "asset-1", prompt: "warm editorial lamp" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  const { container } = render(<MoodboardCanvasNode node={image} />);
+
+  expect(container.querySelector('text[text="warm editorial lamp"]')).toBeNull();
+  expect(container.querySelectorAll("rect")).toHaveLength(1);
 });
 
 test("MoodboardCanvasNode renders image generators without a dashed border and with the mountain image icon", () => {
@@ -2066,9 +2089,11 @@ test("MoodboardPropertiesPanel shows concrete layout values", () => {
   expect(screen.getByText("15 deg")).toBeInTheDocument();
 });
 
-test("SelectionToolbar exposes compact object actions", () => {
+test("SelectionToolbar exposes compact object actions", async () => {
+  const user = userEvent.setup();
   const onDuplicate = vi.fn();
   const onDelete = vi.fn();
+  const onRestoreOriginalSize = vi.fn();
   const onSendToAgent = vi.fn();
   const node: MoodboardNode = {
     id: "n1",
@@ -2091,6 +2116,7 @@ test("SelectionToolbar exposes compact object actions", () => {
       node={node}
       onDuplicate={onDuplicate}
       onDelete={onDelete}
+      onRestoreOriginalSize={onRestoreOriginalSize}
       onSendToAgent={onSendToAgent}
     />,
   );
@@ -2098,10 +2124,15 @@ test("SelectionToolbar exposes compact object actions", () => {
   expect(screen.getByRole("button", { name: "Send to Agent" })).toHaveTextContent("Enter");
   fireEvent.click(screen.getByRole("button", { name: "Send to Agent" }));
   fireEvent.click(screen.getByLabelText("Duplicate"));
-  fireEvent.click(screen.getByLabelText("Delete"));
+  expect(screen.queryByLabelText("Delete")).toBeNull();
+  await user.click(screen.getByLabelText("More node actions"));
+  await user.click(screen.getByRole("menuitem", { name: "Restore original size" }));
+  await user.click(screen.getByLabelText("More node actions"));
+  await user.click(screen.getByRole("menuitem", { name: "Delete" }));
 
   expect(onSendToAgent).toHaveBeenCalledOnce();
   expect(onDuplicate).toHaveBeenCalledOnce();
+  expect(onRestoreOriginalSize).toHaveBeenCalledOnce();
   expect(onDelete).toHaveBeenCalledOnce();
   expect(screen.queryByLabelText("Bring to front")).toBeNull();
   expect(screen.queryByLabelText("Hide layer")).toBeNull();
@@ -2170,7 +2201,8 @@ test("SelectionToolbar surfaces image-edit actions for image nodes", () => {
   expect(container.querySelector(".h-5.w-px.bg-border")).not.toBeNull();
 });
 
-test("MultiSelectionToolbar exposes batch node actions", () => {
+test("MultiSelectionToolbar exposes batch node actions", async () => {
+  const user = userEvent.setup();
   const onDuplicate = vi.fn();
   const onAlign = vi.fn();
   const onArrange = vi.fn();
@@ -2215,7 +2247,9 @@ test("MultiSelectionToolbar exposes batch node actions", () => {
   expect(screen.getByText("Align right").closest("[data-moodboard-toolbar]")).not.toBeNull();
   fireEvent.click(screen.getByText("Align left"));
   fireEvent.click(screen.getByLabelText("Arrange selected"));
-  fireEvent.click(screen.getByLabelText("Delete selected"));
+  expect(screen.queryByLabelText("Delete selected")).toBeNull();
+  await user.click(screen.getByLabelText("More selected actions"));
+  await user.click(screen.getByRole("menuitem", { name: "Delete selected" }));
 
   expect(onSendToAgent).toHaveBeenCalledOnce();
   expect(onDuplicate).toHaveBeenCalledOnce();
@@ -2423,6 +2457,43 @@ test("GeneratorPromptToolbar exposes model parameters and submits them with the 
       expect.objectContaining({ referenceAssetIds: [] }),
     ),
   );
+});
+
+test("GeneratorPromptToolbar resizes the generator node when the aspect ratio changes", () => {
+  const onResizeNode = vi.fn();
+  const node: MoodboardNode = {
+    id: "g1",
+    boardId: "b1",
+    type: "image-generator",
+    x: 120,
+    y: 140,
+    width: 360,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: "soft light", generationParams: { quality: "medium", aspectRatio: "1:1", size: "1024x1024" } },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <GeneratorPromptToolbar
+      node={node}
+      busy={false}
+      imageProviderId="openai"
+      models={["gpt-image-2"]}
+      model="gpt-image-2"
+      onModelChange={() => {}}
+      onPromptChange={() => {}}
+      onResizeNode={onResizeNode}
+      onGenerate={async () => {}}
+    />,
+  );
+
+  fireEvent.click(screen.getByLabelText("Image generation parameters"));
+  fireEvent.click(screen.getByRole("button", { name: "16:9" }));
+
+  expect(onResizeNode).toHaveBeenCalledWith({ width: 360, height: 203 });
 });
 
 test("GeneratorPromptToolbar shows reference image previews from supplied board assets", () => {

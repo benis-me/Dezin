@@ -103,6 +103,8 @@ export function createImageNode(
   point?: { x: number; y: number },
 ): SaveMoodboardNodeInput {
   const height = size.width && size.height ? Math.max(160, Math.round(320 * (size.height / size.width))) : 240;
+  const originalWidth = size.width ?? asset.width ?? undefined;
+  const originalHeight = size.height ?? asset.height ?? undefined;
   return {
     id: localId(),
     type: "image",
@@ -111,7 +113,7 @@ export function createImageNode(
     width: 320,
     height,
     zIndex: count + index,
-    data: { assetId: asset.id, url: asset.url, fileName: asset.fileName, source: "upload" },
+    data: { assetId: asset.id, url: asset.url, fileName: asset.fileName, source: "upload", originalWidth, originalHeight },
   };
 }
 

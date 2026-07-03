@@ -68,6 +68,32 @@ test("HomeScreen shows an empty state with no projects", () => {
   expect(screen.getByText(/No projects yet/i)).toBeInTheDocument();
 });
 
+test("HomeScreen persists the selected agent model as the next default", async () => {
+  const user = userEvent.setup();
+  let current = settingsFixture({ agentCommand: "claude", model: "" });
+  const updateSettings = vi.fn(async (patch: Partial<Settings>) => {
+    current = { ...current, ...patch };
+    return current;
+  });
+  const overrides = {
+    listSkills: async () => SKILLS,
+    listAgents: async () => AGENTS,
+    getSettings: async () => current,
+    updateSettings,
+  };
+
+  const { unmount } = renderWithApiAndAgents(<HomeScreen projects={[]} />, overrides);
+  await user.click(await screen.findByRole("button", { name: "Agent and model" }));
+  await user.click(await screen.findByRole("button", { name: "claude-sonnet-4-6" }));
+
+  await waitFor(() => expect(updateSettings).toHaveBeenLastCalledWith({ agentCommand: "claude", model: "claude-sonnet-4-6" }));
+
+  unmount();
+  renderWithApiAndAgents(<HomeScreen projects={[]} />, overrides);
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Agent and model" })).toHaveTextContent("claude-sonnet-4-6"));
+});
+
 test("Shell sidebar can be resized outside project pages", () => {
   window.history.pushState({}, "", "/");
   render(

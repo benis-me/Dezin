@@ -189,6 +189,56 @@ test("useMoodboardBoard refreshes image model choices when settings change elsew
   expect(board.imageModel).toBe("azure-image-deployment");
 });
 
+test("useMoodboardBoard restores and persists the selected agent model", async () => {
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  let currentSettings = settings({ agentCommand: "codex", model: "gpt-5" });
+  const updateSettings = async (patch: Partial<Settings>) => {
+    currentSettings = { ...currentSettings, ...patch };
+    return currentSettings;
+  };
+  const api = makeFakeApi({
+    listAgents: async () => [
+      { id: "claude", command: "claude", available: true, models: ["sonnet"] },
+      { id: "codex", command: "codex", available: true, models: ["gpt-5", "gpt-5.1"] },
+    ],
+    getSettings: async () => currentSettings,
+    updateSettings,
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(board.loading).toBe(false));
+  await waitFor(() => expect(board.runAgent).toBe("codex"));
+  expect(board.runModel).toBe("gpt-5");
+
+  await act(async () => {
+    board.setRunModel("gpt-5.1");
+  });
+
+  await waitFor(() => expect(currentSettings.model).toBe("gpt-5.1"));
+});
+
 test("imageModelOptions still honors an explicitly configured legacy image endpoint", () => {
   expect(
     imageModelOptions(

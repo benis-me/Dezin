@@ -1,4 +1,4 @@
-import type { MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
+import type { MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 
 export type MoodboardCanvasTool = "select" | "hand" | "note" | "section";
 export type MoodboardAlignType = "left" | "center-v" | "right" | "top" | "center-h" | "bottom";
@@ -99,6 +99,11 @@ export interface CanvasPointInput {
   tree?: { x?: number; y?: number; scale?: number; scaleX?: number; scaleY?: number };
 }
 
+export interface MoodboardNodeSize {
+  width: number;
+  height: number;
+}
+
 export interface LeaferRuntime {
   app: any;
   layer: any;
@@ -156,6 +161,29 @@ export function assetUrl(node: MoodboardNode): string {
 export function promptText(node: MoodboardNode): string {
   const prompt = node.data.prompt;
   return typeof prompt === "string" ? prompt : "";
+}
+
+function positiveDimension(value: unknown): number | null {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue > 0 ? Math.round(numberValue) : null;
+}
+
+export function originalContentSizeForNode(node: MoodboardNode, assets: MoodboardAsset[] = []): MoodboardNodeSize {
+  const dataWidth = positiveDimension(node.data.originalWidth ?? node.data.naturalWidth);
+  const dataHeight = positiveDimension(node.data.originalHeight ?? node.data.naturalHeight);
+  if (dataWidth && dataHeight) return { width: dataWidth, height: dataHeight };
+
+  const assetId = typeof node.data.assetId === "string" ? node.data.assetId.trim() : "";
+  const asset = assetId ? assets.find((item) => item.id === assetId) : undefined;
+  const assetWidth = positiveDimension(asset?.width);
+  const assetHeight = positiveDimension(asset?.height);
+  if (assetWidth && assetHeight) return { width: assetWidth, height: assetHeight };
+
+  if (node.type === "image-generator") return { width: 360, height: 240 };
+  if (node.type === "note") return { width: 220, height: 140 };
+  if (node.type === "section") return { width: 420, height: 280 };
+  if (node.type === "video") return { width: 360, height: 220 };
+  return { width: Math.max(32, Math.round(node.width)), height: Math.max(32, Math.round(node.height)) };
 }
 
 export function fileName(node: MoodboardNode): string {

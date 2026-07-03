@@ -288,11 +288,13 @@ test("POST /api/moodboards/:id/generate-image replaces a submitted generator wit
       rotation: responseBody.nodes[0]?.rotation,
       zIndex: responseBody.nodes[0]?.zIndex,
     },
-    { x: 20, y: 30, width: 512, height: 320, rotation: 8, zIndex: 4 },
+    { x: 20, y: 30, width: 1536, height: 1024, rotation: 8, zIndex: 4 },
   );
   assert.equal(responseBody.nodes[0]?.data.prompt, "warm editorial lamp");
   assert.equal(responseBody.nodes[0]?.data.model, "gpt-image-2");
   assert.deepEqual(responseBody.nodes[0]?.data.generationParams, { quality: "medium", aspectRatio: "16:9", size: "1536x1024" });
+  assert.equal(responseBody.nodes[0]?.data.originalWidth, 1536);
+  assert.equal(responseBody.nodes[0]?.data.originalHeight, 1024);
   assert.equal(responseBody.nodes[0]?.data.source, "generated");
 });
 
