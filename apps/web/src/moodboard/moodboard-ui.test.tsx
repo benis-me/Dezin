@@ -1773,6 +1773,11 @@ test("MoodboardAgentPanel renders canvas insertion as a removable sendable conte
   expect(screen.getByText("Material tone")).toBeInTheDocument();
   expect(screen.getByText("· note")).toBeInTheDocument();
 
+  fireEvent.dragOver(screen.getByLabelText("Agent context cards"), {
+    dataTransfer: { types: ["application/x-dezin-agent-context"], files: [] },
+  });
+  expect(screen.queryByText("Drop files to attach")).toBeNull();
+
   fireEvent.keyDown(message, { key: "Enter" });
   await waitFor(() =>
     expect(onSend).toHaveBeenCalledWith("Selected moodboard node:\n1. Material tone [note, id:note-1] at x:10, y:20, 180x80"),
@@ -1905,9 +1910,9 @@ test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
   );
 
   const composer = screen.getByLabelText("Message").closest("div")!;
-  fireEvent.dragOver(composer);
+  fireEvent.dragOver(composer, { dataTransfer: { types: ["Files"], files } });
   expect(screen.getByText("Drop files to attach")).toBeInTheDocument();
-  fireEvent.drop(composer, { dataTransfer: { files } });
+  fireEvent.drop(composer, { dataTransfer: { types: ["Files"], files } });
 
   expect(onUploadFiles).toHaveBeenCalledWith(files);
 });

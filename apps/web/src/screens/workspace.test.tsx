@@ -352,6 +352,10 @@ test("project agent composer cards serialize context at send time", async () => 
 
   expect(await screen.findByText(".hero-title")).toBeInTheDocument();
   expect(screen.getByLabelText("Agent context cards")).toBeInTheDocument();
+  fireEvent.dragOver(screen.getByLabelText("Agent context cards"), {
+    dataTransfer: { types: ["application/x-dezin-agent-context"], files: [] },
+  });
+  expect(screen.queryByText("Drop files to attach")).toBeNull();
 
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Use the selected references" } });
   fireEvent.click(screen.getByLabelText("Send"));

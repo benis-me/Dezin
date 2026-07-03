@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { ArrowDown, ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardConversation, MoodboardMessage } from "../lib/api.ts";
@@ -18,6 +18,10 @@ import { cn } from "../lib/utils.ts";
 const FLOATING_COMPOSER_FADE_PX = 48;
 const SCROLL_TO_BOTTOM_GAP_PX = 12;
 const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
+
+function hasDraggedFiles(event: ReactDragEvent<Element>): boolean {
+  return Array.from(event.dataTransfer?.types ?? []).includes("Files") || (event.dataTransfer?.files?.length ?? 0) > 0;
+}
 
 export type MoodboardComposerInsertion = {
   id: number;
@@ -304,7 +308,7 @@ export function MoodboardAgentPanel({
         <div ref={composerRef} className="bg-background px-3 pb-3">
           <div
             onDragOver={(event) => {
-              if (!onUploadFiles) return;
+              if (!onUploadFiles || !hasDraggedFiles(event)) return;
               event.preventDefault();
               setDragging(true);
             }}
@@ -312,7 +316,7 @@ export function MoodboardAgentPanel({
               if (event.currentTarget === event.target) setDragging(false);
             }}
             onDrop={(event) => {
-              if (!onUploadFiles) return;
+              if (!onUploadFiles || !hasDraggedFiles(event)) return;
               event.preventDefault();
               attachFiles(event.dataTransfer.files);
             }}
