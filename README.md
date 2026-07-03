@@ -45,7 +45,7 @@ The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that d
 - **Variant branches.** Fork a design into parallel branches, iterate each differently, then compare them side by side with a draggable before/after slider.
 - **Files and Versions workspace.** Browse generated files with an in-pane source preview, and review per-branch versions grouped by branch with View, Diff, Compare, Restore, and Chat jump actions.
 - **Durable run state.** Run events are persisted and replayed when you reopen a project or navigate back. In-app navigation can reconnect to a running agent; if the desktop app quits, the interrupted run reopens at its last known state.
-- **Moodboards.** Collect visual references before a design starts on a local canvas with image, note, section, and image-generator nodes, plus a board-scoped Agent panel.
+- **Moodboards.** Collect references before a design starts on a high-performance, AI-native infinite canvas — pan and zoom across image, note, section, and image-generator nodes, generate visual material inline, and drive it all from a board-scoped Agent. Built on the Leafer engine for a fluid, Lovart-style canvas experience, entirely local.
 - **Reference real work.** Attach another project as a reference (its actual artifact is handed to the agent), reference a Moodboard with budgeted canvas context and asset paths, pull in a built-in or custom Effect, drop in screenshots to recreate, or paste local paths.
 - **Live process view.** The agent's reasoning and file writes stream into the chat as it works; the artifact renders in a sandboxed iframe; export downloads a `.zip`.
 - **Desktop app.** An Electron shell (`apps/desktop`) with native window chrome and pixel-perfect off-screen capture for previews.
@@ -71,7 +71,7 @@ The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that d
 
 <div align="center">
   <img src="./docs/assets/moodboard-canvas.png" alt="A Dezin moodboard canvas" width="900" />
-  <p><em>The moodboard canvas: image, note, section, and image-generator nodes, with a board-scoped Agent panel.</em></p>
+  <p><em>The moodboard canvas — a high-performance, AI-native infinite canvas of image, note, section, and image-generator nodes, with a board-scoped Agent panel.</em></p>
 </div>
 
 ## Quick start
