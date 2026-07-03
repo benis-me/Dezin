@@ -30,7 +30,6 @@ import {
   Picker,
   SearchInput,
   Segmented,
-  Spinner,
   Stagger,
   StaggerItem,
   Tabs,
@@ -52,6 +51,7 @@ import { takePendingComposer } from "../lib/pending-composer.ts";
 import { setPendingImages, setPendingAgent, setPendingRefs } from "../lib/pending-brief.ts";
 import { fetchProjectArtifact, toBase64 } from "../lib/project-ref.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
+import { cn } from "../lib/utils.ts";
 import type { DesignSystemCard, Project, ProjectMode, Settings, SkillCard } from "../lib/api.ts";
 
 const DEFAULT_SKILL = "frontend-design";
@@ -560,7 +560,10 @@ export function HomeScreen({
 
           <div
             aria-label="Design prompt dropzone"
-            className="mt-5 w-full rounded-2xl border border-input bg-card/80 p-2.5 transition-[color,border-color,box-shadow] duration-150 hover:border-border-strong focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring"
+            className={cn(
+              "mt-5 w-full rounded-2xl border p-2.5 transition-[color,border-color,background-color,box-shadow] duration-150 hover:border-border-strong focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring",
+              optimizingPrompt ? "border-border-strong bg-surface-2/80 shadow-inner" : "border-input bg-card/80",
+            )}
             onDragEnter={handlePromptDragOver}
             onDragOver={handlePromptDragOver}
             onDrop={handlePromptDrop}
@@ -615,11 +618,12 @@ export function HomeScreen({
                   ))}
                 </div>
               ) : null}
-              <div className="relative">
+              <div className={cn("relative overflow-hidden rounded-xl transition-colors duration-150", optimizingPrompt && "bg-surface-2/80")}>
                 {optimizingPrompt ? (
                   <div
                     aria-hidden
-                    className="prompt-loading-gradient motion-safe:animate-prompt-loading-gradient pointer-events-none absolute inset-x-2 bottom-0 top-0 rounded-xl opacity-70"
+                    data-testid="prompt-loading-surface"
+                    className="prompt-loading-gradient motion-safe:animate-prompt-loading-gradient pointer-events-none absolute inset-0 rounded-xl opacity-100"
                   />
                 ) : null}
                 <textarea
@@ -629,11 +633,11 @@ export function HomeScreen({
                   onChange={(e) => updateBrief(e.target.value)}
                   placeholder={images.length ? "Add notes, or just build to recreate the screenshot…" : "A pricing page with three plans, the middle one recommended…"}
                   rows={3}
-                  className="field-sizing-content max-h-64 min-h-[92px] w-full resize-none bg-transparent px-3 py-2.5 pr-12 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:cursor-wait disabled:opacity-70"
+                  className="relative z-10 field-sizing-content max-h-64 min-h-[92px] w-full resize-none bg-transparent px-3 py-2.5 pr-12 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:cursor-wait disabled:opacity-75"
                 />
                 {brief.trim().length > 0 ? (
                   <TooltipProvider delayDuration={120}>
-                    <div className="absolute bottom-2 right-2 flex items-center gap-1">
+                    <div className="absolute bottom-2 right-2 z-20 flex items-center gap-1">
                       {optimizedOriginalPrompt !== null && !optimizingPrompt ? (
                         <>
                           <Tooltip>
@@ -668,12 +672,16 @@ export function HomeScreen({
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <IconButton
-                              aria-label="Optimize prompt"
+                              aria-label={optimizingPrompt ? "Optimizing prompt" : "Optimize prompt"}
+                              aria-busy={optimizingPrompt}
                               disabled={optimizingPrompt}
-                              className="h-7 w-7 rounded-md bg-background/80 shadow-sm backdrop-blur"
+                              className={cn(
+                                "h-7 w-7 rounded-md bg-background/80 shadow-sm backdrop-blur",
+                                optimizingPrompt && "bg-transparent text-foreground shadow-none disabled:opacity-100",
+                              )}
                               onClick={() => void optimizeCurrentPrompt()}
                             >
-                              {optimizingPrompt ? <Spinner size={13} /> : <Sparkles size={13} strokeWidth={1.8} />}
+                              <Sparkles size={13} strokeWidth={1.8} className={optimizingPrompt ? "motion-safe:animate-pulse" : undefined} />
                             </IconButton>
                           </TooltipTrigger>
                           <TooltipContent sideOffset={2}>Optimize prompt</TooltipContent>

@@ -293,7 +293,14 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
   expect(textarea).toBeDisabled();
   const loadingGradient = container.querySelector(".prompt-loading-gradient");
   expect(loadingGradient).not.toBeNull();
-  expect(loadingGradient).toHaveClass("motion-safe:animate-prompt-loading-gradient");
+  expect(loadingGradient).toHaveAttribute("data-testid", "prompt-loading-surface");
+  expect(loadingGradient).toHaveClass("motion-safe:animate-prompt-loading-gradient", "inset-0", "opacity-100");
+  const optimizingButton = screen.getByRole("button", { name: "Optimizing prompt" });
+  expect(optimizingButton).toBeDisabled();
+  expect(optimizingButton).toHaveAttribute("aria-busy", "true");
+  expect(optimizingButton).toHaveClass("bg-transparent", "disabled:opacity-100");
+  expect(optimizingButton.querySelector(".animate-spin")).toBeNull();
+  expect(optimizingButton.querySelector(".lucide-sparkles")).not.toBeNull();
 
   await act(async () => {
     resolveFirst({ prompt: "Create a finished shader microsite with sourced assets." });

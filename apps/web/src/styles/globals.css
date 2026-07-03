@@ -250,10 +250,10 @@
 
 @keyframes prompt-loading-gradient {
   0% {
-    background-position: 120% 0;
+    background-position: 120% 0, 0 0;
   }
   100% {
-    background-position: -120% 0;
+    background-position: -120% 0, 0 0;
   }
 }
 
@@ -266,9 +266,14 @@
       color-mix(in oklch, var(--foreground) 8%, transparent) 50%,
       color-mix(in oklch, var(--primary) 10%, transparent) 64%,
       transparent 100%
+    ),
+    linear-gradient(
+      180deg,
+      color-mix(in oklch, var(--surface-2) 78%, var(--background)) 0%,
+      color-mix(in oklch, var(--surface-2) 94%, var(--background)) 100%
     );
-  background-size: 260% 100%;
-  background-position: 120% 0;
+  background-size: 260% 100%, 100% 100%;
+  background-position: 120% 0, 0 0;
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -285,7 +290,7 @@
   }
 
   .prompt-loading-gradient {
-    background-position: 50% 0;
+    background-position: 50% 0, 0 0;
   }
 }
 
