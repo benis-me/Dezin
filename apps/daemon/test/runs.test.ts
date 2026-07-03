@@ -48,6 +48,25 @@ function parseSse(text: string): Array<Record<string, unknown>> {
     .map((b) => JSON.parse(b.replace(/^data:\s?/, "")) as Record<string, unknown>);
 }
 
+function persistedMessageKind(message: { role: string; content: string }): string {
+  if (message.role !== "system") return message.role;
+  try {
+    const parsed = JSON.parse(message.content) as {
+      process?: unknown;
+      steps?: unknown;
+      visualReview?: { round?: unknown };
+      result?: unknown;
+    };
+    if (parsed.process) return "process";
+    if (parsed.steps) return "steps";
+    if (parsed.visualReview) return `visual-${typeof parsed.visualReview.round === "number" ? parsed.visualReview.round : "unknown"}`;
+    if (parsed.result) return "result";
+  } catch {
+    // Fall through to the generic system kind.
+  }
+  return "system";
+}
+
 function commitAll(dir: string, message: string): string {
   execFileSync("git", ["add", "-A"], { cwd: dir });
   execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", message], { cwd: dir });
@@ -1418,6 +1437,65 @@ test("standard auto-improve creates a version before repairing P2 visual finding
                 id: "visual-copy-wrap",
                 message: "The heading clips on mobile.",
                 fix: "Let the heading wrap inside the viewport.",
+              },
+            ]
+          : [];
+      },
+    },
+  );
+});
+
+test("standard auto-improve persists each turn summary before its visual review", async () => {
+  let turn = 0;
+  const runner: AgentRunner = {
+    id: "standard-round-transcript-persistence",
+    async runTurn(input) {
+      turn += 1;
+      mkdirSync(join(input.projectDir, "src"), { recursive: true });
+      writeFileSync(join(input.projectDir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>Round ${turn}</main> }`);
+      writeFileSync(join(input.projectDir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      return { text: turn === 1 ? "round zero summary" : "round one summary", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  let visualQaCalls = 0;
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: true });
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), "{}");
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+      });
+      const events = parseSse(await res.text());
+      const done = events.find((e) => e.type === "run-done")!;
+      const conversationId = events.find((e) => e.type === "run-start")?.conversationId as string;
+      assert.equal(done.rounds, 1);
+
+      const persisted = store.listMessages(conversationId);
+      assert.deepEqual(persisted.map(persistedMessageKind), ["user", "assistant", "visual-0", "assistant", "visual-1", "result"]);
+      assert.equal(persisted[1]?.content, "round zero summary");
+      assert.equal(persisted[3]?.content, "round one summary");
+    },
+    {
+      visualQa: async () => {
+        visualQaCalls += 1;
+        return visualQaCalls === 1
+          ? [
+              {
+                severity: "P2",
+                id: "visual-spacing",
+                message: "Spacing needs polish.",
+                fix: "Tighten the vertical rhythm.",
               },
             ]
           : [];
