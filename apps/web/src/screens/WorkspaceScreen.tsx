@@ -3865,7 +3865,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 <div className="space-y-3">
                   {liveItems.map((it, i) =>
                     it.type === "text" ? (
-                      it.text.trim() ? <Markdown key={i}>{it.text}</Markdown> : null
+                      it.text.trim() ? <AgentOutputText key={i} text={it.text} animate /> : null
                     ) : (
                       <div key={i} className="flex items-center gap-2 py-0.5 font-mono text-[11px] text-muted-foreground">
                         <span aria-hidden className="size-1 shrink-0 rounded-full bg-muted-foreground/60" />
