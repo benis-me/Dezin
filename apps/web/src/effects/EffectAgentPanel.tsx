@@ -203,7 +203,7 @@ export function EffectAgentPanel({
   };
 
   return (
-    <aside aria-label="Effect Agent" className="relative flex h-full min-w-0 flex-col border-r border-border bg-background">
+    <aside aria-label="Effect Agent" className="relative flex h-full min-w-0 flex-col bg-background">
       <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
         <button
           type="button"
