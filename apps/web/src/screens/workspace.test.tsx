@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
 import { computeMarkupPosition, isPreviewBridgeMessage, WorkspaceScreen } from "./WorkspaceScreen.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
-import type { RunEvent } from "../lib/api.ts";
+import type { RunEvent, RunSummary } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { takePendingAgent, takePendingBrief, takePendingModel } from "../lib/pending-brief.ts";
@@ -75,6 +75,17 @@ test("workspace conversation panel keeps a saved user resize instead of the 400p
 
   expect(screen.getByTestId("conversation")).toHaveStyle({ flexGrow: "25" });
   expect(screen.getByTestId("conversation")).not.toHaveStyle({ flexBasis: "400px" });
+});
+
+test("workspace conversation panel constrains scrolling to the transcript area", async () => {
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  expect(await screen.findByRole("region", { name: "Conversation" })).toHaveClass("min-h-0", "overflow-hidden");
+  expect(screen.getByTestId("conversation-scroll")).toHaveClass("min-h-0", "overflow-auto");
 });
 
 test("leaving a standard workspace releases its dev server lease", async () => {
@@ -2234,6 +2245,79 @@ test("prototype preview-update stream events refresh the preview during generati
     fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
     fireEvent.click(screen.getByLabelText("Send"));
     expect(await screen.findByTitle("Artifact preview")).toHaveAttribute("src", "/projects/p1/preview/?t=123456");
+  } finally {
+    release?.();
+  }
+});
+
+test("standard preview-update stream events use the live dev-server URL and refresh versions during generation", async () => {
+  let release: (() => void) | undefined;
+  let runs: RunSummary[] = [];
+  const listRuns = vi.fn(async () => runs);
+  const streamRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {
+    yield { type: "run-start", runId: "r-live", conversationId: "c1" };
+    runs = [
+      {
+        id: "r-live",
+        conversationId: "c1",
+        variantId: "main",
+        status: "running",
+        score: null,
+        repairRounds: 0,
+        lintPassed: false,
+        createdAt: 1700000001000,
+        finishedAt: null,
+      },
+    ];
+    yield {
+      type: "preview-update",
+      runId: "r-live",
+      mode: "standard",
+      previewUrl: "http://127.0.0.1:5310/",
+      t: 123456,
+    };
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  });
+  const fake = makeFakeApi({
+    getProject: async () => ({
+      id: "p1",
+      name: "Standard",
+      skillId: null,
+      designSystemId: "modern-minimal",
+      mode: "standard",
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns,
+    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/p1" }),
+    listFiles: async () => [{ path: "src/App.jsx", size: 120 }],
+    streamRun,
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  try {
+    await screen.findByLabelText("Message");
+    const listRunsBeforeSend = listRuns.mock.calls.length;
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "go" } });
+    fireEvent.click(screen.getByLabelText("Send"));
+
+    await waitFor(() =>
+      expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", "http://127.0.0.1:5310/?t=123456"),
+    );
+    await waitFor(() => expect(listRuns.mock.calls.length).toBeGreaterThan(listRunsBeforeSend));
+
+    fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+    expect(await screen.findByText("Generating")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Switch to Main v1" })).toBeDisabled();
   } finally {
     release?.();
   }

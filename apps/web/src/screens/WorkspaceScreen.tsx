@@ -952,8 +952,8 @@ function sortRunsNewestFirst(runs: RunSummary[]): RunSummary[] {
   });
 }
 
-function cacheBustPreviewUrl(url: string): string {
-  return `${url.split("?")[0]}?t=${Date.now()}`;
+function cacheBustPreviewUrl(url: string, t = Date.now()): string {
+  return `${url.split("?")[0]}?t=${t}`;
 }
 
 function isVersionPreviewSrc(projectId: string, src: string | null): boolean {
@@ -977,6 +977,13 @@ function statusDotClass(status: string): string {
   if (status === "failed") return "bg-destructive";
   if (status === "running" || status === "pending") return "bg-primary";
   return "bg-border-strong";
+}
+
+function versionStatusLabel(status: string): string | null {
+  if (status === "running" || status === "pending") return "Generating";
+  if (status === "failed") return "Failed";
+  if (status === "cancelled") return "Stopped";
+  return null;
 }
 
 /** A folder-navigable file browser: breadcrumb + back/forward, double-click into folders. */
@@ -1641,6 +1648,7 @@ function VersionHistoryPopover({
   groups,
   currentRun,
   selectedRunId,
+  disabled = false,
   onSwitch,
   onJump,
   onCover,
@@ -1651,6 +1659,7 @@ function VersionHistoryPopover({
   groups: VersionGroup[];
   currentRun: RunSummary | null;
   selectedRunId: string | null;
+  disabled?: boolean;
   onSwitch: (runId: string) => void;
   onJump: (run: RunSummary) => void;
   onCover: (runId: string) => void;
@@ -1701,6 +1710,8 @@ function VersionHistoryPopover({
                       const longLabel = `${group.name} ${label}`;
                       const isCurrent = currentRun?.id === run.id;
                       const isSelected = selectedRunId === run.id;
+                      const statusLabel = versionStatusLabel(run.status);
+                      const actionsDisabled = disabled || run.status !== "succeeded";
                       return (
                         <li
                           key={run.id}
@@ -1712,16 +1723,22 @@ function VersionHistoryPopover({
                           <button
                             type="button"
                             aria-label={`Switch to ${longLabel}`}
+                            disabled={actionsDisabled}
                             onClick={() => {
                               onSwitch(run.id);
                               setOpen(false);
                             }}
-                            className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                            className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                           >
                             <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(run.status)}`} aria-hidden />
                             <span className="shrink-0 text-sm font-medium text-foreground">{label}</span>
                             {isCurrent ? (
                               <span className="shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">Current</span>
+                            ) : null}
+                            {statusLabel ? (
+                              <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                                {statusLabel}
+                              </span>
                             ) : null}
                             {run.score !== null ? (
                               <span className="tnum shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">
@@ -1738,17 +1755,18 @@ function VersionHistoryPopover({
                               size="sm"
                               aria-label={`Jump to the message for ${longLabel}`}
                               title="Jump to the chat message"
+                              disabled={actionsDisabled}
                               onClick={() => onJump(run)}
                             >
                               <CornerUpLeft size={14} strokeWidth={1.75} />
                               Chat
                             </Button>
-                            <Button variant="ghost" size="sm" aria-label={`Set ${longLabel} as cover`} onClick={() => onCover(run.id)}>
+                            <Button variant="ghost" size="sm" aria-label={`Set ${longLabel} as cover`} disabled={actionsDisabled} onClick={() => onCover(run.id)}>
                               Cover
                             </Button>
                             {!isCurrent ? (
                               <>
-                                <Button variant="ghost" size="sm" aria-label={`Diff ${longLabel}`} onClick={() => onDiff(run.id, longLabel)}>
+                                <Button variant="ghost" size="sm" aria-label={`Diff ${longLabel}`} disabled={actionsDisabled} onClick={() => onDiff(run.id, longLabel)}>
                                   Diff
                                 </Button>
                                 {currentRun ? (
@@ -1757,12 +1775,13 @@ function VersionHistoryPopover({
                                     size="sm"
                                     aria-label={`Compare ${longLabel} visually`}
                                     title="Visual compare with the current version"
+                                    disabled={actionsDisabled || currentRun.status !== "succeeded"}
                                     onClick={() => onCompare(run.id, longLabel)}
                                   >
                                     Compare
                                   </Button>
                                 ) : null}
-                                <Button variant="outline" size="sm" aria-label={`Restore ${longLabel}`} onClick={() => onRestore(run.id)}>
+                                <Button variant="outline" size="sm" aria-label={`Restore ${longLabel}`} disabled={actionsDisabled} onClick={() => onRestore(run.id)}>
                                   Restore
                                 </Button>
                               </>
@@ -2675,8 +2694,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "preview-update":
         // The agent rewrote the artifact mid-run — show it building live.
         clearVersionPreviewState();
-        setPreviewSrc(`${api.previewUrl(id)}?t=${typeof ev.t === "number" ? ev.t : Date.now()}`);
+        if (typeof ev.previewUrl === "string" && ev.previewUrl.trim()) {
+          setPreviewSrc(cacheBustPreviewUrl(ev.previewUrl.trim(), typeof ev.t === "number" ? ev.t : Date.now()));
+        } else if (ev.mode !== "standard" && modeRef.current !== "standard") {
+          setPreviewSrc(`${api.previewUrl(id)}?t=${typeof ev.t === "number" ? ev.t : Date.now()}`);
+        }
         setTab("Preview");
+        if (ev.mode === "standard" || modeRef.current === "standard") {
+          void loadRuns();
+          void loadFiles();
+        }
         break;
       case "activity": {
         // liveItemsRef is the synchronous source of truth (run-done reads it in the same tick);
@@ -3763,7 +3790,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
       >
         <Panel id={WORKSPACE_CONVERSATION_PANEL} minSize="320px" maxSize="55%">
-          <section aria-label="Conversation" className="relative flex h-full min-w-0 flex-col">
+          <section aria-label="Conversation" className="relative flex h-full min-h-0 min-w-0 overflow-hidden flex-col">
             <div className="app-drag titlebar-pad-left flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-2.5">
           <div className="flex min-w-0 items-center gap-1">
             <button
@@ -3831,7 +3858,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           ref={chatScrollRef}
           data-testid="conversation-scroll"
           onScroll={updateChatBottomState}
-          className="flex-1 space-y-4 overflow-auto px-4 pt-5"
+          className="min-h-0 flex-1 space-y-4 overflow-auto px-4 pt-5"
           style={{ paddingBottom: messageBottomPadding }}
         >
           {messages.length === 0 ? (
@@ -4188,6 +4215,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               groups={versionGroups}
               currentRun={currentRun}
               selectedRunId={previewVersionRunId}
+              disabled={running}
               onSwitch={(runId) => void viewVersion(runId)}
               onJump={(run) => void jumpToRun(run)}
               onCover={(runId) => void setVersionCover(runId)}

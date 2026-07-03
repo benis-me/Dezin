@@ -1088,6 +1088,57 @@ test("standard run succeeds only after project files change", async () => {
   });
 });
 
+test("standard run streams preview updates from the live dev server before completion", async () => {
+  const devServers: Array<{ dir: string; runtimeKey?: string; url: string }> = [];
+  const runner: AgentRunner = {
+    id: "standard-live-preview",
+    async runTurn(input) {
+      mkdirSync(join(input.projectDir, "src"), { recursive: true });
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "export default function App(){ return <main>Live</main> }");
+      writeFileSync(join(input.projectDir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), "{}");
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+      });
+      const events = parseSse(await res.text());
+      const previewIndex = events.findIndex((e) => e.type === "preview-update" && e.mode === "standard");
+      const doneIndex = events.findIndex((e) => e.type === "run-done");
+      const preview = events[previewIndex]!;
+      const done = events[doneIndex]!;
+      assert.ok(previewIndex >= 0, "standard run emitted a live preview update");
+      assert.ok(doneIndex > previewIndex, "preview update arrived before run-done");
+      assert.equal(preview.runId, done.runId);
+      assert.equal(preview.previewUrl, "http://127.0.0.1:6207/");
+      assert.equal(preview.variantId, store.getActiveVariantId(project.id));
+      assert.match(devServers[0]!.runtimeKey ?? "", /:/);
+      assert.ok(store.getRun(done.runId as string)?.commitHash, "run persisted a git snapshot before completion");
+    },
+    {
+      ensureDevServer: async (_projectId, dir, runtimeKey) => {
+        const url = "http://127.0.0.1:6207/";
+        devServers.push({ dir, runtimeKey, url });
+        return { url };
+      },
+      captureCoverUrl: async () => true,
+    },
+  );
+});
+
 test("standard run persists deterministic anti-slop findings from source files", async () => {
   const runner: AgentRunner = {
     id: "standard-static-quality",

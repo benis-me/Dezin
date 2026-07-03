@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Dialog as ShDialog, DialogContent, DialogTitle } from "./dialog.tsx";
+import { Dialog as ShDialog, DialogContent, DialogTitle } from "./Dialog.tsx";
 import { cn } from "@/lib/utils.ts";
 
 /**
