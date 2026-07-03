@@ -624,8 +624,9 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
                 : undefined
             }
             onPaste={() => {
-              canvas.pasteCopiedNodes({ x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY });
+              const point = { x: canvas.contextMenu!.canvasX, y: canvas.contextMenu!.canvasY };
               canvas.setContextMenu(null);
+              void canvas.pasteFromSystemClipboard(point);
             }}
             onDuplicate={canvas.contextTargetId ? () => canvas.duplicateNodes(contextActionIds(canvas.contextTargetId, canvas.selectedIds)) : undefined}
             onQuickEdit={contextSingleNode?.type === "image" ? openContextQuickEdit : undefined}

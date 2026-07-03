@@ -1,4 +1,4 @@
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { MoodboardNode } from "../lib/api.ts";
 
@@ -6,7 +6,7 @@ const runtimeMocks = vi.hoisted(() => ({
   lastOptions: null as any,
   changeZoom: vi.fn(),
   fitView: vi.fn(),
-  getLastCanvasPoint: vi.fn(() => null),
+  getLastCanvasPoint: vi.fn((): { x: number; y: number } | null => null),
   hoverInRuntime: vi.fn(),
   refreshSelectionInRuntime: vi.fn(),
   selectIdsInRuntime: vi.fn(),
@@ -41,10 +41,13 @@ vi.mock("./useLeaferMoodboardRuntime.ts", () => ({
 }));
 
 import { useMoodboardCanvasController } from "./useMoodboardCanvasController.ts";
+import { toInput } from "./canvas-utils.ts";
+import { serializeMoodboardClipboardNodes } from "./moodboard-clipboard.ts";
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   runtimeMocks.lastOptions = null;
   Object.entries(runtimeMocks).forEach(([key, mock]) => {
     if (key !== "lastOptions") mock.mockClear();
@@ -232,4 +235,129 @@ test("useMoodboardCanvasController preserves data across consecutive data and ge
     height: 203,
     data: { generatorPrompt: "soft light", generationParams: { aspectRatio: "16:9", size: "1536x1024" } },
   });
+});
+
+function mockSystemClipboard() {
+  const items: Array<Record<string, unknown>> = [];
+  const write = vi.fn(async () => {});
+  const read = vi.fn(async () => [] as unknown[]);
+  class FakeClipboardItem {
+    constructor(data: Record<string, unknown>) {
+      items.push(data);
+    }
+  }
+  vi.stubGlobal("ClipboardItem", FakeClipboardItem as unknown as typeof ClipboardItem);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { write, read } });
+  return { items, write, read };
+}
+
+function dispatchPaste(clipboardData: { getData: (type: string) => string; files?: File[]; items?: unknown[] }) {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", { configurable: true, value: clipboardData });
+  act(() => {
+    document.dispatchEvent(event);
+  });
+  return event;
+}
+
+function renderController(props: Partial<Parameters<typeof useMoodboardCanvasController>[0]>) {
+  let controller!: ReturnType<typeof useMoodboardCanvasController>;
+  function Probe() {
+    controller = useMoodboardCanvasController({
+      nodes: [],
+      selectedIds: [],
+      onSelectIds: () => {},
+      onNodesChange: () => {},
+      onAddNote: () => {},
+      onAddSection: () => {},
+      onAddImageGenerator: () => {},
+      onUploadFiles: () => {},
+      onGenerateImage: async () => {},
+      ...props,
+    } as Parameters<typeof useMoodboardCanvasController>[0]);
+    return null;
+  }
+  render(<Probe />);
+  return () => controller;
+}
+
+test("copying a single image node writes both the node payload and an image blob to the system clipboard", async () => {
+  const { items, write } = mockSystemClipboard();
+  const pngBlob = new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" });
+  const fetchMock = vi.fn(async () => ({ ok: true, blob: async () => pngBlob }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const getController = renderController({ nodes: [image("img1", "asset-1")], selectedIds: ["img1"] });
+
+  await act(async () => {
+    getController().copyNodes(["img1"]);
+  });
+  await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+
+  expect(fetchMock).toHaveBeenCalledWith("/asset/asset-1.png");
+  expect(Object.keys(items[0])).toEqual(expect.arrayContaining(["text/plain", "image/png"]));
+});
+
+test("copying a note writes only the node payload, never an image", async () => {
+  const { items, write } = mockSystemClipboard();
+  const fetchMock = vi.fn(async () => ({ ok: true, blob: async () => new Blob([]) }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  const getController = renderController({ nodes: [note("n1")], selectedIds: ["n1"] });
+
+  await act(async () => {
+    getController().copyNodes(["n1"]);
+  });
+  await waitFor(() => expect(write).toHaveBeenCalledTimes(1));
+
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(Object.keys(items[0])).toEqual(["text/plain"]);
+});
+
+test("pasting moodboard node JSON via the paste event adds an offset copy to the board", async () => {
+  const onNodesChange = vi.fn();
+  runtimeMocks.getLastCanvasPoint.mockReturnValue({ x: 500, y: 400 });
+  const source = image("img1", "asset-1");
+  renderController({ nodes: [source], selectedIds: [], onNodesChange });
+
+  const text = serializeMoodboardClipboardNodes("board-1", [toInput(source)]);
+  dispatchPaste({ getData: (type) => (type === "text/plain" ? text : ""), files: [] });
+
+  await waitFor(() => expect(onNodesChange).toHaveBeenCalled());
+  const latest = onNodesChange.mock.calls.at(-1)![0] as Array<{ id?: string }>;
+  expect(latest).toHaveLength(2);
+  expect(latest.filter((node) => node.id !== "img1")).toHaveLength(1);
+});
+
+test("pasting an external image via the paste event uploads it at the cursor", async () => {
+  const onUploadFiles = vi.fn();
+  runtimeMocks.getLastCanvasPoint.mockReturnValue({ x: 640, y: 480 });
+  renderController({ nodes: [], selectedIds: [], onUploadFiles });
+
+  const file = new File([new Uint8Array([1, 2, 3])], "shot.png", { type: "image/png" });
+  dispatchPaste({ getData: () => "", files: [file] });
+
+  await waitFor(() => expect(onUploadFiles).toHaveBeenCalled());
+  expect(onUploadFiles).toHaveBeenCalledWith([file], { x: 640, y: 480 });
+});
+
+test("pasteFromSystemClipboard uploads an image read from the async clipboard at the given point", async () => {
+  const onUploadFiles = vi.fn();
+  const { read } = mockSystemClipboard();
+  const pngBlob = new Blob([new Uint8Array([9, 9, 9])], { type: "image/png" });
+  read.mockResolvedValue([
+    { types: ["image/png"], getType: async () => pngBlob },
+  ]);
+
+  const getController = renderController({ nodes: [], selectedIds: [], onUploadFiles });
+
+  await act(async () => {
+    await getController().pasteFromSystemClipboard({ x: 700, y: 500 });
+  });
+
+  await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
+  const [files, point] = onUploadFiles.mock.calls[0]!;
+  expect(files).toHaveLength(1);
+  expect((files as File[])[0].type).toBe("image/png");
+  expect(point).toEqual({ x: 700, y: 500 });
 });

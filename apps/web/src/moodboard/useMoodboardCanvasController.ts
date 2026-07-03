@@ -33,6 +33,8 @@ import {
   type MoodboardHistorySnapshot,
 } from "./canvas-history.ts";
 import { useLeaferMoodboardRuntime } from "./useLeaferMoodboardRuntime.ts";
+import { buildPastedNodeInputs, classifyClipboardPaste } from "./moodboard-clipboard.ts";
+import { readMoodboardClipboardContent, writeMoodboardNodesToClipboard } from "./moodboard-clipboard-io.ts";
 
 export interface MoodboardCanvasProps {
   viewKey?: string;
@@ -384,33 +386,14 @@ export function useMoodboardCanvasController({
 
   const copyNodes = useCallback((ids: string[]) => {
     const targetIds = new Set(ids);
-    clipboardRef.current = nodesRef.current.filter((node) => targetIds.has(node.id)).map(toInput);
+    const matched = nodesRef.current.filter((node) => targetIds.has(node.id));
+    clipboardRef.current = matched.map(toInput);
+    void writeMoodboardNodesToClipboard(matched[0]?.boardId ?? "", clipboardRef.current);
   }, []);
 
   const copySelectedNodes = useCallback(() => {
     copyNodes(selectedIdsRef.current);
   }, [copyNodes]);
-
-  const pasteCopiedNodes = useCallback((point?: { x: number; y: number }) => {
-    if (clipboardRef.current.length === 0) return;
-    const current = nodesRef.current;
-    let nextZIndex = Math.max(0, ...current.map((node) => node.zIndex ?? 0)) + 1;
-    const minX = Math.min(...clipboardRef.current.map((node) => node.x));
-    const minY = Math.min(...clipboardRef.current.map((node) => node.y));
-    const dx = point ? point.x - minX : 32;
-    const dy = point ? point.y - minY : 32;
-    const copies: Array<SaveMoodboardNodeInput & { id: string }> = clipboardRef.current.map((node) => ({
-      ...node,
-      id: localId(),
-      x: Math.round(node.x + dx),
-      y: Math.round(node.y + dy),
-      zIndex: nextZIndex++,
-      data: { ...node.data },
-    }));
-    saveInputs([...current.map(toInput), ...copies]);
-    handleSelectIds(copies.map((node) => node.id));
-    setContextMenu(null);
-  }, [handleSelectIds, saveInputs]);
 
   const patchNodesData = useCallback(
     (ids: string[], patch: Record<string, unknown>) => {
@@ -614,6 +597,48 @@ export function useMoodboardCanvasController({
     [recordHistory],
   );
 
+  const pasteNodeInputs = useCallback(
+    (inputs: SaveMoodboardNodeInput[], point?: { x: number; y: number }) => {
+      if (inputs.length === 0) return false;
+      const current = nodesRef.current;
+      const startZIndex = Math.max(0, ...current.map((node) => node.zIndex ?? 0)) + 1;
+      const copies = buildPastedNodeInputs(inputs, { point, startZIndex, createId: localId });
+      saveInputs([...current.map(toInput), ...copies]);
+      handleSelectIds(copies.map((node) => node.id));
+      setContextMenu(null);
+      return true;
+    },
+    [handleSelectIds, saveInputs],
+  );
+
+  const pasteCopiedNodes = useCallback(
+    (point?: { x: number; y: number }) => pasteNodeInputs(clipboardRef.current, point),
+    [pasteNodeInputs],
+  );
+
+  const applyClipboardPaste = useCallback(
+    (content: { text?: string | null; files?: File[] | null }, point?: { x: number; y: number }) => {
+      const result = classifyClipboardPaste(content);
+      if (result.kind === "nodes") return pasteNodeInputs(result.nodes, point);
+      if (result.kind === "images") {
+        uploadFiles(result.files, point);
+        setContextMenu(null);
+        return true;
+      }
+      return false;
+    },
+    [pasteNodeInputs, uploadFiles],
+  );
+
+  const pasteFromSystemClipboard = useCallback(
+    async (point?: { x: number; y: number }) => {
+      const content = await readMoodboardClipboardContent();
+      if (content && applyClipboardPaste(content, point)) return;
+      pasteCopiedNodes(point);
+    },
+    [applyClipboardPaste, pasteCopiedNodes],
+  );
+
   const handleBlankTap = useCallback((point: { x: number; y: number }) => {
     setContextMenu(null);
     if (referencePickActiveRef.current) {
@@ -741,12 +766,8 @@ export function useMoodboardCanvasController({
           copySelectedNodes();
           return;
         }
-        if (key === "v") {
-          if (clipboardRef.current.length === 0) return;
-          event.preventDefault();
-          pasteCopiedNodes(getLastCanvasPoint() ?? undefined);
-          return;
-        }
+        // Paste (Cmd/Ctrl+V) is handled by the document "paste" listener below so it can
+        // also read images and node payloads copied from other apps.
         if (key === "d") {
           if (selectedIdsRef.current.length === 0) return;
           event.preventDefault();
@@ -832,17 +853,35 @@ export function useMoodboardCanvasController({
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") releaseTemporaryHand();
     };
+    const onPaste = (event: ClipboardEvent) => {
+      if (isEditableShortcutTarget(event.target)) return;
+      const data = event.clipboardData;
+      if (!data) return;
+      const files = Array.from(data.files ?? []);
+      if (files.length === 0 && data.items) {
+        for (const item of Array.from(data.items)) {
+          if (item.kind !== "file") continue;
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+      if (applyClipboardPaste({ text: data.getData("text/plain"), files }, getLastCanvasPoint() ?? undefined)) {
+        event.preventDefault();
+      }
+    };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", releaseTemporaryHand);
     document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("paste", onPaste);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", releaseTemporaryHand);
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener("paste", onPaste);
     };
-  }, [bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, getLastCanvasPoint, moveNodesLayerStep, nudgeNodes, pasteCopiedNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
+  }, [applyClipboardPaste, bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, getLastCanvasPoint, moveNodesLayerStep, nudgeNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
 
   const contextTargetId = contextMenu?.targetId ?? null;
 
@@ -874,6 +913,7 @@ export function useMoodboardCanvasController({
     copyNodes,
     copySelectedNodes,
     pasteCopiedNodes,
+    pasteFromSystemClipboard,
     bringToFront,
     bringNodesToFront,
     moveNodesLayerStep,
