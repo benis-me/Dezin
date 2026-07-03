@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
@@ -12,6 +12,9 @@ import {
   FadeIn,
   IconButton,
   PanelBar,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
   Segmented,
   Spinner,
   Tabs,
@@ -49,7 +52,7 @@ import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZ
 import { previewBridgeOriginForSrc, previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 import { cn } from "../lib/utils.ts";
 
-const TABS = ["Preview", "Files", "Quality", "Versions"] as const;
+const TABS = ["Preview", "Files", "Quality"] as const;
 type Tab = (typeof TABS)[number];
 
 type Device = "desktop" | "tablet" | "mobile";
@@ -197,6 +200,7 @@ type LiveItem = { type: "text"; text: string } | { type: "tool"; summary: string
 
 interface VisualReviewState {
   status: "running" | "complete";
+  runId?: string;
   enabled?: boolean;
   round?: number;
   agentCommand?: string;
@@ -419,6 +423,10 @@ function isAgentVisualFinding(finding: QualityFinding): boolean {
   return finding.id.startsWith("visual-ai-review-") || finding.id === "visual-agent-review-failed" || finding.id === "visual-screenshot-missing";
 }
 
+function isResolvedVisualReviewFinding(finding: QualityFinding): boolean {
+  return finding.reviewStatus === "resolved";
+}
+
 function isVisualFailureFinding(finding: QualityFinding): boolean {
   return [
     "visual-qa-failed",
@@ -493,6 +501,7 @@ interface QualityLane {
   desc: string;
   status: QualityLaneStatus;
   findings: QualityFinding[];
+  reviewFindings?: QualityFinding[];
 }
 
 function qualityStatusText(status: QualityLaneStatus): string {
@@ -546,6 +555,8 @@ function buildQualityLanes(input: {
   const visualFindings = input.findings.filter(isVisualFinding);
   const geometryFindings = visualFindings.filter((finding) => !isAgentVisualFinding(finding));
   const agentFindings = visualFindings.filter(isAgentVisualFinding);
+  const activeGeometryFindings = geometryFindings.filter((finding) => !isResolvedVisualReviewFinding(finding));
+  const activeAgentFindings = agentFindings.filter((finding) => !isResolvedVisualReviewFinding(finding));
   const staticRan = input.checks.staticRan || input.score !== null || staticFindings.length > 0;
   const visualRan = input.checks.visualRan || visualFindings.length > 0;
   const visualDisabled = input.checks.visualEnabled === false;
@@ -563,28 +574,30 @@ function buildQualityLanes(input: {
       label: "Geometry",
       desc: "Viewport overflow, clipping, blank renders, and fixed-position defects.",
       status: laneStatus({
-        findings: geometryFindings,
+        findings: activeGeometryFindings,
         ran: visualRan,
         running: input.running && input.checks.visualEnabled !== false,
         ranOnce: input.ranOnce,
         disabled: visualDisabled,
-        failure: geometryFindings.some(isVisualFailureFinding),
+        failure: activeGeometryFindings.some(isVisualFailureFinding),
       }),
-      findings: geometryFindings,
+      findings: activeGeometryFindings,
+      reviewFindings: geometryFindings,
     },
     {
       key: "agent",
       label: "Agent visual review",
       desc: "Screenshot review by the selected Agent with the current conversation context.",
       status: laneStatus({
-        findings: agentFindings,
+        findings: activeAgentFindings,
         ran: visualRan,
         running: input.running && input.checks.visualEnabled !== false,
         ranOnce: input.ranOnce,
         disabled: visualDisabled,
-        failure: agentFindings.some(isVisualFailureFinding),
+        failure: activeAgentFindings.some(isVisualFailureFinding),
       }),
-      findings: agentFindings,
+      findings: activeAgentFindings,
+      reviewFindings: agentFindings,
     },
   ];
 }
@@ -615,6 +628,7 @@ function normalizeVisualReview(value: unknown): VisualReviewState | null {
   if (!isRecord(value)) return null;
   return {
     status: value.status === "running" ? "running" : "complete",
+    runId: optionalString(value.runId),
     enabled: typeof value.enabled === "boolean" ? value.enabled : undefined,
     round: typeof value.round === "number" ? value.round : undefined,
     agentCommand: optionalString(value.agentCommand),
@@ -870,6 +884,22 @@ function buildVersionGroups(runs: RunSummary[], variants: Variant[]): VersionGro
   }
 
   return groups.filter((group) => group.runs.length > 0 || group.active || variants.length > 1);
+}
+
+function versionLabel(group: VersionGroup, index: number): string {
+  return `v${group.runs.length - index}`;
+}
+
+function findVersionSelection(
+  groups: VersionGroup[],
+  runId: string | null,
+): { group: VersionGroup; run: RunSummary; label: string } | null {
+  if (!runId) return null;
+  for (const group of groups) {
+    const index = group.runs.findIndex((run) => run.id === runId);
+    if (index >= 0) return { group, run: group.runs[index]!, label: versionLabel(group, index) };
+  }
+  return null;
 }
 
 function sortRunsNewestFirst(runs: RunSummary[]): RunSummary[] {
@@ -1526,6 +1556,7 @@ function StandardDoctor({
 
 function AgentVisualReviewSummary({ findings }: { findings: QualityFinding[] }) {
   const summary = visualReviewQualitySummary(findings);
+  const resolvedFindings = findings.filter(isResolvedVisualReviewFinding);
   if (!summary) return null;
   return (
     <div className="border-t border-border px-3 py-2.5">
@@ -1548,9 +1579,171 @@ function AgentVisualReviewSummary({ findings }: { findings: QualityFinding[] }) 
           {summary.screenshotPath && !summary.screenshotUrl ? (
             <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{summary.screenshotPath}</p>
           ) : null}
+          {resolvedFindings.length > 0 ? (
+            <ul className="mt-2 space-y-1">
+              {resolvedFindings.slice(0, 3).map((finding, index) => (
+                <li key={`${finding.id}-${index}`} className="rounded-md bg-card px-2 py-1 text-[11px] leading-snug text-foreground-2">
+                  <span className="font-medium text-foreground">{finding.reviewStatus === "resolved" ? "Resolved review" : "Review"}</span>
+                  <span className="text-muted-foreground"> · </span>
+                  {finding.message}
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       </div>
     </div>
+  );
+}
+
+function VersionHistoryPopover({
+  groups,
+  currentRun,
+  selectedRunId,
+  onSwitch,
+  onJump,
+  onCover,
+  onDiff,
+  onCompare,
+  onRestore,
+}: {
+  groups: VersionGroup[];
+  currentRun: RunSummary | null;
+  selectedRunId: string | null;
+  onSwitch: (runId: string) => void;
+  onJump: (run: RunSummary) => void;
+  onCover: (runId: string) => void;
+  onDiff: (runId: string, label: string) => void;
+  onCompare: (runId: string, label: string) => void;
+  onRestore: (runId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = findVersionSelection(groups, selectedRunId);
+  const count = groups.reduce((total, group) => total + group.runs.length, 0);
+  const triggerText = selected ? `${selected.group.name} ${selected.label}` : "Versions";
+  return (
+    <Popover open={open} onOpenChange={setOpen} modal={false}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="Versions"
+          className="app-no-drag flex h-8 max-w-[13rem] items-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
+        >
+          <History size={13} strokeWidth={1.75} />
+          <span className="min-w-0 truncate font-medium text-foreground">{triggerText}</span>
+          {count > 0 ? <span className="tnum text-[10px] text-muted-foreground">{count}</span> : null}
+          <ChevronDown size={13} strokeWidth={2} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" sideOffset={6} className="w-[min(34rem,calc(100vw-2rem))] p-2">
+        {groups.length > 0 ? (
+          <div className="max-h-[28rem] overflow-auto pr-1">
+            {groups.map((group) => (
+              <section key={group.id} className="mb-3 last:mb-0">
+                <div className="mb-1.5 flex items-center justify-between gap-3 px-1">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="truncate text-xs font-semibold text-foreground">{group.name}</span>
+                    {group.active ? (
+                      <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                        Current branch
+                      </span>
+                    ) : null}
+                  </div>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {group.runs.length} version{group.runs.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                {group.runs.length > 0 ? (
+                  <ul className="space-y-1.5">
+                    {group.runs.map((run, index) => {
+                      const label = versionLabel(group, index);
+                      const longLabel = `${group.name} ${label}`;
+                      const isCurrent = currentRun?.id === run.id;
+                      const isSelected = selectedRunId === run.id;
+                      return (
+                        <li
+                          key={run.id}
+                          className={cn(
+                            "group flex items-center gap-2 rounded-lg border px-2 py-2",
+                            isSelected ? "border-primary/35 bg-primary/5" : "border-border bg-card",
+                          )}
+                        >
+                          <button
+                            type="button"
+                            aria-label={`Switch to ${longLabel}`}
+                            onClick={() => {
+                              onSwitch(run.id);
+                              setOpen(false);
+                            }}
+                            className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                          >
+                            <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(run.status)}`} aria-hidden />
+                            <span className="shrink-0 text-sm font-medium text-foreground">{label}</span>
+                            {isCurrent ? (
+                              <span className="shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">Current</span>
+                            ) : null}
+                            {run.score !== null ? (
+                              <span className="tnum shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">
+                                {run.score}/100
+                              </span>
+                            ) : null}
+                            <span className="min-w-0 truncate text-xs text-muted-foreground">
+                              {run.repairRounds} fix{run.repairRounds === 1 ? "" : "es"} · {shortTime(run.createdAt)}
+                            </span>
+                          </button>
+                          <div className="ml-auto flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              aria-label={`Jump to the message for ${longLabel}`}
+                              title="Jump to the chat message"
+                              onClick={() => onJump(run)}
+                            >
+                              <CornerUpLeft size={14} strokeWidth={1.75} />
+                              Chat
+                            </Button>
+                            <Button variant="ghost" size="sm" aria-label={`Set ${longLabel} as cover`} onClick={() => onCover(run.id)}>
+                              Cover
+                            </Button>
+                            {!isCurrent ? (
+                              <>
+                                <Button variant="ghost" size="sm" aria-label={`Diff ${longLabel}`} onClick={() => onDiff(run.id, longLabel)}>
+                                  Diff
+                                </Button>
+                                {currentRun ? (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    aria-label={`Compare ${longLabel} visually`}
+                                    title="Visual compare with the current version"
+                                    onClick={() => onCompare(run.id, longLabel)}
+                                  >
+                                    Compare
+                                  </Button>
+                                ) : null}
+                                <Button variant="outline" size="sm" aria-label={`Restore ${longLabel}`} onClick={() => onRestore(run.id)}>
+                                  Restore
+                                </Button>
+                              </>
+                            ) : null}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <div className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                    No versions on this branch yet.
+                  </div>
+                )}
+              </section>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">No runs yet.</div>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -1925,6 +2118,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [fileText, setFileText] = useState("");
+  const [versionFiles, setVersionFiles] = useState<ProjectFile[]>([]);
+  const [versionActiveFile, setVersionActiveFile] = useState<string | null>(null);
+  const [versionFileText, setVersionFileText] = useState("");
   const [lintFindings, setLintFindings] = useState<QualityFinding[]>([]);
   const [ranOnce, setRanOnce] = useState(false);
   const [score, setScore] = useState<number | null>(null);
@@ -2050,6 +2246,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const clearVersionPreviewState = (): void => {
     setPreviewVersionRunId(null);
+    setVersionFiles([]);
+    setVersionActiveFile(null);
+    setVersionFileText("");
     setPreviewBusy(null);
   };
 
@@ -2070,6 +2269,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const openFile = (path: string): void => {
     setActiveFile(path);
+    setTab("Files");
+  };
+
+  const openVersionFile = (path: string): void => {
+    setVersionActiveFile(path);
     setTab("Files");
   };
 
@@ -2163,17 +2367,25 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const requestId = versionPreviewRequestRef.current + 1;
     versionPreviewRequestRef.current = requestId;
     setPreviewVersionRunId(runId);
+    setVersionFiles([{ path: "index.html", size: 0 }]);
+    setVersionActiveFile("index.html");
+    setVersionFileText("");
     setPreviewBusy({ title: "Loading version preview", detail: "Preparing the saved snapshot and starting its preview server." });
     setTab("Preview");
     try {
-      const url = await resolveVersionPreviewUrl(runId);
+      const [url, text] = await Promise.all([
+        resolveVersionPreviewUrl(runId),
+        api.getVersionText(projectId, runId).catch(() => ""),
+      ]);
       if (versionPreviewRequestRef.current !== requestId) return;
       setPreviewSrc(url);
+      setVersionFileText(text);
+      setVersionFiles(text ? [{ path: "index.html", size: text.length }] : []);
       setPreviewBusy(null);
     } catch {
       if (versionPreviewRequestRef.current === requestId) {
         setPreviewBusy(null);
-        setPreviewVersionRunId(null);
+        clearVersionPreviewState();
       }
       toast("Couldn't load that version preview.", { variant: "error" });
     }
@@ -2289,6 +2501,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const model = optionalString(ev.model);
     const screenshotUrl = optionalString(ev.screenshotUrl);
     const screenshotPath = optionalString(ev.screenshotPath);
+    const runId = optionalString(ev.runId);
     const reviewer = reviewerLabel({ agentCommand, model });
     const enabled = typeof ev.enabled === "boolean" ? ev.enabled : true;
     const id = msgId.current++;
@@ -2301,6 +2514,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         text: "",
         visualReview: {
           status: "running",
+          runId,
           enabled,
           round: typeof ev.round === "number" ? ev.round : undefined,
           agentCommand,
@@ -2322,6 +2536,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const screenshotUrl = optionalString(ev.screenshotUrl) ?? visualReviewScreenshotUrl(findings);
     const screenshotPath = optionalString(ev.screenshotPath) ?? visualReviewScreenshotPath(findings);
     const summary = optionalString(ev.reviewSummary) ?? visualReviewFindingSummary(findings);
+    const runId = optionalString(ev.runId);
     const existingId = visualReviewMessageIdRef.current;
     if (existingId === null) {
       const id = msgId.current++;
@@ -2334,6 +2549,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           text: "",
           visualReview: {
             status: "complete",
+            runId,
             enabled: typeof ev.enabled === "boolean" ? ev.enabled : true,
             screenshotUrl,
             screenshotPath,
@@ -2353,6 +2569,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           ...message,
           visualReview: {
             status: "complete",
+            runId: runId ?? prior?.runId,
             enabled: typeof ev.enabled === "boolean" ? ev.enabled : prior?.enabled,
             round: prior?.round,
             agentCommand: prior?.agentCommand,
@@ -2715,7 +2932,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       await loadRuns(nextVariants);
       await loadFiles();
       reloadArtifact(nextVariants);
-      setTab("Versions");
+      setTab("Preview");
       toast(`Generated ${targets.length} variants.`);
     } catch (err) {
       toast(`Couldn't generate variants: ${err instanceof Error ? err.message : "run failed"}`, { variant: "error" });
@@ -2900,8 +3117,23 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   // Fetch the selected file's source whenever the Files tab is shown for it.
   useEffect(() => {
-    if (tab !== "Files" || !activeFile) return;
+    if (tab !== "Files") return;
     let alive = true;
+    if (previewVersionRunId) {
+      if (!versionActiveFile) return;
+      void api.getVersionText(projectId, previewVersionRunId).then(
+        (t) => {
+          if (!alive) return;
+          setVersionFileText(t);
+          setVersionFiles(t ? [{ path: versionActiveFile, size: t.length }] : []);
+        },
+        () => alive && setVersionFileText(""),
+      );
+      return () => {
+        alive = false;
+      };
+    }
+    if (!activeFile) return;
     void api.getFileText(projectId, activeFile).then(
       (t) => alive && setFileText(t),
       () => alive && setFileText(""),
@@ -2910,7 +3142,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, activeFile, projectId]);
+  }, [tab, activeFile, versionActiveFile, previewVersionRunId, projectId]);
 
   const switchTo = async (convId: string): Promise<void> => {
     setActive(convId);
@@ -3368,20 +3600,46 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
-  const qualityLanes = buildQualityLanes({ findings: lintFindings, score, ranOnce, running, checks: qualityChecks });
-  const qualityHasFindings = qualityLanes.some((lane) => lane.findings.length > 0);
-  const qualityRecorded = qualityLanes.some((lane) => lane.status === "passed" || lane.status === "issues" || lane.status === "failed");
-  const qualityClean = ranOnce && qualityRecorded && !qualityHasFindings && qualityLanes.every((lane) => lane.status === "passed" || lane.status === "not-run");
   const versionGroups = buildVersionGroups(runs, variants);
   const activeVersionGroup = versionGroups.find((group) => group.active) ?? versionGroups[0] ?? null;
   const currentRun = activeVersionGroup?.runs[0] ?? null;
+  const selectedVersion = findVersionSelection(versionGroups, previewVersionRunId);
+  const selectedVersionRun = selectedVersion?.run ?? null;
+  const selectedVersionFindings = normalizeFindings(selectedVersionRun?.findings);
+  const displayFindings = selectedVersionRun ? selectedVersionFindings : lintFindings;
+  const displayScore = selectedVersionRun ? selectedVersionRun.score : score;
+  const displayRanOnce = selectedVersionRun ? true : ranOnce;
+  const displayRunning = selectedVersionRun ? false : running;
+  const displayQualityChecks = selectedVersionRun
+    ? {
+        staticRan: selectedVersionRun.score !== null || selectedVersionFindings.some((finding) => !isVisualFinding(finding)),
+        visualRan: selectedVersionFindings.some(isVisualFinding),
+        visualEnabled: null,
+        source: "persisted" as const,
+      }
+    : qualityChecks;
+  const displayFiles = selectedVersionRun ? versionFiles : files;
+  const displayActiveFile = selectedVersionRun ? versionActiveFile : activeFile;
+  const displayFileText = selectedVersionRun ? versionFileText : fileText;
+  const openDisplayedFile = selectedVersionRun ? openVersionFile : openFile;
+  const qualityLanes = buildQualityLanes({
+    findings: displayFindings,
+    score: displayScore,
+    ranOnce: displayRanOnce,
+    running: displayRunning,
+    checks: displayQualityChecks,
+  });
+  const qualityHasFindings = qualityLanes.some((lane) => lane.findings.length > 0);
+  const qualityHasDetails = qualityHasFindings || qualityLanes.some((lane) => (lane.reviewFindings?.length ?? 0) > 0);
+  const qualityRecorded = qualityLanes.some((lane) => lane.status === "passed" || lane.status === "issues" || lane.status === "failed");
+  const qualityClean =
+    displayRanOnce && qualityRecorded && !qualityHasFindings && qualityLanes.every((lane) => lane.status === "passed" || lane.status === "not-run");
   const activeDesignSystem = systems.find((system) => system.id === dsId);
 
   const TAB_ICON: Record<Tab, ReactNode> = {
     Preview: <Eye size={13} strokeWidth={1.75} />,
     Files: <Folder size={13} strokeWidth={1.75} />,
     Quality: <ShieldCheck size={13} strokeWidth={1.75} />,
-    Versions: <History size={13} strokeWidth={1.75} />,
   };
   const tabItems: TabItem[] = TABS.map((t) => ({
     value: t,
@@ -3389,8 +3647,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       <>
         {TAB_ICON[t]}
         <span>{t}</span>
-        {t === "Quality" && lintFindings.length > 0 ? (
-          <span className="rounded-full bg-surface-2 px-1 text-[10px] leading-tight text-muted-foreground">{lintFindings.length}</span>
+        {t === "Quality" && displayFindings.length > 0 ? (
+          <span className="rounded-full bg-surface-2 px-1 text-[10px] leading-tight text-muted-foreground">{displayFindings.length}</span>
         ) : null}
       </>
     ),
@@ -3862,14 +4120,28 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       <Panel id={WORKSPACE_ARTIFACT_PANEL} minSize="360px">
         <section aria-label="Artifact" className="flex h-full min-w-0 flex-col">
           <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
-          <Tabs
-            aria-label="Artifact views"
-            className="[&_[role=tab]]:px-2.5"
-            items={tabItems}
-            value={tab}
-            onChange={(v) => setTab(v as Tab)}
-            variant="plain"
-          />
+          <div className="flex min-w-0 items-center gap-1">
+            <VersionHistoryPopover
+              groups={versionGroups}
+              currentRun={currentRun}
+              selectedRunId={previewVersionRunId}
+              onSwitch={(runId) => void viewVersion(runId)}
+              onJump={(run) => void jumpToRun(run)}
+              onCover={(runId) => void setVersionCover(runId)}
+              onDiff={(runId, label) => void openDiff(runId, label)}
+              onCompare={(runId, label) => void openVersionCompare(runId, label)}
+              onRestore={(runId) => void restoreVersion(runId)}
+            />
+            <span data-testid="versions-tabs-separator" className="mx-1 h-5 w-px shrink-0 bg-border" aria-hidden />
+            <Tabs
+              aria-label="Artifact views"
+              className="[&_[role=tab]]:px-2.5"
+              items={tabItems}
+              value={tab}
+              onChange={(v) => setTab(v as Tab)}
+              variant="plain"
+            />
+          </div>
           <TooltipProvider delayDuration={120}>
             <div className="flex items-center gap-1">
               {tab === "Preview" && previewSrc ? (
@@ -4038,16 +4310,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               emptyPane(running ? "Generating…" : "Your preview will appear here")
             )
           ) : tab === "Files" ? (
-            <FilesPanel files={files} activeFile={activeFile} fileText={fileText} running={running} onOpen={openFile} />
+            <FilesPanel files={displayFiles} activeFile={displayActiveFile} fileText={displayFileText} running={displayRunning} onOpen={openDisplayedFile} />
           ) : tab === "Quality" ? (
             <div className="flex h-full flex-col bg-surface">
-              {ranOnce && score !== null ? (
+              {displayRanOnce && displayScore !== null ? (
                 <PanelBar className="gap-1.5">
                   Quality score
-                  <span className="tnum font-mono font-semibold text-foreground">{score}/100</span>
+                  <span className="tnum font-mono font-semibold text-foreground">{displayScore}/100</span>
                 </PanelBar>
               ) : null}
-              {ranOnce || running || projectMode === "standard" ? (
+              {displayRanOnce || displayRunning || projectMode === "standard" ? (
                 <div className="flex-1 overflow-auto p-3 text-sm">
                   {projectMode === "standard" ? (
                     <div className="mb-3">
@@ -4066,7 +4338,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                             {qualityStatusText(lane.status)}
                           </span>
                         </div>
-                        {lane.key === "agent" ? <AgentVisualReviewSummary findings={lane.findings} /> : null}
+                        {lane.key === "agent" ? <AgentVisualReviewSummary findings={lane.reviewFindings ?? lane.findings} /> : null}
                         {lane.findings.length > 0 ? (
                           <ul className="space-y-2 border-t border-border px-3 py-2.5">
                             {lane.findings.map((f, idx) => (
@@ -4088,13 +4360,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                       </section>
                     ))}
                   </div>
-                  {!qualityHasFindings ? (
+                  {!qualityHasDetails ? (
                     <p className="mt-3 px-1 text-xs text-muted-foreground">
-                      {running
+                      {displayRunning
                         ? "Quality checks are still running."
                         : qualityClean
                           ? "No findings in recorded checks."
-                          : ranOnce
+                          : displayRanOnce
                             ? "No stored quality details for this run."
                             : "Run to check quality."}
                     </p>
@@ -4104,113 +4376,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 <div className="flex-1">{emptyPane("Run to check quality")}</div>
               )}
             </div>
-          ) : tab === "Versions" ? (
-            versionGroups.length > 0 ? (
-              <div className="h-full overflow-auto bg-surface p-3 text-sm">
-                {versionGroups.map((group) => (
-                  <section key={group.id} className="mb-4 last:mb-0">
-                    <div className="mb-2 flex items-center justify-between gap-3 px-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <span className="truncate text-xs font-semibold text-foreground">{group.name}</span>
-                        {group.active ? (
-                          <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                            Current branch
-                          </span>
-                        ) : null}
-                      </div>
-                      <span className="shrink-0 text-xs text-muted-foreground">
-                        {group.runs.length} version{group.runs.length === 1 ? "" : "s"}
-                      </span>
-                    </div>
-                    {group.runs.length > 0 ? (
-                      <ul className="space-y-2">
-                        {group.runs.map((r, i) => {
-                          const label = `v${group.runs.length - i}`;
-                          const isCurrent = currentRun?.id === r.id;
-                          return (
-                            <li key={r.id} className="group flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5">
-                              <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(r.status)}`} aria-hidden />
-                              <span className="text-sm font-medium">{label}</span>
-                              {isCurrent ? (
-                                <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">Current</span>
-                              ) : null}
-                              {r.score !== null ? (
-                                <span className="tnum rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">
-                                  {r.score}/100
-                                </span>
-                              ) : null}
-                              <span className="min-w-0 truncate text-xs text-muted-foreground">
-                                {r.repairRounds} fix{r.repairRounds === 1 ? "" : "es"} · {shortTime(r.createdAt)}
-                              </span>
-                              <div className="ml-auto flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  aria-label={`Jump to the message for ${group.name} ${label}`}
-                                  title="Jump to the chat message"
-                                  onClick={() => void jumpToRun(r)}
-                                >
-                                  <CornerUpLeft size={14} strokeWidth={1.75} />
-                                  Chat
-                                </Button>
-                                <Button variant="ghost" size="sm" aria-label={`View ${group.name} ${label}`} onClick={() => void viewVersion(r.id)}>
-                                  View
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  aria-label={`Set ${group.name} ${label} as cover`}
-                                  onClick={() => void setVersionCover(r.id)}
-                                >
-                                  Cover
-                                </Button>
-                                {!isCurrent ? (
-                                  <>
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
-                                      aria-label={`Diff ${group.name} ${label}`}
-                                      onClick={() => void openDiff(r.id, `${group.name} ${label}`)}
-                                    >
-                                      Diff
-                                    </Button>
-                                    {currentRun ? (
-                                      <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        aria-label={`Compare ${group.name} ${label} visually`}
-                                        title="Visual compare with the current version"
-                                        onClick={() => void openVersionCompare(r.id, `${group.name} ${label}`)}
-                                      >
-                                        Compare
-                                      </Button>
-                                    ) : null}
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      aria-label={`Restore ${group.name} ${label}`}
-                                      onClick={() => void restoreVersion(r.id)}
-                                    >
-                                      Restore
-                                    </Button>
-                                  </>
-                                ) : null}
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    ) : (
-                      <div className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                        No versions on this branch yet.
-                      </div>
-                    )}
-                  </section>
-                ))}
-              </div>
-            ) : (
-              emptyPane(running ? "Generating…" : "No runs yet")
-            )
           ) : (
             emptyPane(running ? "Generating…" : "Your preview will appear here")
           )}
