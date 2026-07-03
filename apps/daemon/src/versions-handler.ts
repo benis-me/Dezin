@@ -8,7 +8,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ServerResponse } from "node:http";
 import { sendJson, sendError } from "./http-util.ts";
-import { projectDir } from "./serve-static.ts";
+import { injectSelectBridge, projectDir } from "./serve-static.ts";
 import type { AppDeps } from "./app.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { ensureDevServer } from "./project-runtime.ts";
@@ -73,7 +73,7 @@ export async function handleGetVersion(res: ServerResponse, params: Record<strin
   }
   const file = snapshotPath(deps, params.id!, params.runId!);
   if (!existsSync(file)) return sendError(res, 404, "no snapshot for this run");
-  const html = await readFile(file, "utf8");
+  const html = injectSelectBridge(await readFile(file, "utf8"));
   res.writeHead(200, {
     "content-type": "text/html; charset=utf-8",
     "content-security-policy": "sandbox allow-scripts allow-downloads;",

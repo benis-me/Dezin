@@ -1,4 +1,4 @@
-import { useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type MutableRefObject } from "react";
 import { Columns2, GripVertical, SlidersHorizontal } from "lucide-react";
 import { Dialog, Segmented } from "./ui/index.ts";
 import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
@@ -6,6 +6,67 @@ import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 interface Side {
   url: string;
   label: string;
+}
+
+function frameDocument(frame: HTMLIFrameElement | null): Document | null {
+  try {
+    return frame?.contentDocument ?? frame?.contentWindow?.document ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function frameScrollElement(doc: Document): HTMLElement | null {
+  return (doc.scrollingElement as HTMLElement | null) ?? doc.documentElement ?? doc.body ?? null;
+}
+
+function applyDocumentScroll(doc: Document | null, top: number, left: number): void {
+  if (!doc) return;
+  const root = frameScrollElement(doc);
+  if (!root) return;
+  root.scrollTop = top;
+  root.scrollLeft = left;
+  if (doc.documentElement && doc.documentElement !== root) {
+    doc.documentElement.scrollTop = top;
+    doc.documentElement.scrollLeft = left;
+  }
+  if (doc.body && doc.body !== root) {
+    doc.body.scrollTop = top;
+    doc.body.scrollLeft = left;
+  }
+}
+
+function postScrollSync(frame: HTMLIFrameElement | null, top: number, left: number): void {
+  try {
+    frame?.contentWindow?.postMessage({ source: "dezin-parent", type: "sync-scroll", top, left }, "*");
+  } catch {
+    // Cross-origin frames can still receive postMessage, but tolerate browser edge cases.
+  }
+}
+
+function syncFrameScroll(frame: HTMLIFrameElement | null, top: number, left: number): void {
+  applyDocumentScroll(frameDocument(frame), top, left);
+  postScrollSync(frame, top, left);
+}
+
+function bindFrameScroll(sourceDoc: Document, targetFrame: HTMLIFrameElement | null, syncingRef: MutableRefObject<boolean>): () => void {
+  const sourceWindow = sourceDoc.defaultView;
+  const onScroll = (): void => {
+    if (syncingRef.current) return;
+    const source = frameScrollElement(sourceDoc);
+    if (!source) return;
+    syncingRef.current = true;
+    syncFrameScroll(targetFrame, source.scrollTop, source.scrollLeft);
+    window.setTimeout(() => {
+      syncingRef.current = false;
+    }, 0);
+  };
+  sourceWindow?.addEventListener("scroll", onScroll, { passive: true });
+  sourceDoc.addEventListener("scroll", onScroll, true);
+  return () => {
+    sourceWindow?.removeEventListener("scroll", onScroll);
+    sourceDoc.removeEventListener("scroll", onScroll, true);
+  };
 }
 
 /** Visual diff between two versions/branches: side-by-side, or a before/after slider. */
@@ -16,6 +77,50 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
   const aRef = useRef<HTMLIFrameElement>(null);
   const bRef = useRef<HTMLIFrameElement>(null);
   const handleRef = useRef<HTMLButtonElement>(null);
+  const syncingScrollRef = useRef(false);
+
+  useEffect(() => {
+    if (!open) return;
+    let frameCleanups: Array<() => void> = [];
+    const cleanupFrameScroll = (): void => {
+      for (const cleanup of frameCleanups) cleanup();
+      frameCleanups = [];
+    };
+    const attachFrameScroll = (): void => {
+      cleanupFrameScroll();
+      const aDoc = frameDocument(aRef.current);
+      const bDoc = frameDocument(bRef.current);
+      if (aDoc) frameCleanups.push(bindFrameScroll(aDoc, bRef.current, syncingScrollRef));
+      if (bDoc) frameCleanups.push(bindFrameScroll(bDoc, aRef.current, syncingScrollRef));
+    };
+    const onMessage = (event: MessageEvent): void => {
+      const data = event.data as { source?: string; type?: string; top?: unknown; left?: unknown } | null;
+      if (!data || data.source !== "dezin" || data.type !== "scroll") return;
+      const sourceWindow = event.source;
+      const targetFrame = sourceWindow === aRef.current?.contentWindow ? bRef.current : sourceWindow === bRef.current?.contentWindow ? aRef.current : null;
+      if (!targetFrame) return;
+      const top = typeof data.top === "number" && Number.isFinite(data.top) ? data.top : 0;
+      const left = typeof data.left === "number" && Number.isFinite(data.left) ? data.left : 0;
+      if (syncingScrollRef.current) return;
+      syncingScrollRef.current = true;
+      syncFrameScroll(targetFrame, top, left);
+      window.setTimeout(() => {
+        syncingScrollRef.current = false;
+      }, 0);
+    };
+    const aFrame = aRef.current;
+    const bFrame = bRef.current;
+    attachFrameScroll();
+    aFrame?.addEventListener("load", attachFrameScroll);
+    bFrame?.addEventListener("load", attachFrameScroll);
+    window.addEventListener("message", onMessage);
+    return () => {
+      aFrame?.removeEventListener("load", attachFrameScroll);
+      bFrame?.removeEventListener("load", attachFrameScroll);
+      window.removeEventListener("message", onMessage);
+      cleanupFrameScroll();
+    };
+  }, [open, mode, a.url, b.url]);
 
   // Drive the drag through the DOM directly (no per-frame React re-render of the iframes),
   // and turn off the iframes' hit-testing so fast drags don't get swallowed by them.
@@ -29,7 +134,7 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
       if (!el) return;
       const rect = el.getBoundingClientRect();
       p = Math.min(99, Math.max(1, ((ev.clientX - rect.left) / rect.width) * 100));
-      if (bRef.current) bRef.current.style.clipPath = `inset(0 ${100 - p}% 0 0)`;
+      if (aRef.current) aRef.current.style.clipPath = `inset(0 ${100 - p}% 0 0)`;
       if (handleRef.current) handleRef.current.style.left = `${p}%`;
     };
     const up = (): void => {
@@ -71,24 +176,16 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
             <div className="flex h-full">
               <div className="relative h-full flex-1 border-r border-border">
                 <span className={`${tag} left-2.5`}>{a.label}</span>
-                <iframe key={a.url} src={a.url} title={a.label} sandbox={previewSandboxForSrc(a.url)} className="h-full w-full bg-white" />
+                <iframe key={a.url} ref={aRef} src={a.url} title={a.label} sandbox={previewSandboxForSrc(a.url)} className="h-full w-full bg-white" />
               </div>
               <div className="relative h-full flex-1">
                 <span className={`${tag} left-2.5`}>{b.label}</span>
-                <iframe key={b.url} src={b.url} title={b.label} sandbox={previewSandboxForSrc(b.url)} className="h-full w-full bg-white" />
+                <iframe key={b.url} ref={bRef} src={b.url} title={b.label} sandbox={previewSandboxForSrc(b.url)} className="h-full w-full bg-white" />
               </div>
             </div>
           ) : (
             <>
-              {/* A fills the pane; B is full-size too but clip-path reveals only its left portion */}
-              <iframe
-                key={a.url}
-                ref={aRef}
-                src={a.url}
-                title={a.label}
-                sandbox={previewSandboxForSrc(a.url)}
-                className="absolute inset-0 h-full w-full bg-white"
-              />
+              {/* Current fills the pane; the compared version is clipped to the left side. */}
               <iframe
                 key={b.url}
                 ref={bRef}
@@ -96,19 +193,27 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
                 title={b.label}
                 sandbox={previewSandboxForSrc(b.url)}
                 className="absolute inset-0 h-full w-full bg-white"
+              />
+              <iframe
+                key={a.url}
+                ref={aRef}
+                src={a.url}
+                title={a.label}
+                sandbox={previewSandboxForSrc(a.url)}
+                className="absolute inset-0 h-full w-full bg-white"
                 style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}
               />
-              <span className={`${tag} left-2.5`}>{b.label}</span>
-              <span className={`${tag} right-2.5`}>{a.label}</span>
+              <span className={`${tag} left-2.5`}>{a.label}</span>
+              <span className={`${tag} right-2.5`}>{b.label}</span>
               <button
                 ref={handleRef}
                 type="button"
                 aria-label="Drag to compare"
                 onMouseDown={drag}
-                className="absolute inset-y-0 z-20 grid w-5 -translate-x-1/2 cursor-col-resize place-items-center"
+                className="absolute inset-y-0 z-20 flex w-9 -translate-x-1/2 cursor-col-resize items-center justify-center"
                 style={{ left: `${pos}%` }}
               >
-                <span className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-primary" />
+                <span data-testid="compare-divider-line" className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-primary" />
                 <span className="relative grid size-7 place-items-center rounded-full border border-border bg-card shadow-pop">
                   <GripVertical size={14} strokeWidth={2} className="text-foreground" />
                 </span>

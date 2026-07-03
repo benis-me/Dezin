@@ -638,7 +638,10 @@ test("a run snapshots its artifact; versions can be served and restored", async 
 
     const v = await fetch(`${base}/api/projects/${project.id}/versions/${runId}`);
     assert.equal(v.status, 200);
-    assert.match(await v.text(), /Hi there/); // the CLEAN snapshot content
+    const versionHtml = await v.text();
+    assert.match(versionHtml, /Hi there/); // the CLEAN snapshot content
+    assert.match(versionHtml, /data-dezin-bridge/);
+    assert.match(versionHtml, /sync-scroll/);
 
     const restore = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/restore`, { method: "POST" });
     assert.equal(restore.status, 200);

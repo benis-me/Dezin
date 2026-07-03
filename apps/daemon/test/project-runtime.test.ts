@@ -47,6 +47,8 @@ export default defineConfig({ server: { host: "127.0.0.1" } });
     assert.match(updated, /attrs:attrs\(el\)/);
     assert.match(updated, /gridTemplateColumns:s\.gridTemplateColumns/);
     assert.match(updated, /focus-target/);
+    assert.match(updated, /sync-scroll/);
+    assert.match(updated, /type:'scroll'/);
     assert.match(updated, /selectedBox/);
     assert.match(updated, /#f97316/);
     assert.match(updated, /server: \{ host: "127\.0\.0\.1" \}/);

@@ -691,6 +691,8 @@ test("picker bridge reports stable precise selectors", () => {
   assert.match(html, /borderWidth:s\.borderWidth/);
   assert.match(html, /gridTemplateColumns:s\.gridTemplateColumns/);
   assert.match(html, /focus-target/);
+  assert.match(html, /sync-scroll/);
+  assert.match(html, /type:'scroll'/);
   assert.match(html, /hoverBox/);
   assert.match(html, /selectedBox/);
   assert.match(html, /#f97316/);
