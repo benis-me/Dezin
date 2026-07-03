@@ -246,7 +246,7 @@ export function useMoodboardBoard(boardId: string) {
   );
 
   const uploadFiles = useCallback(
-    async (files: FileList | null, point?: { x: number; y: number }) => {
+    async (files: FileList | File[] | null, point?: { x: number; y: number }) => {
       if (!files?.length) return;
       setImageBusy(true);
       try {
@@ -274,7 +274,7 @@ export function useMoodboardBoard(boardId: string) {
   );
 
   const uploadReferenceFiles = useCallback(
-    async (files: FileList | null): Promise<MoodboardAsset[]> => {
+    async (files: FileList | File[] | null): Promise<MoodboardAsset[]> => {
       if (!files?.length) return [];
       setImageBusy(true);
       try {

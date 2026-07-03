@@ -218,6 +218,8 @@ export interface BrandImportInput {
   bodyFont?: string;
   vibe?: string;
   category?: string;
+  agentCommand?: string;
+  model?: string;
 }
 
 export interface SkillCard {

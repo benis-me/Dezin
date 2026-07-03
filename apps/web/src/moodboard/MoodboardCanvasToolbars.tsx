@@ -49,6 +49,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "../components/ui/index.ts";
+import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { cn } from "../lib/utils.ts";
 import { generatorPrompt, referenceAssetIds as referenceAssetIdsFromNode, type MoodboardAlignType, type MoodboardCanvasTool } from "./canvas-utils.ts";
 import {
@@ -106,22 +107,23 @@ function stopToolbarEvent(event: { stopPropagation: () => void }) {
   event.stopPropagation();
 }
 
-function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
-  return Array.from(event.dataTransfer?.types ?? []).includes("Files") || (event.dataTransfer?.files?.length ?? 0) > 0;
-}
-
-function handleToolbarFileDrag(event: ReactDragEvent<HTMLElement>, onUploadFiles?: (files: FileList) => void): void {
+function handleToolbarFileDrag(event: ReactDragEvent<HTMLElement>, onUploadFiles?: (files: FileList | File[]) => void): void {
   if (!onUploadFiles || !hasDraggedFiles(event)) return;
   event.preventDefault();
   event.stopPropagation();
   event.dataTransfer.dropEffect = "copy";
 }
 
-function handleToolbarFileDrop(event: ReactDragEvent<HTMLElement>, onUploadFiles?: (files: FileList) => void): void {
+function handleToolbarFileDrop(event: ReactDragEvent<HTMLElement>, onUploadFiles?: (files: FileList | File[]) => void): void {
   if (!onUploadFiles || !hasDraggedFiles(event)) return;
   event.preventDefault();
   event.stopPropagation();
-  onUploadFiles(event.dataTransfer.files);
+  const dataTransfer = event.dataTransfer;
+  if (!dataTransfer.items?.length) {
+    onUploadFiles(dataTransfer.files);
+    return;
+  }
+  void filesFromDataTransfer(dataTransfer).then(onUploadFiles);
 }
 
 function isToolbarEventTarget(target: EventTarget | null): boolean {
@@ -212,7 +214,7 @@ function ReferenceImageControl({
   referenceImages?: ReferenceImageItem[];
   referencePickActive?: boolean;
   onReferenceAssetIdsChange?: (assetIds: string[]) => void;
-  onUploadReferenceFiles?: (files: FileList) => void;
+  onUploadReferenceFiles?: (files: FileList | File[]) => void;
   onSelectCanvasReference?: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -884,8 +886,8 @@ export function GeneratorPromptToolbar({
   onResizeNode?: (size: { width: number; height: number }) => void;
   onReferenceAssetIdsChange?: (assetIds: string[]) => void;
   onGenerate: (prompt: string, params: ImageGenerationParams, options: ImageGenerateOptions) => Promise<void>;
-  onUploadFiles?: (files: FileList) => void;
-  onUploadReferenceFiles?: (files: FileList) => void;
+  onUploadFiles?: (files: FileList | File[]) => void;
+  onUploadReferenceFiles?: (files: FileList | File[]) => void;
   onSelectCanvasReference?: () => void;
 }) {
   const [prompt, setPrompt] = useState(generatorPrompt(node));
@@ -1190,8 +1192,8 @@ export function QuickEditPromptToolbar({
   onModelChange: (model: string) => void;
   onReferenceAssetIdsChange?: (assetIds: string[]) => void;
   onGenerate: (prompt: string, options: ImageGenerateOptions) => Promise<void>;
-  onUploadFiles?: (files: FileList) => void;
-  onUploadReferenceFiles?: (files: FileList) => void;
+  onUploadFiles?: (files: FileList | File[]) => void;
+  onUploadReferenceFiles?: (files: FileList | File[]) => void;
   onSelectCanvasReference?: () => void;
 }) {
   const [prompt, setPrompt] = useState("");

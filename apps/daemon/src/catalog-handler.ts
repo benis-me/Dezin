@@ -74,7 +74,16 @@ export function handleGetDesignSystem(res: ServerResponse, params: Record<string
 /** POST /api/design-systems/import — generate a brand system from a few inputs, persist it, register it. */
 export async function handleImportBrand(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
   const body = (await readJsonBody(req)) as
-    | { name?: string; accent?: string; displayFont?: string; bodyFont?: string; vibe?: string; category?: string }
+    | {
+        name?: string;
+        accent?: string;
+        displayFont?: string;
+        bodyFont?: string;
+        vibe?: string;
+        category?: string;
+        agentCommand?: string;
+        model?: string;
+      }
     | null;
   if (!body || typeof body !== "object") return sendError(res, 400, "body must be an object");
   if (typeof body.name !== "string" || body.name.trim().length === 0) return sendError(res, 400, "name is required");
@@ -96,7 +105,15 @@ export async function handleImportBrand(req: IncomingMessage, res: ServerRespons
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, "DESIGN.md"), brand.designMd, "utf8");
   await writeFile(join(dir, "tokens.css"), brand.tokensCss, "utf8");
-  await writeFile(join(dir, "manifest.json"), JSON.stringify(brand.manifest, null, 2), "utf8");
+  const builder = {
+    agentCommand: typeof body.agentCommand === "string" && body.agentCommand.trim() ? body.agentCommand.trim() : undefined,
+    model: typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined,
+  };
+  const manifest =
+    builder.agentCommand || builder.model
+      ? { ...brand.manifest, builder: Object.fromEntries(Object.entries(builder).filter(([, value]) => value)) }
+      : brand.manifest;
+  await writeFile(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
   registry.register({
     id: brand.id,
     name: brand.name,

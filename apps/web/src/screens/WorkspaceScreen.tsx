@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -45,6 +45,7 @@ import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
+import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
 import type { Conversation, Variant, DesignSystemCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, Settings as AppSettings, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
@@ -83,10 +84,6 @@ const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg
 const FLOATING_COMPOSER_FADE_PX = 48;
 const SCROLL_TO_BOTTOM_GAP_PX = 12;
 const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
-
-function hasDraggedFiles(event: ReactDragEvent<Element>): boolean {
-  return Array.from(event.dataTransfer?.types ?? []).includes("Files") || (event.dataTransfer?.files?.length ?? 0) > 0;
-}
 
 function queueKey(projectId: string): string {
   return `dezin.workspace.queue.${projectId}`;
@@ -3533,10 +3530,17 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (!hasDraggedFiles(e)) return;
     e.preventDefault();
     setDragging(false);
-    if (e.dataTransfer.files?.length) void attachFiles(e.dataTransfer.files);
+    const dataTransfer = e.dataTransfer;
+    if (!dataTransfer.items?.length) {
+      if (dataTransfer.files?.length) void attachFiles(dataTransfer.files);
+      return;
+    }
+    void filesFromDataTransfer(dataTransfer).then((files) => {
+      if (files.length) void attachFiles(files);
+    });
   };
 
-  const attachFiles = async (files: FileList | null): Promise<void> => {
+  const attachFiles = async (files: FileList | File[] | null): Promise<void> => {
     if (!files || projectId === "new") return;
     for (const file of Array.from(files)) {
       try {

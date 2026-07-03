@@ -47,6 +47,7 @@ import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
+import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
 import { takePendingComposer } from "../lib/pending-composer.ts";
 import { setPendingImages, setPendingAgent, setPendingRefs } from "../lib/pending-brief.ts";
 import { fetchProjectArtifact, toBase64 } from "../lib/project-ref.ts";
@@ -344,7 +345,7 @@ export function HomeScreen({
     [homeAgent, saveAgentModelDefaults],
   );
 
-  const addImages = async (files: FileList | null): Promise<void> => {
+  const addImages = async (files: FileList | File[] | null): Promise<void> => {
     if (!files) return;
     for (const file of Array.from(files).filter((f) => f.type.startsWith("image/"))) {
       try {
@@ -370,7 +371,12 @@ export function HomeScreen({
   const handlePromptDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
-    void addImages(event.dataTransfer.files);
+    const dataTransfer = event.dataTransfer;
+    const paths = localPathsFromDataTransfer(dataTransfer);
+    if (paths.length) {
+      setBrief((current) => `${current}${current.trim() ? "\n\n" : ""}Use these local paths as reference: ${paths.join(", ")}`);
+    }
+    void filesFromDataTransfer(dataTransfer).then(addImages);
   };
 
   const referenceProject = async (project: Project): Promise<void> => {
@@ -961,8 +967,4 @@ export function HomeScreen({
       </Dialog>
     </div>
   );
-}
-
-function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
-  return Array.from(event.dataTransfer.types ?? []).includes("Files") || event.dataTransfer.files.length > 0;
 }

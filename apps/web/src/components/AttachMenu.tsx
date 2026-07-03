@@ -76,8 +76,9 @@ export function AttachMenu({
       } else {
         toast("Couldn't extract a design from that .fig.", { variant: "error" });
       }
-    } catch {
-      toast(`Couldn't read ${file.name}.`, { variant: "error" });
+    } catch (error) {
+      const message = error instanceof Error && error.message.trim() ? error.message : `Couldn't read ${file.name}.`;
+      toast(message, { variant: "error" });
     }
   };
   return (

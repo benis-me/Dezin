@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronLeft, Copy, Loader2, Paperclip, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AgentInfo, MoodboardConversation, MoodboardMessage } from "../lib/api.ts";
@@ -13,15 +13,12 @@ import { AttachMenu } from "../components/AttachMenu.tsx";
 import { ConversationSelect } from "../components/ConversationSelect.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { Button, IconButton, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/index.ts";
+import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { cn } from "../lib/utils.ts";
 
 const FLOATING_COMPOSER_FADE_PX = 48;
 const SCROLL_TO_BOTTOM_GAP_PX = 12;
 const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
-
-function hasDraggedFiles(event: ReactDragEvent<Element>): boolean {
-  return Array.from(event.dataTransfer?.types ?? []).includes("Files") || (event.dataTransfer?.files?.length ?? 0) > 0;
-}
 
 export type MoodboardComposerInsertion = {
   id: number;
@@ -66,7 +63,7 @@ export function MoodboardAgentPanel({
   onAgentChange: (command: string) => void;
   onModelChange: (model: string) => void;
   onRescanAgents: () => Promise<void>;
-  onUploadFiles?: (files: FileList | null) => void;
+  onUploadFiles?: (files: FileList | File[] | null) => void;
   onSend: (content: string) => Promise<void>;
   loading?: boolean;
   composerInsertion?: MoodboardComposerInsertion | null;
@@ -168,7 +165,7 @@ export function MoodboardAgentPanel({
     return () => window.cancelAnimationFrame(frame);
   }, [addContextItems, composerInsertion?.id, composerInsertion?.items, focusComposerEnd]);
 
-  const attachFiles = (files: FileList | null) => {
+  const attachFiles = (files: FileList | File[] | null) => {
     onUploadFiles?.(files);
     setDragging(false);
   };
@@ -318,7 +315,12 @@ export function MoodboardAgentPanel({
             onDrop={(event) => {
               if (!onUploadFiles || !hasDraggedFiles(event)) return;
               event.preventDefault();
-              attachFiles(event.dataTransfer.files);
+              const dataTransfer = event.dataTransfer;
+              if (!dataTransfer.items?.length) {
+                attachFiles(dataTransfer.files);
+                return;
+              }
+              void filesFromDataTransfer(dataTransfer).then(attachFiles);
             }}
             className={`pointer-events-auto relative rounded-2xl border bg-card px-2.5 pb-2 pt-2.5 transition-[color,border-color,box-shadow] duration-150 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring ${
               dragging ? "border-ring ring-2 ring-ring/40" : "border-input hover:border-border-strong"

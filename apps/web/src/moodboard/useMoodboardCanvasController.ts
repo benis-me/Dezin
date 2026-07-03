@@ -48,8 +48,8 @@ export interface MoodboardCanvasProps {
   onAddNote: (point?: { x: number; y: number }) => void;
   onAddSection: (point?: { x: number; y: number; width?: number; height?: number }) => void;
   onAddImageGenerator: (point?: { x: number; y: number }, data?: Record<string, unknown>) => string | void;
-  onUploadFiles: (files: FileList | null, point?: { x: number; y: number }) => void;
-  onUploadReferenceFiles?: (files: FileList | null) => Promise<MoodboardAsset[]>;
+  onUploadFiles: (files: FileList | File[] | null, point?: { x: number; y: number }) => void;
+  onUploadReferenceFiles?: (files: FileList | File[] | null) => Promise<MoodboardAsset[]>;
   referencePickActive?: boolean;
   onReferenceNodePick?: (node: MoodboardNode) => void;
   onGenerateImage: (
@@ -603,7 +603,7 @@ export function useMoodboardCanvasController({
   );
 
   const uploadFiles = useCallback(
-    (files: FileList | null, point?: { x: number; y: number }) => {
+    (files: FileList | File[] | null, point?: { x: number; y: number }) => {
       if (files?.length) recordHistory();
       onUploadFilesRef.current(files, point);
     },

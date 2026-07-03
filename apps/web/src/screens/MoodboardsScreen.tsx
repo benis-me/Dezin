@@ -23,6 +23,7 @@ import {
 import { ImageModelPicker } from "../moodboard/ImageModelPicker.tsx";
 import { createImageNode, fileToBase64, imageSize } from "../moodboard/moodboard-board-utils.ts";
 import { imageModelOptions } from "../moodboard/useMoodboardBoard.ts";
+import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
 
 interface PromptImage {
   file: File;
@@ -161,7 +162,7 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
     }
   };
 
-  const addPromptImages = async (files: FileList | null): Promise<void> => {
+  const addPromptImages = async (files: FileList | File[] | null): Promise<void> => {
     if (!files) return;
     const next: PromptImage[] = [];
     for (const file of Array.from(files).filter((item) => item.type.startsWith("image/"))) {
@@ -184,7 +185,12 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
   const handlePromptDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
-    void addPromptImages(event.dataTransfer.files);
+    const dataTransfer = event.dataTransfer;
+    const paths = localPathsFromDataTransfer(dataTransfer);
+    if (paths.length) {
+      setPrompt((current) => `${current}${current.trim() ? "\n\n" : ""}Use these local paths as reference: ${paths.join(", ")}`);
+    }
+    void filesFromDataTransfer(dataTransfer).then(addPromptImages);
   };
 
   const startBoard = async () => {
@@ -535,10 +541,6 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
       </Dialog>
     </div>
   );
-}
-
-function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
-  return Array.from(event.dataTransfer.types ?? []).includes("Files") || event.dataTransfer.files.length > 0;
 }
 
 function titleFromPrompt(prompt: string): string {

@@ -1,10 +1,13 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
 import { ChevronLeft, FileUp, FolderPlus, ImagePlus, Sparkles, X } from "lucide-react";
 import { Button } from "../components/ui/index.ts";
+import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { useApi } from "../lib/api-context.tsx";
+import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { navigate } from "../router.tsx";
 import { native } from "../lib/native.ts";
+import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
 
 /** A labelled resource row — a description on the left, a drop/browse target on the right. */
 function ResourceRow({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
@@ -19,12 +22,46 @@ function ResourceRow({ label, hint, children }: { label: string; hint?: string; 
   );
 }
 
-function DropButton({ icon, children, onClick }: { icon: ReactNode; children: ReactNode; onClick: () => void }) {
+function DropButton({
+  icon,
+  children,
+  onClick,
+  onDropFiles,
+}: {
+  icon: ReactNode;
+  children: ReactNode;
+  onClick: () => void;
+  onDropFiles?: (event: ReactDragEvent<HTMLButtonElement>) => void;
+}) {
+  const [dragging, setDragging] = useState(false);
   return (
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-surface-2/40 py-3 text-sm text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
+      onDragEnter={(event) => {
+        if (!onDropFiles || !hasDraggedFiles(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setDragging(true);
+      }}
+      onDragOver={(event) => {
+        if (!onDropFiles || !hasDraggedFiles(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        setDragging(true);
+      }}
+      onDragLeave={(event) => {
+        if (event.currentTarget === event.target) setDragging(false);
+      }}
+      onDrop={(event) => {
+        if (!onDropFiles || !hasDraggedFiles(event)) return;
+        event.preventDefault();
+        setDragging(false);
+        onDropFiles(event);
+      }}
+      className={`flex w-full items-center justify-center gap-2 rounded-lg border border-dashed bg-surface-2/40 py-3 text-sm transition-colors hover:border-border-strong hover:text-foreground ${
+        dragging ? "border-ring text-foreground ring-2 ring-ring/30" : "border-border text-muted-foreground"
+      }`}
     >
       {icon}
       {children}
@@ -35,14 +72,52 @@ function DropButton({ icon, children, onClick }: { icon: ReactNode; children: Re
 export function DesignSystemNewScreen() {
   const api = useApi();
   const { toast } = useToast();
+  const { agents, rescan: rescanAgents } = useAgents();
   const [blurb, setBlurb] = useState("");
   const [notes, setNotes] = useState("");
   const [localPath, setLocalPath] = useState<string | null>(null);
   const [fig, setFig] = useState<{ name: string; summary: string } | null>(null);
   const [assets, setAssets] = useState<string[]>([]);
+  const [settingsAgent, setSettingsAgent] = useState<string | null>(null);
+  const [settingsModel, setSettingsModel] = useState("");
+  const [designAgent, setDesignAgent] = useState("");
+  const [designModel, setDesignModel] = useState("");
   const [busy, setBusy] = useState(false);
   const figInputRef = useRef<HTMLInputElement>(null);
   const assetInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void api
+      .getSettings()
+      .then((settings) => {
+        if (!alive) return;
+        setSettingsAgent(settings.agentCommand ?? "");
+        setSettingsModel(settings.model ?? "");
+      })
+      .catch(() => alive && setSettingsAgent(""));
+    return () => {
+      alive = false;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    if (settingsAgent === null) return;
+    const available = agents.filter((agent) => agent.available);
+    if (!available.length) return;
+    const useSaved = settingsAgent !== "" && available.some((agent) => agent.command === settingsAgent);
+    setDesignAgent((current) => current || (useSaved ? settingsAgent : available[0]!.command));
+    if (useSaved && settingsModel) setDesignModel((current) => current || settingsModel);
+  }, [agents, settingsAgent, settingsModel]);
+
+  const changeDesignAgent = useCallback((command: string) => {
+    setDesignAgent(command);
+    setDesignModel("");
+  }, []);
+
+  const changeDesignModel = useCallback((model: string) => {
+    setDesignModel(model);
+  }, []);
 
   const pickFolder = async (): Promise<void> => {
     if (!native) return toast("Folder linking needs the desktop app.");
@@ -50,9 +125,7 @@ export function DesignSystemNewScreen() {
     if (paths.length) setLocalPath(paths[0]!);
   };
 
-  const onFig = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
+  const readFig = async (file: File): Promise<void> => {
     if (!file) return;
     toast(`Reading ${file.name}…`);
     try {
@@ -61,9 +134,48 @@ export function DesignSystemNewScreen() {
         setFig({ name: file.name, summary: r.summary });
         toast(`Parsed ${file.name}.`);
       } else toast("Couldn't extract a design from that .fig.", { variant: "error" });
-    } catch {
-      toast(`Couldn't read ${file.name}.`, { variant: "error" });
+    } catch (error) {
+      const message = error instanceof Error && error.message.trim() ? error.message : `Couldn't read ${file.name}.`;
+      toast(message, { variant: "error" });
     }
+  };
+
+  const onFig = async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    await readFig(file);
+  };
+
+  const addAssets = (files: File[]): void => {
+    const names = files.map((file) => file.name).filter(Boolean);
+    if (names.length) setAssets((current) => [...current, ...names]);
+  };
+
+  const onFolderDrop = (event: ReactDragEvent<HTMLButtonElement>): void => {
+    const paths = localPathsFromDataTransfer(event.dataTransfer);
+    if (paths.length) {
+      setLocalPath(paths[0]!);
+      return;
+    }
+    toast("Drop a folder from the desktop app, or pick one.", { variant: "error" });
+  };
+
+  const onFigDrop = (event: ReactDragEvent<HTMLButtonElement>): void => {
+    const dataTransfer = event.dataTransfer;
+    void filesFromDataTransfer(dataTransfer).then((files) => {
+      const file = files.find((item) => item.name.toLowerCase().endsWith(".fig"));
+      if (!file) {
+        toast("Drop a .fig file.", { variant: "error" });
+        return;
+      }
+      void readFig(file);
+    });
+  };
+
+  const onAssetsDrop = (event: ReactDragEvent<HTMLButtonElement>): void => {
+    const dataTransfer = event.dataTransfer;
+    void filesFromDataTransfer(dataTransfer).then(addAssets);
   };
 
   const create = async (): Promise<void> => {
@@ -78,7 +190,14 @@ export function DesignSystemNewScreen() {
       const vibe = [text, notes.trim(), fig ? `Reference (${fig.name}): ${fig.summary}` : "", localPath ? `Local code: ${localPath}` : ""]
         .filter(Boolean)
         .join("\n\n");
-      const card = await api.importBrand({ name, accent, displayFont: display, vibe });
+      const card = await api.importBrand({
+        name,
+        accent,
+        displayFont: display,
+        vibe,
+        agentCommand: designAgent || undefined,
+        model: designModel || undefined,
+      });
       toast(`Created ${card.name}.`);
       navigate(`/design-systems/${card.id}`);
     } catch (e) {
@@ -97,9 +216,8 @@ export function DesignSystemNewScreen() {
         multiple
         className="hidden"
         onChange={(e) => {
-          const names = Array.from(e.target.files ?? []).map((f) => f.name);
+          addAssets(Array.from(e.target.files ?? []));
           e.target.value = "";
-          if (names.length) setAssets((a) => [...a, ...names]);
         }}
       />
       <div className="app-drag flex h-12 shrink-0 items-center gap-2.5 border-b border-border px-4">
@@ -133,6 +251,21 @@ export function DesignSystemNewScreen() {
             />
           </div>
 
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card/60 px-3 py-2.5">
+            <div>
+              <p className="text-sm font-medium">Builder</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">Local to this design system.</p>
+            </div>
+            <AgentModelSelect
+              agents={agents}
+              agent={designAgent}
+              model={designModel}
+              onAgentChange={changeDesignAgent}
+              onModelChange={changeDesignModel}
+              onRescan={rescanAgents}
+            />
+          </div>
+
           <div className="mt-9">
             <h3 className="text-lg font-semibold tracking-tight">
               Provide examples of your design system and products <span className="text-base font-normal text-muted-foreground">(all optional)</span>
@@ -149,7 +282,7 @@ export function DesignSystemNewScreen() {
                     </button>
                   </div>
                 ) : (
-                  <DropButton icon={<FolderPlus size={15} strokeWidth={1.75} />} onClick={() => void pickFolder()}>
+                  <DropButton icon={<FolderPlus size={15} strokeWidth={1.75} />} onClick={() => void pickFolder()} onDropFiles={onFolderDrop}>
                     Pick a folder…
                   </DropButton>
                 )}
@@ -164,14 +297,14 @@ export function DesignSystemNewScreen() {
                     </button>
                   </div>
                 ) : (
-                  <DropButton icon={<FileUp size={15} strokeWidth={1.75} />} onClick={() => figInputRef.current?.click()}>
+                  <DropButton icon={<FileUp size={15} strokeWidth={1.75} />} onClick={() => figInputRef.current?.click()} onDropFiles={onFigDrop}>
                     Choose a .fig file…
                   </DropButton>
                 )}
               </ResourceRow>
 
               <ResourceRow label="Add fonts, logos and assets">
-                <DropButton icon={<ImagePlus size={15} strokeWidth={1.75} />} onClick={() => assetInputRef.current?.click()}>
+                <DropButton icon={<ImagePlus size={15} strokeWidth={1.75} />} onClick={() => assetInputRef.current?.click()} onDropFiles={onAssetsDrop}>
                   Choose files…
                 </DropButton>
                 {assets.length ? (

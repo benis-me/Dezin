@@ -5,6 +5,7 @@ import { HomeScreen } from "./HomeScreen.tsx";
 import { MoodboardsScreen } from "./MoodboardsScreen.tsx";
 import { DesignSystemsScreen } from "./DesignSystemsScreen.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
+import { DesignSystemNewScreen } from "./DesignSystemNewScreen.tsx";
 import { SettingsScreen } from "./SettingsScreen.tsx";
 import { Shell } from "../components/Shell.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
@@ -12,6 +13,7 @@ import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import type { Settings } from "../lib/api.ts";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
+import { ToastProvider } from "../components/Toast.tsx";
 
 afterEach(() => {
   localStorage.removeItem("dezin.shell.sidebar.width");
@@ -32,6 +34,16 @@ function renderWithApiAndAgents(ui: React.ReactElement, over = {}) {
   return render(
     <ApiProvider client={makeFakeApi(over)}>
       <AgentsProvider>{ui}</AgentsProvider>
+    </ApiProvider>,
+  );
+}
+
+function renderWithApiToastAndAgents(ui: React.ReactElement, over = {}) {
+  return render(
+    <ApiProvider client={makeFakeApi(over)}>
+      <AgentsProvider>
+        <ToastProvider>{ui}</ToastProvider>
+      </AgentsProvider>
     </ApiProvider>,
   );
 }
@@ -585,6 +597,84 @@ test("DesignSystemDetailScreen loads a system and sets it as default", async () 
   expect(getDesignSystem).toHaveBeenCalledWith("modern-minimal");
   fireEvent.click(await screen.findByRole("button", { name: /Set default/ }));
   await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ defaultDesignSystemId: "modern-minimal" }));
+});
+
+test("DesignSystemNewScreen uses the saved agent/model as a local default without saving changes globally", async () => {
+  const user = userEvent.setup();
+  const updateSettings = vi.fn(async (patch: Partial<Settings>) => settingsFixture(patch));
+  const importBrand = vi.fn(async () => ({ id: "custom-brand", name: "Custom Brand", category: "Custom", summary: "Imported" }));
+
+  renderWithApiToastAndAgents(<DesignSystemNewScreen />, {
+    listAgents: async () => AGENTS,
+    rescanAgents: async () => AGENTS,
+    getSettings: async () => settingsFixture({ agentCommand: "codex", model: "gpt-5" }),
+    updateSettings,
+    importBrand,
+  });
+
+  const trigger = await screen.findByRole("button", { name: "Agent and model" });
+  await waitFor(() => expect(trigger).toHaveTextContent("Codex"));
+  expect(trigger).toHaveTextContent("gpt-5");
+
+  await user.click(trigger);
+  await user.click(await screen.findByRole("button", { name: /Claude/i }));
+  await user.click(await screen.findByRole("button", { name: "claude-sonnet-4-6" }));
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+  fireEvent.change(screen.getByLabelText(/Company name and blurb/i), { target: { value: "Custom Brand: a focused component system" } });
+  await user.click(screen.getByRole("button", { name: "Create design system" }));
+
+  await waitFor(() =>
+    expect(importBrand).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "Custom Brand", agentCommand: "claude", model: "claude-sonnet-4-6" }),
+    ),
+  );
+  expect(updateSettings).not.toHaveBeenCalled();
+});
+
+test("DesignSystemNewScreen accepts dropped folders, fig files, and asset files", async () => {
+  const parseFig = vi.fn(async (_file: Blob, name: string) => ({ name, summary: "Palette: #123456\nFonts: Geist" }));
+  renderWithApiToastAndAgents(<DesignSystemNewScreen />, {
+    listAgents: async () => AGENTS,
+    parseFig,
+  });
+
+  const folder = new File([], "brand-kit", { type: "" });
+  Object.defineProperty(folder, "path", { value: "/tmp/brand-kit" });
+  fireEvent.drop(await screen.findByRole("button", { name: /Pick a folder/i }), {
+    dataTransfer: { types: ["Files"], files: [folder] },
+  });
+  expect(await screen.findByText("/tmp/brand-kit")).toBeInTheDocument();
+
+  const fig = new File(["fig"], "brand.fig", { type: "application/octet-stream" });
+  fireEvent.drop(screen.getByRole("button", { name: /Choose a \.fig file/i }), {
+    dataTransfer: { types: ["Files"], files: [fig] },
+  });
+  await waitFor(() => expect(parseFig).toHaveBeenCalledWith(fig, "brand.fig"));
+  expect(await screen.findByText("brand.fig")).toBeInTheDocument();
+
+  const logo = new File(["logo"], "logo.svg", { type: "image/svg+xml" });
+  fireEvent.drop(screen.getByRole("button", { name: /Choose files/i }), {
+    dataTransfer: { types: ["Files"], files: [logo] },
+  });
+  expect(await screen.findByText("logo.svg")).toBeInTheDocument();
+});
+
+test("DesignSystemNewScreen shows the fig parser error detail", async () => {
+  renderWithApiToastAndAgents(<DesignSystemNewScreen />, {
+    listAgents: async () => AGENTS,
+    parseFig: async () => {
+      throw new Error('Couldn\'t read brand.fig: not a fig-kiwi archive (prelude "SQLite f")');
+    },
+  });
+
+  const fig = new File(["bad"], "brand.fig", { type: "application/octet-stream" });
+  fireEvent.drop(await screen.findByRole("button", { name: /Choose a \.fig file/i }), {
+    dataTransfer: { types: ["Files"], files: [fig] },
+  });
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("not a fig-kiwi archive");
 });
 
 function project(id: string, name: string) {

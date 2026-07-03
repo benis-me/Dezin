@@ -5,6 +5,7 @@ import { Frame as LeaferFrame, Leafer } from "@dezin/leafer-react";
 import type { Frame } from "leafer-editor";
 import { useToast } from "../components/Toast.tsx";
 import type { MoodboardNode } from "../lib/api.ts";
+import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { cn } from "../lib/utils.ts";
 import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
 import {
@@ -124,7 +125,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   );
 
   const uploadReferenceFilesForTarget = useCallback(
-    async (files: FileList, target: ReferencePickTarget) => {
+    async (files: FileList | File[], target: ReferencePickTarget) => {
       if (!onUploadReferenceFiles) return;
       const assets = await onUploadReferenceFiles(files);
       patchReferenceIdsForTarget(target, assets.map((asset) => asset.id));
@@ -290,6 +291,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   const handleExternalDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
     if (!hasDraggedFiles(event)) return;
     event.preventDefault();
+    const dataTransfer = event.dataTransfer;
     const containerRect = canvas.hostRef.current?.getBoundingClientRect();
     const point = containerRect
       ? clientPointToCanvasPoint({
@@ -300,7 +302,11 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           tree: (canvas.appRef.current as any)?.tree,
         })
       : canvas.getLastCanvasPoint() ?? undefined;
-    canvas.uploadFiles(event.dataTransfer.files, point);
+    if (!dataTransfer.items?.length) {
+      canvas.uploadFiles(dataTransfer.files, point);
+      return;
+    }
+    void filesFromDataTransfer(dataTransfer).then((files) => canvas.uploadFiles(files, point));
   };
 
   const unavailableImageAction = (action: string): void => {
@@ -308,7 +314,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   };
 
   const uploadFilesNearNode = useCallback(
-    (files: FileList, node: MoodboardNode) => {
+    (files: FileList | File[], node: MoodboardNode) => {
       canvas.uploadFiles(files, { x: node.x + node.width + 32, y: node.y });
     },
     [canvas.uploadFiles],
@@ -1045,10 +1051,6 @@ function normalizeFloatingFrameBounds(bounds: FloatingFrame): { x: number; y: nu
 
 function hasUsableFloatingFrameBounds(bounds: FloatingFrame): boolean {
   return [bounds.x, bounds.y, bounds.width, bounds.height].every((value) => Number.isFinite(Number(value)));
-}
-
-function hasDraggedFiles(event: ReactDragEvent<HTMLDivElement>): boolean {
-  return Array.from(event.dataTransfer.types ?? []).includes("Files");
 }
 
 function contextActionIds(targetId: string | null, selectedIds: string[]): string[] {
