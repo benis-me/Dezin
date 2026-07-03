@@ -46,6 +46,10 @@ function moodboardAssetPreviewUrl(boardId: string, assetId: string): string {
   return `/api/moodboards/${encodeURIComponent(boardId)}/assets/${encodeURIComponent(assetId)}`;
 }
 
+function imageNodeAssetId(node: MoodboardNode | null): string {
+  return node?.type === "image" && typeof node.data.assetId === "string" ? node.data.assetId.trim() : "";
+}
+
 export function MoodboardCanvas(props: MoodboardCanvasProps) {
   const {
     nodes,
@@ -59,6 +63,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     onConfigureImageActionModel,
     onGenerateImage,
     onSendToAgent,
+    onSetCoverImage,
     onUploadReferenceFiles,
     onTopbarControlsChange,
   } = props;
@@ -368,6 +373,11 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     canvas.setContextMenu(null);
     window.requestAnimationFrame(() => setQuickEditOpen(true));
   }, [canvas.fitNodes, canvas.selectLayers, canvas.setContextMenu, contextSingleNode]);
+  const setContextImageAsCover = useCallback(() => {
+    if (!contextSingleNode || !imageNodeAssetId(contextSingleNode)) return;
+    void onSetCoverImage?.(contextSingleNode);
+    canvas.setContextMenu(null);
+  }, [canvas.setContextMenu, contextSingleNode, onSetCoverImage]);
 
   return (
     <div className="relative min-h-0 flex-1 bg-surface">
@@ -620,6 +630,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             onDuplicate={canvas.contextTargetId ? () => canvas.duplicateNodes(contextActionIds(canvas.contextTargetId, canvas.selectedIds)) : undefined}
             onQuickEdit={contextSingleNode?.type === "image" ? openContextQuickEdit : undefined}
             onSendToAgent={contextActionNodes.length > 0 && onSendToAgent ? sendContextNodesToAgent : undefined}
+            onSetAsCover={contextSingleNode?.type === "image" && imageNodeAssetId(contextSingleNode) && onSetCoverImage ? setContextImageAsCover : undefined}
             onMoveForward={canvas.contextTargetId ? () => canvas.moveNodesLayerStep(contextActionIds(canvas.contextTargetId, canvas.selectedIds), "up") : undefined}
             onMoveBackward={canvas.contextTargetId ? () => canvas.moveNodesLayerStep(contextActionIds(canvas.contextTargetId, canvas.selectedIds), "down") : undefined}
             onBringToFront={canvas.contextTargetId ? () => canvas.bringNodesToFront(contextActionIds(canvas.contextTargetId, canvas.selectedIds)) : undefined}

@@ -171,6 +171,7 @@ export function MoodboardScreen({
               onUploadReferenceFiles={board.uploadReferenceFiles}
               onGenerateImage={board.generateImage}
               onSendToAgent={sendNodesToAgent}
+              onSetCoverImage={board.setCoverImage}
               onTopbarControlsChange={setCanvasTopbarControls}
             />
           </section>

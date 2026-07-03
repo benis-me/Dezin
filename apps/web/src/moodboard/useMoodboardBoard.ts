@@ -60,6 +60,10 @@ function mergeAssets(current: MoodboardAsset[], next: MoodboardAsset[]): Moodboa
   return [...byId.values()];
 }
 
+function imageNodeAssetId(node: MoodboardNode): string {
+  return node.type === "image" && typeof node.data.assetId === "string" ? node.data.assetId.trim() : "";
+}
+
 export function useMoodboardBoard(boardId: string) {
   const api = useApi();
   const { toast } = useToast();
@@ -374,6 +378,24 @@ export function useMoodboardBoard(boardId: string) {
     [api, boardId, conversationId, imageModel, toast],
   );
 
+  const setCoverImage = useCallback(
+    async (node: MoodboardNode) => {
+      const assetId = imageNodeAssetId(node);
+      if (!assetId) {
+        toast("That image is missing an asset reference.", { variant: "error" });
+        return;
+      }
+      try {
+        const updated = await api.patchMoodboard(boardId, { coverAssetId: assetId });
+        setDetail((current) => (current ? { ...current, ...updated } : current));
+        toast("Moodboard cover updated.");
+      } catch {
+        toast("Couldn't set the cover image.", { variant: "error" });
+      }
+    },
+    [api, boardId, toast],
+  );
+
   const sendMessage = useCallback(
     async (content: string) => {
       const activeConversationId = conversationId;
@@ -534,6 +556,7 @@ export function useMoodboardBoard(boardId: string) {
     uploadFiles,
     uploadReferenceFiles,
     generateImage,
+    setCoverImage,
     sendMessage,
     rescanAgents,
   };

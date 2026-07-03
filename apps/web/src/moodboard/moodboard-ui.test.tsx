@@ -418,6 +418,41 @@ test("MoodboardContextMenu separates selection actions from blank-canvas creatio
   expect(screen.getByText("View")).toBeInTheDocument();
 });
 
+test("MoodboardContextMenu exposes Set as cover for image nodes", () => {
+  const onSetAsCover = vi.fn();
+  const node: MoodboardNode = {
+    id: "img1",
+    boardId: "b1",
+    type: "image",
+    x: 40,
+    y: 50,
+    width: 220,
+    height: 140,
+    rotation: 0,
+    zIndex: 0,
+    data: { assetId: "asset-1", url: "/asset.png" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  render(
+    <MoodboardContextMenu
+      menu={{ x: 24, y: 32, canvasX: 240, canvasY: 260, targetId: node.id }}
+      targetId={node.id}
+      targetNode={node}
+      onClose={() => {}}
+      onAddNote={() => {}}
+      onAddSection={() => {}}
+      onGenerate={() => {}}
+      onSetAsCover={onSetAsCover}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "Set as cover" }));
+  expect(onSetAsCover).toHaveBeenCalledOnce();
+  expect(screen.queryByText("Add note here")).toBeNull();
+});
+
 test("MoodboardContextMenu exposes paste on the blank canvas menu", () => {
   const onPaste = vi.fn();
   render(

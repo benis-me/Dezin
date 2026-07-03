@@ -315,6 +315,71 @@ test("sendMessage flushes pending node saves before posting to the agent", async
   expect(calls).toEqual(["save:42", "post"]);
 });
 
+test("useMoodboardBoard sets an image node as the current board cover", async () => {
+  const imageNode: MoodboardNode = {
+    id: "img1",
+    boardId: "board-1",
+    type: "image",
+    x: 0,
+    y: 0,
+    width: 320,
+    height: 240,
+    rotation: 0,
+    zIndex: 0,
+    data: { assetId: "asset-1", url: "/api/moodboards/board-1/assets/asset-1" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let patchInput: unknown;
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    useEffect(() => {}, [board]);
+    return null;
+  }
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      coverUrl: null,
+      nodes: [imageNode],
+      assets: [],
+      messages: [],
+    }),
+    patchMoodboard: async (_id, patch) => {
+      patchInput = patch;
+      return {
+        id: "board-1",
+        name: "Board",
+        createdAt: 1,
+        updatedAt: 2,
+        archivedAt: null,
+        coverAssetId: "asset-1",
+        coverUrl: "/api/moodboards/board-1/assets/asset-1",
+      };
+    },
+  });
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+
+  await act(async () => {
+    await board.setCoverImage(imageNode);
+  });
+
+  expect(patchInput).toEqual({ coverAssetId: "asset-1" });
+  expect(board.detail?.coverAssetId).toBe("asset-1");
+  expect(board.detail?.coverUrl).toBe("/api/moodboards/board-1/assets/asset-1");
+});
+
 test("sendMessage shows the submitted prompt while the agent is still responding", async () => {
   let resolvePost!: (value: { messages: MoodboardMessage[] }) => void;
   let board!: ReturnType<typeof useMoodboardBoard>;

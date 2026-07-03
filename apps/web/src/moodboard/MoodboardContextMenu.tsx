@@ -9,6 +9,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  Image as ImageIcon,
   Lock,
   LockOpen,
   Maximize2,
@@ -41,6 +42,7 @@ export function MoodboardContextMenu({
   onDuplicate,
   onQuickEdit,
   onSendToAgent,
+  onSetAsCover,
   onMoveForward,
   onMoveBackward,
   onBringToFront,
@@ -66,6 +68,7 @@ export function MoodboardContextMenu({
   onDuplicate?: () => void;
   onQuickEdit?: () => void;
   onSendToAgent?: () => void;
+  onSetAsCover?: () => void;
   onMoveForward?: () => void;
   onMoveBackward?: () => void;
   onBringToFront?: () => void;
@@ -112,6 +115,8 @@ export function MoodboardContextMenu({
     };
   }, [boundaryElement, getInitialPosition, updatePosition]);
 
+  const setAsCoverAction = targetNode?.type === "image" && onSetAsCover ? onSetAsCover : null;
+
   return (
     <>
       <button
@@ -132,7 +137,8 @@ export function MoodboardContextMenu({
         {targetId ? <MenuLabel>Selection</MenuLabel> : null}
         {targetId && onSendToAgent ? <MenuButton icon={<SendHorizontal size={14} strokeWidth={1.75} />} label="Send to Agent" shortcut="Enter" onClick={onSendToAgent} /> : null}
         {targetNode?.type === "image" && onQuickEdit ? <MenuButton icon={<PencilLine size={14} strokeWidth={1.75} />} label="Quick Edit" onClick={onQuickEdit} /> : null}
-        {targetId && (onSendToAgent || onQuickEdit) ? <div className="my-1 h-px bg-border" /> : null}
+        {setAsCoverAction ? <MenuButton icon={<ImageIcon size={14} strokeWidth={1.75} />} label="Set as cover" onClick={setAsCoverAction} /> : null}
+        {targetId && (onSendToAgent || onQuickEdit || setAsCoverAction) ? <div className="my-1 h-px bg-border" /> : null}
         {targetId && onCopy ? <MenuButton icon={<ClipboardCopy size={14} strokeWidth={1.75} />} label="Copy" shortcut="Cmd C" onClick={onCopy} /> : null}
         {targetId && onPaste ? <MenuButton icon={<ClipboardPaste size={14} strokeWidth={1.75} />} label="Paste" shortcut="Cmd V" onClick={onPaste} /> : null}
         {targetId && onDuplicate ? <MenuButton icon={<Copy size={14} strokeWidth={1.75} />} label="Duplicate" shortcut="Cmd D" onClick={onDuplicate} /> : null}

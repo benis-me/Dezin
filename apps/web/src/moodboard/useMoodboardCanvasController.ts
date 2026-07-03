@@ -61,6 +61,7 @@ export interface MoodboardCanvasProps {
     options?: { sourceAssetId?: string; referenceAssetIds?: string[]; params?: ImageGenerationParams },
   ) => Promise<void>;
   onSendToAgent?: (nodes: MoodboardNode[]) => void;
+  onSetCoverImage?: (node: MoodboardNode) => void | Promise<void>;
   onTopbarControlsChange?: (controls: MoodboardCanvasTopbarControls | null) => void;
 }
 
