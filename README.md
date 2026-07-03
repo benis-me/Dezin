@@ -7,7 +7,7 @@ Describe what you want; Dezin drives the coding-agent CLI you already have to bu
 
 <br />
 
-<img src="./docs/assets/dezin-preview.png" alt="Dezin app preview" width="960" />
+<img src="./docs/assets/home.png" alt="Dezin — Start a design" width="960" />
 
 </div>
 
@@ -28,21 +28,49 @@ Three ideas do the work:
 
 The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that does not trip its own linter.
 
+<div align="center">
+  <img src="./docs/assets/workspace.png" alt="A Dezin Standard run in the workspace" width="900" />
+  <p><em>A Standard run — the agent's reasoning and file writes stream on the left, the artifact renders live on the right, and every version lands with its own quality score.</em></p>
+</div>
+
 ## Features
 
 - **Bring your own agent.** Dezin scans your PATH for installed CLIs and lets you pick per-run, with the agent's real version. Models the agent exposes are selectable too.
 - **Configurable quality automation.** Visual Review can run on the project agent/model or a separate reviewer agent/model, and auto-improve defaults to 8 repair rounds.
 - **Two build modes.** *Prototype* — one self-contained HTML file, fastest to iterate. *Standard* — a real Vite + React + GSAP project with components and routing.
 - **33 built-in design systems.** Brand visual languages modelled on Airbnb, Apple, Linear, Stripe, Vercel, Notion, Figma, and more (each a 9-section `DESIGN.md` + tokens), plus neutral house styles. Import your own from a code folder or a `.fig` file.
+- **Effects library.** 20 built-in `@Paper` visual effects — image filters (paper texture, fluted glass, halftone, dithering) and generative shaders (mesh/radial gradients, god rays, smoke, metaballs) — rendered via Paper Shaders, each with presets and a live parameter panel. Author your own WebGL2/GLSL effects and let the Agent revise them while the preview stays live.
 - **Variant branches.** Fork a design into parallel branches, iterate each differently, then compare them side by side with a draggable before/after slider.
 - **Files and Versions workspace.** Browse generated files with an in-pane source preview, and review per-branch versions grouped by branch with View, Diff, Compare, Restore, and Chat jump actions.
 - **Durable run state.** Run events are persisted and replayed when you reopen a project or navigate back. In-app navigation can reconnect to a running agent; if the desktop app quits, the interrupted run reopens at its last known state.
 - **Moodboards.** Collect visual references before a design starts on a local canvas with image, note, section, and image-generator nodes, plus a board-scoped Agent panel.
-- **Reference real work.** Attach another project as a reference (its actual artifact is handed to the agent), reference a Moodboard with budgeted canvas context and asset paths, drop in screenshots to recreate, or paste local paths.
+- **Reference real work.** Attach another project as a reference (its actual artifact is handed to the agent), reference a Moodboard with budgeted canvas context and asset paths, pull in a built-in or custom Effect, drop in screenshots to recreate, or paste local paths.
 - **Live process view.** The agent's reasoning and file writes stream into the chat as it works; the artifact renders in a sandboxed iframe; export downloads a `.zip`.
 - **Desktop app.** An Electron shell (`apps/desktop`) with native window chrome and pixel-perfect off-screen capture for previews.
 - **Chrome extension.** Capture a cover image from Dribbble / Behance / Pinterest and send it straight to the composer (`apps/extension`).
 - **Command palette, dark mode, keyboard-first.** The usual niceties, done with restraint.
+
+## A look around
+
+<div align="center">
+  <img src="./docs/assets/design-systems.png" alt="Dezin design systems gallery" width="900" />
+  <p><em>33 built-in design systems, each a brand visual language with its own tokens — or bring your own from a code folder or a <code>.fig</code> file.</em></p>
+</div>
+
+<div align="center">
+  <img src="./docs/assets/effects.png" alt="Dezin Effects library" width="900" />
+  <p><em>The Effects library — 20 built-in <code>@Paper</code> visual effects, from image filters to generative shaders, each with live parameters and presets.</em></p>
+</div>
+
+<div align="center">
+  <img src="./docs/assets/moodboard.png" alt="Dezin Moodboards" width="900" />
+  <p><em>Moodboards — collect references and generate visual material before a design starts.</em></p>
+</div>
+
+<div align="center">
+  <img src="./docs/assets/moodboard-canvas.png" alt="A Dezin moodboard canvas" width="900" />
+  <p><em>The moodboard canvas: image, note, section, and image-generator nodes, with a board-scoped Agent panel.</em></p>
+</div>
 
 ## Quick start
 
@@ -85,11 +113,12 @@ packages/
   prompt/    composeSystemPrompt — a layered system prompt
   agent/     AgentRunner + generateArtifact (wires the loop) + per-CLI runners
   design/    bundled design systems + loader (registry of DESIGN.md brands)
+  effects/   built-in @Paper visual effects (Paper Shaders metadata) + the custom GLSL effect model
   skills/    SKILL.md loader (artifact shapes)
   craft/     generates the anti-slop doc from quality's rule lists + a drift test
 apps/
   daemon/    node:http server: runs, project CRUD, agent scan, static preview, ZIP export
-  web/       Vite + React 19 + Tailwind v4 SPA — workspace UI + Moodboard canvas
+  web/       Vite + React 19 + Tailwind v4 SPA — workspace, design systems, Effects + Moodboard canvas (Leafer)
   desktop/   Electron shell + off-screen capture
   extension/ Chrome extension — capture a cover image into the composer
 content/
@@ -127,3 +156,4 @@ Dezin was built from scratch; its direction was informed by ideas from these pro
 - [open-design](https://github.com/nexu-io/open-design) — for the anti-AI-slop craft direction and the idea of composing generation from a brand/system content model.
 - [Claude Design](https://claude.ai) — Anthropic's Claude interface, a touchstone for the restrained, content-first product aesthetic Dezin aims for.
 - [simple-icons](https://github.com/simple-icons/simple-icons) — the brand marks used for the built-in design systems.
+- [Paper Shaders](https://github.com/paper-design/shaders) — the shader presets and parameter defaults behind Dezin's built-in `@Paper` effects (Apache-2.0).
