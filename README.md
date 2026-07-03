@@ -13,7 +13,7 @@ Describe what you want; Dezin drives the coding-agent CLI you already have to bu
 
 ---
 
-Dezin is deliberately minimal — no telemetry, no automation, no connectors, no paid model router, no plugin marketplace. Just the loop that makes generation good.
+Dezin is deliberately minimal — no telemetry, no hosted automation, no connectors, no paid model router, no plugin marketplace. Just the local loops that make generation good.
 
 **BYOK, nothing leaves your machine.** Dezin shells out to a coding-agent CLI you already have installed and authenticated — Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, or Aider. There is no Dezin account, no hosted inference, no API key to paste. The daemon binds to `127.0.0.1` and writes everything under `~/.dezin`.
 
@@ -22,8 +22,8 @@ Dezin is deliberately minimal — no telemetry, no automation, no connectors, no
 Three ideas do the work:
 
 - **An anti-AI-slop quality kernel.** A deterministic linter flags the tells of machine-generated design — default Tailwind indigo, two-stop "trust" gradients, emoji-as-icons, invented metrics, filler copy, shadow-heavy cards — as P0 regressions, tuned to a neutral, borders-over-shadows aesthetic.
-- **A closed lint → repair loop.** After the agent writes an artifact, it is linted, and any P0 finding feeds back as the next turn until it's clean. Anti-slop is enforced, not advised.
-- **Optional visual QA.** When enabled, the selected agent reviews rendered screenshots and viewport geometry so obvious layout problems can be reported alongside static anti-slop findings.
+- **A closed quality → repair loop.** After the agent writes an artifact, Dezin runs static lint, rendered geometry checks, and optional agent visual review. Blocking P0/P1 findings feed back as repair turns automatically, up to the configured round limit. Quality is enforced, not advised.
+- **Agent visual review with runtime evidence.** When enabled, a reviewer agent inspects rendered screenshots, viewport geometry, current conversation context, and browser runtime signals such as console errors, page errors, failed requests, and HTTP error responses. The reviewer can inherit the project agent/model or use its own Agent + model.
 - **One source of truth.** The linter's rule lists generate the craft doc (`content/craft/anti-ai-slop.md`); a drift test fails if they diverge, so the prompt and the linter can never disagree.
 
 The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that does not trip its own linter.
@@ -31,6 +31,7 @@ The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that d
 ## Features
 
 - **Bring your own agent.** Dezin scans your PATH for installed CLIs and lets you pick per-run, with the agent's real version. Models the agent exposes are selectable too.
+- **Configurable quality automation.** Visual Review can run on the project agent/model or a separate reviewer agent/model, and auto-improve defaults to 8 repair rounds.
 - **Two build modes.** *Prototype* — one self-contained HTML file, fastest to iterate. *Standard* — a real Vite + React + GSAP project with components and routing.
 - **33 built-in design systems.** Brand visual languages modelled on Airbnb, Apple, Linear, Stripe, Vercel, Notion, Figma, and more (each a 9-section `DESIGN.md` + tokens), plus neutral house styles. Import your own from a code folder or a `.fig` file.
 - **Variant branches.** Fork a design into parallel branches, iterate each differently, then compare them side by side with a draggable before/after slider.
