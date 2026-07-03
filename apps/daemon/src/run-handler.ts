@@ -154,6 +154,29 @@ function shouldAutoRepair(settings: Settings, findings: QualityFinding[], repair
   return findings.some((finding) => AUTO_REPAIR_SEVERITIES.has(finding.severity));
 }
 
+function withVisualScreenshotUrl(findings: QualityFinding[], screenshotUrl: string): QualityFinding[] {
+  return findings.map((finding) =>
+    finding.id.startsWith("visual-") && !finding.screenshotUrl ? { ...finding, screenshotUrl } : finding,
+  );
+}
+
+function visualQaStartPayload(
+  round: number,
+  settings: Settings,
+  agentCommand: string,
+  model: string | undefined,
+  screenshotUrl: string,
+): Record<string, unknown> {
+  return {
+    type: "visual-qa-start",
+    round,
+    enabled: true,
+    agentCommand: reviewerAgentCommand(settings, agentCommand),
+    model: reviewerModel(settings, model),
+    screenshotUrl,
+  };
+}
+
 function standardRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number): string | null {
   const lintBlock = renderFindingsForAgent(findings);
   if (!lintBlock) return null;
@@ -481,6 +504,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         if (staticFindings.length) sse({ type: "static-quality", round, findings: staticFindings });
         let visualFindings: QualityFinding[] = [];
         if (settings.visualQaEnabled) {
+          const screenshotUrl = `/api/projects/${project.id}/variants/${targetVariantId}/preview/.visual-qa/screenshot.png`;
+          sse(visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl));
           let renderUrl: string | undefined;
           if (!deps.visualQa) {
             try {
@@ -502,6 +527,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
               renderUrl,
             });
           }
+          visualFindings = withVisualScreenshotUrl(visualFindings, screenshotUrl);
           sse({ type: "visual-qa", round, enabled: settings.visualQaEnabled, findings: visualFindings });
         }
         findings = [...staticFindings, ...visualFindings];
@@ -646,10 +672,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       await writeFile(join(dir, ".versions", `${run.id}.html`), currentHtml, "utf8");
     };
     const reviewCurrentArtifact = async (round: number, staticFindings: QualityFinding[]): Promise<void> => {
-      const visualFindings = await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
+      const screenshotUrl = `${previewUrl}.visual-qa/screenshot.png`;
+      if (settings.visualQaEnabled) sse(visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl));
+      const visualFindings = withVisualScreenshotUrl(await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
         projectRoot: dir,
         renderUrl,
-      });
+      }), screenshotUrl);
       sse({ type: "visual-qa", round, enabled: settings.visualQaEnabled, findings: visualFindings });
       finalFindings = [...staticFindings, ...visualFindings];
       score = lintScore(finalFindings);

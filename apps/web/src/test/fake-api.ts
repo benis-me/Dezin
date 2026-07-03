@@ -66,6 +66,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
       yield { type: "done" as const, agents: await (over.rescanAgents ?? (async () => []))() };
     },
     getHealth: async () => ({ ok: true, version: "0.0.0" }),
+    optimizePrompt: async (input) => ({ prompt: input.prompt }),
     listFiles: async () => [],
     getFileText: async () => "",
     listRuns: async () => [],

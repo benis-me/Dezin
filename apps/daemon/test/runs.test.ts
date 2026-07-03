@@ -125,6 +125,34 @@ test("run passes BYOK settings to spawned agent turns", async () => {
   });
 });
 
+test("visual QA run emits a start event before visual QA results", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      store.updateSettings({ visualQaEnabled: true, visualQaAgentCommand: "codebuddy", visualQaModel: "hunyuan" });
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+      });
+      assert.equal(res.status, 200);
+
+      const events = parseSse(await res.text());
+      const startIndex = events.findIndex((event) => event.type === "visual-qa-start");
+      const resultIndex = events.findIndex((event) => event.type === "visual-qa");
+      assert.ok(startIndex >= 0);
+      assert.ok(resultIndex > startIndex);
+      assert.equal(events[startIndex]?.agentCommand, "codebuddy");
+      assert.equal(events[startIndex]?.model, "hunyuan");
+    },
+    {
+      visualQa: async () => [{ severity: "P2", id: "visual-ai-review-1", message: "CTA clips.", fix: "Allow wrapping." }],
+    },
+  );
+});
+
 test("POST /api/runs rejects a concurrent run for the same project variant", async () => {
   let releaseTurn!: () => void;
   const runner: AgentRunner = {

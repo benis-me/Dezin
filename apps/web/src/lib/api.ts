@@ -177,6 +177,19 @@ export interface RunInput {
   model?: string;
 }
 
+export interface PromptOptimizeInput {
+  prompt: string;
+  agentCommand?: string;
+  model?: string;
+  mode?: ProjectMode;
+  skillId?: string;
+  designSystemId?: string;
+}
+
+export interface PromptOptimizeResult {
+  prompt: string;
+}
+
 export interface Swatch {
   bg: string;
   surface: string;
@@ -361,6 +374,9 @@ export interface QualityFinding {
   id: string;
   message: string;
   fix?: string;
+  screenshotPath?: string;
+  screenshotUrl?: string;
+  reviewSummary?: string;
 }
 
 export interface RunSummary {
@@ -419,6 +435,7 @@ export interface ApiClient {
   /** Rescan with per-agent progress (SSE). Yields progress events, then a final "done". */
   scanAgentsStream(): AsyncGenerator<ScanEvent>;
   getHealth(): Promise<Health>;
+  optimizePrompt(input: PromptOptimizeInput): Promise<PromptOptimizeResult>;
   listFiles(id: string): Promise<ProjectFile[]>;
   getFileText(id: string, path: string): Promise<string>;
   listRuns(id: string, options?: { all?: boolean }): Promise<RunSummary[]>;
@@ -630,6 +647,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     listAgents: () => json<AgentInfo[]>("/api/agents"),
     rescanAgents: () => json<AgentInfo[]>("/api/agents/rescan", { method: "POST" }),
     getHealth: () => json<Health>("/api/health"),
+    optimizePrompt: (input) => json<PromptOptimizeResult>("/api/prompts/optimize", jsonInit("POST", input)),
     listFiles: (id) => json<ProjectFile[]>(`/api/projects/${enc(id)}/files`),
     listRuns: (id, options) => json<RunSummary[]>(`/api/projects/${enc(id)}/runs${options?.all ? "?all=1" : ""}`),
     versionPreviewUrl: (id, runId) => `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`,

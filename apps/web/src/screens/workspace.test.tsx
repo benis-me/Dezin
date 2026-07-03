@@ -1809,6 +1809,112 @@ test("the Quality tab separates static, geometry, and agent visual lanes", async
   expect(screen.getByText(/raw hex values/)).toBeInTheDocument();
 });
 
+test("visual review stream events render a titled transcript record with collapsible process and result", async () => {
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-visual-review", conversationId: "c1" };
+      yield {
+        type: "visual-qa-start",
+        runId: "r-visual-review",
+        enabled: true,
+        round: 0,
+        agentCommand: "codebuddy",
+        model: "hunyuan",
+        screenshotUrl: "/projects/p1/preview/.visual-qa/screenshot.png",
+      };
+      yield {
+        type: "visual-qa",
+        runId: "r-visual-review",
+        enabled: true,
+        findings: [
+          {
+            severity: "P1",
+            id: "visual-ai-review-1",
+            message: "Hero image overlaps the navigation.",
+            fix: "Move the navigation above the image layer.",
+            screenshotUrl: "/projects/p1/preview/.visual-qa/screenshot.png",
+            reviewSummary: "codebuddy / hunyuan reviewed the screenshot and reported 1 issue.",
+          },
+        ],
+      };
+      yield { type: "run-done", runId: "r-visual-review", passed: true, rounds: 0, score: 91, findings: [] };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  const record = await screen.findByTestId("visual-review-message");
+  expect(within(record).getByText("Visual Review")).toBeInTheDocument();
+  expect(within(record).getByRole("button", { name: /Visual Review process/ })).toHaveAttribute("aria-expanded", "false");
+  expect(within(record).getByText(/Hero image overlaps the navigation/)).toBeInTheDocument();
+
+  fireEvent.click(within(record).getByRole("button", { name: /Visual Review process/ }));
+  expect(within(record).getByText(/Reviewing screenshot with codebuddy \/ hunyuan/)).toBeInTheDocument();
+});
+
+test("the Agent visual review quality lane shows the screenshot review summary", async () => {
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-visual-summary", conversationId: "c1" };
+      yield {
+        type: "visual-qa",
+        runId: "r-visual-summary",
+        enabled: true,
+        findings: [
+          {
+            severity: "P2",
+            id: "visual-ai-review-1",
+            message: "The call-to-action is clipped on mobile.",
+            fix: "Reduce the mobile headline block height.",
+            screenshotUrl: "/projects/p1/preview/.visual-qa/screenshot.png",
+            reviewSummary: "codebuddy / hunyuan reviewed the screenshot and reported 1 issue.",
+          },
+        ],
+      };
+      yield {
+        type: "run-done",
+        runId: "r-visual-summary",
+        passed: true,
+        rounds: 0,
+        score: 93,
+        findings: [
+          {
+            severity: "P2",
+            id: "visual-ai-review-1",
+            message: "The call-to-action is clipped on mobile.",
+            fix: "Reduce the mobile headline block height.",
+            screenshotUrl: "/projects/p1/preview/.visual-qa/screenshot.png",
+            reviewSummary: "codebuddy / hunyuan reviewed the screenshot and reported 1 issue.",
+          },
+        ],
+      };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  await screen.findByText(/Done, quality 93\/100/);
+  fireEvent.click(screen.getByRole("tab", { name: /Quality/ }));
+
+  const image = (await screen.findByAltText("Visual review screenshot")) as HTMLImageElement;
+  expect(image).toHaveAttribute("src", "/projects/p1/preview/.visual-qa/screenshot.png");
+  const agentLane = screen.getByText("Agent visual review").closest("section");
+  expect(agentLane).not.toBeNull();
+  expect(within(agentLane as HTMLElement).getByText(/codebuddy \/ hunyuan reviewed the screenshot/)).toBeInTheDocument();
+  expect(within(agentLane as HTMLElement).getByText(/call-to-action is clipped on mobile/)).toBeInTheDocument();
+});
+
 test("reopening a project restores persisted result cards and quality findings", async () => {
   const fake = makeFakeApi({
     listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],

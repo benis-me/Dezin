@@ -353,7 +353,7 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
               onChange={(event) => setPrompt(event.target.value)}
               placeholder="Collect visual references for a calm hospitality brand with warm editorial photography..."
               rows={3}
-              className="w-full resize-none bg-transparent px-3 py-2.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground"
+              className="field-sizing-content max-h-64 min-h-[92px] w-full resize-none bg-transparent px-3 py-2.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground"
             />
             <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 px-1 pt-3">
               <div className="flex flex-wrap items-center gap-2">

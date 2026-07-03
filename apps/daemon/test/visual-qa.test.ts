@@ -132,6 +132,8 @@ test("reviewScreenshotWithAgent reports when screenshot capture never happened",
     join(root, ".visual-qa", "screenshot.png"),
   );
   assert.equal(findings[0]?.id, "visual-screenshot-missing");
+  assert.equal(findings[0]?.screenshotPath, ".visual-qa/screenshot.png");
+  assert.match(findings[0]?.reviewSummary ?? "", /could not run/i);
 });
 
 test("reviewScreenshotWithAgent runs in the project directory with artifact and screenshot context", async () => {
@@ -231,4 +233,6 @@ console.log(JSON.stringify({ findings: [{ severity: "P2", message: "Text clips."
   assert.match(prompt, /hero\.webp/);
   assert.equal(findings[0]?.id, "visual-ai-review-1");
   assert.equal(findings[0]?.message, "Text clips.");
+  assert.equal(findings[0]?.screenshotPath, ".visual-qa/screenshot.png");
+  assert.match(findings[0]?.reviewSummary ?? "", /1 issue/i);
 });

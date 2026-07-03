@@ -191,6 +191,28 @@ function isSeverity(value: unknown): value is QualityFinding["severity"] {
   return value === "P0" || value === "P1" || value === "P2";
 }
 
+function screenshotReviewSummary(count: number, command?: string, model?: string): string {
+  const reviewer = [command, model].filter(Boolean).join(" / ") || "Agent";
+  if (count === 0) return `${reviewer} reviewed the screenshot and reported no visible layout issues.`;
+  return `${reviewer} reviewed the screenshot and reported ${count} issue${count === 1 ? "" : "s"}.`;
+}
+
+function withScreenshotReviewMetadata(
+  findings: QualityFinding[],
+  input: VisualQaInput,
+  screenshotPath: string,
+  summary?: string,
+): QualityFinding[] {
+  const projectDir = input.projectRoot ?? dirname(input.htmlPath);
+  const screenshotRel = toRel(projectDir, screenshotPath);
+  const reviewSummary = summary ?? screenshotReviewSummary(findings.length, input.agentCommand || input.settings.agentCommand, input.model || input.settings.model || undefined);
+  return findings.map((finding) => ({
+    ...finding,
+    screenshotPath: finding.screenshotPath ?? screenshotRel,
+    reviewSummary: finding.reviewSummary ?? reviewSummary,
+  }));
+}
+
 export function parseVisualReview(text: string): QualityFinding[] {
   let parsed: unknown;
   try {
@@ -401,14 +423,19 @@ function spawnAgentText(command: string, args: string[], cwd: string, timeoutMs:
 export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshotPath: string): Promise<QualityFinding[]> {
   if (!input.settings.visualQaEnabled) return [];
   if (!existsSync(screenshotPath)) {
-    return [
-      {
-        severity: "P2",
-        id: "visual-screenshot-missing",
-        message: "Agent visual review could not run because the rendered screenshot was not produced.",
-        fix: "Open Preview and check whether the page can be captured, then rerun the generation.",
-      },
-    ];
+    return withScreenshotReviewMetadata(
+      [
+        {
+          severity: "P2",
+          id: "visual-screenshot-missing",
+          message: "Agent visual review could not run because the rendered screenshot was not produced.",
+          fix: "Open Preview and check whether the page can be captured, then rerun the generation.",
+        },
+      ],
+      input,
+      screenshotPath,
+      "Agent visual review could not run because the rendered screenshot was not produced.",
+    );
   }
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const command = input.agentCommand || input.settings.agentCommand || "claude";
@@ -418,16 +445,21 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
   const args = provider ? provider.oneShotArgs(model, prompt) : ["-p", prompt];
   try {
     const out = await spawnAgentText(command, args, projectDir, 120_000, buildAgentEnv(input.settings, command));
-    return parseVisualReview(out);
+    return withScreenshotReviewMetadata(parseVisualReview(out), input, screenshotPath);
   } catch (err) {
-    return [
-      {
-        severity: "P2",
-        id: "visual-agent-review-failed",
-        message: `Agent visual review failed: ${err instanceof Error ? err.message : "request error"}.`,
-        fix: "Check that the selected Agent can read the generated screenshot and project files, or disable Visual QA in Settings.",
-      },
-    ];
+    return withScreenshotReviewMetadata(
+      [
+        {
+          severity: "P2",
+          id: "visual-agent-review-failed",
+          message: `Agent visual review failed: ${err instanceof Error ? err.message : "request error"}.`,
+          fix: "Check that the selected Agent can read the generated screenshot and project files, or disable Visual QA in Settings.",
+        },
+      ],
+      input,
+      screenshotPath,
+      `Agent visual review failed: ${err instanceof Error ? err.message : "request error"}.`,
+    );
   }
 }
 

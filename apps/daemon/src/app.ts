@@ -38,6 +38,7 @@ import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgent
 import { handleListModelProviderModels, handleTestModelProvider } from "./model-provider-handler.ts";
 import { analyzeImage } from "./analyze-image.ts";
 import { buildAgentEnv } from "./agent-env.ts";
+import { optimizePrompt, type PromptOptimizer } from "./prompt-optimize.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import type { VisualQaRunner } from "./visual-qa.ts";
 import { handleGenerateProjectTitle, type TitleGenerator } from "./title-handler.ts";
@@ -90,6 +91,8 @@ export interface AppDeps {
   captureCover?: typeof captureCover;
   /** Background title generator hook; tests can avoid launching an agent. */
   titleGenerator?: TitleGenerator;
+  /** Prompt optimizer hook; tests can avoid launching a real agent. */
+  promptOptimizer?: PromptOptimizer;
   /** Moodboard chat one-shot agent hook; tests can avoid launching a real CLI. */
   moodboardAgentText?: MoodboardAgentTextRunner;
   /** Provider model-list fetcher; tests can avoid real network calls. */
@@ -212,6 +215,43 @@ const routes: Route[] = [
         sendJson(res, 200, { brief, agent: command });
       } catch (e) {
         sendError(res, 502, e instanceof Error ? e.message : "analysis failed");
+      }
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/api/prompts/optimize",
+    handler: async (req, res, _p, deps) => {
+      const body = (await readJsonBody(req)) as {
+        prompt?: unknown;
+        agentCommand?: unknown;
+        model?: unknown;
+        mode?: unknown;
+        skillId?: unknown;
+        designSystemId?: unknown;
+      } | null;
+      const prompt = typeof body?.prompt === "string" ? body.prompt.trim() : "";
+      if (!prompt) return sendError(res, 400, "prompt is required");
+      const settings = deps.store.getSettings();
+      const command = (typeof body?.agentCommand === "string" && body.agentCommand.trim()) || settings.agentCommand || "claude";
+      const model = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+      const mode = body?.mode === "standard" ? "standard" : body?.mode === "prototype" ? "prototype" : undefined;
+      const skillId = typeof body?.skillId === "string" && body.skillId.trim() ? body.skillId.trim() : undefined;
+      const designSystemId = typeof body?.designSystemId === "string" && body.designSystemId.trim() ? body.designSystemId.trim() : undefined;
+      try {
+        const optimized = await (deps.promptOptimizer ?? optimizePrompt)({
+          prompt,
+          agentCommand: command,
+          model,
+          mode,
+          skillId,
+          designSystemId,
+          cwd: deps.dataDir,
+          env: buildAgentEnv(settings, command),
+        });
+        sendJson(res, 200, { prompt: optimized });
+      } catch (e) {
+        sendError(res, 502, e instanceof Error ? e.message : "prompt optimization failed");
       }
     },
   },
