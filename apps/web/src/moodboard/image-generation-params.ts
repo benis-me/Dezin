@@ -134,12 +134,23 @@ export function imageGeneratorNodeSizeForAspectRatio(
 ): { width: number; height: number } {
   const ratio = parseAspectRatio(aspectRatio);
   if (!ratio) return { width: Math.round(node.width), height: Math.round(node.height) };
+  const minSide = 120;
   if (ratio >= 1) {
-    const width = Math.max(120, Math.round(node.width));
-    return { width, height: Math.max(120, Math.round(width / ratio)) };
+    let width = Math.max(minSide, Math.round(node.width));
+    let height = Math.round(width / ratio);
+    if (height < minSide) {
+      height = minSide;
+      width = Math.round(height * ratio);
+    }
+    return { width, height };
   }
-  const height = Math.max(120, Math.round(node.height));
-  return { width: Math.max(120, Math.round(height * ratio)), height };
+  let height = Math.max(minSide, Math.round(node.height));
+  let width = Math.round(height * ratio);
+  if (width < minSide) {
+    width = minSide;
+    height = Math.round(width / ratio);
+  }
+  return { width, height };
 }
 
 function isGeminiProvider(providerId: ImageProviderId): boolean {

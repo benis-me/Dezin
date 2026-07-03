@@ -199,3 +199,37 @@ test("useMoodboardCanvasController selects a newly added image generator when th
   expect(onSelectIds).toHaveBeenCalledWith(["new-generator"]);
   expect(runtimeMocks.selectIdsInRuntime).toHaveBeenCalledWith(["new-generator"]);
 });
+
+test("useMoodboardCanvasController preserves data across consecutive data and geometry patches", () => {
+  let controller!: ReturnType<typeof useMoodboardCanvasController>;
+  let latestNodes: any[] = [];
+  const onNodesChange = vi.fn((nodes) => {
+    latestNodes = nodes;
+  });
+
+  function PatchProbe() {
+    controller = useMoodboardCanvasController({
+      nodes: [generator("g1")],
+      selectedIds: ["g1"],
+      onSelectIds: () => {},
+      onNodesChange,
+      onAddNote: () => {},
+      onAddSection: () => {},
+      onAddImageGenerator: () => {},
+      onUploadFiles: () => {},
+      onGenerateImage: async () => {},
+    } as any);
+    return null;
+  }
+
+  render(<PatchProbe />);
+
+  controller.patchNodeData("g1", { generationParams: { aspectRatio: "16:9", size: "1536x1024" } });
+  controller.patchNode("g1", { width: 360, height: 203 });
+
+  expect(latestNodes[0]).toMatchObject({
+    width: 360,
+    height: 203,
+    data: { generatorPrompt: "soft light", generationParams: { aspectRatio: "16:9", size: "1536x1024" } },
+  });
+});
