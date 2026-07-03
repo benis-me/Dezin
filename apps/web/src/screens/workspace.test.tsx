@@ -320,6 +320,51 @@ test("sending a brief streams events into the chat and shows the preview + expor
   expect(full).toHaveAttribute("href", "/api/projects/p1/export?scope=full");
 });
 
+test("project agent composer cards serialize context at send time", async () => {
+  const streamRun = vi.fn((input: { brief: string; moodboardRefs?: Array<{ id: string; name?: string }> }) =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-context", conversationId: "c1" };
+      yield { type: "run-done", runId: "r-context", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+    })(),
+  );
+  const fake = makeFakeApi({
+    streamRun: streamRun as never,
+    listFiles: async () => [{ path: "index.html", size: 12 }],
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByLabelText("Message");
+  await screen.findByTitle("Artifact preview");
+  dispatchPreviewMessage({
+    type: "selected",
+    selector: ".hero-title",
+    tag: "h1",
+    text: "Old title",
+    rect: { x: 10, y: 20, w: 200, h: 80 },
+  });
+  fireEvent.change(await screen.findByPlaceholderText(/Describe the change to this element/), { target: { value: "Make this sharper" } });
+  fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+  expect(await screen.findByText(".hero-title")).toBeInTheDocument();
+  expect(screen.getByLabelText("Agent context cards")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Use the selected references" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  await waitFor(() => expect(streamRun).toHaveBeenCalled());
+  const input = streamRun.mock.calls[0]![0] as { brief: string; moodboardRefs?: Array<{ id: string; name?: string }> };
+  expect(input.brief).toContain("Use the selected references");
+  expect(input.brief).toContain("Scoped edit");
+  expect(input.brief).toContain("selector: `.hero-title`");
+  expect(input.brief).toContain("Make this sharper");
+  expect(screen.queryByLabelText("Agent context cards")).toBeNull();
+});
+
 test("completed runs collapse the interleaved process above the final summary", async () => {
   const user = userEvent.setup();
   const fake = makeFakeApi({
@@ -802,7 +847,7 @@ test("composer references a moodboard for the next project run", async () => {
   await user.click(await screen.findByText("Reference a moodboard"));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Warm references" }));
 
-  expect(await screen.findByLabelText("Remove moodboard Warm references")).toBeInTheDocument();
+  expect(await screen.findByLabelText("Remove Warm references")).toBeInTheDocument();
 
   fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "Use this visual direction" } });
   await user.click(screen.getByLabelText("Send"));
@@ -816,7 +861,7 @@ test("composer references a moodboard for the next project run", async () => {
       expect.anything(),
     ),
   );
-  expect(screen.queryByLabelText("Remove moodboard Warm references")).toBeNull();
+  expect(screen.queryByLabelText("Remove Warm references")).toBeNull();
 });
 
 test("queued moodboard references are preserved for the next project run", async () => {

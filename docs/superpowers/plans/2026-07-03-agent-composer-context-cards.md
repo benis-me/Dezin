@@ -290,8 +290,8 @@ test("project agent composer cards serialize context at send time", async () => 
     text: "Old title",
     rect: { x: 10, y: 20, w: 200, h: 80 },
   });
-  fireEvent.change(await screen.findByLabelText("Markup note"), { target: { value: "Make this sharper" } });
-  fireEvent.click(screen.getByRole("button", { name: "Add mark" }));
+  fireEvent.change(await screen.findByPlaceholderText(/Describe the change to this element/), { target: { value: "Make this sharper" } });
+  fireEvent.click(screen.getByRole("button", { name: "Add" }));
 
   expect(await screen.findByText(".hero-title")).toBeInTheDocument();
   expect(screen.getByLabelText("Agent context cards")).toBeInTheDocument();

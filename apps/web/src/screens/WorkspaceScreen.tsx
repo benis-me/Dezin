@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Images, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
@@ -24,6 +24,12 @@ import {
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
 import { PreviewModal } from "../components/PreviewModal.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
+import {
+  AgentComposerContextCards,
+  removeContextItem,
+  upsertContextItems,
+  type AgentComposerContextItem,
+} from "../components/AgentComposerContext.tsx";
 import { ConversationSelect } from "../components/ConversationSelect.tsx";
 import { VersionCompare } from "../components/VersionCompare.tsx";
 import { VariantSwitcher } from "../components/VariantSwitcher.tsx";
@@ -50,6 +56,7 @@ const DEVICE_WIDTH: Record<Device, string> = { desktop: "100%", tablet: "768px",
 type MoodboardRunRef = { id: string; name?: string };
 type QueuedPrompt = { text: string; moodboardRefs?: MoodboardRunRef[] };
 type PreviewBusyState = { title: string; detail?: string };
+type WorkspaceContextItem = AgentComposerContextItem<MarkupTarget>;
 
 const SEVERITY_STYLE: Record<string, string> = {
   P0: "border-destructive text-destructive",
@@ -1689,7 +1696,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [selectMode, setSelectMode] = useState(false);
   const [inspectOpen, setInspectOpen] = useState(false);
   const [inspectedTarget, setInspectedTarget] = useState<MarkupTarget | null>(null);
-  const [selectedTargets, setSelectedTargets] = useState<MarkupTarget[]>([]);
   const [pendingMark, setPendingMark] = useState<(MarkupTarget & { x: number; y: number }) | null>(null);
   const previewIframeRef = useRef<HTMLIFrameElement>(null);
   const [setupPhase, setSetupPhase] = useState<SetupPhase | null>(null);
@@ -1700,8 +1706,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
   const [liveItems, setLiveItems] = useState<LiveItem[]>([]);
   const [input, setInput] = useState("");
-  const [attachments, setAttachments] = useState<{ name: string; path: string }[]>([]);
-  const [moodboardRefs, setMoodboardRefs] = useState<MoodboardRunRef[]>([]);
+  const [contextItems, setContextItems] = useState<WorkspaceContextItem[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
@@ -1776,6 +1781,19 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     },
     [projectId],
   );
+
+  const addContextItems = useCallback((items: WorkspaceContextItem[]): void => {
+    setContextItems((current) => upsertContextItems(current, items));
+  }, []);
+
+  const previewTargetItems = contextItems.filter(
+    (item): item is Extract<WorkspaceContextItem, { type: "preview-target" }> => item.type === "preview-target",
+  );
+  const selectedTargets = previewTargetItems.map((item) => item.target);
+  const selectedMoodboardRefs = contextItems
+    .filter((item): item is Extract<WorkspaceContextItem, { type: "moodboard" }> => item.type === "moodboard")
+    .map((item) => ({ id: item.moodboardId, name: item.name }));
+  const hasComposerContext = contextItems.length > 0;
 
   const scrollChatToBottom = useCallback((behavior: ScrollBehavior = "auto"): void => {
     const el = chatScrollRef.current;
@@ -2729,15 +2747,24 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const addMark = (note: string): void => {
     if (!pendingMark) return;
-    setSelectedTargets((cur) => [
-      ...cur,
+    const target: MarkupTarget = {
+      selector: pendingMark.selector,
+      tag: pendingMark.tag,
+      text: pendingMark.text,
+      rect: pendingMark.rect,
+      styles: pendingMark.styles,
+      attrs: pendingMark.attrs,
+      note: note.trim() || undefined,
+    };
+    addContextItems([
       {
-        selector: pendingMark.selector,
-        tag: pendingMark.tag,
-        text: pendingMark.text,
-        rect: pendingMark.rect,
-        styles: pendingMark.styles,
-        note: note.trim() || undefined,
+        id: `preview-target:${target.selector}:${target.note ?? ""}`,
+        type: "preview-target",
+        title: target.selector,
+        subtitle: target.note || target.tag || "Preview element",
+        selector: target.selector,
+        note: target.note,
+        target,
       },
     ]);
     dismissMark();
@@ -2840,10 +2867,22 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const send = () => {
     const scoped = selectedTargets.length > 0;
-    const fileRefs = attachments.length
-      ? `\n\nReference files (read them from disk): ${attachments.map((a) => a.path).join(", ")}`
+    const fileReferencePaths = contextItems.flatMap((item) => {
+      if (item.type === "file") return [item.path];
+      if (item.type === "project" && item.referencePath) return [item.referencePath];
+      return [];
+    });
+    const localPathItems = contextItems.filter((item): item is Extract<WorkspaceContextItem, { type: "local-path" }> => item.type === "local-path");
+    const textContextItems = contextItems.filter((item): item is Extract<WorkspaceContextItem, { type: "text-context" }> => item.type === "text-context");
+    const fileRefs = fileReferencePaths.length
+      ? `\n\nReference files (read them from disk): ${fileReferencePaths.join(", ")}`
       : "";
-    const selectedMoodboardRefs = moodboardRefs;
+    const localPathRefs = localPathItems.length
+      ? `\n\nReference local paths: ${localPathItems.map((item) => item.path).join(", ")}`
+      : "";
+    const textContextRefs = textContextItems.length
+      ? `\n\n${textContextItems.map((item) => `${item.title}:\n${item.body}`).join("\n\n")}`
+      : "";
     const boardRefs = moodboardReferenceLine(selectedMoodboardRefs);
     const targets = scoped
       ? `\n\nScoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n${selectedTargets
@@ -2851,12 +2890,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           .join("\n")}`
       : "";
     const base = input.trim() || (scoped ? "Refine the marked element(s) per the notes." : "");
-    const text = base + targets + fileRefs + boardRefs;
+    const text = base + targets + fileRefs + localPathRefs + textContextRefs + boardRefs;
     if (!text.trim()) return;
     setInput("");
-    setAttachments([]);
-    setMoodboardRefs([]);
-    setSelectedTargets([]);
+    setContextItems([]);
     // While a run is in flight, queue the prompt to run when it finishes.
     if (runningRef.current) updateQueue((q) => [...q, selectedMoodboardRefs.length ? { text, moodboardRefs: selectedMoodboardRefs } : { text }]);
     else void runBrief(text, undefined, undefined, selectedMoodboardRefs);
@@ -2890,7 +2927,17 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         return;
       }
       const ref = await api.uploadRef(projectId, `reference-${slugify(project.name)}.html`, toBase64(html));
-      setAttachments((a) => (a.some((x) => x.path === ref.path) ? a : [...a, ref]));
+      addContextItems([
+        {
+          id: `project:${project.id}`,
+          type: "project",
+          title: project.name,
+          subtitle: ref.path,
+          projectId: project.id,
+          name: project.name,
+          referencePath: ref.path,
+        },
+      ]);
       toast(`Referencing ${project.name}.`);
     } catch {
       toast("Couldn't reference that project.", { variant: "error" });
@@ -2898,9 +2945,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   };
 
   const referenceMoodboard = (board: Moodboard): void => {
-    setMoodboardRefs((current) =>
-      current.some((ref) => ref.id === board.id) ? current : [...current, { id: board.id, name: board.name }],
-    );
+    addContextItems([
+      {
+        id: `moodboard:${board.id}`,
+        type: "moodboard",
+        title: board.name || "Untitled moodboard",
+        subtitle: "Moodboard",
+        moodboardId: board.id,
+        name: board.name,
+      },
+    ]);
     toast(`Referencing ${board.name}.`);
   };
 
@@ -2924,7 +2978,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         });
         const base64 = dataUrl.split(",")[1] ?? "";
         const ref = await api.uploadRef(projectId, file.name, base64);
-        setAttachments((a) => [...a, ref]);
+        addContextItems([
+          {
+            id: `file:${ref.path}`,
+            type: "file",
+            title: ref.name,
+            subtitle: ref.path,
+            name: ref.name,
+            path: ref.path,
+          },
+        ]);
       } catch {
         toast(`Couldn't attach ${file.name}.`, { variant: "error" });
       }
@@ -3261,77 +3324,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 </span>
               </div>
             ) : null}
-            {selectedTargets.length ? (
-              <div className="mb-2">
-                <p className="label-mono mb-1 flex items-center gap-1.5 text-brand">
-                  <MousePointerClick size={11} strokeWidth={2} />
-                  Scoped edit · {selectedTargets.length} element{selectedTargets.length === 1 ? "" : "s"}
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                {selectedTargets.map((t, i) => (
-                  <span
-                    key={`${t.selector}-${i}`}
-                    className="flex max-w-full items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 py-1 text-xs text-foreground-2"
-                    title={t.note ? `${t.selector}: ${t.note}` : t.selector}
-                  >
-                    <MousePointerClick size={11} strokeWidth={1.75} className="shrink-0 text-brand" />
-                    <span className="truncate font-mono">{t.selector}</span>
-                    {t.note ? <span className="truncate text-foreground/70">· {t.note}</span> : null}
-                    <button
-                      type="button"
-                      aria-label={`Remove ${t.selector}`}
-                      onClick={() => setSelectedTargets((cur) => cur.filter((_, j) => j !== i))}
-                      className="shrink-0 text-muted-foreground hover:text-foreground"
-                    >
-                      <X size={11} strokeWidth={2} />
-                    </button>
-                  </span>
-                ))}
-                </div>
-              </div>
-            ) : null}
-            {attachments.length ? (
-              <div className="mb-2 flex flex-wrap gap-1.5">
-                {attachments.map((a) => (
-                  <span
-                    key={a.path}
-                    className="flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 py-1 text-xs text-foreground-2"
-                  >
-                    <Paperclip size={11} strokeWidth={1.75} />
-                    {a.name}
-                    <button
-                      type="button"
-                      aria-label={`Remove ${a.name}`}
-                      onClick={() => setAttachments((cur) => cur.filter((x) => x.path !== a.path))}
-                      className="text-muted-foreground hover:text-foreground"
-                    >
-                      <X size={11} strokeWidth={2} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            ) : null}
-            {moodboardRefs.length ? (
-              <div className="mb-2 flex flex-wrap gap-1.5">
-                {moodboardRefs.map((ref) => (
-                  <span
-                    key={ref.id}
-                    className="flex max-w-full items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 py-1 text-xs text-foreground-2"
-                  >
-                    <Images size={11} strokeWidth={1.75} className="shrink-0 text-brand" />
-                    <span className="truncate">{ref.name || "Untitled moodboard"}</span>
-                    <button
-                      type="button"
-                      aria-label={`Remove moodboard ${ref.name || "Untitled moodboard"}`}
-                      onClick={() => setMoodboardRefs((current) => current.filter((item) => item.id !== ref.id))}
-                      className="shrink-0 text-muted-foreground hover:text-foreground"
-                    >
-                      <X size={11} strokeWidth={2} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            ) : null}
+            <AgentComposerContextCards
+              items={contextItems}
+              onChange={setContextItems}
+              onRemove={(id) => setContextItems((items) => removeContextItem(items, id))}
+            />
             {queue.length ? (
               <TooltipProvider delayDuration={120}>
                 <div className="mb-2 rounded-lg border border-border bg-surface-2/60 p-1.5">
@@ -3444,8 +3441,28 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               <div className="flex items-center gap-0.5">
                 <AttachMenu
                   onAttachFile={isExisting ? () => fileInputRef.current?.click() : undefined}
-                  onPickPaths={(paths) => setInput((i) => `${i}${i.trim() ? "\n" : ""}Reference local paths: ${paths.join(", ")}`)}
-                  onContext={(text) => setInput((i) => `${i}${i.trim() ? "\n\n" : ""}${text}`)}
+                  onPickPaths={(paths) =>
+                    addContextItems(
+                      paths.map((path) => ({
+                        id: `local-path:${path}`,
+                        type: "local-path",
+                        title: path.split(/[\\/]/).filter(Boolean).pop() || path,
+                        subtitle: path,
+                        path,
+                      })),
+                    )
+                  }
+                  onContext={(text) =>
+                    addContextItems([
+                      {
+                        id: `text-context:${Date.now()}:${text.slice(0, 32)}`,
+                        type: "text-context",
+                        title: "Imported context",
+                        subtitle: "Text",
+                        body: text,
+                      },
+                    ])
+                  }
                   onReference={isExisting ? (p) => void referenceProject(p) : undefined}
                   onReferenceMoodboard={isExisting ? referenceMoodboard : undefined}
                 />
@@ -3478,7 +3495,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                       </Button>
                     </ToolbarTooltip>
                   ) : null}
-                  {running && input.trim().length === 0 && selectedTargets.length === 0 ? (
+                  {running && input.trim().length === 0 && !hasComposerContext ? (
                     <Button aria-label="Stop" size="icon-sm" variant="outline" onClick={stop} className="ml-0.5 rounded-lg" title="Stop generating">
                       <Square size={12} strokeWidth={2} className="fill-current" />
                     </Button>
@@ -3487,7 +3504,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                       aria-label={running ? "Queue" : "Send"}
                       size="icon-sm"
                       onClick={send}
-                      disabled={!running && input.trim().length === 0 && selectedTargets.length === 0}
+                      disabled={!running && input.trim().length === 0 && !hasComposerContext}
                       title={running ? "Queue this prompt to run next" : undefined}
                       className="ml-0.5 rounded-lg"
                     >
