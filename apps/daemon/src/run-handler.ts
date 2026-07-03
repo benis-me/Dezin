@@ -458,6 +458,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const processItems: ProcessItem[] = [];
   const visualReviewRecords: string[] = [];
   let summaryBoundarySeen = false;
+  let processStartedAt = run.createdAt;
   const recordActivity = (activity: unknown): unknown | null => {
     const a = activity as { kind?: string; summary?: string } | undefined;
     if (a?.kind === "tool" && a.summary) {
@@ -489,7 +490,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     processItems.filter((item) => includeText || item.type === "tool");
   const persistProcess = (includeText = summaryBoundarySeen): void => {
     const items = processRecordItems(includeText);
-    if (items.length) store.addMessage(conversation.id, "system", processMessage(items, Math.max(0, Date.now() - run.createdAt)));
+    if (items.length) store.addMessage(conversation.id, "system", processMessage(items, Math.max(0, Date.now() - processStartedAt)));
     processItems.splice(0);
     summaryBoundarySeen = false;
   };
@@ -534,6 +535,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       while (true) {
         const isRepair = round > 0;
         const beforeTree = await workingTreeFingerprint(dir);
+        processStartedAt = Date.now();
         sse({ type: "turn-start", round, isRepair });
         const result = await runTurnWithRetry(
           runner,
@@ -718,6 +720,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           if (visible) sse({ ...e, activity: visible });
           return;
         }
+        if (e.type === "turn-start") processStartedAt = Date.now();
         if (e.type === "done") return;
         if (e.type === "turn-end" && typeof e.text === "string") {
           const stripped = extractAskUserQuestion(e.text);
@@ -801,6 +804,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const repairPrompt = prototypeRepairPrompt(finalFindings, nextRound, maxRepairRounds, score);
       if (!repairPrompt) break;
       if (visualReviewRecords.length) persistTranscript(assistantText);
+      processStartedAt = Date.now();
       sse({ type: "turn-start", round: nextRound, isRepair: true });
       const repaired = await runTurnWithRetry(
         runner,
