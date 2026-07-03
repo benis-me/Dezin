@@ -2,15 +2,15 @@ import { render, screen } from "@testing-library/react";
 import { expect, test } from "vitest";
 import { AgentOutputText } from "./AgentOutputText.tsx";
 
-test("AgentOutputText renders new assistant output with per-character fade spans", () => {
+test("AgentOutputText renders assistant output as normal Markdown", () => {
   const { container } = render(<AgentOutputText text="Ship it" />);
 
   expect(screen.getByText("Ship it")).toBeInTheDocument();
-  expect(container.querySelector('[data-agent-output-animated="true"]')).not.toBeNull();
-  expect(container.querySelectorAll("[data-agent-output-char]").length).toBe("Ship it".length);
+  expect(container.querySelector('[data-agent-output-animated="true"]')).toBeNull();
+  expect(container.querySelector("[data-agent-output-char]")).toBeNull();
 });
 
-test("AgentOutputText falls back to Markdown for long messages after the character pass", () => {
+test("AgentOutputText preserves Markdown links and emphasis", () => {
   render(<AgentOutputText text="**Done** with [preview](https://example.com)." animate={false} />);
 
   expect(screen.getByText("Done")).toBeInTheDocument();
