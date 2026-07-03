@@ -22,6 +22,10 @@ const SETTINGS: Settings = {
   aiProviderOrganization: "org-test",
   aiProviderProfiles: "",
   visualQaEnabled: false,
+  visualQaAgentCommand: "",
+  visualQaModel: "",
+  autoImproveEnabled: true,
+  autoImproveMaxRounds: 8,
 };
 
 test("buildAgentEnv maps BYOK settings for Anthropic-compatible CLIs", () => {

@@ -19,9 +19,18 @@ export interface VisualQaInput {
   model?: string;
   brief?: string;
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
+  consoleMessages?: VisualQaConsoleMessage[];
 }
 
 export type VisualQaRunner = (input: VisualQaInput) => Promise<QualityFinding[]>;
+
+export interface VisualQaConsoleMessage {
+  type: "console" | "pageerror" | "requestfailed" | "response";
+  level: string;
+  text: string;
+  url?: string;
+  line?: number;
+}
 
 interface Rect {
   left: number;
@@ -71,11 +80,19 @@ function agentReviewPrompt(input: VisualQaInput, screenshotPath: string): string
     .map((m, index) => `[${index + 1}] ${m.role.toUpperCase()}:\n${m.content.trim()}`)
     .filter((line) => line.length > 12)
     .join("\n\n");
+  const consoleMessages = (input.consoleMessages ?? [])
+    .slice(0, 20)
+    .map((m, index) => {
+      const where = [m.url, typeof m.line === "number" ? `:${m.line}` : ""].filter(Boolean).join("");
+      return `[${index + 1}] ${m.type}/${m.level}${where ? ` ${where}` : ""}: ${m.text}`;
+    })
+    .join("\n");
   return [
     "You are reviewing the latest rendered result for the current Dezin conversation.",
     `Rendered screenshot: ${screenshotRel}`,
     `Final artifact: ${artifactRel}`,
     input.renderUrl ? `Rendered URL: ${input.renderUrl}` : "",
+    consoleMessages ? `Browser console / runtime signals:\n${consoleMessages}` : "",
     history ? `Current conversation context:\n${history}` : "",
     brief ? `Current user request:\nUSER: ${brief}` : "",
     "Use the screenshot as the primary evidence. Use the conversation context to judge whether the visual result matches the user's intent.",
@@ -155,6 +172,13 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string):
   return findings;
 }
 
+function pushConsoleMessage(messages: VisualQaConsoleMessage[], message: VisualQaConsoleMessage): void {
+  if (messages.length >= 30) return;
+  const text = message.text.replace(/\s+/g, " ").trim().slice(0, 700);
+  if (!text) return;
+  messages.push({ ...message, text });
+}
+
 function parseJsonObject(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] ?? text;
   const start = fenced.indexOf("{");
@@ -192,17 +216,25 @@ export function parseVisualReview(text: string): QualityFinding[] {
   return normalized;
 }
 
-async function collectGeometry(htmlPath: string, screenshotPath?: string, renderUrl?: string): Promise<QualityFinding[]> {
+async function collectGeometry(
+  htmlPath: string,
+  screenshotPath?: string,
+  renderUrl?: string,
+): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[] }> {
+  const consoleMessages: VisualQaConsoleMessage[] = [];
   const executablePath = findChrome();
   if (!executablePath) {
-    return [
-      {
-        severity: "P2",
-        id: "visual-chrome-unavailable",
-        message: "Visual QA could not run because Chrome was not found on this machine.",
-        fix: "Install Chrome/Chromium or disable Visual QA in Settings for this environment.",
-      },
-    ];
+    return {
+      findings: [
+        {
+          severity: "P2",
+          id: "visual-chrome-unavailable",
+          message: "Visual QA could not run because Chrome was not found on this machine.",
+          fix: "Install Chrome/Chromium or disable Visual QA in Settings for this environment.",
+        },
+      ],
+      consoleMessages,
+    };
   }
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
   try {
@@ -210,6 +242,40 @@ async function collectGeometry(htmlPath: string, screenshotPath?: string, render
     const all: QualityFinding[] = [];
     for (const viewport of VIEWPORTS) {
       const page = await browser.newPage();
+      page.on("console", (msg) => {
+        const location = msg.location();
+        pushConsoleMessage(consoleMessages, {
+          type: "console",
+          level: msg.type(),
+          text: msg.text(),
+          url: location.url,
+          line: location.lineNumber,
+        });
+      });
+      page.on("pageerror", (err) => {
+        pushConsoleMessage(consoleMessages, {
+          type: "pageerror",
+          level: "error",
+          text: err instanceof Error ? err.stack || err.message : String(err),
+        });
+      });
+      page.on("requestfailed", (request) => {
+        pushConsoleMessage(consoleMessages, {
+          type: "requestfailed",
+          level: "error",
+          text: `${request.method()} ${request.url()} ${request.failure()?.errorText ?? "request failed"}`,
+          url: request.url(),
+        });
+      });
+      page.on("response", (response) => {
+        if (response.status() < 400) return;
+        pushConsoleMessage(consoleMessages, {
+          type: "response",
+          level: "error",
+          text: `${response.status()} ${response.url()}`,
+          url: response.url(),
+        });
+      });
       await page.setViewport({ width: viewport.width, height: viewport.height, deviceScaleFactor: 1 });
       await page.goto(renderUrl ?? pathToFileURL(htmlPath).href, { waitUntil: "domcontentloaded", timeout: 10000 });
       await new Promise((r) => setTimeout(r, 400));
@@ -276,20 +342,26 @@ async function collectGeometry(htmlPath: string, screenshotPath?: string, render
       await page.close().catch(() => {});
     }
     const seen = new Set<string>();
-    return all.filter((finding) => {
-      if (seen.has(finding.id)) return false;
-      seen.add(finding.id);
-      return true;
-    });
+    return {
+      findings: all.filter((finding) => {
+        if (seen.has(finding.id)) return false;
+        seen.add(finding.id);
+        return true;
+      }),
+      consoleMessages,
+    };
   } catch {
-    return [
-      {
-        severity: "P2",
-        id: "visual-render-failed",
-        message: "Visual QA could not render the final artifact in headless Chrome.",
-        fix: "Open the preview and check for script errors, blocked local assets, or markup that prevents first paint.",
-      },
-    ];
+    return {
+      findings: [
+        {
+          severity: "P2",
+          id: "visual-render-failed",
+          message: "Visual QA could not render the final artifact in headless Chrome.",
+          fix: "Open the preview and check for script errors, blocked local assets, or markup that prevents first paint.",
+        },
+      ],
+      consoleMessages,
+    };
   } finally {
     await browser?.close().catch(() => {});
   }
@@ -374,6 +446,6 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
   const geometry = await collectGeometry(input.htmlPath, screenshotPath, input.renderUrl);
-  const ai = await reviewScreenshotWithAgent(input, screenshotPath);
-  return [...geometry, ...ai];
+  const ai = await reviewScreenshotWithAgent({ ...input, consoleMessages: geometry.consoleMessages }, screenshotPath);
+  return [...geometry.findings, ...ai];
 }

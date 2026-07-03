@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { Eye, Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
-import { Button, Picker, Textarea, Loading, Badge, ScrollArea, Switch } from "../components/ui/index.ts";
+import { Button, Picker, Textarea, Loading, Badge, ScrollArea, Switch, Input } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import type { DesignSystemCard, Settings } from "../lib/api.ts";
+import { agentLabel } from "../components/agent-logos.tsx";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
 import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
@@ -71,7 +72,7 @@ export function SettingsScreen({
     };
   }, [api]);
 
-  const setLocal = (key: keyof Settings, value: string | boolean) =>
+  const setLocal = (key: keyof Settings, value: string | boolean | number) =>
     setSettings((s) => {
       if (!s) return s;
       const next = { ...s, [key]: value };
@@ -85,7 +86,7 @@ export function SettingsScreen({
       publishSettingsUpdate(next);
       return next;
     });
-  const save = (key: keyof Settings, value: string | boolean) => {
+  const save = (key: keyof Settings, value: string | boolean | number) => {
     setLocal(key, value);
     void api.updateSettings({ [key]: value } as Partial<Settings>).catch(() => toast("Couldn't save settings.", { variant: "error" }));
   };
@@ -104,6 +105,23 @@ export function SettingsScreen({
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);
+  const visualReviewAgent = settings?.visualQaAgentCommand
+    ? agents.find((a) => a.command === settings.visualQaAgentCommand)
+    : activeAgent;
+  const visualReviewAgentOptions = [
+    { value: "", label: "Same as project agent" },
+    ...agents
+      .filter((agent) => agent.available || agent.command === settings?.visualQaAgentCommand)
+      .map((agent) => ({ value: agent.command, label: agentLabel(agent.id) })),
+  ];
+  const visualReviewModelOptions = [
+    { value: "", label: "Same as project model" },
+    ...((visualReviewAgent?.models ?? []).map((model) => ({ value: model, label: model }))),
+  ];
+  const clampRounds = (value: string | number) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.max(0, Math.min(20, Math.trunc(n))) : 0;
+  };
 
   return (
     <div className="flex h-[clamp(460px,72vh,660px)]">
@@ -175,16 +193,67 @@ export function SettingsScreen({
             {section === "models" && <ModelProviderSettings settings={settings} onLocalPatch={setLocalPatch} onSavePatch={savePatch} />}
 
             {section === "quality" && (
-              <SettingsPanel title="Quality" desc="Checks the finished prototype against visible layout problems.">
+              <SettingsPanel title="Quality" desc="Checks the finished result against visible layout problems.">
                 <SettingsRows>
                   <SettingRow
                     label="Agent visual review"
-                    desc="After generation, the selected Agent/model reviews the screenshot with the full current conversation context."
+                    desc="After generation, a reviewer Agent/model inspects the screenshot, conversation, and runtime signals."
                   >
                     <Switch
                       aria-label="Agent visual review"
                       checked={settings.visualQaEnabled}
                       onCheckedChange={(checked) => save("visualQaEnabled", checked)}
+                    />
+                  </SettingRow>
+                  <SettingRow label="Review agent" desc="Blank inherits the Agent used for the current project run.">
+                    <Picker
+                      ariaLabel="Visual review agent"
+                      className="w-52"
+                      value={settings.visualQaAgentCommand}
+                      onChange={(value) => savePatch({ visualQaAgentCommand: value, visualQaModel: "" })}
+                      options={visualReviewAgentOptions}
+                    />
+                  </SettingRow>
+                  <SettingRow label="Review model" desc="Blank inherits the model used for the current project run.">
+                    {visualReviewAgentOptions.length > 0 && visualReviewModelOptions.length > 1 ? (
+                      <Picker
+                        ariaLabel="Visual review model"
+                        className="w-52"
+                        value={settings.visualQaModel}
+                        onChange={(value) => save("visualQaModel", value)}
+                        options={visualReviewModelOptions}
+                      />
+                    ) : (
+                      <Input
+                        aria-label="Visual review model"
+                        className="w-52"
+                        value={settings.visualQaModel}
+                        placeholder="Same as project model"
+                        onChange={(event) => setLocal("visualQaModel", event.target.value)}
+                        onBlur={(event) => save("visualQaModel", event.target.value)}
+                      />
+                    )}
+                  </SettingRow>
+                  <SettingRow
+                    label="Auto-improve after review"
+                    desc="When quality checks find P0/P1 issues, Dezin sends a repair prompt back to the project Agent automatically."
+                  >
+                    <Switch
+                      aria-label="Auto-improve after review"
+                      checked={settings.autoImproveEnabled}
+                      onCheckedChange={(checked) => save("autoImproveEnabled", checked)}
+                    />
+                  </SettingRow>
+                  <SettingRow label="Max rounds" desc="Maximum automatic repair turns after the initial generation.">
+                    <Input
+                      aria-label="Max auto-improve rounds"
+                      className="w-24"
+                      type="number"
+                      min={0}
+                      max={20}
+                      value={settings.autoImproveMaxRounds}
+                      onChange={(event) => setLocal("autoImproveMaxRounds", clampRounds(event.target.value))}
+                      onBlur={(event) => save("autoImproveMaxRounds", clampRounds(event.target.value))}
                     />
                   </SettingRow>
                 </SettingsRows>

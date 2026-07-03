@@ -214,6 +214,10 @@ test("settings: defaults, round-trip, and partial merge", () => {
   assert.equal(d.defaultDesignSystemId, "modern-minimal");
   assert.equal(d.model, "");
   assert.equal(d.visualQaEnabled, false);
+  assert.equal(d.visualQaAgentCommand, "");
+  assert.equal(d.visualQaModel, "");
+  assert.equal(d.autoImproveEnabled, true);
+  assert.equal(d.autoImproveMaxRounds, 8);
   assert.equal(d.videoModel, "");
 
   const u = s.updateSettings({
@@ -222,12 +226,20 @@ test("settings: defaults, round-trip, and partial merge", () => {
     customInstructions: "be terse",
     videoModel: "sora",
     visualQaEnabled: true,
+    visualQaAgentCommand: "codebuddy",
+    visualQaModel: "hunyuan",
+    autoImproveEnabled: false,
+    autoImproveMaxRounds: 5,
   });
   assert.equal(u.agentCommand, "codex");
   assert.equal(u.model, "o3");
   assert.equal(s.getSettings().customInstructions, "be terse");
   assert.equal(s.getSettings().videoModel, "sora");
   assert.equal(s.getSettings().visualQaEnabled, true);
+  assert.equal(s.getSettings().visualQaAgentCommand, "codebuddy");
+  assert.equal(s.getSettings().visualQaModel, "hunyuan");
+  assert.equal(s.getSettings().autoImproveEnabled, false);
+  assert.equal(s.getSettings().autoImproveMaxRounds, 5);
 
   // a partial update only changes the given fields
   s.updateSettings({ model: "o4" });
@@ -237,6 +249,10 @@ test("settings: defaults, round-trip, and partial merge", () => {
   assert.equal(after.customInstructions, "be terse");
   assert.equal(after.videoModel, "sora");
   assert.equal(after.visualQaEnabled, true);
+  assert.equal(after.visualQaAgentCommand, "codebuddy");
+  assert.equal(after.visualQaModel, "hunyuan");
+  assert.equal(after.autoImproveEnabled, false);
+  assert.equal(after.autoImproveMaxRounds, 5);
   s.close();
 });
 

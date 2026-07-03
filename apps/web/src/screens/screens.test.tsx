@@ -55,6 +55,10 @@ function settingsFixture(patch: Partial<Settings> = {}): Settings {
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     visualQaEnabled: false,
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+    autoImproveEnabled: true,
+    autoImproveMaxRounds: 8,
     ...patch,
   };
 }
@@ -261,6 +265,10 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
       aiProviderOrganization: "",
       aiProviderProfiles: "",
       visualQaEnabled: false,
+      visualQaAgentCommand: "",
+      visualQaModel: "",
+      autoImproveEnabled: true,
+      autoImproveMaxRounds: 8,
     }),
     createMoodboard,
     postMoodboardMessage,
@@ -517,6 +525,10 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     visualQaEnabled: false,
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+    autoImproveEnabled: true,
+    autoImproveMaxRounds: 8,
   };
   render(
     <ApiProvider
@@ -582,6 +594,22 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
   fireEvent.click(screen.getByRole("button", { name: "Quality" }));
   await user.click(await screen.findByRole("switch", { name: "Agent visual review" }));
   expect(updateSettings).toHaveBeenCalledWith({ visualQaEnabled: true });
+  expect(screen.getByRole("combobox", { name: "Visual review agent" })).toHaveTextContent("Same as project agent");
+  expect(screen.getByRole("combobox", { name: "Visual review model" })).toHaveTextContent("Same as project model");
+  expect(screen.getByRole("spinbutton", { name: "Max auto-improve rounds" })).toHaveValue(8);
+
+  await user.click(screen.getByRole("switch", { name: "Auto-improve after review" }));
+  expect(updateSettings).toHaveBeenCalledWith({ autoImproveEnabled: false });
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Max auto-improve rounds" }), { target: { value: "6" } });
+  fireEvent.blur(screen.getByRole("spinbutton", { name: "Max auto-improve rounds" }));
+  expect(updateSettings).toHaveBeenCalledWith({ autoImproveMaxRounds: 6 });
+
+  await user.click(screen.getByRole("combobox", { name: "Visual review agent" }));
+  await user.click(await screen.findByRole("option", { name: "Codex" }));
+  expect(updateSettings).toHaveBeenCalledWith({ visualQaAgentCommand: "codex", visualQaModel: "" });
+  await user.click(screen.getByRole("combobox", { name: "Visual review model" }));
+  await user.click(await screen.findByRole("option", { name: "gpt-5" }));
+  expect(updateSettings).toHaveBeenCalledWith({ visualQaModel: "gpt-5" });
 });
 
 test("SettingsScreen keeps model API key drafts after redacted settings saves", async () => {

@@ -33,6 +33,10 @@ function settings(overrides: Partial<Settings> = {}): Settings {
       },
     }),
     visualQaEnabled: false,
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+    autoImproveEnabled: true,
+    autoImproveMaxRounds: 8,
     ...overrides,
   };
 }

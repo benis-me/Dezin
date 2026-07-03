@@ -24,6 +24,10 @@ function settings(over: Partial<Settings>): Settings {
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     visualQaEnabled: false,
+    visualQaAgentCommand: "",
+    visualQaModel: "",
+    autoImproveEnabled: true,
+    autoImproveMaxRounds: 8,
     ...over,
   };
 }

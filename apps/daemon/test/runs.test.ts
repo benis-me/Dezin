@@ -310,10 +310,11 @@ test("run writes a readable moodboard snapshot bundle for the agent", async () =
 });
 
 test("prototype run folds visual QA findings into score, result, and persisted run", async () => {
+  let visualInput: { agentCommand?: string; model?: string; brief?: string; htmlPath?: string; conversationHistory?: Array<{ content: string }> } | undefined;
   await withRunServer(
     new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }),
     async ({ base, store }) => {
-      store.updateSettings({ visualQaEnabled: true });
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: false });
       const project = await createProject(base);
       const conversation = store.createConversation(project.id);
       store.addMessage(conversation.id, "user", "previous user request");
@@ -329,6 +330,16 @@ test("prototype run folds visual QA findings into score, result, and persisted r
       assert.equal(visual.findings && Array.isArray(visual.findings), true);
       assert.equal(done.score, 92);
       assert.equal((done.findings as Array<{ id: string }>)[0]?.id, "visual-horizontal-overflow");
+      assert.equal(visualInput?.agentCommand, "codex");
+      assert.equal(visualInput?.model, "gpt-5");
+      assert.equal(visualInput?.brief, "make a hero");
+      assert.match(visualInput?.htmlPath ?? "", /index\.html$/);
+      assert.deepEqual(visualInput?.conversationHistory?.map((m) => m.content), [
+        "previous user request",
+        "previous assistant answer",
+        "make a hero",
+        "done",
+      ]);
 
       const run = store.getRun(done.runId as string)!;
       assert.equal(run.score, 92);
@@ -349,16 +360,7 @@ test("prototype run folds visual QA findings into score, result, and persisted r
     },
     {
       visualQa: async (input) => {
-        assert.equal(input.agentCommand, "codex");
-        assert.equal(input.model, "gpt-5");
-        assert.equal(input.brief, "make a hero");
-        assert.match(input.htmlPath, /index\.html$/);
-        assert.deepEqual(input.conversationHistory?.map((m) => m.content), [
-          "previous user request",
-          "previous assistant answer",
-          "make a hero",
-          "done",
-        ]);
+        visualInput = input;
         return [
           {
             severity: "P1",
@@ -367,6 +369,52 @@ test("prototype run folds visual QA findings into score, result, and persisted r
             fix: "Constrain the widest element to the viewport.",
           },
         ];
+      },
+    },
+  );
+});
+
+test("prototype run auto-improves visual QA findings after screenshot review", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN, CLEAN], texts: ["draft", "fixed"] });
+  const visualQaCalls: string[] = [];
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: true });
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+      });
+      const events = parseSse(await res.text());
+      const done = events.find((e) => e.type === "run-done")!;
+      assert.equal(done.passed, true);
+      assert.equal(done.rounds, 1);
+      assert.equal(done.score, 100);
+      assert.equal(visualQaCalls.length, 2);
+      assert.equal(runner.calls[1]?.isRepair, true);
+      assert.match(runner.calls[1]?.message ?? "", /visual-fixed-offscreen/);
+      assert.match(runner.calls[1]?.message ?? "", /Clamp the toolbar/);
+
+      const run = store.getRun(done.runId as string)!;
+      assert.equal(run.repairRounds, 1);
+      assert.equal(run.lintPassed, true);
+      assert.deepEqual(run.findings, []);
+    },
+    {
+      visualQa: async () => {
+        visualQaCalls.push(`call-${visualQaCalls.length + 1}`);
+        return visualQaCalls.length === 1
+          ? [
+              {
+                severity: "P1",
+                id: "visual-fixed-offscreen",
+                message: "A fixed toolbar is outside the viewport.",
+                fix: "Clamp the toolbar inside the viewport.",
+              },
+            ]
+          : [];
       },
     },
   );
@@ -1024,6 +1072,7 @@ test("standard run captures the gallery cover from the dev server URL", async ()
 
 test("standard run persists visual QA findings and score when enabled", async () => {
   let expectedDir = "";
+  let visualInput: { agentCommand?: string; model?: string; projectRoot?: string; htmlPath?: string; conversationHistory?: Array<{ content: string }> } | undefined;
   const runner: AgentRunner = {
     id: "standard-visual",
     async runTurn(input) {
@@ -1035,7 +1084,12 @@ test("standard run persists visual QA findings and score when enabled", async ()
   await withRunServer(
     runner,
     async ({ base, dataDir, store }) => {
-      store.updateSettings({ visualQaEnabled: true });
+      store.updateSettings({
+        visualQaEnabled: true,
+        visualQaAgentCommand: "codebuddy",
+        visualQaModel: "hunyuan",
+        autoImproveEnabled: false,
+      });
       const project = store.createProject({ name: "Std", mode: "standard" });
       const dir = join(dataDir, "projects", project.id);
       expectedDir = dir;
@@ -1055,17 +1109,18 @@ test("standard run persists visual QA findings and score when enabled", async ()
       const done = events.find((e) => e.type === "run-done")!;
       assert.equal((visual.findings as Array<{ id: string }>)[0]?.id, "visual-fixed-offscreen");
       assert.equal(done.score, 92);
+      assert.equal(visualInput?.projectRoot, expectedDir);
+      assert.match(visualInput?.htmlPath ?? "", /index\.html$/);
+      assert.equal(visualInput?.agentCommand, "codebuddy");
+      assert.equal(visualInput?.model, "hunyuan");
+      assert.deepEqual(visualInput?.conversationHistory?.map((m) => m.content), ["make it better", "changed"]);
       const run = store.getRun(done.runId as string)!;
       assert.equal(run.score, 92);
       assert.equal(run.findings[0]?.id, "visual-fixed-offscreen");
     },
     {
       visualQa: async (input) => {
-        assert.equal(input.projectRoot, expectedDir);
-        assert.match(input.htmlPath, /index\.html$/);
-        assert.equal(input.agentCommand, "codex");
-        assert.equal(input.model, "gpt-5");
-        assert.deepEqual(input.conversationHistory?.map((m) => m.content), ["make it better", "changed"]);
+        visualInput = input;
         return [
           {
             severity: "P1",
@@ -1074,6 +1129,73 @@ test("standard run persists visual QA findings and score when enabled", async ()
             fix: "Clamp the toolbar inside the viewport.",
           },
         ];
+      },
+    },
+  );
+});
+
+test("standard run auto-improves visual QA findings without a manual button", async () => {
+  let turn = 0;
+  const calls: Array<{ message: string; isRepair?: boolean }> = [];
+  const runner: AgentRunner = {
+    id: "standard-auto-improve",
+    async runTurn(input) {
+      turn += 1;
+      calls.push({ message: input.message, isRepair: input.isRepair });
+      mkdirSync(join(input.projectDir, "src"), { recursive: true });
+      writeFileSync(join(input.projectDir, "index.html"), `<div id="root"></div>`);
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>${turn === 1 ? "Draft" : "Fixed"}</main> }`);
+      writeFileSync(join(input.projectDir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      return { text: turn === 1 ? "draft complete" : "fixed complete", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  const visualQaCalls: string[] = [];
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: true });
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), "{}");
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+      });
+      const events = parseSse(await res.text());
+      const done = events.find((e) => e.type === "run-done")!;
+      assert.equal(done.mode, "standard");
+      assert.equal(done.passed, true);
+      assert.equal(done.rounds, 1);
+      assert.equal(done.score, 100);
+      assert.equal(calls.length, 2);
+      assert.equal(calls[1]?.isRepair, true);
+      assert.match(calls[1]?.message ?? "", /visual-fixed-offscreen/);
+      assert.match(calls[1]?.message ?? "", /Clamp the toolbar/);
+      assert.equal(visualQaCalls.length, 2);
+      const run = store.getRun(done.runId as string)!;
+      assert.equal(run.repairRounds, 1);
+      assert.equal(run.lintPassed, true);
+      assert.equal(run.findings.length, 0);
+    },
+    {
+      visualQa: async () => {
+        visualQaCalls.push(`call-${visualQaCalls.length + 1}`);
+        return visualQaCalls.length === 1
+          ? [
+              {
+                severity: "P1",
+                id: "visual-fixed-offscreen",
+                message: "A fixed toolbar is outside the viewport.",
+                fix: "Clamp the toolbar inside the viewport.",
+              },
+            ]
+          : [];
       },
     },
   );

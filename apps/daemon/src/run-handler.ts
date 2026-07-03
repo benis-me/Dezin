@@ -23,7 +23,7 @@ import {
 import { defaultRegistry } from "../../../packages/design/src/index.ts";
 import { loadSkills, findSkill, type SkillInfo } from "../../../packages/skills/src/index.ts";
 import { loadCraftSections } from "../../../packages/craft/src/index.ts";
-import { lintArtifact, lintScore } from "../../../packages/quality/src/index.ts";
+import { lintArtifact, lintScore, renderFindingsForAgent } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
@@ -132,6 +132,52 @@ interface RunBody {
 
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
 
+const DEFAULT_AUTO_IMPROVE_MAX_ROUNDS = 8;
+const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"]);
+
+function autoImproveMaxRounds(settings: Settings, override?: number): number {
+  const raw = typeof override === "number" ? override : settings.autoImproveMaxRounds;
+  const value = Number.isFinite(raw) ? Math.trunc(raw) : DEFAULT_AUTO_IMPROVE_MAX_ROUNDS;
+  return Math.max(0, Math.min(20, value));
+}
+
+function reviewerAgentCommand(settings: Settings, fallback: string): string {
+  return settings.visualQaAgentCommand.trim() || fallback || settings.agentCommand || "claude";
+}
+
+function reviewerModel(settings: Settings, fallback?: string): string | undefined {
+  return settings.visualQaModel.trim() || fallback || settings.model || undefined;
+}
+
+function shouldAutoRepair(settings: Settings, findings: QualityFinding[], repairRounds: number, maxRounds: number): boolean {
+  if (!settings.autoImproveEnabled || repairRounds >= maxRounds) return false;
+  return findings.some((finding) => AUTO_REPAIR_SEVERITIES.has(finding.severity));
+}
+
+function standardRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number): string | null {
+  const lintBlock = renderFindingsForAgent(findings);
+  if (!lintBlock) return null;
+  return [
+    `Automatic quality repair round ${round}/${maxRounds}.`,
+    "You are editing the existing Standard-mode Vite project in this directory. Preserve the user's concept and the current visual direction, but fix the concrete quality findings below.",
+    "Do not ask a follow-up question. Edit the actual project files, then stop.",
+    `Current quality score: ${score}/100.`,
+    lintBlock,
+  ].join("\n\n");
+}
+
+function prototypeRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number): string | null {
+  const lintBlock = renderFindingsForAgent(findings);
+  if (!lintBlock) return null;
+  return [
+    `Automatic quality repair round ${round}/${maxRounds}.`,
+    "You are repairing the current single-file Dezin prototype. Preserve the user's concept and visual direction, but return a complete corrected HTML artifact.",
+    "Do not ask a follow-up question. Rewrite the artifact to fix the concrete findings below, then stop.",
+    `Current quality score: ${score}/100.`,
+    lintBlock,
+  ].join("\n\n");
+}
+
 function splitFinalSummary(text: string): ReturnType<typeof extractFinalSummary> {
   return extractFinalSummary(text);
 }
@@ -178,7 +224,15 @@ async function runVisualQa(
   if (!settings.visualQaEnabled) return [];
   try {
     const runner = deps.visualQa ?? auditVisualArtifact;
-    return await runner({ htmlPath, settings, agentCommand, model, brief, conversationHistory, ...options });
+    return await runner({
+      htmlPath,
+      settings,
+      agentCommand: reviewerAgentCommand(settings, agentCommand),
+      model: reviewerModel(settings, model),
+      brief,
+      conversationHistory,
+      ...options,
+    });
   } catch (err) {
     return [
       {
@@ -350,99 +404,136 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   if (project.mode === "standard") {
     try {
       const ensureStandardDevServer = deps.ensureDevServer ?? ensureDevServer;
-      const beforeTree = await workingTreeFingerprint(dir);
-      sse({ type: "turn-start", round: 0, isRepair: false });
-      const result = await runTurnWithRetry(
-        runner,
-        {
-          systemPrompt,
-          message: agentBrief,
-          projectDir: dir,
-          history,
-          onActivity: (activity) => {
-            const visible = recordActivity(activity);
-            if (visible) sse({ type: "activity", round: 0, activity: visible });
+      const maxRepairRounds = autoImproveMaxRounds(settings, body.maxRounds);
+      const turnHistory: Array<{ role: "user" | "assistant"; content: string }> = [...history];
+      let round = 0;
+      let repairRounds = 0;
+      let turnMessage = agentBrief;
+      let finalAssistantText = "";
+      let commitHash: string | null = null;
+      let findings: QualityFinding[] = [];
+      let score = 100;
+      let passed = true;
+
+      while (true) {
+        const isRepair = round > 0;
+        const beforeTree = await workingTreeFingerprint(dir);
+        sse({ type: "turn-start", round, isRepair });
+        const result = await runTurnWithRetry(
+          runner,
+          {
+            systemPrompt,
+            message: turnMessage,
+            projectDir: dir,
+            history: turnHistory,
+            isRepair,
+            onActivity: (activity) => {
+              const visible = recordActivity(activity);
+              if (visible) sse({ type: "activity", round, activity: visible });
+            },
+            signal: ctrl.signal,
+            env: agentEnv,
           },
-          signal: ctrl.signal,
-          env: agentEnv,
-        },
-        {
-          onRetry: (attempt) =>
-            sse({ type: "activity", round: 0, activity: { kind: "tool", name: "retry", summary: `Agent hiccup — retrying (attempt ${attempt + 1})…` } }),
-        },
-      );
-      const asked = extractAskUserQuestion(result.text);
-      const final = splitFinalSummary(asked.text);
-      if (final.hadBoundary) summaryBoundarySeen = true;
-      sse({ type: "turn-end", round: 0, text: final.summaryText, summaryBoundary: final.hadBoundary });
-      if (asked.question) {
-        persistProcess();
-        if (asked.text) store.addMessage(conversation.id, "assistant", asked.text);
-        persistSteps();
-        store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
-        store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
-        sse({ type: "ask-user-question", runId: run.id, question: asked.question });
-        sse({ type: "run-cancelled", runId: run.id, reason: "question" });
-        return;
-      }
-      const afterTree = await workingTreeFingerprint(dir);
-      if (afterTree === beforeTree) throw new Error("The selected Agent finished without changing project files.");
-      const commit = await gitCommit(dir, visibleBrief);
-      if (!commit.changed) throw new Error("The selected Agent did not leave any project changes to save.");
-      if (!commit.committed) throw new Error("Project files changed, but Dezin could not commit a version snapshot.");
-      const visualConversation = [
-        ...history,
-        { role: "user" as const, content: visibleBrief },
-        ...(final.summaryText ? [{ role: "assistant" as const, content: final.summaryText }] : []),
-      ];
-      const staticSurface = await collectStandardLintSurface(dir);
-      const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface) : []) as QualityFinding[];
-      if (staticFindings.length) sse({ type: "static-quality", findings: staticFindings });
-      let visualFindings: QualityFinding[] = [];
-      if (settings.visualQaEnabled) {
-        let renderUrl: string | undefined;
-        if (!deps.visualQa) {
-          try {
-            renderUrl = (await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId))).url;
-          } catch (err) {
-            visualFindings = [
-              {
-                severity: "P2",
-                id: "visual-devserver-unavailable",
-                message: `Visual QA could not open the standard project preview: ${err instanceof Error ? err.message : "dev server unavailable"}.`,
-                fix: "Wait for dependencies to finish installing, refresh the preview, and rerun visual QA.",
-              },
-            ];
+          {
+            onRetry: (attempt) =>
+              sse({
+                type: "activity",
+                round,
+                activity: { kind: "tool", name: "retry", summary: `Agent hiccup — retrying (attempt ${attempt + 1})…` },
+              }),
+          },
+        );
+        const asked = extractAskUserQuestion(result.text);
+        const final = splitFinalSummary(asked.text);
+        if (final.hadBoundary) summaryBoundarySeen = true;
+        sse({ type: "turn-end", round, text: final.summaryText, summaryBoundary: final.hadBoundary });
+        if (asked.question) {
+          persistProcess();
+          if (asked.text) store.addMessage(conversation.id, "assistant", asked.text);
+          persistSteps();
+          store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
+          store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
+          sse({ type: "ask-user-question", runId: run.id, question: asked.question });
+          sse({ type: "run-cancelled", runId: run.id, reason: "question" });
+          return;
+        }
+
+        finalAssistantText = final.summaryText;
+        turnHistory.push({ role: "user", content: turnMessage });
+        if (final.summaryText) turnHistory.push({ role: "assistant", content: final.summaryText });
+        if (isRepair) repairRounds = Math.max(repairRounds, round);
+
+        const afterTree = await workingTreeFingerprint(dir);
+        if (afterTree === beforeTree) {
+          if (!isRepair) throw new Error("The selected Agent finished without changing project files.");
+          break;
+        }
+        const commit = await gitCommit(dir, isRepair ? `Auto-improve round ${round}: ${visibleBrief}` : visibleBrief);
+        if (!commit.changed) {
+          if (!isRepair) throw new Error("The selected Agent did not leave any project changes to save.");
+          break;
+        }
+        if (!commit.committed) throw new Error("Project files changed, but Dezin could not commit a version snapshot.");
+        commitHash = commit.commitHash;
+
+        const staticSurface = await collectStandardLintSurface(dir);
+        const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface) : []) as QualityFinding[];
+        if (staticFindings.length) sse({ type: "static-quality", round, findings: staticFindings });
+        let visualFindings: QualityFinding[] = [];
+        if (settings.visualQaEnabled) {
+          let renderUrl: string | undefined;
+          if (!deps.visualQa) {
+            try {
+              renderUrl = (await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId))).url;
+            } catch (err) {
+              visualFindings = [
+                {
+                  severity: "P2",
+                  id: "visual-devserver-unavailable",
+                  message: `Visual QA could not open the standard project preview: ${err instanceof Error ? err.message : "dev server unavailable"}.`,
+                  fix: "Wait for dependencies to finish installing, refresh the preview, and rerun visual QA.",
+                },
+              ];
+            }
           }
+          if (!visualFindings.length) {
+            visualFindings = await runVisualQa(deps, join(dir, "index.html"), settings, runAgentCommand, runModel, visibleBrief, turnHistory, {
+              projectRoot: dir,
+              renderUrl,
+            });
+          }
+          sse({ type: "visual-qa", round, enabled: settings.visualQaEnabled, findings: visualFindings });
         }
-        if (!visualFindings.length) {
-          visualFindings = await runVisualQa(deps, join(dir, "index.html"), settings, runAgentCommand, runModel, visibleBrief, visualConversation, {
-            projectRoot: dir,
-            renderUrl,
-          });
-        }
-        sse({ type: "visual-qa", enabled: settings.visualQaEnabled, findings: visualFindings });
+        findings = [...staticFindings, ...visualFindings];
+        score = lintScore(findings);
+        passed = !findings.some((f) => f.severity === "P0");
+
+        if (!shouldAutoRepair(settings, findings, repairRounds, maxRepairRounds)) break;
+        const nextRound = repairRounds + 1;
+        const repairPrompt = standardRepairPrompt(findings, nextRound, maxRepairRounds, score);
+        if (!repairPrompt) break;
+        round = nextRound;
+        turnMessage = repairPrompt;
       }
-      const findings = [...staticFindings, ...visualFindings];
-      const score = lintScore(findings);
-      const passed = !findings.some((f) => f.severity === "P0");
+
       persistProcess();
-      const assistantMessage = store.addMessage(conversation.id, "assistant", final.summaryText);
+      const assistantMessage = store.addMessage(conversation.id, "assistant", finalAssistantText);
       persistSteps();
       const quality = `, quality ${score}/100`;
-      const message = passed ? `Done${quality}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
-      store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: 0 }));
+      const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
+      const message = passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
+      store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds }));
       store.updateRun(run.id, {
         status: "succeeded",
-        repairRounds: 0,
+        repairRounds,
         lintPassed: passed,
         score,
         findings,
         assistantMessageId: assistantMessage.id,
-        commitHash: commit.commitHash,
+        commitHash,
         finishedAt: Date.now(),
       });
-      sse({ type: "run-done", runId: run.id, passed, rounds: 0, score, mode: "standard", findings });
+      sse({ type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", findings });
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
         void (async () => {
@@ -483,7 +574,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       brief: agentBrief,
       projectDir: dir,
       history,
-      lint: { maxRounds: body.maxRounds ?? 2 },
+      lint: { maxRounds: settings.autoImproveEnabled ? autoImproveMaxRounds(settings, body.maxRounds) : 0 },
       signal: ctrl.signal,
       env: agentEnv,
       onEvent: (e: GenerateEvent) => {
@@ -492,6 +583,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           if (visible) sse({ ...e, activity: visible });
           return;
         }
+        if (e.type === "done") return;
         if (e.type === "turn-end" && typeof e.text === "string") {
           const stripped = extractAskUserQuestion(e.text);
           const final = splitFinalSummary(stripped.text);
@@ -508,7 +600,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const asked = extractAskUserQuestion(rawAssistantText);
     const final = splitFinalSummary(asked.text);
     if (final.hadBoundary) summaryBoundarySeen = true;
-    const assistantText = final.summaryText;
+    let assistantText = final.summaryText;
     if (asked.question) {
       persistProcess();
       if (assistantText) store.addMessage(conversation.id, "assistant", assistantText);
@@ -520,59 +612,123 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       return;
     }
 
-    // Generate any media the agent requested (data-gen-prompt placeholders → assets/).
-    const { html: finalHtml, generated } = await generateImages(
-      result.html,
-      {
-        baseUrl: imageBaseUrl,
-        apiKey: imageApiKey,
-        model: settings.imageModel,
-        providerId: settings.aiProviderId,
-        apiVersion: imageRuntime.organization || settings.aiProviderOrganization,
-      },
-      join(dir, "assets"),
-      createProviderFetch(),
-    );
-    if (generated > 0) sse({ type: "images", count: generated });
-
-    // Persist the final artifact to disk + a per-run snapshot (for version history).
-    await writeFile(join(dir, result.artifactPath), finalHtml, "utf8");
-    await mkdir(join(dir, ".versions"), { recursive: true });
-    await writeFile(join(dir, ".versions", `${run.id}.html`), finalHtml, "utf8");
-    const visualConversation = [
+    let artifactPath = result.artifactPath;
+    let currentHtml = result.html;
+    let generatedTotal = 0;
+    let repairRounds = result.rounds;
+    let finalFindings: QualityFinding[] = result.findings as QualityFinding[];
+    let score = lintScore(finalFindings);
+    const maxRepairRounds = autoImproveMaxRounds(settings, body.maxRounds);
+    const repairHistory: Array<{ role: "user" | "assistant"; content: string }> = [
       ...history,
-      { role: "user" as const, content: visibleBrief },
+      { role: "user" as const, content: agentBrief },
       ...(assistantText ? [{ role: "assistant" as const, content: assistantText }] : []),
     ];
-    const visualFindings = await runVisualQa(
-      deps,
-      join(dir, result.artifactPath),
-      settings,
-      runAgentCommand,
-      runModel,
-      visibleBrief,
-      visualConversation,
-      { projectRoot: dir, renderUrl: origin ? `${origin}/projects/${project.id}/preview/` : undefined },
-    );
-    sse({ type: "visual-qa", enabled: settings.visualQaEnabled, findings: visualFindings });
-    const finalFindings = [...result.findings, ...visualFindings];
-    const passed = result.passed && !finalFindings.some((f) => f.severity === "P0");
-    store.recordArtifact(project.id, result.artifactPath, passed);
+    const renderUrl = origin ? `${origin}/projects/${project.id}/preview/` : undefined;
+    const writeCurrentArtifact = async (): Promise<void> => {
+      const media = await generateImages(
+        currentHtml,
+        {
+          baseUrl: imageBaseUrl,
+          apiKey: imageApiKey,
+          model: settings.imageModel,
+          providerId: settings.aiProviderId,
+          apiVersion: imageRuntime.organization || settings.aiProviderOrganization,
+        },
+        join(dir, "assets"),
+        createProviderFetch(),
+      );
+      currentHtml = media.html;
+      generatedTotal += media.generated;
+      if (media.generated > 0) sse({ type: "images", count: media.generated });
+      await writeFile(join(dir, artifactPath), currentHtml, "utf8");
+      await mkdir(join(dir, ".versions"), { recursive: true });
+      await writeFile(join(dir, ".versions", `${run.id}.html`), currentHtml, "utf8");
+    };
+    const reviewCurrentArtifact = async (round: number, staticFindings: QualityFinding[]): Promise<void> => {
+      const visualFindings = await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
+        projectRoot: dir,
+        renderUrl,
+      });
+      sse({ type: "visual-qa", round, enabled: settings.visualQaEnabled, findings: visualFindings });
+      finalFindings = [...staticFindings, ...visualFindings];
+      score = lintScore(finalFindings);
+    };
+
+    await writeCurrentArtifact();
+    await reviewCurrentArtifact(0, result.findings as QualityFinding[]);
+
+    while (shouldAutoRepair(settings, finalFindings, repairRounds, maxRepairRounds)) {
+      const nextRound = repairRounds + 1;
+      const repairPrompt = prototypeRepairPrompt(finalFindings, nextRound, maxRepairRounds, score);
+      if (!repairPrompt) break;
+      sse({ type: "turn-start", round: nextRound, isRepair: true });
+      const repaired = await runTurnWithRetry(
+        runner,
+        {
+          systemPrompt,
+          message: repairPrompt,
+          projectDir: dir,
+          history: repairHistory,
+          isRepair: true,
+          onActivity: (activity) => {
+            const visible = recordActivity(activity);
+            if (visible) sse({ type: "activity", round: nextRound, activity: visible });
+          },
+          signal: ctrl.signal,
+          env: agentEnv,
+        },
+        {
+          onRetry: (attempt) =>
+            sse({
+              type: "activity",
+              round: nextRound,
+              activity: { kind: "tool", name: "retry", summary: `Agent hiccup — retrying (attempt ${attempt + 1})…` },
+            }),
+        },
+      );
+      const repairedAsked = extractAskUserQuestion(repaired.text);
+      const repairedFinal = splitFinalSummary(repairedAsked.text);
+      if (repairedFinal.hadBoundary) summaryBoundarySeen = true;
+      sse({ type: "turn-end", round: nextRound, text: repairedFinal.summaryText, summaryBoundary: repairedFinal.hadBoundary });
+      if (repairedAsked.question) {
+        persistProcess();
+        if (repairedFinal.summaryText) store.addMessage(conversation.id, "assistant", repairedFinal.summaryText);
+        persistSteps();
+        store.addMessage(conversation.id, "system", questionMessage(repairedAsked.question, run.id));
+        store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
+        sse({ type: "ask-user-question", runId: run.id, question: repairedAsked.question });
+        sse({ type: "run-cancelled", runId: run.id, reason: "question" });
+        return;
+      }
+
+      assistantText = repairedFinal.summaryText;
+      repairHistory.push({ role: "user", content: repairPrompt });
+      if (assistantText) repairHistory.push({ role: "assistant", content: assistantText });
+      artifactPath = repaired.artifactPath ?? artifactPath;
+      currentHtml = repaired.artifactHtml || currentHtml;
+      repairRounds = nextRound;
+      await writeCurrentArtifact();
+      const staticFindings = lintArtifact(currentHtml) as QualityFinding[];
+      await reviewCurrentArtifact(nextRound, staticFindings);
+    }
+
+    const passed = !finalFindings.some((f) => f.severity === "P0");
+    store.recordArtifact(project.id, artifactPath, passed);
     persistProcess();
     const assistantMessage = store.addMessage(conversation.id, "assistant", assistantText);
     persistSteps();
-    const score = lintScore(finalFindings);
-    const fixes = result.rounds ? ` after ${result.rounds} fix${result.rounds > 1 ? "es" : ""}` : "";
+    const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
     const quality = `, quality ${score}/100`;
     const text = passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`;
     store.addMessage(
       conversation.id,
       "system",
-      resultMessage(text, { passed, score, rounds: result.rounds, materialSources: generated > 0 ? [`Generated image assets (${generated})`] : [] }),
+      resultMessage(text, { passed, score, rounds: repairRounds, materialSources: generatedTotal > 0 ? [`Generated image assets (${generatedTotal})`] : [] }),
     );
     store.updateRun(run.id, {
       status: "succeeded",
-      repairRounds: result.rounds,
+      repairRounds,
       lintPassed: passed,
       score,
       findings: finalFindings,
@@ -580,17 +736,18 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       finishedAt: Date.now(),
     });
 
+    sse({ type: "done", rounds: repairRounds, passed });
     sse({
       type: "run-done",
       runId: run.id,
       passed,
-      rounds: result.rounds,
+      rounds: repairRounds,
       score,
       previewUrl: `/projects/${project.id}/preview/`,
       findings: finalFindings,
     });
     // Headless-screenshot the finished artifact as the gallery cover (best-effort, async).
-    void captureCover(join(dir, result.artifactPath), join(dir, ".cover.png"));
+    void captureCover(join(dir, artifactPath), join(dir, ".cover.png"));
   } catch (err) {
     const cancelled = ctrl.signal.aborted || isAbortError(err);
     store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });

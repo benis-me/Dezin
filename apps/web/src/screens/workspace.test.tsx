@@ -711,6 +711,10 @@ test("/projects/new preserves the selected agent and model for the first run", a
       aiProviderOrganization: "",
       aiProviderProfiles: "",
       visualQaEnabled: false,
+      visualQaAgentCommand: "",
+      visualQaModel: "",
+      autoImproveEnabled: true,
+      autoImproveMaxRounds: 8,
     }),
   });
   const user = userEvent.setup();

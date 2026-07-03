@@ -288,6 +288,10 @@ test("settings + agents + health endpoints", async () => {
         aiProviderOrganization: "",
         aiProviderProfiles: "",
         visualQaEnabled: false,
+        visualQaAgentCommand: "",
+        visualQaModel: "",
+        autoImproveEnabled: true,
+        autoImproveMaxRounds: 8,
       });
     }
     if (url.endsWith("/api/settings")) {
@@ -310,6 +314,10 @@ test("settings + agents + health endpoints", async () => {
         aiProviderOrganization: "",
         aiProviderProfiles: "",
         visualQaEnabled: false,
+        visualQaAgentCommand: "",
+        visualQaModel: "",
+        autoImproveEnabled: true,
+        autoImproveMaxRounds: 8,
       });
     }
     if (url.endsWith("/api/agents")) return jsonResponse([{ id: "claude", command: "claude", available: true, version: "1.2.3" }]);

@@ -219,6 +219,14 @@ export interface Settings {
   aiProviderOrganization: string;
   /** Serialized per-provider endpoint/model metadata for the Providers settings panel. */
   aiProviderProfiles: string;
-  /** When enabled, the selected Agent/model reviews a rendered screenshot after prototype runs. */
+  /** When enabled, an Agent/model reviews a rendered screenshot after generation. */
   visualQaEnabled: boolean;
+  /** Optional reviewer Agent override; empty means inherit the current project run Agent. */
+  visualQaAgentCommand: string;
+  /** Optional reviewer model override; empty means inherit the current project run model. */
+  visualQaModel: string;
+  /** When enabled, Dezin feeds blocking quality findings back into the Agent automatically. */
+  autoImproveEnabled: boolean;
+  /** Maximum automatic repair turns after the initial generation. */
+  autoImproveMaxRounds: number;
 }

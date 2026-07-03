@@ -107,7 +107,11 @@ CREATE TABLE IF NOT EXISTS settings (
   ai_provider_models TEXT,
   ai_provider_organization TEXT,
   ai_provider_profiles TEXT,
-  visual_qa_enabled INTEGER NOT NULL DEFAULT 0
+  visual_qa_enabled INTEGER NOT NULL DEFAULT 0,
+  visual_qa_agent_command TEXT,
+  visual_qa_model TEXT,
+  auto_improve_enabled INTEGER NOT NULL DEFAULT 1,
+  auto_improve_max_rounds INTEGER NOT NULL DEFAULT 8
 );
 CREATE TABLE IF NOT EXISTS moodboards (
   id TEXT PRIMARY KEY,
@@ -181,6 +185,10 @@ const DEFAULT_SETTINGS: Settings = {
   aiProviderOrganization: "",
   aiProviderProfiles: "",
   visualQaEnabled: false,
+  visualQaAgentCommand: "",
+  visualQaModel: "",
+  autoImproveEnabled: true,
+  autoImproveMaxRounds: 8,
 };
 
 type Row = Record<string, unknown>;
@@ -385,6 +393,10 @@ export class Store {
     ensureColumn("settings", "ai_provider_organization", "ai_provider_organization TEXT");
     ensureColumn("settings", "ai_provider_profiles", "ai_provider_profiles TEXT");
     ensureColumn("settings", "visual_qa_enabled", "visual_qa_enabled INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("settings", "visual_qa_agent_command", "visual_qa_agent_command TEXT");
+    ensureColumn("settings", "visual_qa_model", "visual_qa_model TEXT");
+    ensureColumn("settings", "auto_improve_enabled", "auto_improve_enabled INTEGER NOT NULL DEFAULT 1");
+    ensureColumn("settings", "auto_improve_max_rounds", "auto_improve_max_rounds INTEGER NOT NULL DEFAULT 8");
     ensureColumn("projects", "archived_at", "archived_at INTEGER");
     ensureColumn("projects", "active_variant_id", "active_variant_id TEXT");
     ensureColumn("runs", "variant_id", "variant_id TEXT");
@@ -1039,6 +1051,10 @@ export class Store {
     const r = this.db.prepare(`SELECT * FROM settings WHERE id = 'app'`).get() as Row | undefined;
     if (!r) return { ...DEFAULT_SETTINGS };
     const str = (v: unknown, d: string): string => (typeof v === "string" ? v : d);
+    const int = (v: unknown, d: number): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : d;
+    };
     return {
       agentCommand: str(r.agent_command, DEFAULT_SETTINGS.agentCommand),
       model: str(r.model, DEFAULT_SETTINGS.model),
@@ -1058,6 +1074,10 @@ export class Store {
       aiProviderOrganization: str(r.ai_provider_organization, DEFAULT_SETTINGS.aiProviderOrganization),
       aiProviderProfiles: str(r.ai_provider_profiles, DEFAULT_SETTINGS.aiProviderProfiles),
       visualQaEnabled: Number(r.visual_qa_enabled ?? 0) === 1,
+      visualQaAgentCommand: str(r.visual_qa_agent_command, DEFAULT_SETTINGS.visualQaAgentCommand),
+      visualQaModel: str(r.visual_qa_model, DEFAULT_SETTINGS.visualQaModel),
+      autoImproveEnabled: Number(r.auto_improve_enabled ?? 1) === 1,
+      autoImproveMaxRounds: int(r.auto_improve_max_rounds, DEFAULT_SETTINGS.autoImproveMaxRounds),
     };
   }
 
@@ -1082,6 +1102,10 @@ export class Store {
       aiProviderOrganization: patch.aiProviderOrganization ?? cur.aiProviderOrganization,
       aiProviderProfiles: patch.aiProviderProfiles ?? cur.aiProviderProfiles,
       visualQaEnabled: patch.visualQaEnabled ?? cur.visualQaEnabled,
+      visualQaAgentCommand: patch.visualQaAgentCommand ?? cur.visualQaAgentCommand,
+      visualQaModel: patch.visualQaModel ?? cur.visualQaModel,
+      autoImproveEnabled: patch.autoImproveEnabled ?? cur.autoImproveEnabled,
+      autoImproveMaxRounds: patch.autoImproveMaxRounds ?? cur.autoImproveMaxRounds,
     };
     this.db
       .prepare(
@@ -1089,8 +1113,8 @@ export class Store {
                                image_api_base_url, image_api_key, image_model,
                                video_api_base_url, video_api_key, video_model,
                                ai_provider_id, ai_provider_enabled, ai_provider_models, ai_provider_organization, ai_provider_profiles,
-                               visual_qa_enabled)
-         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               visual_qa_enabled, visual_qa_agent_command, visual_qa_model, auto_improve_enabled, auto_improve_max_rounds)
+         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            agent_command = excluded.agent_command,
            model = excluded.model,
@@ -1109,7 +1133,11 @@ export class Store {
            ai_provider_models = excluded.ai_provider_models,
            ai_provider_organization = excluded.ai_provider_organization,
            ai_provider_profiles = excluded.ai_provider_profiles,
-           visual_qa_enabled = excluded.visual_qa_enabled`,
+           visual_qa_enabled = excluded.visual_qa_enabled,
+           visual_qa_agent_command = excluded.visual_qa_agent_command,
+           visual_qa_model = excluded.visual_qa_model,
+           auto_improve_enabled = excluded.auto_improve_enabled,
+           auto_improve_max_rounds = excluded.auto_improve_max_rounds`,
       )
       .run(
         next.agentCommand,
@@ -1130,6 +1158,10 @@ export class Store {
         next.aiProviderOrganization,
         next.aiProviderProfiles,
         next.visualQaEnabled ? 1 : 0,
+        next.visualQaAgentCommand,
+        next.visualQaModel,
+        next.autoImproveEnabled ? 1 : 0,
+        next.autoImproveMaxRounds,
       );
     return next;
   }

@@ -89,6 +89,10 @@ test("auditVisualArtifact is disabled by settings", async () => {
       aiProviderOrganization: "",
       aiProviderProfiles: "",
       visualQaEnabled: false,
+      visualQaAgentCommand: "",
+      visualQaModel: "",
+      autoImproveEnabled: true,
+      autoImproveMaxRounds: 8,
     },
   });
   assert.deepEqual(findings, []);
@@ -119,6 +123,10 @@ test("reviewScreenshotWithAgent reports when screenshot capture never happened",
         aiProviderOrganization: "",
         aiProviderProfiles: "",
         visualQaEnabled: true,
+        visualQaAgentCommand: "",
+        visualQaModel: "",
+        autoImproveEnabled: true,
+        autoImproveMaxRounds: 8,
       },
     },
     join(root, ".visual-qa", "screenshot.png"),
@@ -171,6 +179,10 @@ console.log(JSON.stringify({ findings: [{ severity: "P2", message: "Text clips."
         aiProviderOrganization: "",
         aiProviderProfiles: "",
         visualQaEnabled: true,
+        visualQaAgentCommand: "",
+        visualQaModel: "",
+        autoImproveEnabled: true,
+        autoImproveMaxRounds: 8,
       },
       brief: "make a pricing page",
       conversationHistory: [
@@ -184,6 +196,20 @@ console.log(JSON.stringify({ findings: [{ severity: "P2", message: "Text clips."
         { role: "assistant", content: "Shortened the enterprise tier." },
         { role: "user", content: "Keep the comparison table readable." },
         { role: "assistant", content: "Adjusted the comparison table columns." },
+      ],
+      consoleMessages: [
+        {
+          type: "pageerror",
+          level: "error",
+          text: "ReferenceError: OGL is not defined",
+          url: "http://127.0.0.1:5173/src/App.jsx",
+          line: 42,
+        },
+        {
+          type: "requestfailed",
+          level: "error",
+          text: "GET /assets/hero.webp net::ERR_FILE_NOT_FOUND",
+        },
       ],
     },
     screenshot,
@@ -200,6 +226,9 @@ console.log(JSON.stringify({ findings: [{ severity: "P2", message: "Text clips."
   assert.match(prompt, /Use the existing three-column pricing direction/);
   assert.match(prompt, /Adjusted the comparison table columns/);
   assert.match(prompt, /Current user request:\s*USER: make a pricing page/);
+  assert.match(prompt, /Browser console \/ runtime signals/);
+  assert.match(prompt, /ReferenceError: OGL is not defined/);
+  assert.match(prompt, /hero\.webp/);
   assert.equal(findings[0]?.id, "visual-ai-review-1");
   assert.equal(findings[0]?.message, "Text clips.");
 });

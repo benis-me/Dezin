@@ -238,6 +238,10 @@ export interface Settings {
   aiProviderOrganization: string;
   aiProviderProfiles: string;
   visualQaEnabled: boolean;
+  visualQaAgentCommand: string;
+  visualQaModel: string;
+  autoImproveEnabled: boolean;
+  autoImproveMaxRounds: number;
 }
 
 export interface ModelProviderModel {

@@ -21,7 +21,7 @@ async function withServer(fn: (base: string) => Promise<void>): Promise<void> {
 }
 
 async function getSettings(base: string) {
-  return (await (await fetch(`${base}/api/settings`)).json()) as Record<string, string | boolean>;
+  return (await (await fetch(`${base}/api/settings`)).json()) as Record<string, unknown>;
 }
 async function putSettings(base: string, patch: object) {
   return await fetch(`${base}/api/settings`, {
@@ -38,6 +38,10 @@ test("GET /api/settings returns defaults", async () => {
     assert.equal(s.defaultDesignSystemId, "modern-minimal");
     assert.equal(s.model, "");
     assert.equal(s.visualQaEnabled, false);
+    assert.equal(s.visualQaAgentCommand, "");
+    assert.equal(s.visualQaModel, "");
+    assert.equal(s.autoImproveEnabled, true);
+    assert.equal(s.autoImproveMaxRounds, 8);
     assert.equal(s.videoModel, "");
   });
 });
@@ -50,6 +54,10 @@ test("PUT /api/settings merges and persists", async () => {
       apiKey: "sk-local",
       videoModel: "sora",
       visualQaEnabled: true,
+      visualQaAgentCommand: "codebuddy",
+      visualQaModel: "hunyuan",
+      autoImproveEnabled: false,
+      autoImproveMaxRounds: 6,
     });
     assert.equal(res.status, 200);
     const updated = (await res.json()) as Record<string, unknown>;
@@ -57,12 +65,20 @@ test("PUT /api/settings merges and persists", async () => {
     assert.equal(updated.model, "o3");
     assert.equal(updated.videoModel, "sora");
     assert.equal(updated.visualQaEnabled, true);
+    assert.equal(updated.visualQaAgentCommand, "codebuddy");
+    assert.equal(updated.visualQaModel, "hunyuan");
+    assert.equal(updated.autoImproveEnabled, false);
+    assert.equal(updated.autoImproveMaxRounds, 6);
 
     const fetched = await getSettings(base);
     assert.equal(fetched.agentCommand, "codex");
     assert.equal(fetched.apiKey, "");
     assert.equal(fetched.videoModel, "sora");
     assert.equal(fetched.visualQaEnabled, true);
+    assert.equal(fetched.visualQaAgentCommand, "codebuddy");
+    assert.equal(fetched.visualQaModel, "hunyuan");
+    assert.equal(fetched.autoImproveEnabled, false);
+    assert.equal(fetched.autoImproveMaxRounds, 6);
     assert.equal(fetched.defaultDesignSystemId, "modern-minimal"); // untouched default
   });
 });
