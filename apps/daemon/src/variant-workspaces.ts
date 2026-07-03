@@ -126,12 +126,18 @@ export async function standardVersionArtifactDir(deps: AppDeps, projectId: strin
   const root = projectDir(deps.dataDir, projectId);
   if (!existsSync(join(root, ".git"))) throw new Error("standard project is not a git repository yet");
   const dir = standardVersionWorktreeDir(deps.dataDir, projectId, runId);
-  if (existsSync(join(dir, ".git"))) return dir;
+  const targetCommit = await gitOutput(root, ["rev-parse", commit]);
+  if (existsSync(join(dir, ".git"))) {
+    const currentCommit = await gitOutput(dir, ["rev-parse", "HEAD"]).catch(() => "");
+    if (currentCommit === targetCommit) return dir;
+    const removed = await captureGit(root, ["worktree", "remove", "--force", dir]);
+    if (removed.code !== 0) await rm(dir, { recursive: true, force: true });
+  }
 
   await rm(dir, { recursive: true, force: true });
   await mkdir(dirname(dir), { recursive: true });
   await captureGit(root, ["worktree", "prune"]);
-  await git(root, ["worktree", "add", "--detach", dir, commit]);
+  await git(root, ["worktree", "add", "--detach", dir, targetCommit]);
   return dir;
 }
 

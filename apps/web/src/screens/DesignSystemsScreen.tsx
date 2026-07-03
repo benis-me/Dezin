@@ -70,62 +70,69 @@ export function DesignSystemsScreen() {
   }, [api]);
 
   return (
-    <div className="h-full w-full overflow-auto px-6 py-10">
-      <div className="mx-auto max-w-5xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Design systems</h1>
-            <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-muted-foreground">
-              The brand visual language each artifact is built from. {systems ? `${systems.length} systems.` : ""}
-            </p>
+    <div className="relative h-full w-full overflow-auto">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-[36vh]"
+        style={{ background: "radial-gradient(60% 100% at 30% 0%, color-mix(in oklch, var(--primary) 10%, transparent), transparent 70%)" }}
+      />
+      <div className="relative w-full px-7 pb-20 pt-10">
+        <div className="mx-auto max-w-5xl">
+          <div className="flex items-start justify-between gap-4">
+            <div className="max-w-2xl">
+              <h1 className="text-2xl font-semibold tracking-tight text-foreground">Design systems</h1>
+              <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-muted-foreground">
+                The brand visual language each artifact is built from. {systems ? `${systems.length} systems.` : ""}
+              </p>
+            </div>
+            <Button onClick={() => navigate("/design-systems/new")} className="gap-2">
+              <Plus size={15} strokeWidth={1.75} />
+              New design system
+            </Button>
           </div>
-          <Button variant="outline" size="sm" onClick={() => navigate("/design-systems/new")} className="shrink-0">
-            <Plus size={14} strokeWidth={2} />
-            New design system
-          </Button>
+
+          {systems && systems.length > 0 ? (
+            <div className="mt-5">
+              <Segmented
+                ariaLabel="Filter design systems"
+                size="sm"
+                value={filter}
+                onChange={setFilter}
+                options={[
+                  { value: "all", label: "All" },
+                  { value: "built-in", label: "Built-in" },
+                  { value: "custom", label: "Custom" },
+                ]}
+              />
+            </div>
+          ) : null}
+
+          {error ? (
+            <p className="mt-6 text-sm text-destructive">Couldn't load design systems: {error}</p>
+          ) : systems === null ? (
+            <Loading label="Loading design systems…" />
+          ) : systems.filter((s) => filter === "all" || (s.origin ?? "built-in") === filter).length === 0 ? (
+            <p className="mt-6 text-sm text-muted-foreground">No {filter === "all" ? "" : `${filter} `}design systems found.</p>
+          ) : (
+            <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {systems
+                .filter((s) => filter === "all" || (s.origin ?? "built-in") === filter)
+                .map((s) => (
+                  <Card
+                    key={s.id}
+                    onClick={() => navigate(`/design-systems/${s.id}`)}
+                    className="cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
+                  >
+                    <Specimen id={s.id} name={s.name} swatch={s.swatch} />
+                    <div className="flex items-center justify-between gap-2 p-3">
+                      {s.category ? <Badge variant="outline">{s.category}</Badge> : <span />}
+                      <SwatchRow swatch={s.swatch} />
+                    </div>
+                  </Card>
+                ))}
+            </div>
+          )}
         </div>
-
-        {systems && systems.length > 0 ? (
-          <div className="mt-5">
-            <Segmented
-              ariaLabel="Filter design systems"
-              size="sm"
-              value={filter}
-              onChange={setFilter}
-              options={[
-                { value: "all", label: "All" },
-                { value: "built-in", label: "Built-in" },
-                { value: "custom", label: "Custom" },
-              ]}
-            />
-          </div>
-        ) : null}
-
-        {error ? (
-          <p className="mt-6 text-sm text-destructive">Couldn't load design systems: {error}</p>
-        ) : systems === null ? (
-          <Loading label="Loading design systems…" />
-        ) : systems.filter((s) => filter === "all" || (s.origin ?? "built-in") === filter).length === 0 ? (
-          <p className="mt-6 text-sm text-muted-foreground">No {filter === "all" ? "" : `${filter} `}design systems found.</p>
-        ) : (
-          <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {systems
-              .filter((s) => filter === "all" || (s.origin ?? "built-in") === filter)
-              .map((s) => (
-              <Card
-                key={s.id}
-                onClick={() => navigate(`/design-systems/${s.id}`)}
-                className="cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
-              >
-                <Specimen id={s.id} name={s.name} swatch={s.swatch} />
-                <div className="flex items-center justify-between gap-2 p-3">
-                  {s.category ? <Badge variant="outline">{s.category}</Badge> : <span />}
-                  <SwatchRow swatch={s.swatch} />
-                </div>
-              </Card>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );

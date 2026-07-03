@@ -66,6 +66,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     getFileText: async () => "",
     listRuns: async () => [],
     versionPreviewUrl: (id: string, runId: string) => `/api/projects/${id}/versions/${runId}`,
+    getVersionPreview: async (id: string, runId: string) => ({ url: `/api/projects/${id}/versions/${runId}`, mode: "prototype" as const }),
     getVersionText: async () => "",
     getVersionDiff: async () => [],
     restoreVersion: notImpl as ApiClient["restoreVersion"],

@@ -36,6 +36,10 @@ function projectRun(deps: AppDeps, projectId: string, runId: string): { project:
   return { project, run };
 }
 
+function versionPreviewPath(projectId: string, runId: string): string {
+  return `/api/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(runId)}`;
+}
+
 async function standardVersionPreviewUrl(deps: AppDeps, project: Project, run: Run): Promise<string> {
   if (!run.commitHash) throw new Error("no snapshot for this run");
   const dir = await standardVersionArtifactDir(deps, project.id, run.id, run.commitHash);
@@ -75,6 +79,22 @@ export async function handleGetVersion(res: ServerResponse, params: Record<strin
     "content-security-policy": "sandbox allow-scripts allow-downloads;",
   });
   res.end(html);
+}
+
+export async function handleGetVersionPreviewUrl(res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+  const found = projectRun(deps, params.id!, params.runId!);
+  if (!found) return sendError(res, 404, "project not found");
+  if (found.project.mode === "standard") {
+    try {
+      sendJson(res, 200, { url: await standardVersionPreviewUrl(deps, found.project, found.run), mode: "standard" });
+    } catch (err) {
+      sendError(res, err instanceof Error && err.message === "no snapshot for this run" ? 404 : 409, err instanceof Error ? err.message : "version unavailable");
+    }
+    return;
+  }
+  const file = snapshotPath(deps, params.id!, params.runId!);
+  if (!existsSync(file)) return sendError(res, 404, "no snapshot for this run");
+  sendJson(res, 200, { url: versionPreviewPath(found.project.id, found.run.id), mode: "prototype" });
 }
 
 export async function handleGetVersionDiff(res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {

@@ -71,18 +71,26 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
             <div className="flex h-full">
               <div className="relative h-full flex-1 border-r border-border">
                 <span className={`${tag} left-2.5`}>{a.label}</span>
-                <iframe src={a.url} title={a.label} sandbox={previewSandboxForSrc(a.url)} className="h-full w-full bg-white" />
+                <iframe key={a.url} src={a.url} title={a.label} sandbox={previewSandboxForSrc(a.url)} className="h-full w-full bg-white" />
               </div>
               <div className="relative h-full flex-1">
                 <span className={`${tag} left-2.5`}>{b.label}</span>
-                <iframe src={b.url} title={b.label} sandbox={previewSandboxForSrc(b.url)} className="h-full w-full bg-white" />
+                <iframe key={b.url} src={b.url} title={b.label} sandbox={previewSandboxForSrc(b.url)} className="h-full w-full bg-white" />
               </div>
             </div>
           ) : (
             <>
               {/* A fills the pane; B is full-size too but clip-path reveals only its left portion */}
-              <iframe ref={aRef} src={a.url} title={a.label} sandbox={previewSandboxForSrc(a.url)} className="absolute inset-0 h-full w-full bg-white" />
               <iframe
+                key={a.url}
+                ref={aRef}
+                src={a.url}
+                title={a.label}
+                sandbox={previewSandboxForSrc(a.url)}
+                className="absolute inset-0 h-full w-full bg-white"
+              />
+              <iframe
+                key={b.url}
                 ref={bRef}
                 src={b.url}
                 title={b.label}

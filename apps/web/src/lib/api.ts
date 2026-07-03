@@ -373,6 +373,10 @@ export interface RunSummary {
 }
 
 export type VersionDiffLine = { t: "ctx" | "add" | "del"; text: string };
+export interface VersionPreview {
+  url: string;
+  mode: ProjectMode;
+}
 
 export interface ApiClient {
   listProjects(): Promise<Project[]>;
@@ -415,6 +419,7 @@ export interface ApiClient {
   getFileText(id: string, path: string): Promise<string>;
   listRuns(id: string, options?: { all?: boolean }): Promise<RunSummary[]>;
   versionPreviewUrl(id: string, runId: string): string;
+  getVersionPreview(id: string, runId: string): Promise<VersionPreview>;
   getVersionText(id: string, runId: string): Promise<string>;
   getVersionDiff(id: string, runId: string): Promise<VersionDiffLine[]>;
   restoreVersion(id: string, runId: string): Promise<void>;
@@ -624,6 +629,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     listFiles: (id) => json<ProjectFile[]>(`/api/projects/${enc(id)}/files`),
     listRuns: (id, options) => json<RunSummary[]>(`/api/projects/${enc(id)}/runs${options?.all ? "?all=1" : ""}`),
     versionPreviewUrl: (id, runId) => `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`,
+    getVersionPreview: (id, runId) => json<VersionPreview>(`/api/projects/${enc(id)}/versions/${enc(runId)}/preview-url`),
     getVersionText: async (id, runId) => {
       const url = `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`;
       const init = initWithDaemonToken();

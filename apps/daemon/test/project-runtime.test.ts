@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { ensureDevServer, ensureProjectPickerBridge, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
 
 async function waitForPortDown(url: string): Promise<void> {
@@ -123,6 +124,94 @@ setInterval(() => {}, 1000);
 
     const second = await ensureDevServer("p1", dir, "runtime-test");
     assert.notEqual(await waitForText(second.url), firstPid);
+  } finally {
+    stopAllDevServers();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ensureDevServer installs missing dependencies before launching", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-runtime-install-"));
+  const depDir = join(root, "local-dep");
+  const dir = join(root, "project");
+  const postinstallMarker = join(dir, "postinstall-ran.txt");
+  mkdirSync(depDir, { recursive: true });
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(depDir, "package.json"), JSON.stringify({ name: "dezin-local-dep", version: "1.0.0", type: "module", main: "index.js" }));
+  writeFileSync(join(depDir, "index.js"), `export const marker = "dependency-ready";\n`);
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      type: "module",
+      scripts: { dev: "node server.mjs", postinstall: "node postinstall.mjs" },
+      dependencies: { "dezin-local-dep": "file:../local-dep" },
+    }),
+  );
+  writeFileSync(join(dir, "postinstall.mjs"), `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(postinstallMarker)}, "ran");\n`);
+  writeFileSync(
+    join(dir, "server.mjs"),
+    `
+import http from "node:http";
+import { marker } from "dezin-local-dep";
+const portArg = process.argv[process.argv.indexOf("--port") + 1];
+const port = Number(portArg);
+const server = http.createServer((_req, res) => res.end(marker));
+server.listen(port, "127.0.0.1");
+setInterval(() => {}, 1000);
+`,
+  );
+
+  try {
+    assert.equal(existsSync(join(dir, "node_modules")), false);
+    const { url } = await ensureDevServer("install-test", dir, "runtime-install-test");
+    assert.equal(existsSync(join(dir, "node_modules", "dezin-local-dep")), true);
+    assert.equal(existsSync(postinstallMarker), false);
+    assert.equal(await waitForText(url), "dependency-ready");
+  } finally {
+    stopAllDevServers();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ensureDevServer restarts when a cached git worktree moves to another commit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-runtime-git-"));
+  mkdirSync(join(dir, "node_modules"));
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({
+      type: "module",
+      scripts: { dev: "node server.mjs" },
+    }),
+  );
+  writeFileSync(
+    join(dir, "server.mjs"),
+    `
+import http from "node:http";
+import { readFileSync } from "node:fs";
+const portArg = process.argv[process.argv.indexOf("--port") + 1];
+const port = Number(portArg);
+const body = readFileSync("version.txt", "utf8");
+const server = http.createServer((_req, res) => res.end(body));
+server.listen(port, "127.0.0.1");
+setInterval(() => {}, 1000);
+`,
+  );
+
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "version.txt"), "first");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "first"], { cwd: dir });
+
+    const first = await ensureDevServer("git-runtime-test", dir, "runtime-git-test");
+    assert.equal(await waitForText(first.url), "first");
+
+    writeFileSync(join(dir, "version.txt"), "second");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "second"], { cwd: dir });
+
+    const second = await ensureDevServer("git-runtime-test", dir, "runtime-git-test");
+    assert.equal(await waitForText(second.url), "second");
   } finally {
     stopAllDevServers();
     rmSync(dir, { recursive: true, force: true });

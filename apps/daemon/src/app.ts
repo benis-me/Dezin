@@ -29,7 +29,7 @@ import {
   handleRenameVariant,
   handleDeleteVariant,
 } from "./variants-handler.ts";
-import { handleGetVersion, handleGetVersionDiff, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
+import { handleGetVersion, handleGetVersionPreviewUrl, handleGetVersionDiff, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } from "./project-runtime.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
@@ -615,6 +615,12 @@ const routes: Route[] = [
     pattern: "/api/projects/:id/versions/:runId",
     publicRead: true,
     handler: (_req, res, params, deps) => handleGetVersion(res, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/versions/:runId/preview-url",
+    publicRead: true,
+    handler: (_req, res, params, deps) => handleGetVersionPreviewUrl(res, params, deps),
   },
   {
     method: "GET",

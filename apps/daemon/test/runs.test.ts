@@ -836,6 +836,12 @@ test("standard version actions use commit snapshots instead of prototype html sn
       assert.match(devServers[0]!.dir, new RegExp(`version-worktrees/${project.id}/${firstRun.id}$`));
       assert.equal(readFileSync(join(devServers[0]!.dir, "src", "App.jsx"), "utf8"), "export default function App(){ return <main>One</main> }");
 
+      execFileSync("git", ["reset", "--hard", secondCommit], { cwd: devServers[0]!.dir, stdio: "ignore" });
+      assert.equal(readFileSync(join(devServers[0]!.dir, "src", "App.jsx"), "utf8"), "export default function App(){ return <main>Two</main> }");
+      const staleView = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}`, { redirect: "manual" });
+      assert.equal(staleView.status, 302);
+      assert.equal(readFileSync(join(devServers[1]!.dir, "src", "App.jsx"), "utf8"), "export default function App(){ return <main>One</main> }");
+
       const diff = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}/diff`);
       assert.equal(diff.status, 200);
       const lines = (await diff.json()) as Array<{ t: string; text: string }>;
@@ -846,7 +852,7 @@ test("standard version actions use commit snapshots instead of prototype html sn
       assert.equal(cover.status, 200);
       assert.deepEqual(await cover.json(), { captured: true });
       assert.deepEqual(captured, {
-        url: "http://127.0.0.1:6202/",
+        url: "http://127.0.0.1:6203/",
         outPath: join(dataDir, "projects", project.id, ".cover.png"),
       });
 
@@ -863,6 +869,40 @@ test("standard version actions use commit snapshots instead of prototype html sn
       captureCoverUrl: async (url, outPath) => {
         captured = { url, outPath };
         return true;
+      },
+    },
+  );
+});
+
+test("standard version preview URL endpoint resolves the dev server URL without iframe redirect", async () => {
+  const devServers: Array<{ dir: string; runtimeKey?: string; url: string }> = [];
+  await withRunServer(
+    undefined,
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      mkdirSync(join(dir, "src"), { recursive: true });
+      writeFileSync(join(dir, "src", "App.jsx"), "export default function App(){ return <main>One</main> }");
+      const commit = commitAll(dir, "first");
+
+      const conversation = store.createConversation(project.id, "First");
+      const run = store.createRun(project.id, conversation.id);
+      store.updateRun(run.id, { status: "succeeded", commitHash: commit, finishedAt: Date.now() });
+
+      const preview = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/preview-url`);
+      assert.equal(preview.status, 200);
+      assert.deepEqual(await preview.json(), { url: "http://127.0.0.1:6201/", mode: "standard" });
+      assert.match(devServers[0]!.dir, new RegExp(`version-worktrees/${project.id}/${run.id}$`));
+      assert.equal(devServers[0]!.runtimeKey, `${project.id}:version:${run.id}`);
+    },
+    {
+      ensureDevServer: async (_projectId, dir, runtimeKey) => {
+        const url = `http://127.0.0.1:${6201 + devServers.length}/`;
+        devServers.push({ dir, runtimeKey, url });
+        return { url };
       },
     },
   );

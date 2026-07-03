@@ -27,7 +27,7 @@ interface Runtime {
   phase: SetupPhase;
   error?: string;
   logs: RuntimeLog[];
-  dev?: { proc: ChildProcess; port: number; url: string; releaseTimer?: ReturnType<typeof setTimeout> };
+  dev?: { proc: ChildProcess; port: number; url: string; projectDir: string; fingerprint: string; releaseTimer?: ReturnType<typeof setTimeout> };
 }
 
 const runtimes = new Map<string, Runtime>();
@@ -179,6 +179,27 @@ export function getSetup(projectId: string, projectDir: string): { phase: SetupP
   return { phase: "scaffolding", logs: relatedLogs };
 }
 
+async function ensurePreviewDependencies(projectDir: string, rt: Runtime): Promise<void> {
+  if (existsSync(join(projectDir, "node_modules"))) {
+    rt.phase = "ready";
+    rt.error = undefined;
+    return;
+  }
+  if (!existsSync(join(projectDir, "package.json"))) throw new Error("dependencies not installed yet");
+
+  rt.phase = "installing";
+  rt.error = undefined;
+  appendLog(rt, "Installing preview dependencies");
+  const code = await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install --ignore-scripts");
+  if (code !== 0) {
+    rt.phase = "error";
+    rt.error = "npm install failed";
+    throw new Error(rt.error);
+  }
+  rt.phase = "ready";
+  appendLog(rt, "Preview dependencies are ready");
+}
+
 async function portResponds(port: number): Promise<boolean> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(800) });
@@ -221,14 +242,21 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
       rt.dev = undefined;
     }
   }
-  if (!existsSync(join(projectDir, "node_modules"))) throw new Error("dependencies not installed yet");
+  await ensurePreviewDependencies(projectDir, rt);
+  const currentFingerprint = await devServerFingerprint(projectDir);
   if (rt.dev && !rt.dev.proc.killed) {
-    if (await portResponds(rt.dev.port)) {
+    if (rt.dev.projectDir !== projectDir || rt.dev.fingerprint !== currentFingerprint) {
+      appendLog(rt, "Restarting dev server for updated project files");
+      stopDev(rt.dev);
+      rt.dev = undefined;
+    } else if (await portResponds(rt.dev.port)) {
       clearDevReleaseTimer(rt.dev);
       return { url: rt.dev.url };
     }
-    stopDev(rt.dev);
-    rt.dev = undefined;
+    if (rt.dev) {
+      stopDev(rt.dev);
+      rt.dev = undefined;
+    }
   }
 
   const port = await freePort();
@@ -251,7 +279,7 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
     }
   });
   const url = `http://127.0.0.1:${port}/`;
-  rt.dev = { proc, port, url };
+  rt.dev = { proc, port, url, projectDir, fingerprint: currentFingerprint };
 
   // Wait for Vite to come up (up to ~15s).
   for (let i = 0; i < 30; i++) {
@@ -280,6 +308,14 @@ export async function workingTreeFingerprint(projectDir: string): Promise<string
   if (!existsSync(join(projectDir, ".git"))) return "__no_git__";
   const res = await capture("git", ["status", "--porcelain=v1"], projectDir);
   return res.code === 0 ? res.out.trim() : `__git_status_failed__:${res.out.trim()}`;
+}
+
+async function devServerFingerprint(projectDir: string): Promise<string> {
+  if (!existsSync(join(projectDir, ".git"))) return `__no_git__:${projectDir}`;
+  const head = await capture("git", ["rev-parse", "HEAD"], projectDir);
+  const status = await workingTreeFingerprint(projectDir);
+  const headText = head.code === 0 ? head.out.trim() : `__git_head_failed__:${head.out.trim()}`;
+  return `${headText}\n${status}`;
 }
 
 /** Commit the project's current state as a version. */

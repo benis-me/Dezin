@@ -396,6 +396,11 @@ test("DesignSystemsScreen loads systems from the daemon", async () => {
   expect(heading).toHaveClass("text-2xl", "font-semibold", "tracking-tight", "text-foreground");
   const subtitle = screen.getByText(/The brand visual language each artifact is built from/i);
   expect(subtitle).toHaveClass("mt-1.5", "text-sm", "leading-relaxed", "text-muted-foreground");
+  const action = screen.getByRole("button", { name: "New design system" });
+  expect(action).toHaveAttribute("data-variant", "default");
+  expect(action).toHaveAttribute("data-size", "default");
+  expect(action).toHaveClass("gap-2", "bg-primary");
+  expect(action).not.toHaveClass("border");
   expect(await screen.findByText("Modern Minimal")).toBeInTheDocument();
   expect(screen.getByText("Editorial")).toBeInTheDocument();
 });

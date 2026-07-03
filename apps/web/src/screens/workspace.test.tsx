@@ -162,7 +162,7 @@ test("refreshing a standard preview revalidates the dev server lease", async () 
   fireEvent.click(screen.getByLabelText("Refresh preview"));
 
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
-  expect(iframe.getAttribute("src") ?? "").toMatch(/^http:\/\/127\.0\.0\.1:5301\/p1\?t=\d+/);
+  expect(screen.getByTitle("Artifact preview").getAttribute("src") ?? "").toMatch(/^http:\/\/127\.0\.0\.1:5301\/p1\?t=\d+/);
   expect(captureProjectCover).toHaveBeenCalledTimes(1);
 });
 
@@ -1453,6 +1453,171 @@ test("the Versions tab groups branch versions with View, set cover, and Restore"
   // the active branch's newest version has no Restore (it IS current); the older branch version does
   fireEvent.click(screen.getByRole("button", { name: "Restore Main v1" }));
   await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith("p1", "r1"));
+});
+
+test("version compare uses the active branch's newest run as current even when runs arrive unsorted", async () => {
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [
+      { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
+      { id: "r-new", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1700000001000, finishedAt: 1700000001001 },
+    ],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+  expect(await screen.findByRole("button", { name: "View Main v2" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Compare Main v1 visually" }));
+
+  const oldFrame = await screen.findByTitle("Main v1");
+  const currentFrame = await screen.findByTitle("Main current");
+  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/));
+  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-new\?t=\d+$/));
+});
+
+test("refreshing a viewed standard version keeps the version preview instead of jumping to live current", async () => {
+  const getDevServerUrl = vi.fn(async () => ({ url: "http://127.0.0.1:5300/p1" }));
+  const getVersionPreview = vi.fn(async () => ({ url: "http://127.0.0.1:5401/", mode: "standard" as const }));
+  const fake = makeFakeApi({
+    getProject: async () => ({
+      id: "p1",
+      name: "Standard",
+      skillId: null,
+      designSystemId: "modern-minimal",
+      mode: "standard",
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [
+      { id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
+    ],
+    getDevServerUrl,
+    getVersionPreview,
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(1));
+  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "View Main v1" }));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/)));
+
+  fireEvent.click(screen.getByLabelText("Refresh preview"));
+
+  await waitFor(() => expect(getVersionPreview).toHaveBeenCalledTimes(2));
+  expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/));
+  expect(getDevServerUrl).toHaveBeenCalledTimes(1);
+});
+
+test("viewing a standard version resolves the dev-server URL before rendering the iframe", async () => {
+  let resolveVersionPreview!: (value: { url: string; mode: "standard" }) => void;
+  const getVersionPreview = vi.fn(
+    () =>
+      new Promise<{ url: string; mode: "standard" }>((resolve) => {
+        resolveVersionPreview = resolve;
+      }),
+  );
+  const fake = makeFakeApi({
+    getProject: async () => ({
+      id: "p1",
+      name: "Standard",
+      skillId: null,
+      designSystemId: "modern-minimal",
+      mode: "standard",
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [
+      { id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
+    ],
+    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/current" }),
+    getVersionPreview,
+  } as never);
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "View Main v1" }));
+
+  expect(getVersionPreview).toHaveBeenCalledWith("p1", "r1");
+  expect(await screen.findByText("Loading version preview")).toBeInTheDocument();
+
+  resolveVersionPreview({ url: "http://127.0.0.1:5401/", mode: "standard" });
+
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/)));
+  expect(screen.getByTitle("Artifact preview").getAttribute("sandbox") ?? "").toContain("allow-same-origin");
+  expect(screen.queryByText("Loading version preview")).toBeNull();
+});
+
+test("standard version compare resolves both dev-server URLs before opening the frames", async () => {
+  const pending = new Map<string, (value: { url: string; mode: "standard" }) => void>();
+  const getVersionPreview = vi.fn(
+    (_projectId: string, runId: string) =>
+      new Promise<{ url: string; mode: "standard" }>((resolve) => {
+        pending.set(runId, resolve);
+      }),
+  );
+  const fake = makeFakeApi({
+    getProject: async () => ({
+      id: "p1",
+      name: "Standard",
+      skillId: null,
+      designSystemId: "modern-minimal",
+      mode: "standard",
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [
+      { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
+      { id: "r-new", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1700000001000, finishedAt: 1700000001001 },
+    ],
+    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/current" }),
+    getVersionPreview,
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Compare Main v1 visually" }));
+
+  await waitFor(() => expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-old"));
+  expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-new");
+  expect(await screen.findByText("Loading version comparison")).toBeInTheDocument();
+
+  pending.get("r-old")?.({ url: "http://127.0.0.1:5401/", mode: "standard" });
+  pending.get("r-new")?.({ url: "http://127.0.0.1:5402/", mode: "standard" });
+
+  const oldFrame = await screen.findByTitle("Main v1");
+  const currentFrame = await screen.findByTitle("Main current");
+  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/));
+  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5402\/\?t=\d+$/));
+  expect(oldFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
+  expect(currentFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
+  expect(screen.queryByText("Loading version comparison")).toBeNull();
 });
 
 test("standard project version Diff uses the commit diff endpoint", async () => {

@@ -15,6 +15,7 @@ export function PreviewModal({ open, src, onClose }: { open: boolean; src?: stri
       <div className="flex-1 bg-surface-2">
         {src ? (
           <iframe
+            key={src}
             title="Artifact preview (full screen)"
             src={src}
             sandbox={previewSandboxForSrc(src)}

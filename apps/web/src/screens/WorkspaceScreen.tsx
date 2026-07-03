@@ -49,6 +49,7 @@ type Device = "desktop" | "tablet" | "mobile";
 const DEVICE_WIDTH: Record<Device, string> = { desktop: "100%", tablet: "768px", mobile: "390px" };
 type MoodboardRunRef = { id: string; name?: string };
 type QueuedPrompt = { text: string; moodboardRefs?: MoodboardRunRef[] };
+type PreviewBusyState = { title: string; detail?: string };
 
 const SEVERITY_STYLE: Record<string, string> = {
   P0: "border-destructive text-destructive",
@@ -753,7 +754,7 @@ function activeVariantIdOf(variants: Variant[]): string | null {
 function buildVersionGroups(runs: RunSummary[], variants: Variant[]): VersionGroup[] {
   const fallbackVariantId = activeVariantIdOf(variants) ?? UNASSIGNED_VARIANT_ID;
   const byVariant = new Map<string, RunSummary[]>();
-  for (const run of runs) {
+  for (const run of sortRunsNewestFirst(runs)) {
     const variantId = run.variantId ?? fallbackVariantId;
     const groupRuns = byVariant.get(variantId);
     if (groupRuns) groupRuns.push(run);
@@ -772,6 +773,35 @@ function buildVersionGroups(runs: RunSummary[], variants: Variant[]): VersionGro
   }
 
   return groups.filter((group) => group.runs.length > 0 || group.active || variants.length > 1);
+}
+
+function sortRunsNewestFirst(runs: RunSummary[]): RunSummary[] {
+  return [...runs].sort((a, b) => {
+    const created = b.createdAt - a.createdAt;
+    if (created !== 0) return created;
+    const finished = (b.finishedAt ?? 0) - (a.finishedAt ?? 0);
+    return finished;
+  });
+}
+
+function cacheBustPreviewUrl(url: string): string {
+  return `${url.split("?")[0]}?t=${Date.now()}`;
+}
+
+function isVersionPreviewSrc(projectId: string, src: string | null): boolean {
+  return !!src && src.includes(`/api/projects/${projectId}/versions/`);
+}
+
+function PreviewBusyOverlay({ title, detail }: PreviewBusyState): ReactNode {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center bg-surface/78 p-4 backdrop-blur-sm">
+      <div className="flex max-w-sm flex-col items-center gap-2 rounded-lg border border-border bg-card px-4 py-3 text-center shadow-pop">
+        <Spinner size={18} />
+        <div className="text-sm font-medium text-foreground">{title}</div>
+        {detail ? <div className="text-xs leading-snug text-muted-foreground">{detail}</div> : null}
+      </div>
+    </div>
+  );
 }
 
 function statusDotClass(status: string): string {
@@ -1643,6 +1673,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [fullscreen, setFullscreen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const [previewBusy, setPreviewBusy] = useState<PreviewBusyState | null>(null);
+  const [previewVersionRunId, setPreviewVersionRunId] = useState<string | null>(null);
   const [projectMode, setProjectMode] = useState<ProjectMode>("prototype");
   const [projectName, setProjectName] = useState("");
   const [dsId, setDsId] = useState("");
@@ -1713,6 +1745,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const activeRunIdRef = useRef<string | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
   const selectionModeRef = useRef<"markup" | "inspect" | null>(null);
+  const versionPreviewRequestRef = useRef(0);
   const inspectedTargetRef = useRef<MarkupTarget | null>(null);
   const terminalEventRef = useRef(false);
   const liveQualityRef = useRef(false);
@@ -1785,6 +1818,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     scheduleScrollChatToBottom("auto");
   };
 
+  const clearVersionPreviewState = (): void => {
+    setPreviewVersionRunId(null);
+    setPreviewBusy(null);
+  };
+
   const loadFiles = async (): Promise<void> => {
     try {
       const fs = await api.listFiles(projectId);
@@ -1808,10 +1846,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const loadRuns = async (scopeVariants: Variant[] = variants): Promise<void> => {
     try {
       const rs = await api.listRuns(projectId, { all: true });
-      setRuns(rs);
+      const sortedRuns = sortRunsNewestFirst(rs);
+      setRuns(sortedRuns);
       // Reflect the active branch's latest run in the Quality tab when reopening a project.
       const activeVariantId = activeVariantIdOf(scopeVariants);
-      const latest = activeVariantId ? (rs.find((run) => (run.variantId ?? activeVariantId) === activeVariantId) ?? null) : (rs[0] ?? null);
+      const latest = activeVariantId
+        ? (sortedRuns.find((run) => (run.variantId ?? activeVariantId) === activeVariantId) ?? null)
+        : (sortedRuns[0] ?? null);
       const latestFindings = normalizeFindings(latest?.findings);
       if (latest && (typeof latest.score === "number" || latestFindings.length > 0)) {
         const restoredFindings = latestFindings;
@@ -1858,6 +1899,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         await new Promise((r) => setTimeout(r, 1500));
       }
       const { url } = await api.getDevServerUrl(projectId);
+      clearVersionPreviewState();
       setPreviewSrc(url);
       void api.getSetup(projectId).then((s) => {
         setSetupPhase(s.phase);
@@ -1885,9 +1927,42 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     return () => window.removeEventListener("dezin:project-title", onTitle);
   }, [projectId]);
 
-  const viewVersion = (runId: string): void => {
-    setPreviewSrc(api.versionPreviewUrl(projectId, runId));
+  const resolveVersionPreviewUrl = async (runId: string): Promise<string> => cacheBustPreviewUrl((await api.getVersionPreview(projectId, runId)).url);
+
+  const viewVersion = async (runId: string): Promise<void> => {
+    const requestId = versionPreviewRequestRef.current + 1;
+    versionPreviewRequestRef.current = requestId;
+    setPreviewVersionRunId(runId);
+    setPreviewBusy({ title: "Loading version preview", detail: "Preparing the saved snapshot and starting its preview server." });
     setTab("Preview");
+    try {
+      const url = await resolveVersionPreviewUrl(runId);
+      if (versionPreviewRequestRef.current !== requestId) return;
+      setPreviewSrc(url);
+      setPreviewBusy(null);
+    } catch {
+      if (versionPreviewRequestRef.current === requestId) {
+        setPreviewBusy(null);
+        setPreviewVersionRunId(null);
+      }
+      toast("Couldn't load that version preview.", { variant: "error" });
+    }
+  };
+
+  const openVersionCompare = async (runId: string, label: string): Promise<void> => {
+    if (!currentRun) return;
+    setPreviewBusy({ title: "Loading version comparison", detail: "Preparing both saved snapshots for visual comparison." });
+    try {
+      const [versionUrl, currentUrl] = await Promise.all([resolveVersionPreviewUrl(runId), resolveVersionPreviewUrl(currentRun.id)]);
+      setCompare({
+        a: { url: versionUrl, label },
+        b: { url: currentUrl, label: `${activeVersionGroup?.name ?? "Current branch"} current` },
+      });
+    } catch {
+      toast("Couldn't load that comparison.", { variant: "error" });
+    } finally {
+      setPreviewBusy(null);
+    }
   };
 
   const openDiff = async (runId: string, label: string): Promise<void> => {
@@ -1910,6 +1985,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     try {
       await api.restoreVersion(projectId, runId);
       toast("Restored that version as the current design.");
+      clearVersionPreviewState();
       setPreviewSrc(`${api.previewUrl(projectId)}?t=${Date.now()}`);
       setTab("Preview");
       void loadRuns();
@@ -2019,6 +2095,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         break;
       case "preview-update":
         // The agent rewrote the artifact mid-run — show it building live.
+        clearVersionPreviewState();
         setPreviewSrc(`${api.previewUrl(id)}?t=${typeof ev.t === "number" ? ev.t : Date.now()}`);
         setTab("Preview");
         break;
@@ -2103,7 +2180,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           { passed: !!ev.passed, score: s, rounds, status: "done" },
         );
         if (modeRef.current === "standard") void loadDevPreview();
-        else setPreviewSrc(`${api.previewUrl(id)}?t=${Date.now()}`);
+        else {
+          clearVersionPreviewState();
+          setPreviewSrc(`${api.previewUrl(id)}?t=${Date.now()}`);
+        }
         setTab("Preview");
         setRanOnce(true);
         void loadFiles();
@@ -2693,7 +2773,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     void loadFiles();
     void loadRuns(scopeVariants);
     if (modeRef.current === "standard") void loadDevPreview();
-    else setPreviewSrc(`${api.previewUrl(projectId)}?t=${Date.now()}`);
+    else {
+      clearVersionPreviewState();
+      setPreviewSrc(`${api.previewUrl(projectId)}?t=${Date.now()}`);
+    }
   };
 
   const switchVariant = async (vid: string): Promise<void> => {
@@ -2851,6 +2934,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const refreshDevPreview = async (): Promise<void> => {
     try {
       const { url } = await api.getDevServerUrl(projectId);
+      clearVersionPreviewState();
       setPreviewSrc(`${url.split("?")[0]}?t=${Date.now()}`);
       void api.getSetup(projectId)
         .then((s) => {
@@ -2866,11 +2950,19 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const refreshPreview = () => {
     setRefreshSpin((n) => n + 1);
+    if (previewVersionRunId) {
+      void viewVersion(previewVersionRunId);
+      return;
+    }
+    if (isVersionPreviewSrc(projectId, previewSrc)) {
+      setPreviewSrc(cacheBustPreviewUrl(previewSrc!));
+      return;
+    }
     if (modeRef.current === "standard") {
       void refreshDevPreview();
       return;
     }
-    if (previewSrc) setPreviewSrc(previewSrc.startsWith("http") ? `${previewSrc.split("?")[0]}?t=${Date.now()}` : `${api.previewUrl(projectId)}?t=${Date.now()}`);
+    if (previewSrc) setPreviewSrc(previewSrc.startsWith("http") ? cacheBustPreviewUrl(previewSrc) : cacheBustPreviewUrl(api.previewUrl(projectId)));
   };
 
   const canExport = previewSrc !== null && projectId !== "new";
@@ -2928,6 +3020,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   );
   const renderPreviewFrame = (): ReactNode => (
     <iframe
+      key={previewSrc ?? "artifact-preview"}
       ref={previewIframeRef}
       title="Artifact preview"
       src={previewSrc ?? undefined}
@@ -3549,6 +3642,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               </span>
             </div>
           ) : null}
+          {previewBusy ? <PreviewBusyOverlay {...previewBusy} /> : null}
           {tab === "Preview" ? (
             previewSrc ? (
               <Group
@@ -3704,7 +3798,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                                   <CornerUpLeft size={14} strokeWidth={1.75} />
                                   Chat
                                 </Button>
-                                <Button variant="ghost" size="sm" aria-label={`View ${group.name} ${label}`} onClick={() => viewVersion(r.id)}>
+                                <Button variant="ghost" size="sm" aria-label={`View ${group.name} ${label}`} onClick={() => void viewVersion(r.id)}>
                                   View
                                 </Button>
                                 <Button
@@ -3731,15 +3825,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                                         size="sm"
                                         aria-label={`Compare ${group.name} ${label} visually`}
                                         title="Visual compare with the current version"
-                                        onClick={() =>
-                                          setCompare({
-                                            a: { url: api.versionPreviewUrl(projectId, r.id), label: `${group.name} ${label}` },
-                                            b: {
-                                              url: api.versionPreviewUrl(projectId, currentRun.id),
-                                              label: `${activeVersionGroup?.name ?? "Current branch"} current`,
-                                            },
-                                          })
-                                        }
+                                        onClick={() => void openVersionCompare(r.id, `${group.name} ${label}`)}
                                       >
                                         Compare
                                       </Button>
