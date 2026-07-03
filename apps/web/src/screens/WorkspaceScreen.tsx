@@ -168,11 +168,12 @@ interface ResultMeta {
 interface Msg {
   id: number;
   dbId?: string;
-  kind: "user" | "assistant" | "result" | "process" | "question";
+  kind: "user" | "assistant" | "result" | "process" | "question" | "visual-review";
   text: string;
   meta?: ResultMeta;
   steps?: string[];
   items?: LiveItem[];
+  visualReview?: VisualReviewState;
   elapsedMs?: number;
   runId?: string;
   /** DB createdAt — used to link a Versions run back to its triggering message. */
@@ -189,8 +190,21 @@ type TranscriptBlock =
  *  render interleaved (chronologically) during generation, not split into separate blocks. */
 type LiveItem = { type: "text"; text: string } | { type: "tool"; summary: string };
 
+interface VisualReviewState {
+  status: "running" | "complete";
+  enabled?: boolean;
+  round?: number;
+  agentCommand?: string;
+  model?: string;
+  screenshotUrl?: string;
+  screenshotPath?: string;
+  summary?: string;
+  findings: QualityFinding[];
+  process: LiveItem[];
+}
+
 function isRunCardMessage(message: Msg): boolean {
-  return message.kind === "process" || message.kind === "result";
+  return message.kind === "process" || message.kind === "result" || message.kind === "visual-review";
 }
 
 function isStepsMessage(message: Msg | undefined): message is Msg {
@@ -388,6 +402,10 @@ function normalizeFindings(value: unknown): QualityFinding[] {
   });
 }
 
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
 function isVisualFinding(finding: QualityFinding): boolean {
   return finding.id.startsWith("visual-");
 }
@@ -406,6 +424,53 @@ function isVisualFailureFinding(finding: QualityFinding): boolean {
     "visual-agent-review-failed",
     "visual-artifact-missing",
   ].includes(finding.id);
+}
+
+function reviewerLabel(input: { agentCommand?: string; model?: string }): string {
+  return [input.agentCommand, input.model].filter((value): value is string => !!value && value.trim().length > 0).join(" / ") || "selected reviewer";
+}
+
+function firstVisualReviewFinding(findings: QualityFinding[]): QualityFinding | undefined {
+  return findings.find((finding) => isAgentVisualFinding(finding) && (finding.screenshotUrl || finding.screenshotPath || finding.reviewSummary));
+}
+
+function visualReviewFindingSummary(findings: QualityFinding[]): string | undefined {
+  return firstVisualReviewFinding(findings)?.reviewSummary;
+}
+
+function visualReviewScreenshotUrl(findings: QualityFinding[]): string | undefined {
+  return firstVisualReviewFinding(findings)?.screenshotUrl;
+}
+
+function visualReviewScreenshotPath(findings: QualityFinding[]): string | undefined {
+  return firstVisualReviewFinding(findings)?.screenshotPath;
+}
+
+function visualReviewStatusText(review: VisualReviewState): string {
+  if (review.status === "running") return "Running";
+  if (review.enabled === false) return "Skipped";
+  if (review.findings.length > 0) return `${review.findings.length} issue${review.findings.length === 1 ? "" : "s"}`;
+  return "Clean";
+}
+
+function visualReviewResultText(review: VisualReviewState): string {
+  if (review.status === "running") return "Waiting for screenshot review result.";
+  if (review.enabled === false) return "Visual review was disabled for this run.";
+  if (review.summary) return review.summary;
+  const findingSummary = visualReviewFindingSummary(review.findings);
+  if (findingSummary) return findingSummary;
+  if (review.findings.length > 0) return `${review.findings.length} screenshot issue${review.findings.length === 1 ? "" : "s"} reported.`;
+  return "Screenshot review completed with no visible layout issues reported.";
+}
+
+function visualReviewQualitySummary(findings: QualityFinding[]): { screenshotUrl?: string; screenshotPath?: string; summary?: string } | null {
+  const finding = firstVisualReviewFinding(findings);
+  if (!finding) return null;
+  return {
+    screenshotUrl: finding.screenshotUrl,
+    screenshotPath: finding.screenshotPath,
+    summary: finding.reviewSummary,
+  };
 }
 
 type QualityLaneStatus = "passed" | "issues" | "failed" | "running" | "not-run" | "not-recorded";
@@ -1110,6 +1175,97 @@ function liveText(items: LiveItem[]): string {
     .trim();
 }
 
+function VisualReviewRecord({
+  review,
+  stackPosition = "single",
+}: {
+  review: VisualReviewState;
+  stackPosition?: RunCardStackPosition;
+}) {
+  const [open, setOpen] = useState(false);
+  const status = visualReviewStatusText(review);
+  const reviewer = reviewerLabel(review);
+  const processItems = review.process.length
+    ? review.process
+    : [{ type: "tool" as const, summary: `Reviewing screenshot with ${reviewer}` }];
+  return (
+    <div
+      data-testid="visual-review-message"
+      className={cn(
+        "overflow-hidden border border-border bg-card/70",
+        runCardRadiusClass(stackPosition),
+        stackPosition !== "single" && stackPosition !== "first" && "-mt-px",
+      )}
+    >
+      <div className="flex items-center justify-between gap-3 px-3 py-2">
+        <div className="min-w-0">
+          <div className="label-mono text-brand">Visual Review</div>
+          <p className="mt-1 text-sm leading-snug text-foreground">{visualReviewResultText(review)}</p>
+        </div>
+        <span
+          className={cn(
+            "shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium",
+            review.status === "running"
+              ? "border-accent/25 bg-accent/10 text-accent-foreground"
+              : review.findings.length > 0
+                ? "border-border-strong bg-surface-2 text-foreground"
+                : "border-success/25 bg-success/10 text-success",
+          )}
+        >
+          {status}
+        </span>
+      </div>
+      {review.findings.length > 0 ? (
+        <ul className="space-y-1.5 border-t border-border px-3 py-2">
+          {review.findings.map((finding, index) => (
+            <li key={`${finding.id}-${index}`} className="rounded-md bg-surface px-2 py-1.5 text-xs leading-snug text-foreground-2">
+              {finding.message}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <button
+        type="button"
+        aria-label="Visual Review process"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-2 border-t border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <ChevronRight size={13} strokeWidth={2} className={`transition-transform duration-200 ${open ? "rotate-90" : ""}`} />
+        {review.status === "running" ? <Spinner size={12} /> : <Check size={13} strokeWidth={2.5} className="text-success" />}
+        <span className="font-medium">Process</span>
+        <span className="min-w-0 truncate font-mono text-[11px]">{reviewer}</span>
+      </button>
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.22, ease: [0.25, 1, 0.5, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="space-y-2 border-t border-border px-3 py-2.5">
+              {processItems.map((item, index) =>
+                item.type === "text" ? (
+                  <div key={index} className="text-sm leading-relaxed text-foreground-2">
+                    <Markdown>{item.text}</Markdown>
+                  </div>
+                ) : (
+                  <div key={index} className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                    <span aria-hidden className="size-1 shrink-0 rounded-full bg-muted-foreground/60" />
+                    <span className="truncate">{item.summary}</span>
+                  </div>
+                ),
+              )}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 /** A collapsed record of the agent's process or build steps, kept in the transcript. */
 function ProcessRecord({
   steps = [],
@@ -1340,6 +1496,36 @@ function StandardDoctor({
         <p className="px-3 py-2 text-xs text-muted-foreground">No runtime logs recorded in this daemon session.</p>
       )}
     </section>
+  );
+}
+
+function AgentVisualReviewSummary({ findings }: { findings: QualityFinding[] }) {
+  const summary = visualReviewQualitySummary(findings);
+  if (!summary) return null;
+  return (
+    <div className="border-t border-border px-3 py-2.5">
+      <div className="flex gap-3 rounded-md border border-border bg-surface p-2">
+        {summary.screenshotUrl ? (
+          <img
+            src={summary.screenshotUrl}
+            alt="Visual review screenshot"
+            loading="lazy"
+            className="h-20 w-28 shrink-0 rounded-md border border-border bg-white object-cover"
+          />
+        ) : (
+          <div className="grid h-20 w-28 shrink-0 place-items-center rounded-md border border-border bg-card text-muted-foreground">
+            <Eye size={16} strokeWidth={1.75} />
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="label-mono text-brand">Screenshot review</div>
+          <p className="mt-1 text-xs leading-snug text-foreground">{summary.summary ?? "Screenshot review completed."}</p>
+          {summary.screenshotPath && !summary.screenshotUrl ? (
+            <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{summary.screenshotPath}</p>
+          ) : null}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1757,6 +1943,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const reattachedRunsRef = useRef<Set<string>>(new Set());
   const lastSeqByRunRef = useRef<Map<string, number>>(new Map());
   const qualityChecksRef = useRef<QualityCheckState>({ staticRan: false, visualRan: false, visualEnabled: null, source: "none" });
+  const visualReviewMessageIdRef = useRef<number | null>(null);
 
   const updateQualityChecks = (next: QualityCheckState | ((current: QualityCheckState) => QualityCheckState)): void => {
     const resolved = typeof next === "function" ? next(qualityChecksRef.current) : next;
@@ -2071,6 +2258,91 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     return text;
   };
 
+  const startVisualReviewMessage = (ev: RunEvent): void => {
+    if (liveItemsRef.current.length > 0 || finalSummaryTextRef.current.trim()) materializeLive();
+    const agentCommand = optionalString(ev.agentCommand);
+    const model = optionalString(ev.model);
+    const screenshotUrl = optionalString(ev.screenshotUrl);
+    const screenshotPath = optionalString(ev.screenshotPath);
+    const reviewer = reviewerLabel({ agentCommand, model });
+    const enabled = typeof ev.enabled === "boolean" ? ev.enabled : true;
+    const id = msgId.current++;
+    visualReviewMessageIdRef.current = id;
+    setMessages((current) => [
+      ...current,
+      {
+        id,
+        kind: "visual-review",
+        text: "",
+        visualReview: {
+          status: "running",
+          enabled,
+          round: typeof ev.round === "number" ? ev.round : undefined,
+          agentCommand,
+          model,
+          screenshotUrl,
+          screenshotPath,
+          findings: [],
+          process: [
+            { type: "tool", summary: screenshotUrl || screenshotPath ? "Captured preview screenshot" : "Preparing preview screenshot" },
+            { type: "tool", summary: `Reviewing screenshot with ${reviewer}` },
+          ],
+        },
+      },
+    ]);
+  };
+
+  const completeVisualReviewMessage = (ev: RunEvent, findings: QualityFinding[]): void => {
+    if (liveItemsRef.current.length > 0 || finalSummaryTextRef.current.trim()) materializeLive();
+    const screenshotUrl = optionalString(ev.screenshotUrl) ?? visualReviewScreenshotUrl(findings);
+    const screenshotPath = optionalString(ev.screenshotPath) ?? visualReviewScreenshotPath(findings);
+    const summary = optionalString(ev.reviewSummary) ?? visualReviewFindingSummary(findings);
+    const existingId = visualReviewMessageIdRef.current;
+    if (existingId === null) {
+      const id = msgId.current++;
+      visualReviewMessageIdRef.current = id;
+      setMessages((current) => [
+        ...current,
+        {
+          id,
+          kind: "visual-review",
+          text: "",
+          visualReview: {
+            status: "complete",
+            enabled: typeof ev.enabled === "boolean" ? ev.enabled : true,
+            screenshotUrl,
+            screenshotPath,
+            summary,
+            findings,
+            process: [{ type: "tool", summary: "Reviewed preview screenshot" }],
+          },
+        },
+      ]);
+      return;
+    }
+    setMessages((current) =>
+      current.map((message) => {
+        if (message.id !== existingId || message.kind !== "visual-review") return message;
+        const prior = message.visualReview;
+        return {
+          ...message,
+          visualReview: {
+            status: "complete",
+            enabled: typeof ev.enabled === "boolean" ? ev.enabled : prior?.enabled,
+            round: prior?.round,
+            agentCommand: prior?.agentCommand,
+            model: prior?.model,
+            screenshotUrl: screenshotUrl ?? prior?.screenshotUrl,
+            screenshotPath: screenshotPath ?? prior?.screenshotPath,
+            summary,
+            findings,
+            process: prior?.process ?? [],
+          },
+        };
+      }),
+    );
+  };
+
   const handleEvent = (ev: RunEvent, id: string): void => {
     const seq = typeof ev.seq === "number" && Number.isFinite(ev.seq) ? ev.seq : null;
     const eventRunId = typeof ev.runId === "string" ? ev.runId : activeRunIdRef.current;
@@ -2101,6 +2373,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         finalSummaryTextRef.current = "";
         summaryBoundaryRef.current = false;
         materialSourcesRef.current = [];
+        visualReviewMessageIdRef.current = null;
         gotTurnText.current = false;
         stickBottom.current = true;
         setLiveStatus("Starting…");
@@ -2154,8 +2427,19 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         setLiveStatus(`Found ${findings.length} issue${findings.length === 1 ? "" : "s"}, repairing`);
         break;
       }
+      case "visual-qa-start": {
+        startVisualReviewMessage(ev);
+        updateQualityChecks((current) => ({
+          ...current,
+          visualEnabled: typeof ev.enabled === "boolean" ? ev.enabled : current.visualEnabled,
+          source: "live",
+        }));
+        setLiveStatus(ev.enabled === false ? "Visual review skipped." : "Reviewing screenshot…");
+        break;
+      }
       case "visual-qa": {
         const findings = Array.isArray(ev.findings) ? normalizeFindings(ev.findings) : [];
+        completeVisualReviewMessage(ev, findings);
         setLintFindings((current) => [...current.filter((finding) => !isVisualFinding(finding)), ...findings]);
         updateQualityChecks((current) => ({
           ...current,
@@ -3069,6 +3353,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       <AssistantMessage message={m} />
     ) : m.kind === "process" ? (
       <ProcessRecord steps={m.steps} items={m.items} elapsedMs={m.elapsedMs} stackPosition={stackPosition} />
+    ) : m.kind === "visual-review" && m.visualReview ? (
+      <VisualReviewRecord review={m.visualReview} stackPosition={stackPosition} />
     ) : m.kind === "question" ? (
       <QuestionCard question={m.text} onAnswer={(answer) => void runBrief(answer)} />
     ) : (
@@ -3729,6 +4015,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                             {qualityStatusText(lane.status)}
                           </span>
                         </div>
+                        {lane.key === "agent" ? <AgentVisualReviewSummary findings={lane.findings} /> : null}
                         {lane.findings.length > 0 ? (
                           <ul className="space-y-2 border-t border-border px-3 py-2.5">
                             {lane.findings.map((f, idx) => (

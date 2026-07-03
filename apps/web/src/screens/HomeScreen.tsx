@@ -4,6 +4,7 @@ import {
   ArchiveRestore,
   ArrowRight,
   Boxes,
+  Check,
   FileText,
   FolderInput,
   Layers,
@@ -29,6 +30,7 @@ import {
   Picker,
   SearchInput,
   Segmented,
+  Spinner,
   Stagger,
   StaggerItem,
   Tabs,
@@ -141,6 +143,8 @@ export function HomeScreen({
   const api = useApi();
   const { toast } = useToast();
   const [brief, setBrief] = useState("");
+  const [optimizingPrompt, setOptimizingPrompt] = useState(false);
+  const [optimizedOriginalPrompt, setOptimizedOriginalPrompt] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillCard[]>([]);
   const [skillId, setSkillId] = useState(DEFAULT_SKILL);
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
@@ -313,6 +317,35 @@ export function HomeScreen({
     if (refs.length) setPendingRefs(refs.map((r) => ({ name: r.name, base64: r.base64 })));
     if (homeAgent) setPendingAgent(homeAgent, homeModel || undefined);
     onNewProject?.(text, skillId, designSystemId, mode);
+  };
+
+  const updateBrief = (value: string): void => {
+    setBrief(value);
+    if (optimizedOriginalPrompt !== null) setOptimizedOriginalPrompt(null);
+  };
+
+  const optimizeCurrentPrompt = async (): Promise<void> => {
+    const original = brief.trim();
+    if (!original || optimizingPrompt) return;
+    setOptimizingPrompt(true);
+    try {
+      const result = await api.optimizePrompt({
+        prompt: original,
+        agentCommand: homeAgent || undefined,
+        model: homeModel || undefined,
+        mode,
+        skillId,
+        designSystemId,
+      });
+      const next = result.prompt.trim();
+      if (!next) throw new Error("empty optimized prompt");
+      setBrief(next);
+      setOptimizedOriginalPrompt(original);
+    } catch {
+      toast("Couldn't optimize that prompt.", { variant: "error" });
+    } finally {
+      setOptimizingPrompt(false);
+    }
   };
 
   const remove = async (id: string) => {
@@ -497,14 +530,74 @@ export function HomeScreen({
                   ))}
                 </div>
               ) : null}
-              <textarea
-                aria-label="Describe your design"
-                value={brief}
-                onChange={(e) => setBrief(e.target.value)}
-                placeholder={images.length ? "Add notes, or just build to recreate the screenshot…" : "A pricing page with three plans, the middle one recommended…"}
-                rows={3}
-                className="w-full resize-none bg-transparent px-3 py-2.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground"
-              />
+              <div className="relative">
+                {optimizingPrompt ? (
+                  <div
+                    aria-hidden
+                    className="pointer-events-none absolute inset-x-2 bottom-0 top-0 rounded-xl bg-[linear-gradient(110deg,transparent_0%,color-mix(in_oklch,var(--primary)_10%,transparent)_45%,transparent_70%)] opacity-70 animate-pulse"
+                  />
+                ) : null}
+                <textarea
+                  aria-label="Describe your design"
+                  value={brief}
+                  disabled={optimizingPrompt}
+                  onChange={(e) => updateBrief(e.target.value)}
+                  placeholder={images.length ? "Add notes, or just build to recreate the screenshot…" : "A pricing page with three plans, the middle one recommended…"}
+                  rows={3}
+                  className="field-sizing-content max-h-64 min-h-[92px] w-full resize-none bg-transparent px-3 py-2.5 pr-12 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:cursor-wait disabled:opacity-70"
+                />
+                {brief.trim().length > 0 ? (
+                  <TooltipProvider delayDuration={120}>
+                    <div className="absolute bottom-2 right-2 flex items-center gap-1">
+                      {optimizedOriginalPrompt !== null && !optimizingPrompt ? (
+                        <>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <IconButton
+                                aria-label="Reject optimized prompt"
+                                className="h-7 w-7 rounded-md bg-background/80 shadow-sm backdrop-blur"
+                                onClick={() => {
+                                  setBrief(optimizedOriginalPrompt);
+                                  setOptimizedOriginalPrompt(null);
+                                }}
+                              >
+                                <X size={13} strokeWidth={2} />
+                              </IconButton>
+                            </TooltipTrigger>
+                            <TooltipContent sideOffset={2}>Reject optimized prompt</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <IconButton
+                                aria-label="Accept optimized prompt"
+                                className="h-7 w-7 rounded-md bg-background/80 text-foreground shadow-sm backdrop-blur"
+                                onClick={() => setOptimizedOriginalPrompt(null)}
+                              >
+                                <Check size={13} strokeWidth={2} />
+                              </IconButton>
+                            </TooltipTrigger>
+                            <TooltipContent sideOffset={2}>Accept optimized prompt</TooltipContent>
+                          </Tooltip>
+                        </>
+                      ) : (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <IconButton
+                              aria-label="Optimize prompt"
+                              disabled={optimizingPrompt}
+                              className="h-7 w-7 rounded-md bg-background/80 shadow-sm backdrop-blur"
+                              onClick={() => void optimizeCurrentPrompt()}
+                            >
+                              {optimizingPrompt ? <Spinner size={13} /> : <Sparkles size={13} strokeWidth={1.8} />}
+                            </IconButton>
+                          </TooltipTrigger>
+                          <TooltipContent sideOffset={2}>Optimize prompt</TooltipContent>
+                        </Tooltip>
+                      )}
+                    </div>
+                  </TooltipProvider>
+                ) : null}
+              </div>
               <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 px-1 pt-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <AttachMenu
@@ -550,7 +643,7 @@ export function HomeScreen({
                   <Button
                     size="lg"
                     onClick={submit}
-                    disabled={brief.trim().length === 0 && images.length === 0}
+                    disabled={optimizingPrompt || (brief.trim().length === 0 && images.length === 0)}
                     aria-label="Build"
                     className="rounded-xl px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
                   >
@@ -569,7 +662,7 @@ export function HomeScreen({
                 key={t.label}
                 type="button"
                 onClick={() => {
-                  setBrief(t.brief);
+                  updateBrief(t.brief);
                   setSkillId(t.skillId);
                   setDesignSystemId(t.designSystemId);
                 }}

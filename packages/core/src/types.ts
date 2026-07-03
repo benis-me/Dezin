@@ -62,6 +62,9 @@ export interface QualityFinding {
   message: string;
   fix: string;
   snippet?: string;
+  screenshotPath?: string;
+  screenshotUrl?: string;
+  reviewSummary?: string;
 }
 
 export interface Run {

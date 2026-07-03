@@ -181,6 +181,65 @@ test("HomeScreen Build passes the brief, skillId, and designSystemId", async () 
   expect(onNewProject).toHaveBeenCalledWith("a dashboard", "deck", "editorial", "prototype");
 });
 
+test("HomeScreen optimizes the prompt with the selected agent and lets the user reject or accept it", async () => {
+  const user = userEvent.setup();
+  const onNewProject = vi.fn();
+  let resolveFirst!: (value: { prompt: string }) => void;
+  const firstOptimization = new Promise<{ prompt: string }>((resolve) => {
+    resolveFirst = resolve;
+  });
+  const optimizePrompt = vi
+    .fn()
+    .mockImplementationOnce(() => firstOptimization)
+    .mockResolvedValueOnce({ prompt: "Accepted optimized shader brief" });
+
+  renderWithApiAndAgents(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+    listAgents: async () => [{ id: "codebuddy", command: "codebuddy", available: true, models: ["hunyuan"] }],
+    getSettings: async () => settingsFixture({ agentCommand: "codebuddy", model: "hunyuan" }),
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+    optimizePrompt,
+  });
+
+  const textarea = await screen.findByLabelText("Describe your design");
+  expect(screen.queryByRole("button", { name: "Optimize prompt" })).toBeNull();
+
+  fireEvent.change(textarea, { target: { value: "make a shader site" } });
+  await user.click(await screen.findByRole("button", { name: "Optimize prompt" }));
+  await waitFor(() =>
+    expect(optimizePrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: "make a shader site",
+        agentCommand: "codebuddy",
+        model: "hunyuan",
+        mode: "prototype",
+        skillId: "frontend-design",
+        designSystemId: "modern-minimal",
+      }),
+    ),
+  );
+  expect(textarea).toBeDisabled();
+
+  await act(async () => {
+    resolveFirst({ prompt: "Create a finished shader microsite with sourced assets." });
+    await firstOptimization;
+  });
+
+  expect(textarea).toHaveValue("Create a finished shader microsite with sourced assets.");
+  fireEvent.click(screen.getByLabelText("Build"));
+  expect(onNewProject).toHaveBeenCalledWith("Create a finished shader microsite with sourced assets.", "frontend-design", "modern-minimal", "prototype");
+
+  await user.click(screen.getByRole("button", { name: "Reject optimized prompt" }));
+  expect(textarea).toHaveValue("make a shader site");
+  expect(screen.getByRole("button", { name: "Optimize prompt" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Optimize prompt" }));
+  expect(await screen.findByRole("button", { name: "Accept optimized prompt" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Accept optimized prompt" }));
+  expect(textarea).toHaveValue("Accepted optimized shader brief");
+  expect(screen.getByRole("button", { name: "Optimize prompt" })).toBeInTheDocument();
+});
+
 test("HomeScreen prompt accepts dropped image references", async () => {
   renderWithApi(<HomeScreen projects={[]} />, {
     listSkills: async () => SKILLS,
@@ -220,6 +279,16 @@ test("MoodboardsScreen uses a Home-like prompt to start a board with initial dir
   );
   expect(onOpenBoard).toHaveBeenCalledWith("b1");
   expect(screen.getByRole("button", { name: "New board" })).toBeInTheDocument();
+});
+
+test("MoodboardsScreen homepage prompt textarea auto-sizes with a capped height", async () => {
+  renderWithApiAndAgents(<MoodboardsScreen onOpenBoard={vi.fn()} />, {
+    listMoodboards: async () => [],
+    listAgents: async () => [{ id: "claude", command: "claude", available: true, models: ["sonnet"] }],
+  });
+
+  const prompt = await screen.findByLabelText("Describe moodboard direction");
+  expect(prompt).toHaveClass("field-sizing-content", "max-h-64", "min-h-[92px]");
 });
 
 test("MoodboardsScreen generate mode starts a board with an image model instead of an agent message", async () => {

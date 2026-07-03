@@ -111,6 +111,38 @@ test("generateProjectTitle POSTs the background title endpoint", async () => {
   );
 });
 
+test("optimizePrompt POSTs the selected prompt optimizer context", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ prompt: "Create a finished Awwwards-level brief." }));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  await expect(
+    api.optimizePrompt({
+      prompt: "make it cool",
+      agentCommand: "codebuddy",
+      model: "hunyuan",
+      mode: "standard",
+      skillId: "frontend-design",
+      designSystemId: "modern-minimal",
+    }),
+  ).resolves.toEqual({ prompt: "Create a finished Awwwards-level brief." });
+
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/prompts/optimize",
+    expect.objectContaining({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: "make it cool",
+        agentCommand: "codebuddy",
+        model: "hunyuan",
+        mode: "standard",
+        skillId: "frontend-design",
+        designSystemId: "modern-minimal",
+      }),
+    }),
+  );
+});
+
 test("listProjects GETs the collection", async () => {
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse([PROJECT]));
   const api = createApiClient({ fetchImpl });
