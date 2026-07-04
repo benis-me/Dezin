@@ -11,6 +11,12 @@ designSystem: true
 
 A single `index.html` docs layout: a left nav, a readable content column, and an optional on-this-page rail.
 
+## Research
+
+- What the reader is actually trying to do, and the real concepts and terms this doc must
+  cover — organize the nav around their tasks, not the product's internal structure.
+- One or two reference docs in this space worth matching for clarity and scannability.
+
 ## Layout
 
 - Three zones: sidebar (sections), content (max ~72ch), and an optional right "On this page" anchor list.

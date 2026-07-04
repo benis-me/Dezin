@@ -12,6 +12,13 @@ designSystem: true
 Build a single `index.html` status page that answers "is it down?" in the first second
 and tells the honest story underneath.
 
+## Research
+
+- The real services and their dependencies for this product — API, dashboard, webhooks,
+  auth — so the component list matches what users actually feel.
+- How comparable status pages phrase incidents and structure uptime history; borrow the
+  honest, specific voice.
+
 ## Current status, up top
 
 - One unambiguous summary banner: **All systems operational**, **Degraded
