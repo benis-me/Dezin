@@ -182,6 +182,8 @@ export interface ResearchDetail {
   sources?: ResearchSourceItem[];
   directions?: Array<{ slug: string; title: string; markdown: string }>;
   assets?: string[];
+  /** The candidate direction the user picked at the gate, if any. */
+  chosenSlug?: string;
 }
 
 export interface RunInput {

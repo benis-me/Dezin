@@ -11,6 +11,7 @@ import {
   ASSETS_DIRNAME,
   assetsDir,
   briefPath,
+  chosenPath,
   directionPath,
   directionsDir,
   reportPath,
@@ -85,6 +86,19 @@ export async function listDirections(projectDir: string): Promise<Array<{ slug: 
     if (markdown !== null) out.push({ slug, markdown });
   }
   return out;
+}
+
+/** Record the candidate direction the user picked at the gate (overwrites any prior pick). */
+export async function writeChosenDirection(projectDir: string, slug: string): Promise<void> {
+  await mkdir(researchDir(projectDir), { recursive: true });
+  await writeFile(chosenPath(projectDir), `${slug.trim()}\n`, "utf8");
+}
+
+/** The slug the user picked at the gate, or null if none has been chosen yet. */
+export async function readChosenDirection(projectDir: string): Promise<string | null> {
+  const text = await readText(chosenPath(projectDir));
+  const slug = text?.trim();
+  return slug ? slug : null;
 }
 
 /**

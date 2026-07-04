@@ -9,8 +9,10 @@ import {
   listAssets,
   listDirections,
   readBrief,
+  readChosenDirection,
   researchExists,
   writeBrief,
+  writeChosenDirection,
   writeReport,
 } from "../src/io.ts";
 import type { ResearchBrief } from "../src/types.ts";
@@ -74,4 +76,14 @@ test("buildResearchContext includes the report and the chosen direction", async 
 test("buildResearchContext is null when there is no report", async () => {
   const dir = await project();
   assert.equal(await buildResearchContext(dir), null);
+});
+
+test("writeChosenDirection then readChosenDirection round-trips the picked slug", async () => {
+  const dir = await project();
+  assert.equal(await readChosenDirection(dir), null);
+  await writeChosenDirection(dir, "bold-terminal");
+  assert.equal(await readChosenDirection(dir), "bold-terminal");
+  // A later pick overwrites the earlier one.
+  await writeChosenDirection(dir, "calm-editorial");
+  assert.equal(await readChosenDirection(dir), "calm-editorial");
 });

@@ -12,7 +12,7 @@ import type { ServerResponse } from "node:http";
 import type { AppDeps } from "./app.ts";
 import { sendJson, sendError } from "./http-util.ts";
 import { activeArtifactDir } from "./variant-workspaces.ts";
-import { researchExists, readReport, readSources, listDirections, listAssets, directionTitle } from "../../../packages/research/src/index.ts";
+import { researchExists, readReport, readSources, listDirections, listAssets, readChosenDirection, directionTitle } from "../../../packages/research/src/index.ts";
 
 export async function handleGetResearch(res: ServerResponse, params: Record<string, string | undefined>, deps: AppDeps): Promise<void> {
   const project = deps.store.getProject(params.id ?? "");
@@ -26,11 +26,12 @@ export async function handleGetResearch(res: ServerResponse, params: Record<stri
   }
   if (!researchExists(dir)) return sendJson(res, 200, { exists: false });
 
-  const [report, sources, directions, assets] = await Promise.all([
+  const [report, sources, directions, assets, chosenSlug] = await Promise.all([
     readReport(dir),
     readSources(dir).catch(() => []),
     listDirections(dir).catch(() => []),
     listAssets(dir).catch(() => []),
+    readChosenDirection(dir).catch(() => null),
   ]);
   return sendJson(res, 200, {
     exists: true,
@@ -38,5 +39,6 @@ export async function handleGetResearch(res: ServerResponse, params: Record<stri
     sources,
     directions: directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown), markdown: d.markdown })),
     assets,
+    ...(chosenSlug ? { chosenSlug } : {}),
   });
 }

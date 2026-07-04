@@ -38,7 +38,7 @@ import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizePr
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { runResearchPhase } from "./research-phase.ts";
-import { buildResearchContext, directionTitle, listDirections, listAssets, readSources, researchExists } from "../../../packages/research/src/index.ts";
+import { buildResearchContext, directionTitle, listDirections, listAssets, readSources, researchExists, writeChosenDirection } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import type { AppDeps } from "./app.ts";
@@ -591,6 +591,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         res.end();
         return;
       }
+      // Record the pick so the workspace can show which direction was chosen (survives reload).
+      if (chosenDirection) await writeChosenDirection(dir, chosenDirection).catch(() => {});
       const researchContext = await buildResearchContext(dir, chosenDirection);
       if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
     }

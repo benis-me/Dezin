@@ -72,6 +72,20 @@ test("GET /api/projects/:id/research returns the deliverables when .research exi
   });
 });
 
+test("GET /api/projects/:id/research reports the chosen direction once one is picked", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = seedResearch(dataDir, store);
+    // Before a pick, no chosen slug is reported.
+    const before = (await (await fetch(`${base}/api/projects/${project.id}/research`)).json()) as { chosenSlug?: string };
+    assert.equal(before.chosenSlug, undefined);
+
+    // The gate records the pick in .research/chosen.
+    writeFileSync(join(dataDir, "projects", project.id, ".research", "chosen"), "bold\n");
+    const after = (await (await fetch(`${base}/api/projects/${project.id}/research`)).json()) as { chosenSlug?: string };
+    assert.equal(after.chosenSlug, "bold");
+  });
+});
+
 test("GET /api/projects/:id/research/assets/:name serves a collected image (publicRead)", async () => {
   await withServer(async ({ base, dataDir, store }) => {
     const project = seedResearch(dataDir, store);

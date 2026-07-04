@@ -8,6 +8,7 @@ export {
   RESEARCH_DIRNAME,
   ASSETS_DIRNAME,
   DIRECTIONS_DIRNAME,
+  CHOSEN_FILE,
   researchDir,
   briefPath,
   reportPath,
@@ -16,6 +17,7 @@ export {
   directionsDir,
   directionDir,
   directionPath,
+  chosenPath,
 } from "./convention.ts";
 export { slugify, uniqueSlug } from "./slug.ts";
 export { directionTitle } from "./directions.ts";
@@ -35,5 +37,7 @@ export {
   readReport,
   listAssets,
   listDirections,
+  writeChosenDirection,
+  readChosenDirection,
   buildResearchContext,
 } from "./io.ts";

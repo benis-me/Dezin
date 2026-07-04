@@ -13,6 +13,8 @@ export const SOURCES_FILE = "sources.json";
 export const ASSETS_DIRNAME = "assets";
 export const DIRECTIONS_DIRNAME = "directions";
 export const DIRECTION_FILE = "direction.md";
+/** Records which candidate direction the user picked at the gate (one slug). */
+export const CHOSEN_FILE = "chosen";
 
 export function researchDir(projectDir: string): string {
   return join(projectDir, RESEARCH_DIRNAME);
@@ -37,4 +39,7 @@ export function directionDir(projectDir: string, slug: string): string {
 }
 export function directionPath(projectDir: string, slug: string): string {
   return join(directionDir(projectDir, slug), DIRECTION_FILE);
+}
+export function chosenPath(projectDir: string): string {
+  return join(researchDir(projectDir), CHOSEN_FILE);
 }

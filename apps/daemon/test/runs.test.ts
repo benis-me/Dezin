@@ -1954,6 +1954,9 @@ test("a run with directionSlug skips the gate and builds the chosen direction", 
       assert.match(runner.calls[0]!.message, /Chosen direction/);
       assert.match(runner.calls[0]!.message, /Bold concept for alpha/);
       assert.doesNotMatch(runner.calls[0]!.message, /Calm concept for beta/);
+      // The pick is persisted so the Research views can show it (survives reload).
+      const research = (await (await fetch(`${base}/api/projects/${project.id}/research`)).json()) as { chosenSlug?: string };
+      assert.equal(research.chosenSlug, "alpha");
     },
     { researchPhase: researchWithDirections },
   );
