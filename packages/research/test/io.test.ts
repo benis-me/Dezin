@@ -47,9 +47,9 @@ test("researchExists reflects whether a report was written", async () => {
 test("listAssets and listDirections read the scaffold", async () => {
   const dir = await project();
   await ensureResearchScaffold(dir);
-  await writeFile(join(dir, "research", "assets", "a.png"), "x");
-  await mkdir(join(dir, "research", "directions", "bold"), { recursive: true });
-  await writeFile(join(dir, "research", "directions", "bold", "direction.md"), "# Bold\n\nBig type.");
+  await writeFile(join(dir, ".research", "assets", "a.png"), "x");
+  await mkdir(join(dir, ".research", "directions", "bold"), { recursive: true });
+  await writeFile(join(dir, ".research", "directions", "bold", "direction.md"), "# Bold\n\nBig type.");
   assert.deepEqual(await listAssets(dir), ["assets/a.png"]);
   const directions = await listDirections(dir);
   assert.equal(directions.length, 1);
@@ -62,8 +62,8 @@ test("buildResearchContext includes the report and the chosen direction", async 
   const dir = await project();
   await ensureResearchScaffold(dir);
   await writeReport(dir, "# Research\n\nKey finding: developers skim.");
-  await mkdir(join(dir, "research", "directions", "bold"), { recursive: true });
-  await writeFile(join(dir, "research", "directions", "bold", "direction.md"), "# Bold direction\n\nTerminal hero.");
+  await mkdir(join(dir, ".research", "directions", "bold"), { recursive: true });
+  await writeFile(join(dir, ".research", "directions", "bold", "direction.md"), "# Bold direction\n\nTerminal hero.");
   const ctx = await buildResearchContext(dir, "bold");
   assert.ok(ctx);
   assert.match(ctx!, /developers skim/);

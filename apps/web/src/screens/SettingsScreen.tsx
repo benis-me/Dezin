@@ -278,7 +278,7 @@ export function SettingsScreen({
                 <SettingsRows>
                   <SettingRow
                     label="Design research"
-                    desc="Before designing, the Agent researches competitors, audience, and references into research/, then builds from it. Adds time and uses your agent's tokens."
+                    desc="Before designing, the Agent researches competitors, audience, and references into .research/, then builds from it. Adds time and uses your agent's tokens."
                   >
                     <Switch
                       aria-label="Design research"

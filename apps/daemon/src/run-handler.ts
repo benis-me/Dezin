@@ -38,7 +38,7 @@ import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizePr
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { runResearchPhase } from "./research-phase.ts";
-import { buildResearchContext, directionTitle, listDirections } from "../../../packages/research/src/index.ts";
+import { buildResearchContext, directionTitle, listDirections, listAssets, readSources, researchExists } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import type { AppDeps } from "./app.ts";
@@ -256,6 +256,36 @@ function questionMessage(text: string, runId: string): string {
 
 function directionGateMessage(directions: Array<{ slug: string; title: string; markdown: string }>, runId: string, brief: string): string {
   return JSON.stringify({ directionGate: { directions, runId, brief } });
+}
+
+/** What the Research phase produced on disk — powers the workspace's Research card. */
+export interface ResearchSummary {
+  produced: boolean;
+  error?: string;
+  report: boolean;
+  sources: number;
+  assets: number;
+  directions: Array<{ slug: string; title: string }>;
+}
+
+/** Read the .research/ tree into a compact summary for the UI (best-effort). */
+async function summarizeResearch(dir: string): Promise<Omit<ResearchSummary, "produced" | "error">> {
+  const [sources, assets, directions] = await Promise.all([
+    readSources(dir).catch(() => []),
+    listAssets(dir).catch(() => []),
+    listDirections(dir).catch(() => []),
+  ]);
+  return {
+    report: researchExists(dir),
+    sources: sources.length,
+    assets: assets.length,
+    directions: directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown) })),
+  };
+}
+
+/** Persisted system message so the Research card survives reattach / history restore. */
+function researchSummaryMessage(summary: ResearchSummary): string {
+  return JSON.stringify({ research: summary });
 }
 
 /** A compact HTML snippet of a kept design from any project, for cross-project exemplars. */
@@ -507,7 +537,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // research/ directory, then its report is prepended to the brief so the build is
   // grounded in real discovery. Idempotent; a soft failure just proceeds without it.
   if (body.research === true || settings.researchEnabled || process.env.DEZIN_RESEARCH === "1") {
-    sse({ type: "phase-start", phase: "research", runId: run.id });
+    sse({ type: "research-start", runId: run.id });
     const research = await (deps.researchPhase ?? runResearchPhase)({
       dir,
       brief: visibleBrief,
@@ -518,8 +548,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       model: runModel,
       env: agentEnv,
       signal: ctrl.signal,
+      onActivity: (a) => sse({ type: "research-activity", runId: run.id, kind: a.kind, text: a.text }),
     });
-    sse({ type: "phase-end", phase: "research", produced: research.produced, error: research.error });
+    const researchSummary: ResearchSummary = { produced: research.produced, error: research.error, ...(await summarizeResearch(dir)) };
+    sse({ type: "research-done", runId: run.id, ...researchSummary });
+    store.addMessage(conversation.id, "system", researchSummaryMessage(researchSummary));
     if (research.produced) {
       const chosenDirection = body.directionSlug?.trim() || undefined;
       // Direction gate: when research produced 2+ candidate directions and the caller

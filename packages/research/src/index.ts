@@ -23,6 +23,7 @@ export { renderFrontmatter, parseFrontmatter, type FrontmatterValue } from "./fr
 export { buildBriefMarkdown, parseBriefMarkdown } from "./brief.ts";
 export { normalizeSource, parseSources, serializeSources, collectSourceAssets } from "./sources.ts";
 export { buildIntakePrompt, buildResearchPrompt, type IntakeInput, type ResearchInput } from "./prompts.ts";
+export { parseResearchActivity, type ResearchActivity } from "./activity.ts";
 export {
   researchExists,
   ensureResearchScaffold,

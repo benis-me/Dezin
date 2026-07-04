@@ -6,7 +6,7 @@
 
 import { join } from "node:path";
 
-export const RESEARCH_DIRNAME = "research";
+export const RESEARCH_DIRNAME = ".research";
 export const BRIEF_FILE = "brief.md";
 export const REPORT_FILE = "research.md";
 export const SOURCES_FILE = "sources.json";

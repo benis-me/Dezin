@@ -97,13 +97,14 @@ the "one distinctive move" heuristic, and gate conditions — with anti-slop dup
 removed (anti-slop already lives in the craft layer / linter, the single source of
 truth).
 
-## The `research/` directory convention
+## The `.research/` directory convention
 
-Research for design is **image + text**. It lives on disk under the project root so
-it can hold many resource types and be versioned/inspected like any other artifact:
+Research for design is **image + text**. It lives on disk under the project root (as a
+dotfolder, so it stays out of the way of the shipped artifact) so it can hold many
+resource types and be versioned/inspected like any other artifact:
 
 ```
-<project>/research/
+<project>/.research/
   brief.md            # the distilled design brief (intake output)
   research.md         # the synthesized research report — the main deliverable
   sources.json        # machine-readable provenance for every source & asset

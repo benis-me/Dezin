@@ -1848,8 +1848,8 @@ test("daemon start rejects a second instance for the same data dir", async () =>
 test("research-enabled run writes research/ and grounds the build in the report", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {
-    mkdirSync(join(input.dir, "research"), { recursive: true });
-    writeFileSync(join(input.dir, "research", "research.md"), "# Research\n\nKey finding: real users skim.");
+    mkdirSync(join(input.dir, ".research"), { recursive: true });
+    writeFileSync(join(input.dir, ".research", "research.md"), "# Research\n\nKey finding: real users skim.");
     return { ran: true, produced: true };
   };
   await withRunServer(
@@ -1864,10 +1864,12 @@ test("research-enabled run writes research/ and grounds the build in the report"
       assert.equal(res.status, 200);
       const events = parseSse(await res.text());
       const types = events.map((e) => e.type);
-      assert.ok(types.includes("phase-start"));
-      assert.ok(types.includes("phase-end"));
+      assert.ok(types.includes("research-start"));
+      assert.ok(types.includes("research-done"));
       assert.ok(types.includes("run-done"));
-      assert.equal(events.find((e) => e.type === "phase-end")!.produced, true);
+      const done = events.find((e) => e.type === "research-done")!;
+      assert.equal(done.produced, true);
+      assert.equal(done.report, true, "research-done carries a disk summary (report present)");
       // the build turn's brief was grounded in the research report
       assert.ok(runner.calls.length >= 1);
       assert.match(runner.calls[0]!.message, /Key finding: real users skim/);
@@ -1903,10 +1905,10 @@ test("runs without the research flag skip the research phase", async () => {
 });
 
 const researchWithDirections: NonNullable<AppDeps["researchPhase"]> = async (input) => {
-  const dirs = join(input.dir, "research", "directions");
+  const dirs = join(input.dir, ".research", "directions");
   mkdirSync(join(dirs, "alpha"), { recursive: true });
   mkdirSync(join(dirs, "beta"), { recursive: true });
-  writeFileSync(join(input.dir, "research", "research.md"), "# Research\n\nFindings.");
+  writeFileSync(join(input.dir, ".research", "research.md"), "# Research\n\nFindings.");
   writeFileSync(join(dirs, "alpha", "direction.md"), "# Alpha — bold\n\nBold concept for alpha.");
   writeFileSync(join(dirs, "beta", "direction.md"), "# Beta — calm\n\nCalm concept for beta.");
   return { ran: true, produced: true };

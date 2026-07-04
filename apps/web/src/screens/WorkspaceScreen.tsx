@@ -213,9 +213,19 @@ interface ResultMeta {
 interface Msg {
   id: number;
   dbId?: string;
-  kind: "user" | "assistant" | "result" | "process" | "question" | "visual-review" | "direction-gate";
+  kind: "user" | "assistant" | "result" | "process" | "question" | "visual-review" | "direction-gate" | "research";
   text: string;
   directions?: Array<{ slug: string; title: string; markdown: string }>;
+  /** Live + final state of the pre-design Research phase (its dedicated card). */
+  research?: {
+    status: "running" | "done";
+    activities: Array<{ kind: string; text: string }>;
+    report?: boolean;
+    sources?: number;
+    assets?: number;
+    directions?: Array<{ slug: string; title: string }>;
+    error?: string;
+  };
   meta?: ResultMeta;
   steps?: string[];
   items?: LiveItem[];
@@ -758,6 +768,31 @@ function toMsg(m: Message, id: number): Msg {
       if (isRecord(parsed) && isRecord(parsed.visualReview)) {
         const visualReview = normalizeVisualReview(parsed.visualReview);
         if (visualReview) return { id, dbId: m.id, kind: "visual-review", text: "", visualReview, at: m.createdAt };
+      }
+      if (isRecord(parsed) && isRecord(parsed.research)) {
+        const r = parsed.research;
+        const directions = Array.isArray(r.directions)
+          ? (r.directions as unknown[]).filter((d): d is { slug: string; title: string } => {
+              const o = d as { slug?: unknown; title?: unknown } | null;
+              return !!o && typeof o.slug === "string" && typeof o.title === "string";
+            })
+          : [];
+        return {
+          id,
+          dbId: m.id,
+          kind: "research",
+          text: "",
+          research: {
+            status: "done",
+            activities: [],
+            report: r.report === true,
+            sources: typeof r.sources === "number" ? r.sources : 0,
+            assets: typeof r.assets === "number" ? r.assets : 0,
+            directions,
+            error: typeof r.error === "string" ? r.error : undefined,
+          },
+          at: m.createdAt,
+        };
       }
       if (isRecord(parsed) && Array.isArray(parsed.steps)) return { id, dbId: m.id, kind: "process", text: "", steps: parsed.steps as string[], at: m.createdAt };
     } catch {
@@ -1688,6 +1723,53 @@ function emptyPane(label: string) {
   );
 }
 
+/** The pre-design Research phase's dedicated card — live steps, then the results. */
+function ResearchCard({ research }: { research: NonNullable<Msg["research"]> }) {
+  const { status, activities, report, sources = 0, assets = 0, directions = [], error } = research;
+  return (
+    <section className="rounded-lg border border-border bg-card">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold text-foreground">Research</div>
+          <div className="text-[11px] text-muted-foreground">
+            {status === "running" ? "Studying competitors, audience & references…" : "Discovery complete"}
+          </div>
+        </div>
+        <span className="shrink-0 rounded-md border border-border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+          {status === "running" ? "researching" : report ? "grounded" : "no report"}
+        </span>
+      </div>
+      {activities.length > 0 ? (
+        <ul className="max-h-44 space-y-1 overflow-auto px-3 py-2 font-mono text-[11px]">
+          {activities.slice(-12).map((a, index) => (
+            <li key={index} className="flex items-baseline gap-1.5">
+              <span className="w-14 shrink-0 uppercase text-[9px] tracking-wide text-muted-foreground/60">{a.kind}</span>
+              <span className="truncate text-muted-foreground">{a.text}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {status === "done" ? (
+        <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
+          <span className={report ? "text-foreground" : undefined}>{report ? "Report written" : "No report"}</span>
+          {` · ${sources} sources · ${assets} assets`}
+          {directions.length ? ` · ${directions.length} direction${directions.length > 1 ? "s" : ""}` : ""}
+          {directions.length ? (
+            <ul className="mt-1 space-y-0.5">
+              {directions.map((d) => (
+                <li key={d.slug} className="truncate">
+                  — {d.title}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {error ? <p className="mt-1 text-destructive">{error}</p> : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function StandardDoctor({
   phase,
   logs,
@@ -2360,6 +2442,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const lastSeqByRunRef = useRef<Map<string, number>>(new Map());
   const qualityChecksRef = useRef<QualityCheckState>({ staticRan: false, visualRan: false, visualEnabled: null, source: "none" });
   const visualReviewMessageIdRef = useRef<number | null>(null);
+  const researchMsgIdRef = useRef<number | null>(null);
 
   const updateQualityChecks = (next: QualityCheckState | ((current: QualityCheckState) => QualityCheckState)): void => {
     const resolved = typeof next === "function" ? next(qualityChecksRef.current) : next;
@@ -2882,6 +2965,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         summaryBoundaryRef.current = false;
         materialSourcesRef.current = [];
         visualReviewMessageIdRef.current = null;
+        researchMsgIdRef.current = null;
         gotTurnText.current = false;
         stickBottom.current = true;
         setLiveStatus("Starting…");
@@ -3048,6 +3132,51 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             { id: msgId.current++, kind: "direction-gate", text: typeof ev.brief === "string" ? ev.brief : "", directions, runId: typeof ev.runId === "string" ? ev.runId : undefined },
           ]);
         }
+        setLiveStatus(null);
+        break;
+      }
+      case "research-start": {
+        const rid = msgId.current++;
+        researchMsgIdRef.current = rid;
+        setMessages((m) => [...m, { id: rid, kind: "research", text: "", research: { status: "running", activities: [] } }]);
+        setLiveStatus("Researching");
+        break;
+      }
+      case "research-activity": {
+        const rid = researchMsgIdRef.current;
+        if (rid !== null && typeof ev.text === "string") {
+          const kind = typeof ev.kind === "string" ? ev.kind : "note";
+          const text = ev.text;
+          setMessages((m) =>
+            m.map((msg) =>
+              msg.id === rid && msg.research
+                ? { ...msg, research: { ...msg.research, activities: [...msg.research.activities, { kind, text }] } }
+                : msg,
+            ),
+          );
+        }
+        break;
+      }
+      case "research-done": {
+        const rid = researchMsgIdRef.current;
+        const directions = Array.isArray(ev.directions)
+          ? (ev.directions as unknown[]).filter((d): d is { slug: string; title: string } => {
+              const o = d as { slug?: unknown; title?: unknown } | null;
+              return !!o && typeof o.slug === "string" && typeof o.title === "string";
+            })
+          : [];
+        const done = {
+          status: "done" as const,
+          report: ev.report === true,
+          sources: typeof ev.sources === "number" ? ev.sources : 0,
+          assets: typeof ev.assets === "number" ? ev.assets : 0,
+          directions,
+          error: typeof ev.error === "string" ? ev.error : undefined,
+        };
+        if (rid !== null) {
+          setMessages((m) => m.map((msg) => (msg.id === rid && msg.research ? { ...msg, research: { ...msg.research, ...done } } : msg)));
+        }
+        researchMsgIdRef.current = null;
         setLiveStatus(null);
         break;
       }
@@ -4015,6 +4144,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       <QuestionCard question={m.text} onAnswer={(answer) => void runBrief(answer)} />
     ) : m.kind === "direction-gate" && m.directions ? (
       <DirectionCard directions={m.directions} onPick={(slug) => void runBrief(m.text || lastRunBriefRef.current, undefined, undefined, [], [], slug)} />
+    ) : m.kind === "research" && m.research ? (
+      <ResearchCard research={m.research} />
     ) : (
       <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} runId={m.runId} onFeedback={(runId, verdict) => void api.setRunFeedback(runId, { verdict }).catch(() => {})} stackPosition={stackPosition} />
     );
