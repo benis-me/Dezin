@@ -185,13 +185,13 @@ function PillToggle({ on, label, tip, onToggle }: { on: boolean; label: string; 
           className={cn(
             "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
             on
-              ? "border-emerald-500/30 bg-emerald-500/10 text-foreground"
+              ? "border-foreground/25 bg-foreground/5 text-foreground"
               : "border-border bg-surface-2 text-muted-foreground hover:border-border-strong hover:text-foreground",
           )}
         >
           <span
             aria-hidden
-            className={cn("size-1.5 rounded-full transition-all", on ? "bg-emerald-500 ring-2 ring-emerald-500/30" : "bg-muted-foreground/40")}
+            className={cn("size-1.5 rounded-full transition-all", on ? "bg-foreground ring-2 ring-foreground/20" : "bg-muted-foreground/40")}
           />
           {label}
         </button>
