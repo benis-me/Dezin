@@ -1,9 +1,9 @@
 # Design process — the staged generation path
 
-Status: **implemented** on branch `feature/design-process`, validated end-to-end on a
-real CodeBuddy + Hunyuan run. This document is the blueprint for moving Dezin from a
-single silent turn to a staged path that mirrors how a real designer works: research
-before design, converge on a direction before high-fidelity, critique against intent.
+Status: **implemented and merged to `main`**, validated end-to-end on real CodeBuddy +
+Hunyuan runs. This document is the blueprint for moving Dezin from a single silent turn to
+a staged path that mirrors how a real designer works: research before design, converge on
+a direction before high-fidelity, critique against intent.
 
 ### Implemented
 
@@ -15,9 +15,17 @@ before design, converge on a direction before high-fidelity, critique against in
 - Research phase → the `research/` directory (report + local assets + provenance +
   candidate directions), opt-in via the **Design research** setting (or `body.research`).
 - Direction gate: research emits 2–3 directions; the run pauses, the user picks one in the
-  workspace, and the build grounds in only that direction.
+  workspace, and the build grounds in only that direction. The pick is persisted to
+  `.research/chosen` so the workspace can show which direction was chosen after a reload.
+- Auto-improve as **floor + ceiling**: the deterministic anti-slop linter guards the floor
+  (with oscillation + marginal-gain guards so it converges instead of flip-flopping), and a
+  senior-designer critic pass judges the ceiling against the brief and chosen direction,
+  emitting concrete design improvements plus a 0–100 `designScore` that drives bounded
+  upgrade rounds.
+- Research reliability: the phase runs entirely within its turn (no detaching to background
+  sub-agents) and retries once if a turn produces no report — mitigating occasional empty runs.
 - Phase-bearing rewrites of all 21 built-in skills.
-- Attribution: `model` / `agent` / `skill` recorded on every run.
+- Attribution: `model` / `agent` / `skill` recorded on every run (main + version snapshots).
 - Learning loop (local, no upload): 👍/👎 + gap-tag feedback on the result card;
   exemplar retrieval (a build references the user's previously-kept designs — same-project
   and cross-project by skill); and preference distillation (a local agent reflects over the
@@ -33,7 +41,8 @@ and richer intent judging in the critique phase.
 Two notes specific to the skill catalog: (1) it hands the agent **absolute** playbook
 paths, which the local BYOK agents read with `bypassPermissions` — a packaged desktop
 build must keep `content/skills/` readable on disk (not sealed inside an asar), or copy
-the playbooks to a readable location per run. (2) Attribution records the deterministic
+the playbooks to a readable location per run. `defaultSkillsDir()` carries a doc-note
+spelling out the `asarUnpack` requirement. (2) Attribution records the deterministic
 best-guess skill, not the one the agent actually read on demand — parsing the agent's file
 reads (which `SKILL.md` it opened) would make skill attribution exact.
 
@@ -114,6 +123,7 @@ resource types and be versioned/inspected like any other artifact:
     <slug>/
       direction.md    # concept + IA/structure + the one distinctive move + rationale
       preview.<ext>   # optional lo-fi visual / style tile
+  chosen              # the slug the user picked at the gate (one line) — drives selection UI
 ```
 
 Rules:
