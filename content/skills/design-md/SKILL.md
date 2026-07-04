@@ -11,6 +11,14 @@ designSystem: false
 
 Produce two files: a `DESIGN.md` brand contract and a `tokens.css`.
 
+## Research
+
+- The brand's positioning, personality, and the feeling it should evoke — a design
+  system encodes a point of view, not defaults. Study any references or brand given;
+  otherwise infer a coherent stance from the brief and commit to it.
+- The visual language of the space it competes in — what to align with and what to
+  deliberately diverge from, so the system has an identity.
+
 ## DESIGN.md — nine sections
 
 1. Visual Theme & Atmosphere

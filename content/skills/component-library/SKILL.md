@@ -13,6 +13,13 @@ Build a single `index.html` that documents a UI kit: each component shown **live
 in all its states, beside a copyable snippet. Honor the active design system — this
 page is the proof the system is real.
 
+## Research
+
+- The components this product actually needs and how they'll be used — a kit that
+  documents components no one uses is dead weight. Prioritize by real usage.
+- How mature component libraries in this space document states, props, and usage;
+  borrow their clarity.
+
 ## Structure
 
 - A left rail listing component **groups** — at most 5 (Miller): Actions, Inputs,

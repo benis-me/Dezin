@@ -18,6 +18,14 @@ must earn its place by directing attention or revealing structure.
 This is the one skill where expressiveness is the brief. But expressive ≠ sloppy:
 the discipline below is what separates an award winner from an AI demo.
 
+## Research
+
+- The brand's story and the single feeling this page should leave — motion serves that
+  feeling, not the reverse. Study award-winning sites in this space for what earns the
+  motion.
+- Real content for each act: the actual headline, the real product moment worth
+  rendering large. Choreography with nothing to say is decoration.
+
 ## Output shape
 
 Honor the Dezin output mode above everything else:

@@ -11,6 +11,13 @@ designSystem: true
 
 A single `index.html` one-page resume that reads in ten seconds and prints clean.
 
+## Research
+
+- What this person is applying for and what that reader scans for first — a resume is
+  targeted, not generic. Lead with what matters to that role.
+- The real, specific outcomes and numbers behind their work; a resume of vague
+  responsibilities reads like everyone else's.
+
 ## Structure
 
 - A clear header: name (the dominant element), one-line role/summary, contact + links.

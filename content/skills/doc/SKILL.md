@@ -11,6 +11,12 @@ designSystem: true
 
 A long-form reading document — report, guide, or spec — as one `index.html`.
 
+## Research
+
+- The real content this document must convey — the facts, data, and sources. A report or
+  spec built on invented specifics is worthless; gather the real material first.
+- Who reads it and what they need from it, so the structure serves the reader's task.
+
 ## Editorial hierarchy
 
 - Establish one dominant entry point: a title 3–5× the body size.
