@@ -16,13 +16,33 @@ import type { DesignSystem } from "../../design/src/index.ts";
 import { INJECTION_RESISTANCE, IDENTITY_CHARTER, SELF_CRITIQUE, ANTI_ROLEPLAY } from "./charter.ts";
 import { renderAntiSlopContract } from "./anti-slop.ts";
 import { renderDirectionBlock, type Direction } from "./directions.ts";
-import { DECK_FRAMEWORK } from "./deck.ts";
+
+/** One row of the skill catalog exposed to the agent for on-demand loading. */
+export interface SkillCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  /** Keyword phrases that hint when this skill applies (shown as "use when"). */
+  triggers?: string[];
+  mode?: string;
+  /** Implementation libraries this skill may choose from (union → routing). */
+  libraries?: string[];
+  /** Marks a skill the user pinned for this project — preferred, not forced. */
+  pinned?: boolean;
+}
 
 export interface ComposeInput {
   /** The active brand. Injected as authoritative tokens. */
   designSystem?: DesignSystem;
-  /** The active skill (artifact shape): its SKILL.md body is the workflow. */
-  skill?: { name: string; body: string; mode?: string; libraries?: string[] };
+  /**
+   * The skill catalog, for progressive disclosure. The agent judges which
+   * skill(s) fit the brief during the run and reads each full SKILL.md on
+   * demand — the body is never force-injected. This mirrors how real agent
+   * systems surface skills: a cheap catalog in context, the playbook on demand.
+   */
+  skills?: SkillCatalogEntry[];
+  /** Absolute directory the skill playbooks live under (for on-demand paths). */
+  skillsDir?: string;
   /** Free-form project/user instructions. */
   userInstructions?: string;
   /** Pre-rendered craft references (from @dezin/craft loadCraftSections). */
@@ -131,7 +151,7 @@ function renderLibraryRouting(libraries: string[], mode: ComposeInput["mode"]): 
   const standard = mode === "standard";
   return `## Implementation library routing
 
-This skill may use these libraries when the brief genuinely needs them: ${available.join(", ")}.
+These libraries are available when the brief genuinely needs them: ${available.join(", ")}.
 Choose the smallest tool that fits the job; do not stack libraries for the same motion.
 
 - CSS transitions / Web Animations API: simple hover states, opacity/transform reveals,
@@ -150,6 +170,34 @@ Choose the smallest tool that fits the job; do not stack libraries for the same 
 
 Always respect \`prefers-reduced-motion\`, keep the no-motion state fully readable, and
 make load/reveal animations fail-safe so content cannot remain hidden if JS or a library fails.`;
+}
+
+/**
+ * The skill catalog — progressive disclosure. Instead of force-injecting one
+ * pre-selected skill's whole body, we list every skill's name + description +
+ * "use when" + an on-demand path to its full playbook. The agent decides which
+ * skill(s) the brief calls for and reads the SKILL.md itself, mid-run. A pinned
+ * skill (an explicit per-project choice) is surfaced first and flagged, but the
+ * agent is never locked to it.
+ */
+function renderSkillCatalog(skills: SkillCatalogEntry[], skillsDir?: string): string {
+  const ordered = [...skills].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
+  const rows = ordered.map((s) => {
+    const path = (skillsDir ? `${skillsDir}/${s.id}` : s.id) + "/SKILL.md";
+    const pin = s.pinned
+      ? " **(pinned for this project — prefer it unless the request clearly needs another)**"
+      : "";
+    const when = s.triggers && s.triggers.length ? ` — use when: ${s.triggers.slice(0, 5).join(", ")}` : "";
+    return `- **${s.name}** (\`${s.id}\`)${pin} — ${s.description}${when}\n  Playbook: \`${path}\``;
+  });
+  return `## Available skills — pick what fits, then read it on demand
+
+Dezin ships skill playbooks for specific deliverables. Do NOT guess a skill's contents.
+When this request matches one (or more) of these, READ that skill's full playbook file
+BEFORE you design, and follow it. You may combine several; if none genuinely fit, proceed
+on your own judgment. Read a skill only when it's relevant — don't read them all.
+
+${rows.join("\n")}`;
 }
 
 const SEP = "\n\n---\n\n";
@@ -199,17 +247,12 @@ export function composeSystemPrompt(input: ComposeInput = {}): string {
     parts.push(`## Custom instructions\n\n${input.userInstructions.trim()}`);
   }
 
-  const libraryRouting = renderLibraryRouting(input.skill?.libraries ?? [], input.mode);
+  const allLibraries = (input.skills ?? []).flatMap((s) => s.libraries ?? []);
+  const libraryRouting = renderLibraryRouting(allLibraries, input.mode);
   if (libraryRouting) parts.push(libraryRouting);
 
-  if (input.skill && input.skill.body.trim()) {
-    parts.push(
-      `## Active skill — ${input.skill.name}\n\nFollow this skill's workflow exactly.\n\n${input.skill.body.trim()}`,
-    );
-  }
-
-  if (input.skill?.mode === "deck") {
-    parts.push(DECK_FRAMEWORK);
+  if (input.skills && input.skills.length) {
+    parts.push(renderSkillCatalog(input.skills, input.skillsDir));
   }
 
   if (input.imageGen) {
@@ -228,8 +271,8 @@ export function composeSystemPrompt(input: ComposeInput = {}): string {
  * so it doesn't regress into a generic hero+features+CTA skeleton.
  */
 function renderPreflight(input: ComposeInput): string {
-  const shape = input.skill?.body.trim()
-    ? "the active skill's required structure — its sections, components, and any seed/scaffold it specifies — not a generic hero + features + CTA skeleton"
+  const shape = input.skills && input.skills.length
+    ? "the artifact shape this brief needs — if a catalogued skill fits, read its playbook and follow the structure it specifies (sections, components, any scaffold), not a generic hero + features + CTA skeleton"
     : "the artifact shape this brief actually needs — not a generic hero + features + CTA skeleton";
   return `## Preflight — ground yourself before writing
 

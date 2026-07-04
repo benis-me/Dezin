@@ -22,7 +22,7 @@ import {
   type AgentRunner,
 } from "../../../packages/agent/src/index.ts";
 import { defaultRegistry } from "../../../packages/design/src/index.ts";
-import { loadSkills, findSkill, selectSkill, type SkillInfo } from "../../../packages/skills/src/index.ts";
+import { loadSkills, findSkill, selectSkill, defaultSkillsDir, type SkillInfo } from "../../../packages/skills/src/index.ts";
 import { loadCraftSections } from "../../../packages/craft/src/index.ts";
 import { lintArtifact, lintScore, renderFindingsForAgent } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
@@ -413,18 +413,31 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const designSystemId = project.designSystemId ?? settings.defaultDesignSystemId;
   const designSystem = registry.get(designSystemId) ?? registry.default();
 
-  // Resolve the active skill (artifact shape). An explicit project.skillId is an
-  // override; otherwise the brief selects its own skill — skills are agent-selected,
-  // not forced upfront. Falls back to null when nothing in the catalog fits.
+  // Best-guess skill: an explicit project.skillId pins it; otherwise the brief's
+  // top trigger match. This is NOT forced on the agent — it only seeds craft
+  // selection, research angles, and attribution. Skills are chosen at RUNTIME:
+  // the agent gets the full catalog (below) and reads whichever playbook(s) fit,
+  // on demand — like Claude Code / Agent Skills, not a single skill picked upfront.
   const skill = project.skillId ? findSkill(skills(), project.skillId) : selectSkill(body.brief.trim(), skills());
 
-  // Craft = the union of the skill's required sections and the brand's applied ones.
+  // Craft = the union of the best-guess skill's required sections and the brand's applied ones.
   const craftSlugs = Array.from(new Set([...(skill?.craft ?? []), ...(designSystem.craft?.applies ?? [])]));
   const craft = loadCraftSections(craftSlugs);
 
   const systemPrompt = composeSystemPrompt({
     designSystem,
-    skill: skill ? { name: skill.name, body: skill.body, mode: skill.mode, libraries: skill.libraries } : undefined,
+    // The whole catalog, for on-demand loading. A pinned project.skillId is
+    // surfaced first and flagged, but the agent still judges + reads on its own.
+    skills: skills().map((s) => ({
+      id: s.id,
+      name: s.name,
+      description: s.description,
+      triggers: s.triggers,
+      mode: s.mode,
+      libraries: s.libraries,
+      pinned: project.skillId ? s.id === project.skillId : false,
+    })),
+    skillsDir: defaultSkillsDir(),
     userInstructions: settings.customInstructions || undefined,
     craft: craft || undefined,
     imageGen: Boolean(imageApiKey && imageBaseUrl),

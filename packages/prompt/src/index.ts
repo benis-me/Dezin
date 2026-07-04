@@ -6,10 +6,10 @@ export {
   composeSystemPrompt,
   renderDesignSystemBlock,
   type ComposeInput,
+  type SkillCatalogEntry,
 } from "./compose.ts";
 export { renderAntiSlopContract } from "./anti-slop.ts";
 export { INJECTION_RESISTANCE, IDENTITY_CHARTER, SELF_CRITIQUE, ANTI_ROLEPLAY } from "./charter.ts";
-export { DECK_FRAMEWORK } from "./deck.ts";
 export {
   DESIGN_DIRECTIONS,
   findDirection,

@@ -849,7 +849,7 @@ test("GET /api/projects/:id/runs includes final quality findings", async () => {
   });
 });
 
-test("a deck-skill project gets the deck framework in its prompt", async () => {
+test("a deck-skill project surfaces the deck playbook in the catalog (scaffold loads on demand)", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN] });
   await withRunServer(runner, async ({ base, store }) => {
     const project = store.createProject({ name: "P", skillId: "deck", designSystemId: "modern-minimal" });
@@ -859,7 +859,11 @@ test("a deck-skill project gets the deck framework in its prompt", async () => {
       body: JSON.stringify({ projectId: project.id, brief: "go" }),
     });
     await res.text();
-    assert.match(runner.calls[0]?.systemPrompt ?? "", /Deck framework/);
+    const prompt = runner.calls[0]?.systemPrompt ?? "";
+    assert.match(prompt, /Slide deck/, "deck skill is catalogued");
+    assert.match(prompt, /deck\/SKILL\.md/, "with its on-demand playbook path");
+    assert.match(prompt, /pinned for this project/, "the pinned deck skill is flagged");
+    assert.doesNotMatch(prompt, /ArrowRight/, "the scaffold is not force-injected — it lives in the playbook");
   });
 });
 
@@ -1636,7 +1640,7 @@ test("standard auto-improve persists process elapsed time per turn", async () =>
   }
 });
 
-test("the composed prompt includes the active skill body and design-system tokens", async () => {
+test("the composed prompt exposes the skill catalog for on-demand loading, not a force-injected body", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN] });
   await withRunServer(runner, async ({ base, store }) => {
     const project = store.createProject({
@@ -1652,8 +1656,11 @@ test("the composed prompt includes the active skill body and design-system token
     await res.text(); // drain the SSE stream
 
     const prompt = runner.calls[0]?.systemPrompt ?? "";
-    assert.match(prompt, /Active skill — Frontend design/, "skill section present");
-    assert.match(prompt, /general skill for a single polished page/, "skill body text present");
+    assert.match(prompt, /Available skills/, "skill catalog present");
+    assert.match(prompt, /`frontend-design`/, "the skill is catalogued");
+    assert.match(prompt, /pinned for this project/, "an explicit skillId is flagged as pinned, not forced");
+    assert.match(prompt, /frontend-design\/SKILL\.md/, "on-demand playbook path present");
+    assert.doesNotMatch(prompt, /general skill for a single polished page/, "the body is NOT injected — the agent reads it on demand");
     assert.match(prompt, /AUTHORITATIVE/, "design-system declared authoritative");
     assert.match(prompt, /--accent: #2563eb/, "verbatim design-system token present");
   });
@@ -1681,7 +1688,7 @@ test("motion skills add animation library routing to the composed prompt", async
   });
 });
 
-test("an unknown skillId is tolerated — skill omitted, run still succeeds", async () => {
+test("an unknown skillId is tolerated — the catalog is still offered, run still succeeds", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN] });
   await withRunServer(runner, async ({ base, store }) => {
     const project = store.createProject({ name: "P", skillId: "does-not-exist" });
@@ -1692,7 +1699,9 @@ test("an unknown skillId is tolerated — skill omitted, run still succeeds", as
     });
     const events = parseSse(await res.text());
     assert.ok(events.some((e) => e.type === "run-done"), "run completed");
-    assert.doesNotMatch(runner.calls[0]?.systemPrompt ?? "", /Active skill/, "no skill section");
+    const prompt = runner.calls[0]?.systemPrompt ?? "";
+    assert.match(prompt, /Available skills/, "the catalog is always offered for on-demand loading");
+    assert.doesNotMatch(prompt, /pinned for this project/, "an unknown skillId pins nothing");
   });
 });
 

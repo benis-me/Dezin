@@ -65,36 +65,65 @@ test("design system is injected as authoritative tokens, verbatim", () => {
   assert.ok(p.indexOf("Active design system") < p.indexOf("Never fabricate"));
 });
 
-test("skill body and user instructions are included when provided", () => {
+// --- Progressive-disclosure skills ---------------------------------------
+// Skills are not force-injected. The composer exposes a CATALOG (name +
+// description + when-to-use + an on-demand path to the full playbook); the
+// agent judges which skill(s) fit the brief and reads the SKILL.md itself.
+
+test("the skill catalog lists skills for on-demand loading; bodies are not injected", () => {
   const p = composeSystemPrompt({
-    skill: { name: "frontend-design", body: "## Steps\n1. Read the seed template." },
+    skills: [
+      { id: "frontend-design", name: "Frontend design", description: "A single polished page.", triggers: ["landing", "website"] },
+      { id: "deck", name: "Slide deck", description: "A 16:9 presentation.", triggers: ["slides"] },
+    ],
+    skillsDir: "/skills",
     userInstructions: "Keep it under 3 sections.",
   });
-  assert.ok(p.includes("Active skill — frontend-design"));
-  assert.ok(p.includes("Read the seed template."));
-  assert.ok(p.includes("Keep it under 3 sections."));
-  // skill comes after design-system slot, before anti-roleplay
-  assert.ok(p.indexOf("Active skill") < p.indexOf("Never fabricate"));
+  assert.match(p, /Available skills/, "catalog header present");
+  assert.match(p, /on demand/i, "instructs on-demand loading");
+  assert.match(p, /Frontend design/);
+  assert.match(p, /`frontend-design`/);
+  assert.match(p, /A single polished page\./, "description shown");
+  assert.match(p, /use when:.*landing/, "trigger hints shown");
+  assert.match(p, /\/skills\/frontend-design\/SKILL\.md/, "on-demand playbook path shown");
+  assert.match(p, /Slide deck/, "all skills catalogued, not just one");
+  assert.ok(p.includes("Keep it under 3 sections."), "user instructions included");
+  assert.ok(p.indexOf("Available skills") < p.indexOf("Never fabricate"), "catalog before anti-roleplay");
 });
 
-test("skill libraries inject implementation routing only when declared", () => {
+test("a pinned skill is flagged as preferred, but the whole catalog stays visible", () => {
+  const p = composeSystemPrompt({
+    skills: [
+      { id: "frontend-design", name: "Frontend design", description: "x", pinned: true },
+      { id: "deck", name: "Slide deck", description: "y" },
+    ],
+    skillsDir: "/s",
+  });
+  assert.match(p, /pinned for this project/i, "the pinned skill is flagged");
+  assert.match(p, /Slide deck/, "other skills are still offered, not hidden");
+});
+
+test("library routing is the union across catalogued skills, omitted when none declare libraries", () => {
   const p = composeSystemPrompt({
     mode: "standard",
-    skill: { name: "Motion landing", body: "build motion", libraries: ["motion", "gsap", "remotion"] },
+    skills: [
+      { id: "motion-landing", name: "Motion landing", description: "x", libraries: ["motion", "gsap"] },
+      { id: "video", name: "Video", description: "y", libraries: ["remotion"] },
+    ],
   });
   assert.match(p, /Implementation library routing/);
   assert.match(p, /motion\/react/);
   assert.match(p, /ScrollTrigger/);
   assert.match(p, /only for a video\/timeline deliverable/);
-  assert.ok(p.indexOf("Implementation library routing") < p.indexOf("Active skill"));
+  assert.ok(p.indexOf("Implementation library routing") < p.indexOf("Available skills"));
 
-  const plain = composeSystemPrompt({ skill: { name: "Landing", body: "build it" } });
+  const plain = composeSystemPrompt({ skills: [{ id: "x", name: "X", description: "d" }] });
   assert.ok(!plain.includes("Implementation library routing"));
 });
 
-test("empty skill/instructions are omitted (no empty sections)", () => {
-  const p = composeSystemPrompt({ skill: { name: "x", body: "   " }, userInstructions: "  " });
-  assert.ok(!p.includes("Active skill"));
+test("empty skills and instructions are omitted (no empty sections)", () => {
+  const p = composeSystemPrompt({ skills: [], userInstructions: "  " });
+  assert.ok(!p.includes("Available skills"));
   assert.ok(!p.includes("Custom instructions"));
 });
 
@@ -108,34 +137,28 @@ test("a direction guides when no design system is active; a brand takes preceden
   assert.ok(!both.includes("Visual direction"));
 });
 
-test("the deck framework is injected only for deck-mode skills", () => {
-  const deck = composeSystemPrompt({
+test("the deck scaffold is NOT inlined — it lives in the deck playbook, read on demand", () => {
+  const p = composeSystemPrompt({
     designSystem: modernMinimal,
-    skill: { name: "Slide deck", body: "make slides", mode: "deck" },
+    skills: [{ id: "deck", name: "Slide deck", description: "A 16:9 deck.", mode: "deck" }],
+    skillsDir: "/s",
   });
-  assert.match(deck, /Deck framework/);
-  assert.match(deck, /1920/);
-  assert.match(deck, /ArrowRight/); // keyboard nav
-  assert.ok(deck.indexOf("Active skill") < deck.indexOf("Deck framework"));
-  assert.ok(deck.indexOf("Deck framework") < deck.indexOf("Self-critique"));
-
-  const notDeck = composeSystemPrompt({
-    designSystem: modernMinimal,
-    skill: { name: "Landing", body: "make a landing", mode: "prototype" },
-  });
-  assert.ok(!notDeck.includes("Deck framework"));
+  assert.match(p, /Slide deck/, "deck offered in the catalog");
+  assert.match(p, /\/s\/deck\/SKILL\.md/, "with its on-demand path");
+  assert.ok(!p.includes("Deck framework"), "scaffold not force-injected");
+  assert.ok(!p.includes("ArrowRight"), "scaffold body not inlined into every prompt");
 });
 
 test("the self-critique gate is the final content section before anti-roleplay", () => {
   const p = composeSystemPrompt({
     designSystem: modernMinimal,
-    skill: { name: "frontend-design", body: "build it" },
+    skills: [{ id: "frontend-design", name: "Frontend design", description: "build it" }],
   });
   for (const dim of ["Philosophy", "Hierarchy", "Execution", "Specificity", "Restraint"]) {
     assert.ok(p.includes(dim), `critique mentions ${dim}`);
   }
   assert.match(p, /under 3\/5 is a regression/);
-  assert.ok(p.indexOf("Active skill") < p.indexOf("Self-critique"));
+  assert.ok(p.indexOf("Available skills") < p.indexOf("Self-critique"));
   assert.ok(p.indexOf("Self-critique") < p.indexOf("Never fabricate"));
 });
 
@@ -145,23 +168,30 @@ test("the charter embodies the specialist by artifact type", () => {
   assert.match(p, /slide designer/);
 });
 
-test("craft references are injected between the design system and the skill", () => {
+test("craft references are injected between the design system and the skill catalog", () => {
   const p = composeSystemPrompt({
     designSystem: modernMinimal,
     craft: "### typography\n\nALL CAPS needs 0.06em tracking.",
-    skill: { name: "frontend-design", body: "build it" },
+    skills: [{ id: "frontend-design", name: "Frontend design", description: "build it" }],
   });
   assert.ok(p.includes("Active craft references"));
   assert.ok(p.includes("0.06em tracking"));
   assert.ok(p.indexOf("Active design system") < p.indexOf("Active craft references"));
-  assert.ok(p.indexOf("Active craft references") < p.indexOf("Active skill"));
+  assert.ok(p.indexOf("Active craft references") < p.indexOf("Available skills"));
 });
 
-test("a full prompt stays lean (well under 15k tokens)", () => {
-  const p = composeSystemPrompt({
-    designSystem: modernMinimal,
-    skill: { name: "frontend-design", body: "build a landing page" },
-  });
-  // ~4 chars/token heuristic; assert the whole thing is a few-KB, not tens of KB.
-  assert.ok(p.length < 12_000, `prompt is ${p.length} chars; expected lean`);
+test("the whole skill catalog stays lean — a cheap line per skill, not 21 bodies", () => {
+  const many = Array.from({ length: 21 }, (_, i) => ({
+    id: `skill-${i}`,
+    name: `Skill ${i}`,
+    description: "A reasonably descriptive one-line summary of what this skill produces.",
+    triggers: ["one", "two", "three", "four"],
+  }));
+  const base = composeSystemPrompt({ designSystem: modernMinimal });
+  const withCatalog = composeSystemPrompt({ designSystem: modernMinimal, skills: many, skillsDir: "/skills" });
+  // The whole point of progressive disclosure: each skill costs a catalog line,
+  // not its full body. 21 skills should add only a few KB, ~a couple hundred chars each.
+  const perSkill = (withCatalog.length - base.length) / many.length;
+  assert.ok(perSkill < 260, `catalog costs ${perSkill.toFixed(0)} chars/skill; expected a lean line`);
+  assert.ok(withCatalog.length < 18_000, `full prompt is ${withCatalog.length} chars; expected a few KB`);
 });

@@ -7,7 +7,11 @@ before design, converge on a direction before high-fidelity, critique against in
 
 ### Implemented
 
-- Agent-selected skills (the brief picks its own skill; an explicit `skillId` overrides).
+- Skills as runtime progressive disclosure: the composer exposes a *catalog* (each
+  skill's name + description + "use when" + an on-demand path to its playbook); the agent
+  judges which skill(s) the brief calls for and reads each `SKILL.md` itself, mid-run — no
+  single skill body is force-injected. An explicit `skillId` pins a preferred skill without
+  locking the agent to it.
 - Research phase → the `research/` directory (report + local assets + provenance +
   candidate directions), opt-in via the **Design research** setting (or `body.research`).
 - Direction gate: research emits 2–3 directions; the run pauses, the user picks one in the
@@ -25,6 +29,13 @@ before design, converge on a direction before high-fidelity, critique against in
 The staged pipeline is complete. Natural next iterations: parallel direction generation
 (the roadmap's "fan out N approaches at once"), a Studio/Fast mode toggle in the composer,
 and richer intent judging in the critique phase.
+
+Two notes specific to the skill catalog: (1) it hands the agent **absolute** playbook
+paths, which the local BYOK agents read with `bypassPermissions` — a packaged desktop
+build must keep `content/skills/` readable on disk (not sealed inside an asar), or copy
+the playbooks to a readable location per run. (2) Attribution records the deterministic
+best-guess skill, not the one the agent actually read on demand — parsing the agent's file
+reads (which `SKILL.md` it opened) would make skill attribution exact.
 
 ## Why
 
@@ -66,13 +77,19 @@ phase — so the staged path is additive, never a rewrite of the shipped flow.
   research or a direction gate; gates only fire when scope/ambiguity is high. Studio
   is the ceiling, not a fixed toll.
 
-## Agent-selected skills
+## Skills as runtime progressive disclosure
 
-Skills are no longer force-selected in the composer. During **intake** the agent
-picks the skill(s) that fit the brief, from the skill catalog (`name` + `description`
-+ `triggers`). A deterministic trigger/description score seeds the choice; the agent
-confirms or overrides. `project.skillId`, if set, remains an explicit override. This
-removes upfront config burden (Q3) and lets one brief route itself.
+Skills are not force-selected in the composer, and no single skill's body is injected
+upfront. The system prompt carries a **catalog** — every skill's `name`, `description`,
+`triggers` (shown as "use when"), and the absolute path to its full playbook. During the
+run the agent judges which skill(s) the brief calls for and **reads the `SKILL.md` on
+demand** (it may combine several, or none) — exactly how Claude Code / Agent Skills
+surface skills: a cheap catalog in context, the playbook fetched only when relevant. A
+deterministic trigger/description score still runs, but only to seed craft selection,
+research angles, and attribution — it never biases what the agent sees (the catalog is
+ordered plainly, pinned-first). `project.skillId`, if set, is surfaced first and flagged
+as *pinned* — preferred, never a lock. This removes upfront config burden (Q3), keeps
+every skill one read away, and lets one brief route itself.
 
 Skills themselves are being deep-rewritten from thin taste-bullet lists into
 **phase-bearing playbooks**: per-artifact-type research angles, section/IA guidance,

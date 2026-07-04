@@ -18,7 +18,7 @@ import { generateArtifact, ClaudeCodeRunner } from "../packages/agent/src/index.
 import { defaultRegistry } from "../packages/design/src/index.ts";
 import { lintScore } from "../packages/quality/src/index.ts";
 import { loadCraftSections } from "../packages/craft/src/index.ts";
-import { loadSkills, findSkill } from "../packages/skills/src/index.ts";
+import { loadSkills, findSkill, defaultSkillsDir } from "../packages/skills/src/index.ts";
 
 interface Case {
   brief: string;
@@ -74,7 +74,17 @@ for (const c of selected) {
   const craft = loadCraftSections(craftSlugs);
   const systemPrompt = composeSystemPrompt({
     designSystem: ds,
-    skill: skill ? { name: skill.name, body: skill.body, mode: skill.mode } : undefined,
+    // Full catalog with the case's skill pinned — the agent reads it on demand.
+    skills: allSkills.map((s) => ({
+      id: s.id,
+      name: s.name,
+      description: s.description,
+      triggers: s.triggers,
+      mode: s.mode,
+      libraries: s.libraries,
+      pinned: c.skill ? s.id === c.skill : false,
+    })),
+    skillsDir: defaultSkillsDir(),
     craft: craft || undefined,
   });
   const dir = mkdtempSync(join(tmpdir(), "dezin-bench-"));
