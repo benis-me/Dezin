@@ -1653,7 +1653,7 @@ test("the composed prompt includes the active skill body and design-system token
 
     const prompt = runner.calls[0]?.systemPrompt ?? "";
     assert.match(prompt, /Active skill — Frontend design/, "skill section present");
-    assert.match(prompt, /Paste its/, "skill body text present");
+    assert.match(prompt, /general skill for a single polished page/, "skill body text present");
     assert.match(prompt, /AUTHORITATIVE/, "design-system declared authoritative");
     assert.match(prompt, /--accent: #2563eb/, "verbatim design-system token present");
   });
