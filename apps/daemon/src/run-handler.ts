@@ -38,7 +38,7 @@ import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizePr
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { runResearchPhase } from "./research-phase.ts";
-import { buildResearchContext, directionTitle, listDirections, listAssets, readSources, researchExists, writeChosenDirection } from "../../../packages/research/src/index.ts";
+import { buildResearchContext, directionPath, directionTitle, listDirections, listAssets, readSources, researchExists, writeChosenDirection } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import type { AppDeps } from "./app.ts";
@@ -386,7 +386,7 @@ async function runVisualQa(
   model: string | undefined,
   brief: string,
   conversationHistory: VisualQaInput["conversationHistory"],
-  options: Pick<VisualQaInput, "projectRoot" | "renderUrl"> = {},
+  options: Pick<VisualQaInput, "projectRoot" | "renderUrl" | "directionSpec"> = {},
 ): Promise<QualityFinding[]> {
   if (!settings.visualQaEnabled) return [];
   try {
@@ -524,6 +524,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   });
   const visibleBrief = appendEffectReferenceLine(appendMoodboardReferenceLine(brief, moodboardContext.labels), effectContext.labels);
   let agentBrief = [visibleBrief, moodboardContext.promptBlock, effectContext.promptBlock].filter(Boolean).join("\n\n");
+  // The chosen direction's spec, if research produced one — handed to the critic as its aesthetic
+  // contract so it judges palette/soul alignment, not just micro-polish.
+  let chosenDirectionSpec: string | undefined;
   const userMessage = store.addMessage(conversation.id, "user", visibleBrief);
   store.updateRun(run.id, { status: "running", userMessageId: userMessage.id });
 
@@ -593,6 +596,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       }
       // Record the pick so the workspace can show which direction was chosen (survives reload).
       if (chosenDirection) await writeChosenDirection(dir, chosenDirection).catch(() => {});
+      if (chosenDirection) chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
       const researchContext = await buildResearchContext(dir, chosenDirection);
       if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
     }
@@ -831,6 +835,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             visualFindings = await runVisualQa(deps, join(dir, "index.html"), settings, runAgentCommand, runModel, visibleBrief, turnHistory, {
               projectRoot: dir,
               renderUrl,
+              directionSpec: chosenDirectionSpec,
             });
           }
           visualFindings = markVisualReviewRound(withVisualScreenshotUrl(visualFindings, screenshotUrl), round);
@@ -1049,6 +1054,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const visualFindings = markVisualReviewRound(withVisualScreenshotUrl(await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
         projectRoot: dir,
         renderUrl,
+        directionSpec: chosenDirectionSpec,
       }), screenshotUrl), round);
       visualReviewHistory = [...visualReviewHistory, ...visualFindings];
       sse({ type: "visual-qa", runId: run.id, round, enabled: settings.visualQaEnabled, findings: visualFindings });

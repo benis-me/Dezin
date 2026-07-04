@@ -18,6 +18,8 @@ export interface VisualQaInput {
   agentCommand?: string;
   model?: string;
   brief?: string;
+  /** The chosen direction's spec (its Visual Language etc.) — the critic's aesthetic contract. */
+  directionSpec?: string;
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
   consoleMessages?: VisualQaConsoleMessage[];
 }
@@ -71,11 +73,12 @@ function toRel(root: string, file: string): string {
   return relative(root, file).split(sep).join("/");
 }
 
-function agentReviewPrompt(input: VisualQaInput, screenshotPath: string): string {
+export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string): string {
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const artifactRel = toRel(projectDir, input.htmlPath);
   const screenshotRel = toRel(projectDir, screenshotPath);
   const brief = input.brief?.trim();
+  const directionSpec = input.directionSpec?.trim();
   const history = (input.conversationHistory ?? [])
     .map((m, index) => `[${index + 1}] ${m.role.toUpperCase()}:\n${m.content.trim()}`)
     .filter((line) => line.length > 12)
@@ -94,13 +97,23 @@ function agentReviewPrompt(input: VisualQaInput, screenshotPath: string): string
     input.renderUrl ? `Rendered URL: ${input.renderUrl}` : "",
     consoleMessages ? `Browser console / runtime signals:\n${consoleMessages}` : "",
     history ? `Current conversation context:\n${history}` : "",
-    brief ? `The brief and chosen direction to judge against:\nUSER: ${brief}` : "",
+    brief ? `USER BRIEF:\n${brief}` : "",
+    directionSpec ? `CHOSEN DIRECTION — the aesthetic CONTRACT this build must honor:\n${directionSpec}` : "",
     "Use the full-page screenshot as primary evidence (it shows below-the-fold content too). You may read the artifact and assets for context, but do not create, edit, or write files.",
-    "Judge it the way a senior designer would, against the brief and the chosen direction. Report two kinds of findings:",
-    '- kind "defect" (severity P0/P1): concrete layout/visual BUGS — overlap, clipping, offscreen or orphaned elements, content overflowing below the fold, broken spacing, unreadable text, misalignment.',
-    '- kind "improvement" (severity P2): concrete changes that would most RAISE design quality toward the brief — hierarchy, spacing/rhythm, composition, type scale, restraint, intent-match. Be specific and actionable, never vague taste talk.',
-    "Report as many of each as genuinely matter — there could be several, or none. Do NOT invent findings to hit a count; if it is defect-free and already excellent, return an empty findings list.",
-    "Also rate overall design quality against the brief from 0 to 100 in designScore — how close is this to a senior designer's finished, shipped work?",
+    "",
+    "STEP 1 — DIRECTION ALIGNMENT (do this FIRST, before any nitpick). Judge the screenshot against the chosen direction's visual language as a hard contract, not a suggestion:",
+    "- PALETTE: list every saturated / branded color you can see (buttons, rules, accents, badges). For each, is it justified by the direction? If the direction implies near-monochrome / a restrained or named palette and the build uses a default saturated blue/indigo/violet/teal (e.g. a filled colored CTA, a colored accent rule), that is a **defect (P1)**, not an improvement — the design contradicts its own direction. Do not wave it through as 'intentional accent'.",
+    "- TYPE, SPACING, COMPOSITION, SOUL: does the surface actually read as the direction describes (e.g. 'calm, near-monochrome, precise operator console'), or as a generic template? A build that misses the direction's core aesthetic is a P1 defect even if nothing is technically broken.",
+    "STEP 2 — then report the rest. Two kinds of findings:",
+    '- kind "defect" (severity P0/P1): direction violations (from Step 1) AND concrete layout/visual BUGS — overlap, clipping, offscreen or orphaned elements, content overflowing below the fold, broken spacing, unreadable text, misalignment.',
+    '- kind "improvement" (severity P2): concrete changes that would most RAISE quality toward the brief + direction — hierarchy, spacing/rhythm, composition, type scale, restraint. Specific and actionable, never vague taste talk.',
+    "Report as many of each as genuinely matter — there could be several, or none. Do NOT invent findings to hit a count.",
+    "",
+    "SCORE by this rubric (sum, 0-100) — not a vibe:",
+    "- directionAlignment (0-40): palette, type, spacing system, and soul match the chosen direction. A build that violates the direction's core visual language (e.g. a saturated accent against a near-monochrome direction) scores AT MOST 15 here — hence AT MOST ~60 overall, no matter how polished.",
+    "- craft (0-35): hierarchy, rhythm, type scale, alignment, states, responsive, polish.",
+    "- restraint (0-25): no AI-slop; neutrals carry the surface; at most one quiet accent; borders over shadows.",
+    "Put the sum in designScore.",
     'Return JSON only, exactly: {"designScore": <0-100>, "findings":[{"kind":"defect|improvement","severity":"P0|P1|P2","message":"...","fix":"...","snippet":"optional"}]}.',
   ]
     .filter(Boolean)
@@ -473,6 +486,23 @@ function spawnAgentText(command: string, args: string[], cwd: string, timeoutMs:
   });
 }
 
+/** True when the critic produced a designScore judgment for this pass. */
+function hasDesignScore(findings: QualityFinding[]): boolean {
+  return findings.some((f) => f.id === "visual-design-score");
+}
+
+/**
+ * The critic occasionally returns nothing parseable for a round (e.g. it reviewed a pre-mount
+ * blank frame), leaving that round with no ceiling judgment. Retry once when a pass yields no
+ * designScore; keep the retry only if it actually judged (or surfaced more).
+ */
+export async function reviewWithRetry(reviewOnce: () => Promise<QualityFinding[]>): Promise<QualityFinding[]> {
+  const first = await reviewOnce();
+  if (hasDesignScore(first)) return first;
+  const second = await reviewOnce();
+  return hasDesignScore(second) || second.length > first.length ? second : first;
+}
+
 export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshotPath: string): Promise<QualityFinding[]> {
   if (!input.settings.visualQaEnabled) return [];
   if (!existsSync(screenshotPath)) {
@@ -497,8 +527,10 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
   const prompt = agentReviewPrompt(input, screenshotPath);
   const args = provider ? provider.oneShotArgs(model, prompt) : ["-p", prompt];
   try {
-    const out = await spawnAgentText(command, args, projectDir, 120_000, buildAgentEnv(input.settings, command));
-    return withScreenshotReviewMetadata(parseVisualReview(out), input, screenshotPath);
+    const findings = await reviewWithRetry(async () =>
+      parseVisualReview(await spawnAgentText(command, args, projectDir, 120_000, buildAgentEnv(input.settings, command))),
+    );
+    return withScreenshotReviewMetadata(findings, input, screenshotPath);
   } catch (err) {
     return withScreenshotReviewMetadata(
       [

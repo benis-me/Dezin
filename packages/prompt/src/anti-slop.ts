@@ -32,6 +32,12 @@ Dezin taste, also enforced:
 - Borders over shadows. Reserve box-shadow for true overlays (dropdowns, modals); in-page
   cards use a 1px hairline border, never a shadow.
 - Neutral grayscale carries 80–90% of the surface; --accent appears at most ${slopRules.ACCENT_OVERUSE_CAP} times per screen.
+- Palette discipline. Unless a brand design system OR the chosen direction NAMES a specific accent
+  hue, bind --accent to a NEAR-NEUTRAL (near-black on light, near-white on dark) — never a default
+  saturated blue/indigo/violet/teal — and never ship a saturated FILLED button/CTA. Declaring your
+  invented blue as \`--accent\` does not make it intentional. If the brief or the chosen direction
+  says "monochrome" / "near-monochrome", that is a HARD constraint: the accent is a whisper, the
+  neutrals do the work.
 - ALL-CAPS text always gets ≥${slopRules.ALL_CAPS_TRACKING_FLOOR_EM}em letter-spacing. No gradient-clipped text. Keep
   border-radius on the brand's radius scale.
 

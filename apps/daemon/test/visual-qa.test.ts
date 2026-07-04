@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { auditVisualArtifact, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent } from "../src/visual-qa.ts";
+import { agentReviewPrompt, auditVisualArtifact, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, type VisualQaInput } from "../src/visual-qa.ts";
 
 test("findingsFromGeometry reports horizontal overflow, offscreen fixed controls, and clipped text", () => {
   const findings = findingsFromGeometry(
@@ -99,6 +99,48 @@ test("parseVisualReview normalizes model-returned findings", () => {
   assert.equal(findings[0]?.id, "visual-ai-review-1");
   assert.equal(findings[0]?.severity, "P1");
   assert.match(findings[0]?.message ?? "", /CTA overlaps/);
+});
+
+test("agentReviewPrompt hands the critic the direction spec, verifies palette first, and scores by rubric", () => {
+  const input = {
+    htmlPath: "/proj/index.html",
+    projectRoot: "/proj",
+    brief: "A calm, minimal AI chat UI",
+    directionSpec: "# Console\n\n## Visual language\n- Near-monochrome base; quiet mono blocks.",
+  } as unknown as VisualQaInput;
+  const prompt = agentReviewPrompt(input, "/proj/.visual-qa/shot.png");
+  // The chosen direction is actually supplied to the critic (previously it never was).
+  assert.match(prompt, /Near-monochrome base/);
+  assert.match(prompt, /CHOSEN DIRECTION/);
+  // Direction/palette alignment is judged FIRST, and a palette violation is a defect (P1).
+  assert.match(prompt, /DIRECTION ALIGNMENT/);
+  assert.match(prompt, /PALETTE/);
+  assert.match(prompt, /defect \(P1\)/i);
+  // Score is an anchored rubric, not a vibe.
+  assert.match(prompt, /directionAlignment \(0-40\)/);
+  assert.match(prompt, /AT MOST/);
+});
+
+test("reviewWithRetry retries once when a pass returns no designScore, and keeps the scored pass", async () => {
+  const scored = parseVisualReview(JSON.stringify({ designScore: 82, findings: [] }));
+  let calls = 0;
+  const findings = await reviewWithRetry(async () => {
+    calls += 1;
+    return calls === 1 ? [] : scored; // empty first (blank capture), judged on retry
+  });
+  assert.equal(calls, 2);
+  assert.ok(findings.some((f) => f.id === "visual-design-score"));
+});
+
+test("reviewWithRetry does not retry when the first pass already produced a score", async () => {
+  const scored = parseVisualReview(JSON.stringify({ designScore: 90, findings: [] }));
+  let calls = 0;
+  const findings = await reviewWithRetry(async () => {
+    calls += 1;
+    return scored;
+  });
+  assert.equal(calls, 1);
+  assert.ok(findings.some((f) => f.id === "visual-design-score"));
 });
 
 test("auditVisualArtifact is disabled by settings", async () => {
@@ -270,7 +312,8 @@ console.log(JSON.stringify({ findings: [{ kind: "defect", severity: "P1", messag
   assert.match(prompt, /Current conversation context/);
   assert.match(prompt, /Use the existing three-column pricing direction/);
   assert.match(prompt, /Adjusted the comparison table columns/);
-  assert.match(prompt, /USER: make a pricing page/);
+  assert.match(prompt, /USER BRIEF:/);
+  assert.match(prompt, /make a pricing page/);
   assert.match(prompt, /Browser console \/ runtime signals/);
   assert.match(prompt, /ReferenceError: OGL is not defined/);
   assert.match(prompt, /hero\.webp/);
