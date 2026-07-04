@@ -5,6 +5,7 @@ export interface DezinNative {
   platform: string;
   pickFiles: () => Promise<string[]>;
   pickFolder: () => Promise<string[]>;
+  openPath?: (path: string) => Promise<boolean>;
 }
 
 export const native: DezinNative | undefined =

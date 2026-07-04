@@ -20,6 +20,8 @@ export interface Project {
   coverUrl?: string | null;
   /** Active generation state for the project card, if a run is still in flight. */
   runStatus?: "pending" | "running" | null;
+  /** Absolute on-disk project folder, when served by the local daemon. */
+  projectPath?: string;
 }
 
 export type SetupPhase = "scaffolding" | "installing" | "ready" | "error";

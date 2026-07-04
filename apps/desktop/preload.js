@@ -10,4 +10,6 @@ contextBridge.exposeInMainWorld("dezin", {
   pickFiles: () => ipcRenderer.invoke("dezin:pickFiles"),
   /** Native folder picker → absolute path(s). */
   pickFolder: () => ipcRenderer.invoke("dezin:pickFolder"),
+  /** Open an absolute path with the OS file manager. */
+  openPath: (path) => ipcRenderer.invoke("dezin:openPath", path),
 });

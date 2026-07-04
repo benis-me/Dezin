@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MousePointerClick, PanelsTopLeft, Paperclip, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MoreHorizontal, MousePointerClick, PanelsTopLeft, Paperclip, Pencil, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
@@ -8,9 +8,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
   FadeIn,
   IconButton,
+  Input,
   PanelBar,
   Popover,
   PopoverContent,
@@ -53,6 +55,7 @@ import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { previewBridgeOriginForSrc, previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 import { cn } from "../lib/utils.ts";
+import { native } from "../lib/native.ts";
 
 const TABS = ["Preview", "Files", "Quality"] as const;
 type Tab = (typeof TABS)[number];
@@ -156,6 +159,26 @@ export function isPreviewBridgeMessage(event: MessageEvent, iframe: HTMLIFrameEl
       event.source === iframe.contentWindow &&
       event.origin === previewBridgeOriginForSrc(previewSrc),
   );
+}
+
+export function buildProjectAnalysisPrompt(project: Project): string {
+  const projectPath = project.projectPath?.trim() || `(Dezin did not expose a projectPath for ${project.id})`;
+  return `Analyze this Dezin-generated project and identify why the design result does not match the intended direction.
+
+Project name: ${project.name}
+Project mode: ${project.mode}
+Project path: ${projectPath}
+Project ID: ${project.id}
+
+Read the source, assets, configuration, and generated output under the project path. Structure your answer as:
+1. Describe 5-8 concrete observations about what the project actually renders today.
+2. Identify the highest-impact gaps between the result and the intended direction, prioritized as P0/P1/P2. Include file, component, or CSS locations for each issue.
+3. Analyze likely contributing factors: original input prompt, agent/model behavior, Dezin context, design system, generation mode, asset selection, and Quality-check blind spots.
+4. Propose improvements that can be verified directly in this project, including concrete code directions.
+5. Recommend Dezin product-side improvements to the generation pipeline, prompt structure, Quality checks, or iteration workflow.
+6. Design the next test round: which variables to keep fixed, which variables to change, and how to judge whether the improvement is real.
+
+The goal is not only to fix this project. Use it as a Dezin generation-quality sample and extract reusable product improvements.`;
 }
 
 function moodboardReferenceLine(refs: MoodboardRunRef[]): string {
@@ -2162,8 +2185,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const [previewBusy, setPreviewBusy] = useState<PreviewBusyState | null>(null);
   const [previewVersionRunId, setPreviewVersionRunId] = useState<string | null>(null);
+  const [project, setProject] = useState<Project | null>(null);
   const [projectMode, setProjectMode] = useState<ProjectMode>("prototype");
   const [projectName, setProjectName] = useState("");
+  const [projectPath, setProjectPath] = useState("");
+  const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [projectRenameOpen, setProjectRenameOpen] = useState(false);
   const [dsId, setDsId] = useState("");
   const [viewDs, setViewDs] = useState(false);
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
@@ -2210,6 +2237,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [diff, setDiff] = useState<{ label: string; lines: DiffLine[] } | null>(null);
+  const [projectActionsOpen, setProjectActionsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const workspaceConversationPercent =
     readStoredPanelPercent(SPLIT_KEY, 24, 55) ??
@@ -2533,6 +2561,71 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       toast("Copied.");
     } catch {
       toast("Couldn't copy that message.", { variant: "error" });
+    }
+  };
+
+  const copyProjectAnalysisPrompt = async (): Promise<void> => {
+    const target =
+      project ??
+      (isExisting
+        ? {
+            id: projectId,
+            name: projectName || "Untitled project",
+            skillId: null,
+            designSystemId: dsId || null,
+            mode: projectMode,
+            createdAt: 0,
+            updatedAt: 0,
+            projectPath: projectPath || undefined,
+          }
+        : null);
+    if (!target) return;
+    try {
+      await navigator.clipboard.writeText(buildProjectAnalysisPrompt(target));
+      toast("Copied analysis prompt.");
+    } catch {
+      toast("Couldn't copy the analysis prompt.", { variant: "error" });
+    }
+  };
+
+  const openProjectInFinder = async (): Promise<void> => {
+    const path = project?.projectPath || projectPath;
+    if (!path || !native?.openPath) {
+      toast("Finder is available in the desktop app.", { variant: "error" });
+      return;
+    }
+    const opened = await native.openPath(path);
+    if (!opened) {
+      toast("Couldn't open the project folder.", { variant: "error" });
+    }
+  };
+
+  const startProjectRename = (): void => {
+    setProjectNameDraft(projectName);
+    setProjectRenameOpen(true);
+  };
+
+  const commitProjectRename = async (): Promise<void> => {
+    const name = projectNameDraft.trim();
+    if (!isExisting || !name) return;
+    try {
+      const next = await api.patchProject(projectId, { name });
+      setProject(next);
+      setProjectName(next.name);
+      setProjectNameDraft("");
+      setProjectRenameOpen(false);
+    } catch {
+      toast("Couldn't rename the project.", { variant: "error" });
+    }
+  };
+
+  const deleteProject = async (): Promise<void> => {
+    if (!isExisting || !window.confirm("Delete this project permanently? This can't be undone.")) return;
+    try {
+      await api.deleteProject(projectId);
+      navigate("/");
+    } catch {
+      toast("Couldn't delete the project.", { variant: "error" });
     }
   };
 
@@ -3133,6 +3226,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setScore(null);
     setLintFindings([]);
     setRanOnce(false);
+    setProject(null);
+    setProjectPath("");
     setLoading(true);
     void (async () => {
       try {
@@ -3150,6 +3245,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       try {
         const proj = await api.getProject(projectId);
         if (alive) {
+          setProject(proj);
+          setProjectPath(proj.projectPath ?? "");
           modeRef.current = proj.mode;
           setProjectMode(proj.mode);
           setProjectName(proj.name);
@@ -3729,6 +3826,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
+  const canOpenProjectPath = Boolean((project?.projectPath || projectPath) && native?.openPath);
   const versionGroups = buildVersionGroups(runs, variants);
   const activeVersionGroup = versionGroups.find((group) => group.active) ?? versionGroups[0] ?? null;
   const currentRun = activeVersionGroup?.runs[0] ?? null;
@@ -4354,8 +4452,45 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   </ToolbarTooltip>
                 </>
               ) : null}
-              {canExport || onOpenSettings ? (
+              {isExisting || canExport || onOpenSettings ? (
                 <span className="mx-0.5 h-5 w-px bg-border" aria-hidden />
+              ) : null}
+              {isExisting ? (
+                <DropdownMenu open={projectActionsOpen} onOpenChange={setProjectActionsOpen}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="app-no-drag inline-flex">
+                        <DropdownMenuTrigger
+                          aria-label="Project actions"
+                          onClick={() => setProjectActionsOpen(true)}
+                          className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-[transform,color,background-color] duration-150 ease-out hover:bg-surface-2 hover:text-foreground active:scale-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-2 data-[state=open]:text-foreground"
+                        >
+                          <MoreHorizontal size={15} strokeWidth={1.75} />
+                        </DropdownMenuTrigger>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent sideOffset={2}>Project actions</TooltipContent>
+                  </Tooltip>
+                  <DropdownMenuContent align="end" className="w-56">
+                    <DropdownMenuItem onClick={startProjectRename}>
+                      <Pencil size={15} strokeWidth={1.75} />
+                      Rename project
+                    </DropdownMenuItem>
+                    <DropdownMenuItem disabled={!canOpenProjectPath} onClick={() => void openProjectInFinder()}>
+                      <Folder size={15} strokeWidth={1.75} />
+                      Open in Finder
+                    </DropdownMenuItem>
+                    <DropdownMenuItem variant="destructive" onClick={() => void deleteProject()}>
+                      <Trash2 size={15} strokeWidth={1.75} />
+                      Delete project
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => void copyProjectAnalysisPrompt()}>
+                      <Copy size={15} strokeWidth={1.75} />
+                      Copy Analysis Prompt
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               ) : null}
               {canExport ? (
                 <DropdownMenu open={exportOpen} onOpenChange={setExportOpen}>
@@ -4532,6 +4667,32 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           <div className="h-[82vh]">
             <DesignSystemDetailScreen id={dsId} embedded />
           </div>
+        </Dialog>
+      ) : null}
+      {projectRenameOpen ? (
+        <Dialog open onClose={() => setProjectRenameOpen(false)} label="Rename project" className="sm:max-w-md" showClose>
+          <form
+            className="space-y-4 p-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void commitProjectRename();
+            }}
+          >
+            <Input
+              aria-label="Project name"
+              autoFocus
+              value={projectNameDraft}
+              onChange={(event) => setProjectNameDraft(event.target.value)}
+            />
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={() => setProjectRenameOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={!projectNameDraft.trim()}>
+                Save
+              </Button>
+            </div>
+          </form>
         </Dialog>
       ) : null}
       <PreviewModal open={fullscreen} src={previewSrc ?? undefined} onClose={() => setFullscreen(false)} />

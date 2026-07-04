@@ -11,7 +11,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
-import type { CreateProjectInput, Settings } from "../../../packages/core/src/index.ts";
+import type { CreateProjectInput, Project, Settings } from "../../../packages/core/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import type { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
@@ -129,6 +129,10 @@ interface PendingCapture {
   source: string;
 }
 let pendingCapture: PendingCapture | null = null;
+
+function projectPayload(dataDir: string, project: Project): Project & { projectPath: string } {
+  return { ...project, projectPath: projectDir(dataDir, project.id) };
+}
 
 function validateRouteParams(params: Record<string, string>): void {
   for (const [key, value] of Object.entries(params)) {
@@ -294,7 +298,7 @@ const routes: Route[] = [
         res,
         200,
         store.listProjects().map((p) => ({
-          ...p,
+          ...projectPayload(dataDir, p),
           hasArtifact: existsSync(join(projectDir(dataDir, p.id), "index.html")),
           coverUrl: existsSync(join(projectDir(dataDir, p.id), ".cover.png")) ? `/api/projects/${p.id}/cover?t=${p.updatedAt}` : null,
           runStatus: store.listRuns(p.id).find((r) => r.status === "running" || r.status === "pending")?.status ?? null,
@@ -372,7 +376,7 @@ const routes: Route[] = [
       });
       // Standard projects scaffold a real Vite project + install deps in the background.
       if (mode === "standard") void (deps.standardProjectSetup ?? setupStandardProject)(project.id, projectDir(dataDir, project.id));
-      sendJson(res, 201, project);
+      sendJson(res, 201, projectPayload(dataDir, project));
     },
   },
   {
@@ -508,9 +512,9 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id",
-    handler: (_req, res, { id }, { store }) => {
+    handler: (_req, res, { id }, { store, dataDir }) => {
       const p = store.getProject(id!);
-      return p ? sendJson(res, 200, p) : sendError(res, 404, "project not found");
+      return p ? sendJson(res, 200, projectPayload(dataDir, p)) : sendError(res, 404, "project not found");
     },
   },
   {
@@ -521,15 +525,18 @@ const routes: Route[] = [
   {
     method: "PATCH",
     pattern: "/api/projects/:id",
-    handler: async (req, res, { id }, { store }) => {
+    handler: async (req, res, { id }, { store, dataDir }) => {
       if (!store.getProject(id!)) return sendError(res, 404, "project not found");
       const body = (await readJsonBody(req)) as Record<string, unknown>;
-      if (typeof body.archived === "boolean") return sendJson(res, 200, store.setArchived(id!, body.archived));
+      if (typeof body.archived === "boolean") {
+        const archived = store.setArchived(id!, body.archived);
+        return archived ? sendJson(res, 200, projectPayload(dataDir, archived)) : sendError(res, 404, "project not found");
+      }
       const patch: Record<string, unknown> = {};
       if (typeof body.name === "string") patch.name = body.name;
       if ("skillId" in body) patch.skillId = body.skillId ?? null;
       if ("designSystemId" in body) patch.designSystemId = body.designSystemId ?? null;
-      sendJson(res, 200, store.updateProject(id!, patch));
+      sendJson(res, 200, projectPayload(dataDir, store.updateProject(id!, patch)));
     },
   },
   {

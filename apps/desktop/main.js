@@ -236,6 +236,21 @@ ipcMain.handle("dezin:pickFolder", async () => {
   return r.canceled ? [] : r.filePaths;
 });
 
+ipcMain.handle("dezin:openPath", async (_event, pathToOpen) => {
+  if (typeof pathToOpen !== "string" || !pathToOpen.trim() || !existsSync(pathToOpen)) return false;
+  try {
+    const error = await shell.openPath(pathToOpen.trim());
+    if (error) {
+      console.error("[desktop] failed to open path:", error);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error("[desktop] failed to open path:", e && e.message);
+    return false;
+  }
+});
+
 app.whenReady().then(() => {
   buildMenu();
   createWindow();

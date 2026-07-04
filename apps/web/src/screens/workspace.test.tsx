@@ -1,7 +1,7 @@
 import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
-import { computeMarkupPosition, isPreviewBridgeMessage, WorkspaceScreen } from "./WorkspaceScreen.tsx";
+import { buildProjectAnalysisPrompt, computeMarkupPosition, isPreviewBridgeMessage, WorkspaceScreen } from "./WorkspaceScreen.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type { RunEvent, RunSummary } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
@@ -222,6 +222,57 @@ test("preview bridge messages must come from the current iframe window", () => {
   expect(isPreviewBridgeMessage(standardAccepted, iframe, standardPreview)).toBe(true);
   const standardWrongOrigin = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "null", source: trustedWindow });
   expect(isPreviewBridgeMessage(standardWrongOrigin, iframe, standardPreview)).toBe(false);
+});
+
+test("project analysis prompt includes the project folder path and review checklist", () => {
+  const prompt = buildProjectAnalysisPrompt({
+    id: "p1",
+    name: "Landing Sprint",
+    skillId: "frontend-design",
+    designSystemId: "modern-minimal",
+    mode: "standard",
+    createdAt: 1,
+    updatedAt: 2,
+    projectPath: "/Users/ben/.dezin/data/projects/p1",
+  });
+
+  expect(prompt).toContain("/Users/ben/.dezin/data/projects/p1");
+  expect(prompt).toContain("Landing Sprint");
+  expect(prompt).toContain("standard");
+  expect(prompt).toContain("Analyze this Dezin-generated project");
+  expect(prompt).toContain("contributing factors");
+  expect(prompt).toContain("next test round");
+});
+
+test("workspace project actions menu exposes project management and analysis actions", async () => {
+  const user = userEvent.setup();
+
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Landing Sprint",
+          skillId: "frontend-design",
+          designSystemId: "modern-minimal",
+          mode: "standard",
+          createdAt: 1,
+          updatedAt: 2,
+          projectPath: "/Users/ben/.dezin/data/projects/p1",
+        }),
+        listFiles: async () => [{ path: "src/App.tsx", size: 12 }],
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await user.click(await screen.findByLabelText("Project actions"));
+
+  expect(await screen.findByRole("menuitem", { name: "Rename project" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "Delete project" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "Open in Finder" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "Copy Analysis Prompt" })).toBeInTheDocument();
 });
 
 test("standard workspace shows setup and dev-server logs in Standard Doctor", async () => {
