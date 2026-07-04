@@ -13,6 +13,7 @@ import type {
   Variant,
   Message,
   Run,
+  RunFeedback,
   Artifact,
   Moodboard,
   MoodboardNode,
@@ -73,7 +74,11 @@ CREATE TABLE IF NOT EXISTS runs (
   score INTEGER,
   final_findings TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL,
-  finished_at INTEGER
+  finished_at INTEGER,
+  model TEXT,
+  agent_command TEXT,
+  skill_id TEXT,
+  feedback TEXT
 );
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY,
@@ -274,6 +279,17 @@ function asQualityFindings(value: unknown): QualityFinding[] {
     return [];
   }
 }
+function parseRunFeedback(value: unknown): RunFeedback | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const p = JSON.parse(value) as { verdict?: unknown; gap?: unknown };
+    if (p.verdict === "up" || p.verdict === "down") return { verdict: p.verdict, gap: typeof p.gap === "string" ? p.gap : undefined };
+  } catch {
+    /* ignore malformed feedback */
+  }
+  return null;
+}
+
 function asRun(r: Row): Run {
   return {
     id: r.id as string,
@@ -288,6 +304,10 @@ function asRun(r: Row): Run {
     lintPassed: Number(r.lint_passed) === 1,
     score: r.score == null ? null : Number(r.score),
     findings: asQualityFindings(r.final_findings),
+    model: (r.model as string | null | undefined) ?? null,
+    agentCommand: (r.agent_command as string | null | undefined) ?? null,
+    skillId: (r.skill_id as string | null | undefined) ?? null,
+    feedback: parseRunFeedback(r.feedback),
     createdAt: Number(r.created_at),
     finishedAt: r.finished_at == null ? null : Number(r.finished_at),
   };
@@ -505,6 +525,10 @@ export class Store {
     ensureColumn("runs", "user_message_id", "user_message_id TEXT");
     ensureColumn("runs", "assistant_message_id", "assistant_message_id TEXT");
     ensureColumn("runs", "commit_hash", "commit_hash TEXT");
+    ensureColumn("runs", "model", "model TEXT");
+    ensureColumn("runs", "agent_command", "agent_command TEXT");
+    ensureColumn("runs", "skill_id", "skill_id TEXT");
+    ensureColumn("runs", "feedback", "feedback TEXT");
     ensureColumn("runs", "owner_id", "owner_id TEXT");
     this.db.exec(`CREATE TABLE IF NOT EXISTS moodboard_conversations (
       id TEXT PRIMARY KEY,
@@ -1015,14 +1039,40 @@ export class Store {
   }
 
   // ── runs ──────────────────────────────────────────────────────────────────
-  createRun(projectId: string, conversationId: string, variantId?: string, userMessageId?: string, ownerId?: string): Run {
+  createRun(
+    projectId: string,
+    conversationId: string,
+    variantId?: string,
+    userMessageId?: string,
+    ownerId?: string,
+    attribution?: { model?: string | null; agentCommand?: string | null; skillId?: string | null },
+  ): Run {
     const id = this.clock.id();
     const vid = variantId ?? this.ensureMainVariant(projectId).id;
     this.db
       .prepare(
-        `INSERT INTO runs (id, project_id, conversation_id, variant_id, user_message_id, owner_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        `INSERT INTO runs (id, project_id, conversation_id, variant_id, user_message_id, owner_id, status, created_at, model, agent_command, skill_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       )
-      .run(id, projectId, conversationId, vid, userMessageId ?? null, ownerId ?? null, this.clock.now());
+      .run(
+        id,
+        projectId,
+        conversationId,
+        vid,
+        userMessageId ?? null,
+        ownerId ?? null,
+        this.clock.now(),
+        attribution?.model ?? null,
+        attribution?.agentCommand ?? null,
+        attribution?.skillId ?? null,
+      );
+    return this.getRun(id)!;
+  }
+
+  /** Record (or clear) the user's feedback verdict + gap tag on a run. */
+  setRunFeedback(id: string, feedback: RunFeedback | null): Run {
+    if (!this.getRun(id)) throw new Error(`run not found: ${id}`);
+    this.db.prepare(`UPDATE runs SET feedback = ? WHERE id = ?`).run(feedback ? JSON.stringify(feedback) : null, id);
     return this.getRun(id)!;
   }
 
@@ -1175,6 +1225,17 @@ export class Store {
           .all(projectId, variantId) as Row[])
       : (this.db.prepare(`SELECT * FROM runs WHERE project_id = ? ORDER BY created_at DESC, rowid DESC`).all(projectId) as Row[]);
     return rows.map(asRun);
+  }
+
+  /** Recent runs the user marked 👍 (most recent first) — exemplars to ground future builds. */
+  listUpvotedRuns(projectId: string, limit = 3): Run[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM runs WHERE project_id = ? AND status = 'succeeded' AND feedback IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+      .all(projectId, Math.max(1, limit) * 4) as Row[];
+    return rows
+      .map(asRun)
+      .filter((r) => r.feedback?.verdict === "up")
+      .slice(0, Math.max(1, limit));
   }
 
   // ── artifacts ───────────────────────────────────────────────────────────────

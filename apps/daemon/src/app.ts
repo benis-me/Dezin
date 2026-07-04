@@ -18,7 +18,7 @@ import { sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttp
 import { serveProjectFile, serveFileFromBase, projectDir } from "./serve-static.ts";
 import { figToJson, summarizeFig } from "./parse-fig.ts";
 import { serveWeb, defaultWebDir } from "./serve-web.ts";
-import { handleRun, handleRunStream, handleCancelRun } from "./run-handler.ts";
+import { handleRun, handleRunStream, handleCancelRun, handleRunFeedback } from "./run-handler.ts";
 import type { ResearchPhaseRunner } from "./research-phase.ts";
 import { handleExport, handleImportProject } from "./export-handler.ts";
 import { handleListFiles } from "./files-handler.ts";
@@ -622,6 +622,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/runs/:id/cancel",
     handler: (_req, res, params) => handleCancelRun(res, params),
+  },
+  {
+    method: "POST",
+    pattern: "/api/runs/:id/feedback",
+    handler: (req, res, params, deps) => handleRunFeedback(req, res, params, deps),
   },
   {
     method: "GET",

@@ -1947,3 +1947,64 @@ test("a run with directionSlug skips the gate and builds the chosen direction", 
     { researchPhase: researchWithDirections },
   );
 });
+
+test("a run records its model, agent, and agent-selected skill for attribution", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "a pricing page with three tiers", agentCommand: "codebuddy", model: "hy3-preview-agent-ioa" }),
+    });
+    const runId = parseSse(await res.text()).find((e) => e.type === "run-start")!.runId as string;
+    const run = store.getRun(runId)!;
+    assert.equal(run.agentCommand, "codebuddy");
+    assert.equal(run.model, "hy3-preview-agent-ioa");
+    assert.equal(run.skillId, "pricing-page");
+  });
+});
+
+test("the run feedback endpoint records and clears a verdict", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+    });
+    const runId = parseSse(await res.text()).find((e) => e.type === "run-start")!.runId as string;
+
+    const up = await fetch(`${base}/api/runs/${runId}/feedback`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ verdict: "up", gap: "layout" }),
+    });
+    assert.equal(up.status, 200);
+    assert.deepEqual(store.getRun(runId)!.feedback, { verdict: "up", gap: "layout" });
+
+    await fetch(`${base}/api/runs/${runId}/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clear: true }) });
+    assert.equal(store.getRun(runId)!.feedback, null);
+
+    const bad = await fetch(`${base}/api/runs/${runId}/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ verdict: "maybe" }) });
+    assert.equal(bad.status, 400);
+  });
+});
+
+test("a build references the user's previously-kept (upvoted) designs", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN, CLEAN], texts: ["done", "done"] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = await createProject(base);
+    const res1 = await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, brief: "v1" }) });
+    const run1 = parseSse(await res1.text()).find((e) => e.type === "run-start")!.runId as string;
+    store.setRunFeedback(run1, { verdict: "up" });
+
+    const res2 = await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, brief: "v2" }) });
+    await res2.text();
+
+    const lastCall = runner.calls[runner.calls.length - 1]!;
+    assert.match(lastCall.message, new RegExp(`\\.versions/${run1}\\.html`));
+    assert.match(lastCall.message, /KEPT these earlier designs/);
+  });
+});

@@ -126,6 +126,9 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     // eslint-disable-next-line require-yield
     reattachRun: async function* () {},
     cancelRun: async () => ({ cancelled: true }),
+    setRunFeedback: async (runId, feedback) => ({
+      run: { id: runId, status: "succeeded", score: 100, repairRounds: 0, lintPassed: true, feedback: feedback ?? null, createdAt: 0, finishedAt: 0 },
+    }),
     ...over,
   };
 }

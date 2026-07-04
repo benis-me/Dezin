@@ -7,6 +7,7 @@
 
 import { mkdir, readdir, readFile, writeFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { existsSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { composeSystemPrompt } from "../../../packages/prompt/src/index.ts";
 import {
@@ -426,7 +427,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const history = store
     .listMessages(conversation.id)
     .flatMap(messageToAgentTurn);
-  const run = store.createRun(project.id, conversation.id, targetVariantId, undefined, deps.daemonOwnerId);
+  const run = store.createRun(project.id, conversation.id, targetVariantId, undefined, deps.daemonOwnerId, {
+    model: runModel ?? null,
+    agentCommand: runAgentCommand,
+    skillId: skill?.id ?? null,
+  });
   const moodboardContext = buildProjectMoodboardContext({
     store,
     dataDir: deps.dataDir,
@@ -508,6 +513,18 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       }
       const researchContext = await buildResearchContext(dir, chosenDirection);
       if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
+    }
+  }
+
+  // Exemplar retrieval: reference the user's previously-kept (👍) designs so the build
+  // matches the caliber and direction they have already approved.
+  if (project.mode !== "standard") {
+    const kept = store
+      .listUpvotedRuns(project.id, 2)
+      .filter((r) => r.id !== run.id && existsSync(join(dir, ".versions", `${r.id}.html`)));
+    if (kept.length) {
+      const refs = kept.map((r) => `\`.versions/${r.id}.html\``).join(", ");
+      agentBrief = `The user KEPT these earlier designs in this project — open and study them, and match their caliber and direction (evolve, do not copy verbatim): ${refs}.\n\n---\n\n${agentBrief}`;
     }
   }
 
@@ -1041,4 +1058,18 @@ export function handleRunStream(req: IncomingMessage, res: ServerResponse, param
 /** POST /api/runs/:id/cancel — explicit Stop; aborts the agent + ends the run. */
 export function handleCancelRun(res: ServerResponse, params: Record<string, string>): void {
   sendJson(res, 200, { cancelled: cancelRun(params.id!) });
+}
+
+/** POST /api/runs/:id/feedback — record 👍/👎 + an optional gap tag (or clear it). */
+export async function handleRunFeedback(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+  const runId = params.id!;
+  if (!deps.store.getRun(runId)) return sendError(res, 404, "run not found");
+  const body = (await readJsonBody(req)) as { verdict?: unknown; gap?: unknown; clear?: unknown };
+  if (body.clear === true || body.verdict == null) {
+    return sendJson(res, 200, { run: deps.store.setRunFeedback(runId, null) });
+  }
+  const verdict = body.verdict;
+  if (verdict !== "up" && verdict !== "down") return sendError(res, 400, "verdict must be 'up' or 'down'");
+  const gap = typeof body.gap === "string" && body.gap.trim() ? body.gap.trim() : undefined;
+  sendJson(res, 200, { run: deps.store.setRunFeedback(runId, { verdict, gap }) });
 }

@@ -442,6 +442,11 @@ export interface QualityFinding {
   reviewRound?: number;
 }
 
+export interface RunFeedback {
+  verdict: "up" | "down";
+  gap?: string;
+}
+
 export interface RunSummary {
   id: string;
   conversationId?: string;
@@ -451,6 +456,7 @@ export interface RunSummary {
   repairRounds: number;
   lintPassed: boolean;
   findings?: QualityFinding[];
+  feedback?: RunFeedback | null;
   createdAt: number;
   finishedAt: number | null;
 }
@@ -558,6 +564,7 @@ export interface ApiClient {
   reattachRun(runId: string, signal?: AbortSignal, options?: { afterSeq?: number }): AsyncGenerator<RunEvent>;
   /** Explicitly stop a run (the composer "Stop"); works across pages. */
   cancelRun(runId: string): Promise<{ cancelled: boolean }>;
+  setRunFeedback(runId: string, feedback: RunFeedback | null): Promise<{ run: RunSummary }>;
 }
 
 export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
@@ -802,5 +809,6 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     streamRun,
     reattachRun,
     cancelRun: (runId) => json<{ cancelled: boolean }>(`/api/runs/${enc(runId)}/cancel`, { method: "POST" }),
+    setRunFeedback: (runId, feedback) => json<{ run: RunSummary }>(`/api/runs/${enc(runId)}/feedback`, jsonInit("POST", feedback ?? { clear: true })),
   };
 }

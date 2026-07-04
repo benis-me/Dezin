@@ -69,6 +69,12 @@ export interface QualityFinding {
   reviewRound?: number;
 }
 
+export interface RunFeedback {
+  verdict: "up" | "down";
+  /** Optional gap tag: layout | type | color | tone | structure | off-brief. */
+  gap?: string;
+}
+
 export interface Run {
   id: string;
   projectId: string;
@@ -90,6 +96,12 @@ export interface Run {
   score: number | null;
   /** Final quality findings for this run. Empty means clean or no details persisted. */
   findings: QualityFinding[];
+  /** Attribution — what produced this run (null for runs created before this was tracked). */
+  model: string | null;
+  agentCommand: string | null;
+  skillId: string | null;
+  /** User feedback on this run's output, when given. */
+  feedback: RunFeedback | null;
   createdAt: number;
   finishedAt: number | null;
 }
