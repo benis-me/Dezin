@@ -145,6 +145,11 @@ imagery, not just prose.
 
 ## Rules
 
+- **Do all of this work, and write every file below, WITHIN this turn — finish only after the
+  files exist on disk.** Do NOT delegate the work to background processes or long-running
+  sub-agents that keep running after you return: if you parallelise, WAIT for the results and
+  synthesise them into the files yourself. A turn that ends before \`${REPORT_FILE}\` and the
+  direction files exist has failed, even if searches were dispatched.
 - ${NEVER_INVENT}
 - Download every referenced image into \`${ASSETS_DIRNAME}/\`; the report must render offline.
 - Be thorough but decisive — enough to design confidently, not an encyclopedia.${brandLine}${userRefs}

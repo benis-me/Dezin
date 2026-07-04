@@ -70,26 +70,32 @@ export async function runResearchPhase(input: ResearchPhaseInput): Promise<Resea
   const baseArgs = provider ? provider.oneShotArgs(input.model, prompt) : ["-p", prompt];
   const args = [...baseArgs, "--output-format", "stream-json", "--verbose"];
 
-  try {
-    const { code, stderr } = await spawnResearch(input.agentCommand, args, input.dir, {
-      env: input.env ?? {},
-      signal: input.signal,
-      timeoutMs: input.timeoutMs,
-      onActivity: input.onActivity,
-    });
-    const produced = researchExists(input.dir);
-    return {
-      ran: true,
-      produced,
-      error: produced ? undefined : stderr.trim().slice(0, 200) || `${input.agentCommand} exited with ${code}`,
-    };
-  } catch (err) {
-    return {
-      ran: true,
-      produced: researchExists(input.dir),
-      error: err instanceof Error ? err.message : String(err),
-    };
+  // Research is non-deterministic: some turns the agent detaches the work to background
+  // sub-agents and returns before they write anything, leaving the tree empty. Retry once if a
+  // turn produced no report (unless the user aborted). Roughly squares the per-turn success rate.
+  const MAX_ATTEMPTS = 2;
+  let lastError: string | undefined;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (input.signal?.aborted) break;
+    try {
+      const { code, stderr } = await spawnResearch(input.agentCommand, args, input.dir, {
+        env: input.env ?? {},
+        signal: input.signal,
+        timeoutMs: input.timeoutMs,
+        onActivity: input.onActivity,
+      });
+      if (researchExists(input.dir)) return { ran: true, produced: true };
+      lastError = stderr.trim().slice(0, 200) || `${input.agentCommand} exited with ${code}`;
+    } catch (err) {
+      if (researchExists(input.dir)) return { ran: true, produced: true };
+      lastError = err instanceof Error ? err.message : String(err);
+      if (/aborted/i.test(lastError)) break;
+    }
+    if (attempt < MAX_ATTEMPTS && !input.signal?.aborted) {
+      input.onActivity?.({ kind: "note", text: "Research produced no report — retrying once." });
+    }
   }
+  return { ran: true, produced: researchExists(input.dir), error: lastError };
 }
 
 interface SpawnResearchOpts {

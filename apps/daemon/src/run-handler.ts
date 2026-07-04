@@ -901,6 +901,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             findings: withResolvedVisualReviewHistory(findings, visualReviewHistory),
             createdAt: Math.max(0, run.createdAt - (maxRepairRounds - round + 1)),
             finishedAt: Date.now(),
+            model: runModel ?? null,
+            agentCommand: runAgentCommand,
+            skillId: skill?.id ?? null,
           });
           await emitStandardPreviewUpdate(round);
         }

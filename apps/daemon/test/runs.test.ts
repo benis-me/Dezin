@@ -2039,6 +2039,26 @@ test("a build references kept designs of the same kind from other projects (cros
   });
 });
 
+test("an approved distilled preference is injected into the next build's system prompt (learning loop closes)", async () => {
+  // Closes the preference leg of the learning loop end-to-end: feedback → distilled preference
+  // → (user approves →) settings.customInstructions → the NEXT build's system prompt. The
+  // suggestion + exemplar legs are covered above; this proves the approved preference actually
+  // reaches the agent that generates the design.
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = await createProject(base);
+    // The user approved a distilled preference — the endpoint writes it into customInstructions.
+    const preference = "Prefer generous whitespace with exactly one restrained accent color";
+    store.updateSettings({ customInstructions: preference });
+
+    const res = await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, brief: "make a hero" }) });
+    await res.text();
+
+    const lastCall = runner.calls[runner.calls.length - 1]!;
+    assert.match(lastCall.systemPrompt, /generous whitespace with exactly one restrained accent color/);
+  });
+});
+
 test("the preference suggestion endpoint reflects over feedback (injected agent)", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   let gotSignals = 0;

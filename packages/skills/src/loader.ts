@@ -40,7 +40,16 @@ export function toSkillInfo(id: string, data: Record<string, FrontmatterValue>, 
   };
 }
 
-/** Resolve the bundled content/skills directory relative to this package. */
+/**
+ * Resolve the bundled content/skills directory relative to this package.
+ *
+ * PACKAGING REQUIREMENT: skills are read from the real filesystem — both here (readdirSync)
+ * and by the spawned BYOK agent, which is handed absolute SKILL.md paths and reads them with
+ * its own fs, NOT through Electron's asar shim. So when the desktop app is packaged, this
+ * directory MUST live on disk unpacked. In electron-builder terms add
+ * `"asarUnpack": ["content/skills/**"]` (or ship `content/` outside the asar). Inside an asar
+ * archive `readdirSync` returns empty for the child and loadSkills() silently yields [].
+ */
 export function defaultSkillsDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "content", "skills");
 }

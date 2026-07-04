@@ -1091,6 +1091,9 @@ export class Store {
       findings?: QualityFinding[];
       createdAt?: number;
       finishedAt?: number | null;
+      model?: string | null;
+      agentCommand?: string | null;
+      skillId?: string | null;
     },
   ): Run {
     const id = this.clock.id();
@@ -1101,8 +1104,9 @@ export class Store {
       .prepare(
         `INSERT INTO runs (
            id, project_id, conversation_id, variant_id, user_message_id, assistant_message_id, commit_hash,
-           status, repair_rounds, lint_passed, score, final_findings, created_at, finished_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           status, repair_rounds, lint_passed, score, final_findings, created_at, finished_at,
+           model, agent_command, skill_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1119,6 +1123,9 @@ export class Store {
         JSON.stringify(input.findings ?? []),
         createdAt,
         finishedAt,
+        input.model ?? null,
+        input.agentCommand ?? null,
+        input.skillId ?? null,
       );
     return this.getRun(id)!;
   }

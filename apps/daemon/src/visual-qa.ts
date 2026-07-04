@@ -338,8 +338,22 @@ async function collectGeometry(
         });
       });
       await page.setViewport({ width: viewport.width, height: viewport.height, deviceScaleFactor: 1 });
-      await page.goto(renderUrl ?? pathToFileURL(htmlPath).href, { waitUntil: "domcontentloaded", timeout: 10000 });
-      await new Promise((r) => setTimeout(r, 400));
+      await page.goto(renderUrl ?? pathToFileURL(htmlPath).href, { waitUntil: "load", timeout: 10000 });
+      // Wait for the app to actually paint before screenshotting/inspecting. A React SPA mounts
+      // AFTER `load`, so the old domcontentloaded+400ms sometimes captured a pre-mount blank frame
+      // and the critic reviewed an empty page (round-0/2 empty reviews). Poll for real content,
+      // then a short paint settle.
+      await page
+        .waitForFunction(
+          () => {
+            const body = (globalThis as any).document?.body;
+            if (!body) return false;
+            return body.scrollHeight > 40 && ((body as any).innerText ?? "").trim().length > 20;
+          },
+          { timeout: 4000, polling: 100 },
+        )
+        .catch(() => {});
+      await new Promise((r) => setTimeout(r, 500));
       const snapshot = await page.evaluate(() => {
         const win = globalThis as any;
         const doc = win.document;

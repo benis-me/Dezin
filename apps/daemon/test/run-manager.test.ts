@@ -50,9 +50,20 @@ test("finished run logs persist sequence numbers for restart reattach cursors", 
   pushEvent("r-log", { type: "first", runId: "r-log" });
   pushEvent("r-log", { type: "second", runId: "r-log" });
   finishRun("r-log");
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const log = readFileSync(join(dataDir, ".runs", "r-log.jsonl"), "utf8");
+  // Poll for the async log flush rather than a fixed 20ms sleep — under load the sleep lost the
+  // race and this test flaked intermittently (#108).
+  const logPath = join(dataDir, ".runs", "r-log.jsonl");
+  const started = Date.now();
+  let log = "";
+  while (Date.now() - started < 3000) {
+    try {
+      log = readFileSync(logPath, "utf8");
+    } catch {
+      log = "";
+    }
+    if (/"seq":1/.test(log) && /"seq":2/.test(log)) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.match(log, /"seq":1/);
   assert.match(log, /"seq":2/);
 
