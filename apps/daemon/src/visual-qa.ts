@@ -88,18 +88,20 @@ function agentReviewPrompt(input: VisualQaInput, screenshotPath: string): string
     })
     .join("\n");
   return [
-    "You are reviewing the latest rendered result for the current Dezin conversation.",
-    `Rendered screenshot: ${screenshotRel}`,
+    "You are a senior product designer reviewing the latest rendered result for the current Dezin conversation.",
+    `Rendered screenshot (full page, top to bottom): ${screenshotRel}`,
     `Final artifact: ${artifactRel}`,
     input.renderUrl ? `Rendered URL: ${input.renderUrl}` : "",
     consoleMessages ? `Browser console / runtime signals:\n${consoleMessages}` : "",
     history ? `Current conversation context:\n${history}` : "",
-    brief ? `Current user request:\nUSER: ${brief}` : "",
-    "Use the screenshot as the primary evidence. Use the conversation context to judge whether the visual result matches the user's intent.",
-    "You may read the artifact and assets in this project directory for extra context, but do not create, edit, or write files.",
-    'Return JSON only with this exact shape: {"findings":[{"severity":"P0|P1|P2","message":"...","fix":"...","snippet":"optional"}]}.',
-    "Check only visible layout defects: overlap, clipping, offscreen controls/popovers, blank or hidden content, broken spacing, unreadable text, and obvious alignment problems.",
-    'Ignore subjective style preferences. Use at most 5 findings. If the screenshot is visually clean, return {"findings":[]}.',
+    brief ? `The brief and chosen direction to judge against:\nUSER: ${brief}` : "",
+    "Use the full-page screenshot as primary evidence (it shows below-the-fold content too). You may read the artifact and assets for context, but do not create, edit, or write files.",
+    "Judge it the way a senior designer would, against the brief and the chosen direction. Report two kinds of findings:",
+    '- kind "defect" (severity P0/P1): concrete layout/visual BUGS — overlap, clipping, offscreen or orphaned elements, content overflowing below the fold, broken spacing, unreadable text, misalignment.',
+    '- kind "improvement" (severity P2): concrete changes that would most RAISE design quality toward the brief — hierarchy, spacing/rhythm, composition, type scale, restraint, intent-match. Be specific and actionable, never vague taste talk.',
+    "Report as many of each as genuinely matter — there could be several, or none. Do NOT invent findings to hit a count; if it is defect-free and already excellent, return an empty findings list.",
+    "Also rate overall design quality against the brief from 0 to 100 in designScore — how close is this to a senior designer's finished, shipped work?",
+    'Return JSON only, exactly: {"designScore": <0-100>, "findings":[{"kind":"defect|improvement","severity":"P0|P1|P2","message":"...","fix":"...","snippet":"optional"}]}.',
   ]
     .filter(Boolean)
     .join("\n");
@@ -126,6 +128,20 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string):
       id: "visual-horizontal-overflow",
       message: `${titleCase(label)} viewport has horizontal overflow (${doc.scrollWidth}px content in ${viewport.width}px viewport).`,
       fix: "Constrain wide sections, media, and absolute elements with max-width: 100% and overflow-safe layout.",
+    });
+  }
+
+  // A thin strip of content just below the fold is almost always a mis-placed element (an
+  // orphaned header/footer, a grid without grid-template-rows) rather than intentional
+  // scrolling — real long pages overflow by far more than one strip. Screenshots are a single
+  // viewport, so this is the cheap deterministic catch for below-the-fold layout bugs.
+  const verticalOverflowPx = Math.round(doc.scrollHeight - viewport.height);
+  if (verticalOverflowPx > 8 && verticalOverflowPx <= 200) {
+    findings.push({
+      severity: "P1",
+      id: "visual-below-fold-strip",
+      message: `${titleCase(label)} has a ${verticalOverflowPx}px strip of content just below the fold — likely an element pushed out of the layout (an orphaned header/footer or a grid missing its rows), not intentional scrolling.`,
+      fix: "Fix the top-level layout so every region sits in its intended place (e.g. give the app grid a grid-template-rows and assign the header/footer a grid-row) instead of overflowing below the viewport.",
     });
   }
 
@@ -220,20 +236,43 @@ export function parseVisualReview(text: string): QualityFinding[] {
   } catch {
     return [];
   }
-  const findings = (parsed as { findings?: unknown })?.findings;
-  if (!Array.isArray(findings)) return [];
+  const obj = parsed as { findings?: unknown; designScore?: unknown };
+  const findingsRaw = obj?.findings;
+  if (!Array.isArray(findingsRaw)) return [];
   const normalized: QualityFinding[] = [];
-  for (const item of findings) {
-    const f = item as { severity?: unknown; message?: unknown; fix?: unknown; snippet?: unknown };
+  let defectN = 0;
+  let improveN = 0;
+  for (const item of findingsRaw) {
+    const f = item as { severity?: unknown; message?: unknown; fix?: unknown; snippet?: unknown; kind?: unknown };
     if (!isSeverity(f.severity) || typeof f.message !== "string") continue;
-    normalized.push({
-      severity: f.severity,
-      id: `visual-ai-review-${normalized.length + 1}`,
-      message: f.message,
-      fix: typeof f.fix === "string" && f.fix ? f.fix : "Adjust the layout and visual hierarchy in the screenshot.",
-      snippet: typeof f.snippet === "string" ? f.snippet : undefined,
-    });
-    if (normalized.length >= 5) break;
+    // "A few" of each — however many genuinely matter (or none). Sane caps guard against a
+    // runaway response, but there is no forced count. Defects (P0/P1) vs design improvements (P2).
+    const isImprovement = f.kind === "improvement" || (f.kind !== "defect" && f.severity === "P2");
+    if (isImprovement) {
+      if (improveN >= 8) continue;
+      improveN += 1;
+      normalized.push({
+        severity: "P2",
+        id: `visual-improve-${improveN}`,
+        message: f.message,
+        fix: typeof f.fix === "string" && f.fix ? f.fix : "Apply the design improvement described.",
+        snippet: typeof f.snippet === "string" ? f.snippet : undefined,
+      });
+    } else {
+      if (defectN >= 6) continue;
+      defectN += 1;
+      normalized.push({
+        severity: f.severity,
+        id: `visual-ai-review-${defectN}`,
+        message: f.message,
+        fix: typeof f.fix === "string" && f.fix ? f.fix : "Adjust the layout and visual hierarchy in the screenshot.",
+        snippet: typeof f.snippet === "string" ? f.snippet : undefined,
+      });
+    }
+  }
+  const designScore = typeof obj?.designScore === "number" && Number.isFinite(obj.designScore) ? Math.max(0, Math.min(100, Math.round(obj.designScore))) : null;
+  if (designScore !== null) {
+    normalized.push({ severity: "P2", id: "visual-design-score", message: `Design quality (critic): ${designScore}/100 vs the brief.`, fix: "" });
   }
   return normalized;
 }
@@ -359,7 +398,7 @@ async function collectGeometry(
       all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label));
       if (viewport.label === "desktop" && screenshotPath) {
         await mkdir(dirname(screenshotPath), { recursive: true });
-        await page.screenshot({ path: screenshotPath as `${string}.png`, type: "png", clip: { x: 0, y: 0, width: viewport.width, height: viewport.height } });
+        await page.screenshot({ path: screenshotPath as `${string}.png`, type: "png", fullPage: true });
       }
       await page.close().catch(() => {});
     }

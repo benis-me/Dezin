@@ -1422,7 +1422,7 @@ test("standard run auto-improves visual QA findings without a manual button", as
   );
 });
 
-test("standard auto-improve creates a version before repairing P2 visual findings", async () => {
+test("standard auto-improve creates a version before repairing a visual defect", async () => {
   let turn = 0;
   const calls: Array<{ message: string; isRepair?: boolean }> = [];
   const runner: AgentRunner = {
@@ -1474,7 +1474,7 @@ test("standard auto-improve creates a version before repairing P2 visual finding
       const snapshot = versionRuns.find((run) => run.id !== finalRun.id)!;
       assert.equal(snapshot.status, "succeeded");
       assert.equal(snapshot.repairRounds, 0);
-      assert.equal(snapshot.score, 97);
+      assert.equal(snapshot.score, 92);
       assert.equal(snapshot.findings[0]?.id, "visual-copy-wrap");
       assert.equal((snapshot.findings[0] as { reviewStatus?: string } | undefined)?.reviewStatus, "active");
       assert.notEqual(snapshot.commitHash, finalRun.commitHash);
@@ -1491,7 +1491,7 @@ test("standard auto-improve creates a version before repairing P2 visual finding
         return visualQaCalls.length === 1
           ? [
               {
-                severity: "P2",
+                severity: "P1",
                 id: "visual-copy-wrap",
                 message: "The heading clips on mobile.",
                 fix: "Let the heading wrap inside the viewport.",
@@ -1550,7 +1550,7 @@ test("standard auto-improve persists each turn summary before its visual review"
         return visualQaCalls === 1
           ? [
               {
-                severity: "P2",
+                severity: "P1",
                 id: "visual-spacing",
                 message: "Spacing needs polish.",
                 fix: "Tighten the vertical rhythm.",
@@ -1625,7 +1625,7 @@ test("standard auto-improve persists process elapsed time per turn", async () =>
           return visualQaCalls === 1
             ? [
                 {
-                  severity: "P2",
+                  severity: "P1",
                   id: "visual-spacing",
                   message: "Spacing needs polish.",
                   fix: "Tighten the vertical rhythm.",

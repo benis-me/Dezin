@@ -153,7 +153,26 @@ interface RunBody {
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
 
 const DEFAULT_AUTO_IMPROVE_MAX_ROUNDS = 8;
-const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1", "P2"]);
+// Only real defects/slop (P0/P1) drive a repair round. Cosmetic P2 anti-slop nits alone must
+// NOT keep the loop grinding — that was the main cause of 8 rounds of no-op churn. Design
+// IMPROVEMENTS (also P2, id "visual-improve-*") drive a separate, bounded ceiling phase (below).
+const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"]);
+
+/** Max bounded design-improvement (ceiling) rounds once the floor (defects/slop) is clean. */
+const CEILING_MAX_ROUNDS = 2;
+
+/** The critic's 0-100 design score, if it emitted one (rides as the visual-design-score finding). */
+function readDesignScore(findings: QualityFinding[]): number | null {
+  const f = findings.find((x) => x.id === "visual-design-score");
+  const m = f?.message.match(/(\d{1,3})\s*\/\s*100/);
+  return m ? Math.max(0, Math.min(100, Number(m[1]))) : null;
+}
+
+/** The lint/FLOOR score — slop + defects only. Ceiling signal (design improvements, the
+ *  critic's design score) is separate and must NOT drag the floor score down. */
+function floorScore(findings: QualityFinding[]): number {
+  return lintScore(findings.filter((f) => !f.id.startsWith("visual-improve") && f.id !== "visual-design-score"));
+}
 
 function autoImproveMaxRounds(settings: Settings, override?: number): number {
   const raw = typeof override === "number" ? override : settings.autoImproveMaxRounds;
@@ -218,25 +237,27 @@ function visualQaStartPayload(
   };
 }
 
-function standardRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number): string | null {
+function standardRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {
   const lintBlock = renderFindingsForAgent(findings);
   if (!lintBlock) return null;
   return [
     `Automatic quality repair round ${round}/${maxRounds}.`,
-    "You are editing the existing Standard-mode Vite project in this directory. Preserve the user's concept and the current visual direction, but fix the concrete quality findings below.",
-    "Do not ask a follow-up question. Edit the actual project files, then stop.",
+    "You are editing the existing Standard-mode Vite project in this directory. Apply the findings below — defects are bugs to fix; improvements are concrete design upgrades to make.",
+    intent ? `Stay true to the original request and the chosen direction — do not drift:\n${intent}` : "Preserve the user's concept and the current visual direction.",
+    "Do NOT undo or oscillate on earlier fixes; if a finding is ambiguous, make the choice a senior designer would and keep it. Do not ask a follow-up question. Edit the actual project files, then stop.",
     `Current quality score: ${score}/100.`,
     lintBlock,
   ].join("\n\n");
 }
 
-function prototypeRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number): string | null {
+function prototypeRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {
   const lintBlock = renderFindingsForAgent(findings);
   if (!lintBlock) return null;
   return [
     `Automatic quality repair round ${round}/${maxRounds}.`,
-    "You are repairing the current single-file Dezin prototype. Preserve the user's concept and visual direction, but return a complete corrected HTML artifact.",
-    "Do not ask a follow-up question. Rewrite the artifact to fix the concrete findings below, then stop.",
+    "You are repairing the current single-file Dezin prototype. Apply the findings below — defects are bugs to fix; improvements are concrete design upgrades. Return a complete corrected HTML artifact.",
+    intent ? `Stay true to the original request and the chosen direction — do not drift:\n${intent}` : "Preserve the user's concept and visual direction.",
+    "Do NOT undo or oscillate on earlier fixes; make a senior designer's choice on ambiguous findings and keep it. Do not ask a follow-up question. Rewrite the artifact, then stop.",
     `Current quality score: ${score}/100.`,
     lintBlock,
   ].join("\n\n");
@@ -679,6 +700,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       let passed = true;
       const repairSnapshotCommits = new Set<string>();
       let livePreviewUrl: string | null = null;
+      // Convergence state: don't grind. Track prior tree states (oscillation), the best floor
+      // score (marginal-gain), and the bounded design-improvement (ceiling) phase.
+      const convergenceTrees = new Set<string>();
+      let bestFloorScore = 0;
+      let floorStalled = 0;
+      let improvementRounds = 0;
+      let prevDesignScore = -1;
       const emitStandardPreviewUpdate = async (eventRound: number): Promise<void> => {
         try {
           const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId));
@@ -809,7 +837,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
         }
         findings = [...staticFindings, ...visualFindings];
-        score = lintScore(findings);
+        score = floorScore(findings);
         passed = !findings.some((f) => f.severity === "P0");
         store.updateRun(run.id, {
           commitHash,
@@ -820,9 +848,45 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         });
         await emitStandardPreviewUpdate(round);
 
-        if (!shouldAutoRepair(settings, findings, repairRounds, maxRepairRounds)) break;
+        // Converge, don't grind. Oscillation guard: if the working tree returns to a state we
+        // already produced, we're cycling (the ellipsis↔wrap flip-flop) — stop. Then repair floor
+        // DEFECTS first (P0/P1); once the floor is clean, allow a bounded design-IMPROVEMENT
+        // (ceiling) phase while the critic's design score keeps rising. P2 anti-slop nits alone
+        // never trigger a round (AUTO_REPAIR_SEVERITIES).
+        if (afterTree && convergenceTrees.has(afterTree)) break;
+        if (afterTree) convergenceTrees.add(afterTree);
+        if (!settings.autoImproveEnabled || repairRounds >= maxRepairRounds) break;
+
+        const defects = findings.filter(
+          (f) => AUTO_REPAIR_SEVERITIES.has(f.severity) && !f.id.startsWith("visual-improve") && f.id !== "visual-design-score",
+        );
+        const improvements = findings.filter((f) => f.id.startsWith("visual-improve"));
+        const critiqueScore = readDesignScore(findings);
+
+        let repairFindings: QualityFinding[] | null = null;
+        if (defects.length > 0) {
+          // Floor phase: fix defects/slop, but stop if the score stalls for 2 rounds (stuck).
+          if (score > bestFloorScore) {
+            bestFloorScore = score;
+            floorStalled = 0;
+          } else {
+            floorStalled += 1;
+          }
+          if (floorStalled < 2) repairFindings = defects.concat(improvements.slice(0, 3));
+        } else if (
+          improvements.length > 0 &&
+          improvementRounds < CEILING_MAX_ROUNDS &&
+          (critiqueScore === null || critiqueScore > prevDesignScore)
+        ) {
+          // Ceiling phase: bounded design-quality upgrades while the critic's score rises.
+          improvementRounds += 1;
+          if (critiqueScore !== null) prevDesignScore = critiqueScore;
+          repairFindings = improvements;
+        }
+        if (!repairFindings || !repairFindings.length) break;
+
         const nextRound = repairRounds + 1;
-        const repairPrompt = standardRepairPrompt(findings, nextRound, maxRepairRounds, score);
+        const repairPrompt = standardRepairPrompt(repairFindings, nextRound, maxRepairRounds, score, visibleBrief);
         if (!repairPrompt) break;
         if (commitHash && !repairSnapshotCommits.has(commitHash)) {
           repairSnapshotCommits.add(commitHash);
@@ -946,7 +1010,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     let repairRounds = result.rounds;
     let finalFindings: QualityFinding[] = result.findings as QualityFinding[];
     let visualReviewHistory: QualityFinding[] = [];
-    let score = lintScore(finalFindings);
+    let score = floorScore(finalFindings);
     const maxRepairRounds = autoImproveMaxRounds(settings, body.maxRounds);
     const repairHistory: Array<{ role: "user" | "assistant"; content: string }> = [
       ...history,
@@ -985,7 +1049,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       sse({ type: "visual-qa", runId: run.id, round, enabled: settings.visualQaEnabled, findings: visualFindings });
       queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
       finalFindings = [...staticFindings, ...visualFindings];
-      score = lintScore(finalFindings);
+      score = floorScore(finalFindings);
     };
 
     await writeCurrentArtifact();
@@ -993,7 +1057,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
 
     while (shouldAutoRepair(settings, finalFindings, repairRounds, maxRepairRounds)) {
       const nextRound = repairRounds + 1;
-      const repairPrompt = prototypeRepairPrompt(finalFindings, nextRound, maxRepairRounds, score);
+      const repairPrompt = prototypeRepairPrompt(finalFindings, nextRound, maxRepairRounds, score, visibleBrief);
       if (!repairPrompt) break;
       if (visualReviewRecords.length) persistTranscript(assistantText);
       processStartedAt = Date.now();

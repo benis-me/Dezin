@@ -44,11 +44,45 @@ test("findingsFromGeometry reports horizontal overflow, offscreen fixed controls
 
   assert.deepEqual(
     findings.map((f) => f.id),
-    ["visual-horizontal-overflow", "visual-fixed-offscreen", "visual-text-clipped"],
+    ["visual-horizontal-overflow", "visual-below-fold-strip", "visual-fixed-offscreen", "visual-text-clipped"],
   );
   assert.match(findings[0]!.message, /mobile/i);
-  assert.match(findings[1]!.snippet ?? "", /header \.menu/);
-  assert.match(findings[2]!.fix, /wrapping|height|container/i);
+  assert.match(findings.find((f) => f.id === "visual-fixed-offscreen")!.snippet ?? "", /header \.menu/);
+  assert.match(findings.find((f) => f.id === "visual-text-clipped")!.fix, /wrapping|height|container/i);
+});
+
+test("findingsFromGeometry flags a thin below-the-fold strip (orphaned element), not a long scrolling page", () => {
+  const base = { elements: [] as never[], bodyTextLength: 500 };
+  // A ~56px strip hanging below a 100svh app shell → orphaned-element bug.
+  const strip = findingsFromGeometry({ ...base, viewport: { width: 1280, height: 800 }, document: { scrollWidth: 1280, scrollHeight: 856 } }, "desktop");
+  assert.ok(strip.some((f) => f.id === "visual-below-fold-strip"));
+  assert.match(strip.find((f) => f.id === "visual-below-fold-strip")!.message, /below the fold/i);
+  // A genuinely long page (overflows by far more than one strip) is NOT flagged.
+  const longPage = findingsFromGeometry({ ...base, viewport: { width: 1280, height: 800 }, document: { scrollWidth: 1280, scrollHeight: 3200 } }, "desktop");
+  assert.ok(!longPage.some((f) => f.id === "visual-below-fold-strip"));
+});
+
+test("parseVisualReview splits defects from design improvements and reads the design score", () => {
+  const findings = parseVisualReview(
+    JSON.stringify({
+      designScore: 82,
+      findings: [
+        { kind: "defect", severity: "P1", message: "The header overflows below the fold.", fix: "Fix the grid rows." },
+        { kind: "improvement", severity: "P2", message: "Tighten the hero hierarchy: raise the headline, mute the subhead.", fix: "Adjust type scale." },
+        { kind: "improvement", severity: "P2", message: "Give the sidebar rows more vertical rhythm.", fix: "Increase row padding." },
+      ],
+    }),
+  );
+  const ids = findings.map((f) => f.id);
+  assert.deepEqual(ids, ["visual-ai-review-1", "visual-improve-1", "visual-improve-2", "visual-design-score"]);
+  assert.equal(findings.find((f) => f.id === "visual-ai-review-1")!.severity, "P1");
+  assert.equal(findings.filter((f) => f.id.startsWith("visual-improve")).length, 2);
+  assert.match(findings.find((f) => f.id === "visual-design-score")!.message, /82\/100/);
+});
+
+test("parseVisualReview tolerates no improvements and no score (already excellent)", () => {
+  const findings = parseVisualReview(JSON.stringify({ designScore: 96, findings: [] }));
+  assert.deepEqual(findings.map((f) => f.id), ["visual-design-score"]);
 });
 
 test("parseVisualReview normalizes model-returned findings", () => {
@@ -160,7 +194,7 @@ fs.writeFileSync(${JSON.stringify(callsFile)}, JSON.stringify({
   hasArtifact: fs.existsSync("index.html"),
   hasScreenshot: fs.existsSync(".visual-qa/screenshot.png")
 }));
-console.log(JSON.stringify({ findings: [{ severity: "P2", message: "Text clips.", fix: "Allow wrapping." }] }));
+console.log(JSON.stringify({ findings: [{ kind: "defect", severity: "P1", message: "Text clips.", fix: "Allow wrapping." }] }));
 `,
     { mode: 0o755 },
   );
@@ -232,11 +266,11 @@ console.log(JSON.stringify({ findings: [{ severity: "P2", message: "Text clips."
   assert.equal(call.hasScreenshot, true);
   const prompt = call.args.join(" ");
   assert.match(prompt, /Final artifact: index.html/);
-  assert.match(prompt, /Rendered screenshot: \.visual-qa\/screenshot\.png/);
+  assert.match(prompt, /Rendered screenshot.*\.visual-qa\/screenshot\.png/);
   assert.match(prompt, /Current conversation context/);
   assert.match(prompt, /Use the existing three-column pricing direction/);
   assert.match(prompt, /Adjusted the comparison table columns/);
-  assert.match(prompt, /Current user request:\s*USER: make a pricing page/);
+  assert.match(prompt, /USER: make a pricing page/);
   assert.match(prompt, /Browser console \/ runtime signals/);
   assert.match(prompt, /ReferenceError: OGL is not defined/);
   assert.match(prompt, /hero\.webp/);
