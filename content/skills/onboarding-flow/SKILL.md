@@ -12,6 +12,13 @@ designSystem: true
 Build a single `index.html` that walks a new user from zero to first value in a few
 focused steps — a stepper, honest progress, and one decision at a time.
 
+## Research
+
+- The real "first value" for this product — the single outcome a new user must reach to
+  understand why it matters. The flow exists to get them there, nothing more.
+- The genuinely required steps versus the optional ones; study comparable onboarding to
+  cut everything that can wait.
+
 ## Structure
 
 - **3–5 steps**, no more (Hick / cognitive load). A stepper shows where you are and how

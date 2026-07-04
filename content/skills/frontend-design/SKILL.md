@@ -9,22 +9,36 @@ designSystem: true
 
 # Frontend design
 
-Build one self-contained `index.html` that renders a single, polished page.
+The general skill for a single polished page when no more specific skill fits. Work in
+phases: research what the page must accomplish, structure it, then build one
+self-contained `index.html`.
 
-## Workflow
+## Research
 
-1. Read the active design system. Paste its `:root` token block verbatim into a
-   `<style>` and reference everything with `var()` — never write raw hex outside `:root`.
-2. State the system in one line before building: the palette, type scale, and
-   spacing you'll use.
-3. Compose with intent. Avoid the Hero → Features → Pricing → FAQ → CTA template;
-   vary at least one section.
-4. Use real copy. No lorem ipsum, no invented metrics, no placeholder feature lists.
-5. Structure with borders and whitespace, not shadows. Reserve shadow for true overlays.
-6. One accent, at most twice per screen. One decisive flourish, nothing else decorative.
+- What this page is for, who it's for, and the one action or belief it should produce. A
+  page with no job becomes decoration.
+- Real products in this space — how they solve the same problem, what to borrow, what
+  reads as generic. Collect concrete references.
+- The real content: the actual copy, facts, and numbers this page needs. A page built on
+  invented filler reads as a template no matter how it's styled.
+
+## Structure
+
+- Compose the sections the goal actually needs, in the order that makes the argument —
+  not a fixed template. Give the page one clear focal point and a deliberate reading path.
+- Paste the active design system's `:root` token block verbatim into a `<style>` and
+  reference everything with `var()`. State the palette, type scale, and spacing you'll use
+  before building.
+
+## The distinctive move
+
+Name the one decisive, page-specific decision that makes this real — a real screenshot, a
+real interaction, one bold type or layout choice, a detail only someone close to the
+subject would add. One flourish, not many. If you can't name it, the brief is
+underspecified: commit to the most likely intent rather than hedging.
 
 ## Before you ship
 
-Run the 5-dimension self-check: posture matches the brief, one clear focal point,
-typography and spacing are exact, every word is specific to this brief, restraint
-holds. Fix anything weak, then write the file.
+Self-check: posture matches the brief, one clear focal point, typography and spacing are
+exact, every word is specific to this brief, restraint holds. Cover the loading / empty /
+error states of any data surface. Fix anything weak, then write the file.

@@ -12,6 +12,13 @@ designSystem: true
 Build a single `index.html` settings surface that reads as real product chrome — the
 boring-on-purpose screen that has to be trustworthy.
 
+## Research
+
+- Which settings this product actually has, and how users group them mentally — study
+  comparable products so the section nav matches expectations.
+- The destructive and high-stakes actions that need extra friction: delete account,
+  revoke tokens, change billing.
+
 ## Layout
 
 - A left **section nav** — at most 5 groups (Miller): Profile, Account, Notifications,
