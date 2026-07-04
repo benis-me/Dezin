@@ -221,6 +221,8 @@ importers:
 
   packages/quality: {}
 
+  packages/research: {}
+
   packages/skills: {}
 
 packages:
