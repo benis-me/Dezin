@@ -21,7 +21,7 @@ import {
   type AgentRunner,
 } from "../../../packages/agent/src/index.ts";
 import { defaultRegistry } from "../../../packages/design/src/index.ts";
-import { loadSkills, findSkill, type SkillInfo } from "../../../packages/skills/src/index.ts";
+import { loadSkills, findSkill, selectSkill, type SkillInfo } from "../../../packages/skills/src/index.ts";
 import { loadCraftSections } from "../../../packages/craft/src/index.ts";
 import { lintArtifact, lintScore, renderFindingsForAgent } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
@@ -389,8 +389,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const designSystemId = project.designSystemId ?? settings.defaultDesignSystemId;
   const designSystem = registry.get(designSystemId) ?? registry.default();
 
-  // Resolve the active skill (artifact shape), tolerating a missing/unknown id.
-  const skill = project.skillId ? findSkill(skills(), project.skillId) : null;
+  // Resolve the active skill (artifact shape). An explicit project.skillId is an
+  // override; otherwise the brief selects its own skill — skills are agent-selected,
+  // not forced upfront. Falls back to null when nothing in the catalog fits.
+  const skill = project.skillId ? findSkill(skills(), project.skillId) : selectSkill(body.brief.trim(), skills());
 
   // Craft = the union of the skill's required sections and the brand's applied ones.
   const craftSlugs = Array.from(new Set([...(skill?.craft ?? []), ...(designSystem.craft?.applies ?? [])]));
