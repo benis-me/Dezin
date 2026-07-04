@@ -1,9 +1,27 @@
 # Design process — the staged generation path
 
-Status: **in progress** (branch `feature/design-process`). This document is the
-blueprint for moving Dezin from a single silent turn to a staged path that mirrors
-how a real designer works: research before design, converge on a direction before
-high-fidelity, critique against intent.
+Status: **implemented** on branch `feature/design-process`, validated end-to-end on a
+real CodeBuddy + Hunyuan run. This document is the blueprint for moving Dezin from a
+single silent turn to a staged path that mirrors how a real designer works: research
+before design, converge on a direction before high-fidelity, critique against intent.
+
+### Implemented
+
+- Agent-selected skills (the brief picks its own skill; an explicit `skillId` overrides).
+- Research phase → the `research/` directory (report + local assets + provenance +
+  candidate directions), opt-in via the **Design research** setting (or `body.research`).
+- Direction gate: research emits 2–3 directions; the run pauses, the user picks one in the
+  workspace, and the build grounds in only that direction.
+- Phase-bearing rewrites of all 21 built-in skills.
+- Attribution: `model` / `agent` / `skill` recorded on every run.
+- Learning loop (local, no upload): 👍/👎 + gap-tag feedback on the result card, and
+  exemplar retrieval (a build references the user's previously-kept designs).
+
+### Not yet built
+
+- **Preference distillation** — turning recurring feedback into a growing preferences
+  block; best as a local agent "reflection" pass that proposes edits for approval.
+- **Cross-project exemplars** — retrieval is currently same-project only.
 
 ## Why
 
