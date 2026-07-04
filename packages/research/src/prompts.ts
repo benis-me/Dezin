@@ -107,15 +107,20 @@ imagery, not just prose.
 
 ## Cover the full discovery scope
 
-1. **Competitive & comparative** — direct competitors AND analogous products from other
-   domains. What they do well, what to avoid, and their patterns. Capture screenshots.
+1. **Competitive & comparative** — FIRST name the artifact's SHAPE the brief asks for (a
+   standalone chat surface? a landing page? a dashboard?), then study the products that
+   share that shape — those are your direct competitors. Adjacent categories (e.g. a full
+   IDE when the ask is a simple chat app) are secondary CONTEXT at most: label them as such
+   and never let them drag the design toward the wrong shape. Note what each does well and
+   what to avoid. Capture screenshots of the ACTUAL product UI, not marketing pages.
 2. **Audience & user research** — who the audience is, their jobs-to-be-done, contexts,
    needs, objections, and the actual language they use. Ground it in real sources
    (reviews, forums, docs, communities), not assumptions.
 3. **Domain & content** — real facts, terminology, numbers, and vocabulary for this
    domain so the eventual copy is real, never invented filler.
-4. **Visual & aesthetic references** — the moodboard: reference imagery, color and type
-   directions, texture, layout and motion references. Collect real images.
+4. **Visual & aesthetic references** — the moodboard: real product-UI screenshots plus
+   color, type, texture, layout, and motion references. Every image must earn its place by
+   informing the design — see the asset rule below.
 5. **Patterns & conventions** — established patterns for this deliverable, and the one
    convention worth breaking to give it soul.${angles}
 
@@ -126,8 +131,12 @@ imagery, not just prose.
   (\`![caption](${ASSETS_DIRNAME}/name.png)\`). End with **Synthesis → 2–3 candidate
   directions**, each with a concept, an information architecture (the sections/screens in
   order), and the ONE distinctive move that would give it soul.
-- \`${RESEARCH_DIRNAME}/${ASSETS_DIRNAME}/\` — every reference image, DOWNLOADED locally
-  (never hotlink a remote URL in the report). Kebab-case filenames.
+- \`${RESEARCH_DIRNAME}/${ASSETS_DIRNAME}/\` — reference images DOWNLOADED locally (never
+  hotlink), kebab-case filenames. Each asset MUST be an actual product-UI screenshot or a
+  genuine style/type/color reference that directly informs the design. Do NOT save
+  marketing hero shots, \`og:image\` banners, stock photos, people/portraits, bare logos, or
+  decorative graphics. After downloading, verify each image truly shows UI (or a real style
+  reference) and DELETE anything that does not — few and on-point beats many-and-noisy.
 - \`${RESEARCH_DIRNAME}/${SOURCES_FILE}\` — a JSON array; one entry per source:
   \`{ "id", "kind": "competitor|inspiration|article|data|asset", "title", "url",
   "takeaways": [..], "assets": ["${ASSETS_DIRNAME}/name.png"] }\`.
