@@ -167,6 +167,23 @@ export interface MoodboardDetail extends Moodboard {
   messages: MoodboardMessage[];
 }
 
+export interface ResearchSourceItem {
+  id?: string;
+  kind?: string;
+  title?: string;
+  url?: string;
+  takeaways?: string[];
+  assets?: string[];
+}
+/** The .research/ deliverables for the Research tab. `exists:false` → hide the tab. */
+export interface ResearchDetail {
+  exists: boolean;
+  report?: string;
+  sources?: ResearchSourceItem[];
+  directions?: Array<{ slug: string; title: string; markdown: string }>;
+  assets?: string[];
+}
+
 export interface RunInput {
   projectId: string;
   brief: string;
@@ -526,6 +543,10 @@ export interface ApiClient {
   previewUrl(id: string): string;
   /** URL serving an uploaded reference file (e.g. an image), given its `.refs/<name>` path. */
   refUrl(id: string, refPath: string): string;
+  /** The project's research deliverables ({exists:false} when it hasn't been researched). */
+  getResearch(id: string): Promise<ResearchDetail>;
+  /** URL serving a collected research asset image, given its `assets/<name>` path. */
+  researchAssetUrl(id: string, assetPath: string): string;
   variantPreviewUrl(id: string, vid: string): string;
   exportUrl(id: string, scope?: "source" | "full"): string;
   importProject(file: Blob): Promise<Project>;
@@ -767,6 +788,8 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     },
     previewUrl: (id) => `${baseUrl}/projects/${enc(id)}/preview/`,
     refUrl: (id, refPath) => `${baseUrl}/api/projects/${enc(id)}/refs/${refPath.replace(/^\.refs\//, "").split("/").map(encodeURIComponent).join("/")}`,
+    getResearch: (id) => json<ResearchDetail>(`/api/projects/${enc(id)}/research`),
+    researchAssetUrl: (id, assetPath) => `${baseUrl}/api/projects/${enc(id)}/research/assets/${assetPath.replace(/^assets\//, "").split("/").map(encodeURIComponent).join("/")}`,
     variantPreviewUrl: (id, vid) => `${baseUrl}/api/projects/${enc(id)}/variants/${enc(vid)}/preview/`,
     exportUrl: (id, scope = "source") => `${baseUrl}/api/projects/${enc(id)}/export${scope === "full" ? "?scope=full" : ""}`,
     importProject: (file) =>

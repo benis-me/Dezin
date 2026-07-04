@@ -23,6 +23,7 @@ import type { ResearchPhaseRunner } from "./research-phase.ts";
 import { handlePreferenceSuggest, type PreferenceSuggester } from "./preference-reflect.ts";
 import { handleExport, handleImportProject } from "./export-handler.ts";
 import { handleListFiles } from "./files-handler.ts";
+import { handleGetResearch } from "./research-handler.ts";
 import {
   handleListVariants,
   handleCreateVariant,
@@ -640,6 +641,18 @@ const routes: Route[] = [
     method: "GET",
     pattern: "/api/projects/:id/files",
     handler: (_req, res, params, deps) => handleListFiles(res, params, deps),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/research",
+    handler: (_req, res, params, deps) => handleGetResearch(res, params, deps),
+  },
+  {
+    // Serve a collected research asset image (publicRead so <img src> works). safeJoin blocks traversal.
+    method: "GET",
+    pattern: "/api/projects/:id/research/assets/*rest",
+    publicRead: true,
+    handler: (_req, res, { id, rest }, { dataDir }) => serveProjectFile(res, dataDir, id!, join(".research", "assets", rest ?? "")),
   },
   {
     method: "GET",

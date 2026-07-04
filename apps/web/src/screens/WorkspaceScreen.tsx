@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MoreHorizontal, MousePointerClick, PanelsTopLeft, Paperclip, Pencil, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, Globe, GripVertical, History, Maximize2, Monitor, MoreHorizontal, MousePointerClick, PanelsTopLeft, Paperclip, Pencil, RotateCw, Search, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
@@ -50,14 +50,14 @@ import { navigate } from "../router.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
-import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, RunEvent, RunSummary, Settings as AppSettings, SetupPhase } from "../lib/api.ts";
+import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, ResearchDetail, RunEvent, RunSummary, Settings as AppSettings, SetupPhase } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { previewBridgeOriginForSrc, previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
 
-const TABS = ["Preview", "Files", "Quality"] as const;
+const TABS = ["Preview", "Research", "Files", "Quality"] as const;
 type Tab = (typeof TABS)[number];
 
 type Device = "desktop" | "tablet" | "mobile";
@@ -1724,49 +1724,145 @@ function emptyPane(label: string) {
 }
 
 /** The pre-design Research phase's dedicated card — live steps, then the results. */
+/** Small icon for one research step kind. */
+function ResearchActivityIcon({ kind }: { kind: string }) {
+  const p = { size: 12, strokeWidth: 1.9 } as const;
+  if (kind === "search") return <Search {...p} />;
+  if (kind === "fetch") return <Globe {...p} />;
+  if (kind === "download") return <Download {...p} />;
+  if (kind === "write") return <FileCode2 {...p} />;
+  return <Sparkles {...p} />; // note / reasoning
+}
+
+/** The pre-design Research phase's dedicated card — live steps, then a results summary. */
 function ResearchCard({ research }: { research: NonNullable<Msg["research"]> }) {
   const { status, activities, report, sources = 0, assets = 0, directions = [], error } = research;
+  const running = status === "running";
+  const recent = activities.slice(-14);
   return (
-    <section className="rounded-lg border border-border bg-card">
+    <section className="overflow-hidden rounded-lg border border-border bg-card">
       <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
-        <div className="min-w-0">
-          <div className="text-xs font-semibold text-foreground">Research</div>
-          <div className="text-[11px] text-muted-foreground">
-            {status === "running" ? "Studying competitors, audience & references…" : "Discovery complete"}
+        <div className="flex min-w-0 items-center gap-2">
+          <Search size={14} strokeWidth={1.9} className="shrink-0 text-muted-foreground" />
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-foreground">Research</div>
+            <div className="truncate text-[11px] text-muted-foreground">
+              {running ? "Studying competitors, audience & references" : "Discovery complete"}
+            </div>
           </div>
         </div>
-        <span className="shrink-0 rounded-md border border-border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-          {status === "running" ? "researching" : report ? "grounded" : "no report"}
+        <span
+          className={cn(
+            "flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium",
+            running ? "border-border bg-surface-2 text-muted-foreground" : report ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "border-border bg-surface-2 text-muted-foreground",
+          )}
+        >
+          {running ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> : <Check size={11} strokeWidth={2.4} />}
+          {running ? "researching" : report ? "grounded" : "no report"}
         </span>
       </div>
-      {activities.length > 0 ? (
-        <ul className="max-h-44 space-y-1 overflow-auto px-3 py-2 font-mono text-[11px]">
-          {activities.slice(-12).map((a, index) => (
-            <li key={index} className="flex items-baseline gap-1.5">
-              <span className="w-14 shrink-0 uppercase text-[9px] tracking-wide text-muted-foreground/60">{a.kind}</span>
-              <span className="truncate text-muted-foreground">{a.text}</span>
+      {recent.length > 0 ? (
+        <ul className="max-h-44 space-y-1 overflow-auto px-3 py-2 text-[11px]">
+          {recent.map((a, index) => (
+            <li key={index} className="flex items-center gap-2 text-muted-foreground">
+              <span className="text-muted-foreground/70">
+                <ResearchActivityIcon kind={a.kind} />
+              </span>
+              <span className="truncate">{a.text}</span>
             </li>
           ))}
         </ul>
+      ) : running ? (
+        <div className="px-3 py-2 text-[11px] text-muted-foreground">Launching research…</div>
       ) : null}
       {status === "done" ? (
-        <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
-          <span className={report ? "text-foreground" : undefined}>{report ? "Report written" : "No report"}</span>
-          {` · ${sources} sources · ${assets} assets`}
-          {directions.length ? ` · ${directions.length} direction${directions.length > 1 ? "s" : ""}` : ""}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-3 py-2 text-[11px]">
+          <span className={report ? "font-medium text-foreground" : "text-muted-foreground"}>{report ? "Report" : "No report"}</span>
+          <span className="text-muted-foreground">{sources} sources</span>
+          <span className="text-muted-foreground">{assets} assets</span>
+          {directions.length ? <span className="text-muted-foreground">{directions.length} directions</span> : null}
           {directions.length ? (
-            <ul className="mt-1 space-y-0.5">
+            <div className="mt-1 flex w-full flex-wrap gap-1">
               {directions.map((d) => (
-                <li key={d.slug} className="truncate">
-                  — {d.title}
-                </li>
+                <span key={d.slug} className="max-w-full truncate rounded-full border border-border bg-surface-2 px-2 py-0.5 text-[10px] text-muted-foreground">
+                  {d.title}
+                </span>
               ))}
-            </ul>
+            </div>
           ) : null}
-          {error ? <p className="mt-1 text-destructive">{error}</p> : null}
+          {error ? <p className="w-full text-destructive">{error}</p> : null}
         </div>
       ) : null}
     </section>
+  );
+}
+
+/** The Research tab — renders the .research/ deliverables: directions, report, assets, sources. */
+function ResearchPanel({ research, assetUrl }: { research: ResearchDetail | null; assetUrl: (assetPath: string) => string }) {
+  if (!research?.exists) {
+    return <div className="flex h-full items-center justify-center bg-surface p-6 text-center text-sm text-muted-foreground">No research for this project yet.</div>;
+  }
+  const directions = research.directions ?? [];
+  const sources = research.sources ?? [];
+  const assets = research.assets ?? [];
+  // Rewrite markdown image paths (assets/foo.png) to served URLs so the report renders图文并茂.
+  const reportMd = (research.report ?? "").replace(/(!\[[^\]]*\]\()(?:\.\/)?(assets\/[^)\s]+)(\))/g, (_m, pre, path, post) => `${pre}${assetUrl(path)}${post}`);
+  return (
+    <div className="h-full overflow-auto bg-surface">
+      <div className="mx-auto max-w-3xl space-y-6 p-4">
+        {directions.length ? (
+          <section>
+            <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Candidate directions</h3>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {directions.map((d) => (
+                <details key={d.slug} className="group rounded-lg border border-border bg-card p-3">
+                  <summary className="cursor-pointer list-none text-sm font-medium text-foreground marker:content-['']">{d.title}</summary>
+                  <div className="mt-2 border-t border-border pt-2">
+                    <Markdown className="space-y-1.5 text-[13px] text-foreground">{d.markdown}</Markdown>
+                  </div>
+                </details>
+              ))}
+            </div>
+          </section>
+        ) : null}
+        {reportMd ? (
+          <section className="rounded-lg border border-border bg-card p-4">
+            <Markdown className="space-y-2 text-sm text-foreground [&_img]:my-2 [&_img]:rounded-md [&_img]:border [&_img]:border-border">{reportMd}</Markdown>
+          </section>
+        ) : null}
+        {assets.length ? (
+          <section>
+            <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collected references · {assets.length}</h3>
+            <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+              {assets.map((a) => (
+                <a key={a} href={assetUrl(a)} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-md border border-border bg-card transition hover:border-muted-foreground/40">
+                  <img src={assetUrl(a)} alt={a} loading="lazy" className="aspect-video w-full object-cover" />
+                </a>
+              ))}
+            </div>
+          </section>
+        ) : null}
+        {sources.length ? (
+          <section>
+            <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Sources · {sources.length}</h3>
+            <ul className="space-y-1.5">
+              {sources.map((s, index) => (
+                <li key={s.id ?? index} className="flex items-baseline gap-2 text-[13px]">
+                  {s.kind ? <span className="shrink-0 rounded bg-surface-2 px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">{s.kind}</span> : null}
+                  {s.url ? (
+                    <a href={s.url} target="_blank" rel="noreferrer" className="truncate text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground">
+                      {s.title || s.url}
+                    </a>
+                  ) : (
+                    <span className="truncate text-foreground">{s.title || "source"}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -2351,6 +2447,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const api = useApi();
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("Preview");
+  const [research, setResearch] = useState<ResearchDetail | null>(null);
+  const [researchRefreshKey, setResearchRefreshKey] = useState(0);
   const [device, setDevice] = useState<Device>("desktop");
   const [fullscreen, setFullscreen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -3158,6 +3256,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         break;
       }
       case "research-done": {
+        setResearchRefreshKey((k) => k + 1); // fresh research landed → reload the Research tab
         const rid = researchMsgIdRef.current;
         const directions = Array.isArray(ev.directions)
           ? (ev.directions as unknown[]).filter((d): d is { slug: string; title: string } => {
@@ -3551,6 +3650,24 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
+
+  // Load the project's research deliverables (for the conditional Research tab). Re-fetch
+  // when researchRefreshKey bumps — i.e. a run just finished producing research.
+  useEffect(() => {
+    let alive = true;
+    api
+      .getResearch(projectId)
+      .then((r) => {
+        if (alive) setResearch(r);
+      })
+      .catch(() => {
+        if (alive) setResearch(null);
+      });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, researchRefreshKey]);
 
   // Fetch the selected file's source whenever the Files tab is shown for it.
   useEffect(() => {
@@ -4106,10 +4223,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const TAB_ICON: Record<Tab, ReactNode> = {
     Preview: <Eye size={13} strokeWidth={1.75} />,
+    Research: <Search size={13} strokeWidth={1.75} />,
     Files: <Folder size={13} strokeWidth={1.75} />,
     Quality: <ShieldCheck size={13} strokeWidth={1.75} />,
   };
-  const tabItems: TabItem[] = TABS.map((t) => ({
+  const tabItems: TabItem[] = TABS.filter((t) => t !== "Research" || research?.exists).map((t) => ({
     value: t,
     label: (
       <>
@@ -4830,6 +4948,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             ) : (
               emptyPane(running ? "Generating…" : "Your preview will appear here")
             )
+          ) : tab === "Research" ? (
+            <ResearchPanel research={research} assetUrl={(p) => api.researchAssetUrl(projectId, p)} />
           ) : tab === "Files" ? (
             <FilesPanel files={displayFiles} activeFile={displayActiveFile} fileText={displayFileText} running={displayRunning} onOpen={openDisplayedFile} />
           ) : tab === "Quality" ? (
