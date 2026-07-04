@@ -1,0 +1,14 @@
+{
+  "name": "@dezin/research",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dezin design research: the research/ project convention (brief, report, sources, assets, directions) plus the DeepResearch phase prompt.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}
