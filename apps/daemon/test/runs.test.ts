@@ -2008,3 +2008,22 @@ test("a build references the user's previously-kept (upvoted) designs", async ()
     assert.match(lastCall.message, /KEPT these earlier designs/);
   });
 });
+
+test("a build references kept designs of the same kind from other projects (cross-project exemplars)", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN, CLEAN], texts: ["done", "done"] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const projA = store.createProject({ name: "A", skillId: "landing", mode: "prototype" });
+    const projB = store.createProject({ name: "B", skillId: "landing", mode: "prototype" });
+
+    const resA = await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: projA.id, brief: "landing A" }) });
+    const runA = parseSse(await resA.text()).find((e) => e.type === "run-start")!.runId as string;
+    store.setRunFeedback(runA, { verdict: "up" });
+
+    const resB = await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: projB.id, brief: "landing B" }) });
+    await resB.text();
+
+    const lastCall = runner.calls[runner.calls.length - 1]!;
+    assert.match(lastCall.message, /kept designs of this kind before/);
+    assert.match(lastCall.message, /--accent:#2563eb/);
+  });
+});

@@ -1238,6 +1238,20 @@ export class Store {
       .slice(0, Math.max(1, limit));
   }
 
+  /** Recent 👍 runs across ALL projects (optionally by skill) — cross-project exemplars. */
+  listExemplarRuns(opts: { skillId?: string; excludeProjectId?: string; limit?: number } = {}): Run[] {
+    const limit = Math.max(1, opts.limit ?? 3);
+    const rows = this.db
+      .prepare(`SELECT * FROM runs WHERE status = 'succeeded' AND feedback IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+      .all(limit * 8) as Row[];
+    return rows
+      .map(asRun)
+      .filter((r) => r.feedback?.verdict === "up")
+      .filter((r) => (opts.excludeProjectId ? r.projectId !== opts.excludeProjectId : true))
+      .filter((r) => (opts.skillId ? r.skillId === opts.skillId : true))
+      .slice(0, limit);
+  }
+
   // ── artifacts ───────────────────────────────────────────────────────────────
   recordArtifact(projectId: string, path: string, lintPassed: boolean): Artifact {
     const id = this.clock.id();

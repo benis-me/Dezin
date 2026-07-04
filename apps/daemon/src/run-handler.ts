@@ -7,7 +7,7 @@
 
 import { mkdir, readdir, readFile, writeFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { composeSystemPrompt } from "../../../packages/prompt/src/index.ts";
 import {
@@ -256,6 +256,19 @@ function questionMessage(text: string, runId: string): string {
 
 function directionGateMessage(directions: Array<{ slug: string; title: string; markdown: string }>, runId: string, brief: string): string {
   return JSON.stringify({ directionGate: { directions, runId, brief } });
+}
+
+/** A compact HTML snippet of a kept design from any project, for cross-project exemplars. */
+function exemplarSnippet(dataDir: string, projectId: string, runId: string): string | null {
+  const path = join(projectDir(dataDir, projectId), ".versions", `${runId}.html`);
+  if (!existsSync(path)) return null;
+  try {
+    const html = readFileSync(path, "utf8");
+    const body = html.length > 1600 ? `${html.slice(0, 1600)}\n<!-- …truncated -->` : html;
+    return `\`\`\`html\n${body}\n\`\`\``;
+  } catch {
+    return null;
+  }
 }
 
 function processMessage(items: ProcessItem[], elapsedMs?: number): string {
@@ -525,6 +538,18 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     if (kept.length) {
       const refs = kept.map((r) => `\`.versions/${r.id}.html\``).join(", ");
       agentBrief = `The user KEPT these earlier designs in this project — open and study them, and match their caliber and direction (evolve, do not copy verbatim): ${refs}.\n\n---\n\n${agentBrief}`;
+    }
+  }
+
+  // Cross-project exemplars: designs the user kept for this SAME kind of work in other
+  // projects, injected as compact snippets to teach caliber and voice.
+  if (project.mode !== "standard" && skill?.id) {
+    const snippets = store
+      .listExemplarRuns({ skillId: skill.id, excludeProjectId: project.id, limit: 1 })
+      .map((r) => exemplarSnippet(deps.dataDir, r.projectId, r.id))
+      .filter((s): s is string => Boolean(s));
+    if (snippets.length) {
+      agentBrief = `You have kept designs of this kind before — match their caliber and voice (evolve, do not copy):\n\n${snippets.join("\n\n")}\n\n---\n\n${agentBrief}`;
     }
   }
 
