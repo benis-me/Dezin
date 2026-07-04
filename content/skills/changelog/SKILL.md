@@ -11,6 +11,11 @@ designSystem: true
 
 A single `index.html` changelog that's easy to skim top-to-bottom.
 
+## Research
+
+- The real, specific changes this release contains and why each matters to a user —
+  never "various improvements".
+
 ## Structure
 
 - Reverse-chronological entries. Each: a date (tabular-nums), an optional version tag, a one-line summary, then grouped changes.

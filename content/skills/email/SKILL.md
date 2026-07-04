@@ -11,6 +11,11 @@ designSystem: true
 
 A single `index.html` email that survives real clients (Gmail, Outlook, Apple Mail).
 
+## Research
+
+- The one message this email must land and the single action it wants — and the real
+  audience segment receiving it.
+
 ## Constraints (email is not the web)
 
 - **Table-based layout**, max width **600px**, centered. No flexbox/grid for structure.

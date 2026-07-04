@@ -11,6 +11,13 @@ designSystem: true
 
 A single `index.html` reading surface — designed like a magazine page, not a CMS dump.
 
+## Research
+
+- The real argument or story this piece makes, and who it's for — a post with no thesis
+  becomes a content dump.
+- The real facts, examples, and references the prose needs; pull them so the writing is
+  specific, not generic.
+
 ## Editorial hierarchy
 
 - One dominant title (3–5× body size). A dated byline + a one-line standfirst.
