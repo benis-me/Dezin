@@ -18,6 +18,7 @@ export {
   directionPath,
 } from "./convention.ts";
 export { slugify, uniqueSlug } from "./slug.ts";
+export { directionTitle } from "./directions.ts";
 export { renderFrontmatter, parseFrontmatter, type FrontmatterValue } from "./frontmatter.ts";
 export { buildBriefMarkdown, parseBriefMarkdown } from "./brief.ts";
 export { normalizeSource, parseSources, serializeSources, collectSourceAssets } from "./sources.ts";

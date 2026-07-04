@@ -37,7 +37,7 @@ import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizePr
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { runResearchPhase } from "./research-phase.ts";
-import { buildResearchContext } from "../../../packages/research/src/index.ts";
+import { buildResearchContext, directionTitle, listDirections } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import type { AppDeps } from "./app.ts";
@@ -145,6 +145,8 @@ interface RunBody {
   effectRefs?: unknown;
   /** Opt-in: run the pre-design Research phase (writes research/) before building. */
   research?: boolean;
+  /** Chosen direction slug — skips the direction gate; the build uses this direction. */
+  directionSlug?: string;
 }
 
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
@@ -249,6 +251,10 @@ function resultMessage(text: string, meta: Record<string, unknown>): string {
 
 function questionMessage(text: string, runId: string): string {
   return JSON.stringify({ question: { text, runId } });
+}
+
+function directionGateMessage(directions: Array<{ slug: string; title: string }>, runId: string): string {
+  return JSON.stringify({ directionGate: { directions: directions.map((d) => ({ slug: d.slug, title: d.title })), runId } });
 }
 
 function processMessage(items: ProcessItem[], elapsedMs?: number): string {
@@ -482,11 +488,27 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       env: agentEnv,
       signal: ctrl.signal,
     });
+    sse({ type: "phase-end", phase: "research", produced: research.produced, error: research.error });
     if (research.produced) {
-      const researchContext = await buildResearchContext(dir);
+      const chosenDirection = body.directionSlug?.trim() || undefined;
+      // Direction gate: when research produced 2+ candidate directions and the caller
+      // hasn't chosen one, surface them and end the run (like the ask-user question). The
+      // user's next run passes directionSlug to build the chosen direction.
+      const directions = chosenDirection ? [] : await listDirections(dir);
+      if (directions.length >= 2) {
+        const options = directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown), markdown: d.markdown }));
+        store.addMessage(conversation.id, "system", directionGateMessage(options, run.id));
+        store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
+        sse({ type: "direction-gate", runId: run.id, directions: options });
+        sse({ type: "run-cancelled", runId: run.id, reason: "direction" });
+        finishRun(run.id);
+        unsubscribe();
+        res.end();
+        return;
+      }
+      const researchContext = await buildResearchContext(dir, chosenDirection);
       if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
     }
-    sse({ type: "phase-end", phase: "research", produced: research.produced, error: research.error });
   }
 
   // Record the agent's interleaved process so the conversation can be restored after

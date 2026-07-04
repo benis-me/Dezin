@@ -1892,3 +1892,58 @@ test("runs without the research flag skip the research phase", async () => {
     { researchPhase },
   );
 });
+
+const researchWithDirections: NonNullable<AppDeps["researchPhase"]> = async (input) => {
+  const dirs = join(input.dir, "research", "directions");
+  mkdirSync(join(dirs, "alpha"), { recursive: true });
+  mkdirSync(join(dirs, "beta"), { recursive: true });
+  writeFileSync(join(input.dir, "research", "research.md"), "# Research\n\nFindings.");
+  writeFileSync(join(dirs, "alpha", "direction.md"), "# Alpha — bold\n\nBold concept for alpha.");
+  writeFileSync(join(dirs, "beta", "direction.md"), "# Beta — calm\n\nCalm concept for beta.");
+  return { ran: true, produced: true };
+};
+
+test("research with 2+ directions fires the direction gate and stops before build", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(
+    runner,
+    async ({ base }) => {
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero", research: true }),
+      });
+      const events = parseSse(await res.text());
+      const gate = events.find((e) => e.type === "direction-gate");
+      assert.ok(gate, "expected a direction-gate event");
+      assert.equal((gate!.directions as unknown[]).length, 2);
+      assert.equal(events.find((e) => e.type === "run-cancelled")!.reason, "direction");
+      assert.equal(runner.calls.length, 0); // build never ran
+    },
+    { researchPhase: researchWithDirections },
+  );
+});
+
+test("a run with directionSlug skips the gate and builds the chosen direction", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(
+    runner,
+    async ({ base }) => {
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero", research: true, directionSlug: "alpha" }),
+      });
+      const events = parseSse(await res.text());
+      assert.ok(!events.some((e) => e.type === "direction-gate"), "gate should be skipped");
+      assert.ok(events.some((e) => e.type === "run-done"));
+      assert.ok(runner.calls.length >= 1);
+      assert.match(runner.calls[0]!.message, /Chosen direction/);
+      assert.match(runner.calls[0]!.message, /Bold concept for alpha/);
+      assert.doesNotMatch(runner.calls[0]!.message, /Calm concept for beta/);
+    },
+    { researchPhase: researchWithDirections },
+  );
+});
