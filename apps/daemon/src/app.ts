@@ -20,6 +20,7 @@ import { figToJson, summarizeFig } from "./parse-fig.ts";
 import { serveWeb, defaultWebDir } from "./serve-web.ts";
 import { handleRun, handleRunStream, handleCancelRun, handleRunFeedback } from "./run-handler.ts";
 import type { ResearchPhaseRunner } from "./research-phase.ts";
+import { handlePreferenceSuggest, type PreferenceSuggester } from "./preference-reflect.ts";
 import { handleExport, handleImportProject } from "./export-handler.ts";
 import { handleListFiles } from "./files-handler.ts";
 import {
@@ -97,6 +98,8 @@ export interface AppDeps {
   promptOptimizer?: PromptOptimizer;
   /** Research phase hook; tests can avoid launching a real research agent. */
   researchPhase?: ResearchPhaseRunner;
+  /** Preference reflection hook; tests can avoid launching a real agent. */
+  preferenceSuggester?: PreferenceSuggester;
   /** Moodboard chat one-shot agent hook; tests can avoid launching a real CLI. */
   moodboardAgentText?: MoodboardAgentTextRunner;
   /** Provider model-list fetcher; tests can avoid real network calls. */
@@ -627,6 +630,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/runs/:id/feedback",
     handler: (req, res, params, deps) => handleRunFeedback(req, res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/preferences/suggest",
+    handler: (req, res, _p, deps) => handlePreferenceSuggest(req, res, deps),
   },
   {
     method: "GET",

@@ -47,6 +47,52 @@ function parseInitialSettingsTarget(initialSection?: string): { section: Section
   return { section, focusTarget };
 }
 
+function PreferenceSuggestion({ onApply }: { onApply: (lines: string) => void }) {
+  const api = useApi();
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  const [suggestion, setSuggestion] = useState<string | null>(null);
+  const run = async (): Promise<void> => {
+    setBusy(true);
+    try {
+      const { suggestion, signals } = await api.suggestPreferences();
+      if (signals === 0) toast("No feedback yet — rate a few results with 👍/👎 first.");
+      else if (!suggestion.trim()) toast("Not enough feedback for a confident suggestion yet.");
+      setSuggestion(suggestion.trim() || null);
+    } catch {
+      toast("Couldn't reflect on your feedback.", { variant: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-3 space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">Distill durable preferences from the results you've rated 👍/👎.</p>
+        <Button size="sm" variant="outline" onClick={() => void run()} disabled={busy}>
+          {busy ? "Reflecting…" : "Suggest from my feedback"}
+        </Button>
+      </div>
+      {suggestion ? (
+        <div className="rounded-md border border-border bg-surface-2/40 p-2.5">
+          <pre className="whitespace-pre-wrap font-sans text-xs text-foreground">{suggestion}</pre>
+          <div className="mt-2 flex justify-end">
+            <Button
+              size="sm"
+              onClick={() => {
+                onApply(suggestion);
+                setSuggestion(null);
+              }}
+            >
+              Add to instructions
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function SettingsScreen({
   dark,
   onToggleDark,
@@ -350,6 +396,13 @@ export function SettingsScreen({
                   placeholder="e.g. Prefer dense layouts. Never use emoji. Match our voice: precise, calm."
                   onChange={(e) => setLocal("customInstructions", e.target.value)}
                   onBlur={(e) => save("customInstructions", e.target.value)}
+                />
+                <PreferenceSuggestion
+                  onApply={(lines) => {
+                    const next = settings.customInstructions.trim() ? `${settings.customInstructions.trim()}\n${lines}` : lines;
+                    setLocal("customInstructions", next);
+                    save("customInstructions", next);
+                  }}
                 />
               </SettingsPanel>
             )}

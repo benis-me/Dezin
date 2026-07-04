@@ -565,6 +565,7 @@ export interface ApiClient {
   /** Explicitly stop a run (the composer "Stop"); works across pages. */
   cancelRun(runId: string): Promise<{ cancelled: boolean }>;
   setRunFeedback(runId: string, feedback: RunFeedback | null): Promise<{ run: RunSummary }>;
+  suggestPreferences(): Promise<{ suggestion: string; signals: number }>;
 }
 
 export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
@@ -810,5 +811,6 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     reattachRun,
     cancelRun: (runId) => json<{ cancelled: boolean }>(`/api/runs/${enc(runId)}/cancel`, { method: "POST" }),
     setRunFeedback: (runId, feedback) => json<{ run: RunSummary }>(`/api/runs/${enc(runId)}/feedback`, jsonInit("POST", feedback ?? { clear: true })),
+    suggestPreferences: () => json<{ suggestion: string; signals: number }>("/api/preferences/suggest", { method: "POST" }),
   };
 }

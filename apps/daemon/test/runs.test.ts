@@ -2027,3 +2027,40 @@ test("a build references kept designs of the same kind from other projects (cros
     assert.match(lastCall.message, /--accent:#2563eb/);
   });
 });
+
+test("the preference suggestion endpoint reflects over feedback (injected agent)", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  let gotSignals = 0;
+  const preferenceSuggester: NonNullable<AppDeps["preferenceSuggester"]> = async (input) => {
+    gotSignals = input.signals.length;
+    return "- Prefer restrained accent use\n- Generous whitespace";
+  };
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, brief: "make a hero" }) });
+      const runId = parseSse(await res.text()).find((e) => e.type === "run-start")!.runId as string;
+      store.setRunFeedback(runId, { verdict: "up", gap: "layout" });
+
+      const sugg = await fetch(`${base}/api/preferences/suggest`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      assert.equal(sugg.status, 200);
+      const body = (await sugg.json()) as { suggestion: string; signals: number };
+      assert.equal(body.signals, 1);
+      assert.match(body.suggestion, /restrained accent/);
+      assert.equal(gotSignals, 1);
+    },
+    { preferenceSuggester },
+  );
+});
+
+test("the preference suggestion endpoint returns empty when there is no feedback", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base }) => {
+    await createProject(base);
+    const sugg = await fetch(`${base}/api/preferences/suggest`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const body = (await sugg.json()) as { suggestion: string; signals: number };
+    assert.equal(body.signals, 0);
+    assert.equal(body.suggestion, "");
+  });
+});

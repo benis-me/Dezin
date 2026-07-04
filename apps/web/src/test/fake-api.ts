@@ -129,6 +129,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     setRunFeedback: async (runId, feedback) => ({
       run: { id: runId, status: "succeeded", score: 100, repairRounds: 0, lintPassed: true, feedback: feedback ?? null, createdAt: 0, finishedAt: 0 },
     }),
+    suggestPreferences: async () => ({ suggestion: "", signals: 0 }),
     ...over,
   };
 }

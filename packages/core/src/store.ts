@@ -1252,6 +1252,14 @@ export class Store {
       .slice(0, limit);
   }
 
+  /** Recent runs carrying any user feedback (👍 or 👎), most recent first — for reflection. */
+  listFeedbackRuns(limit = 40): Run[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM runs WHERE feedback IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+      .all(Math.max(1, limit)) as Row[];
+    return rows.map(asRun).filter((r) => r.feedback !== null);
+  }
+
   // ── artifacts ───────────────────────────────────────────────────────────────
   recordArtifact(projectId: string, path: string, lintPassed: boolean): Artifact {
     const id = this.clock.id();

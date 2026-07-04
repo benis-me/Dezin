@@ -14,14 +14,17 @@ before design, converge on a direction before high-fidelity, critique against in
   workspace, and the build grounds in only that direction.
 - Phase-bearing rewrites of all 21 built-in skills.
 - Attribution: `model` / `agent` / `skill` recorded on every run.
-- Learning loop (local, no upload): 👍/👎 + gap-tag feedback on the result card, and
-  exemplar retrieval (a build references the user's previously-kept designs).
+- Learning loop (local, no upload): 👍/👎 + gap-tag feedback on the result card;
+  exemplar retrieval (a build references the user's previously-kept designs — same-project
+  and cross-project by skill); and preference distillation (a local agent reflects over the
+  feedback and proposes preference lines to add to instructions — human-approved, nothing
+  auto-written).
 
-### Not yet built
+### Follow-ups
 
-- **Preference distillation** — turning recurring feedback into a growing preferences
-  block; best as a local agent "reflection" pass that proposes edits for approval.
-- **Cross-project exemplars** — retrieval is currently same-project only.
+The staged pipeline is complete. Natural next iterations: parallel direction generation
+(the roadmap's "fan out N approaches at once"), a Studio/Fast mode toggle in the composer,
+and richer intent judging in the critique phase.
 
 ## Why
 
