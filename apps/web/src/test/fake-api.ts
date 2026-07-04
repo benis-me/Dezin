@@ -59,6 +59,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
       aiProviderOrganization: "",
       aiProviderProfiles: "",
       visualQaEnabled: false,
+      researchEnabled: false,
       visualQaAgentCommand: "",
       visualQaModel: "",
       autoImproveEnabled: true,

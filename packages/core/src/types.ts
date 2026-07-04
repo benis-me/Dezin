@@ -287,6 +287,8 @@ export interface Settings {
   visualQaAgentCommand: string;
   /** Optional reviewer model override; empty means inherit the current project run model. */
   visualQaModel: string;
+  /** When enabled, runs do a pre-design Research phase (writes research/) before building. */
+  researchEnabled: boolean;
   /** When enabled, Dezin feeds blocking quality findings back into the Agent automatically. */
   autoImproveEnabled: boolean;
   /** Maximum automatic repair turns after the initial generation. */

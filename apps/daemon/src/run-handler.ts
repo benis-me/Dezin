@@ -475,7 +475,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // Optional pre-design Research phase (opt-in via body.research). It writes the
   // research/ directory, then its report is prepended to the brief so the build is
   // grounded in real discovery. Idempotent; a soft failure just proceeds without it.
-  if (body.research === true || process.env.DEZIN_RESEARCH === "1") {
+  if (body.research === true || settings.researchEnabled || process.env.DEZIN_RESEARCH === "1") {
     sse({ type: "phase-start", phase: "research", runId: run.id });
     const research = await (deps.researchPhase ?? runResearchPhase)({
       dir,

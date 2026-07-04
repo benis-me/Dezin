@@ -28,7 +28,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     visualQaEnabled: false,
-    visualQaAgentCommand: "",
+    researchEnabled: false,    visualQaAgentCommand: "",
     visualQaModel: "",
     autoImproveEnabled: true,
     autoImproveMaxRounds: 8,

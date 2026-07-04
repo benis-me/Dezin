@@ -228,8 +228,18 @@ export function SettingsScreen({
             {section === "models" && <ModelProviderSettings settings={settings} onLocalPatch={setLocalPatch} onSavePatch={savePatch} />}
 
             {section === "quality" && (
-              <SettingsPanel title="Quality" desc="Checks the finished result against visible layout problems.">
+              <SettingsPanel title="Quality" desc="How Dezin generates: optional research before designing, plus checks on the finished result.">
                 <SettingsRows>
+                  <SettingRow
+                    label="Design research"
+                    desc="Before designing, the Agent researches competitors, audience, and references into research/, then builds from it. Adds time and uses your agent's tokens."
+                  >
+                    <Switch
+                      aria-label="Design research"
+                      checked={settings.researchEnabled}
+                      onCheckedChange={(checked) => save("researchEnabled", checked)}
+                    />
+                  </SettingRow>
                   <SettingRow
                     label="Agent visual review"
                     desc="After generation, a reviewer Agent/model inspects the screenshot, conversation, and runtime signals."

@@ -309,6 +309,7 @@ export interface Settings {
   aiProviderOrganization: string;
   aiProviderProfiles: string;
   visualQaEnabled: boolean;
+  researchEnabled: boolean;
   visualQaAgentCommand: string;
   visualQaModel: string;
   autoImproveEnabled: boolean;
