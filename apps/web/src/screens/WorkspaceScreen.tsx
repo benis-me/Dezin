@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MoreHorizontal, MousePointerClick, PanelsTopLeft, Paperclip, Pencil, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MoreHorizontal, MousePointerClick, PanelsTopLeft, Paperclip, Pencil, RotateCw, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
@@ -1502,15 +1502,47 @@ function ProcessRecord({
   );
 }
 
+function FeedbackButtons({ onFeedback }: { onFeedback: (verdict: "up" | "down") => void }) {
+  const [voted, setVoted] = useState<"up" | "down" | null>(null);
+  const vote = (v: "up" | "down"): void => {
+    setVoted(v);
+    onFeedback(v);
+  };
+  return (
+    <div className="flex items-center gap-0.5">
+      <button
+        type="button"
+        aria-label="Good result"
+        onClick={() => vote("up")}
+        className={cn("grid h-6 w-6 place-items-center rounded-md transition-colors hover:bg-surface-2", voted === "up" ? "text-accent" : "text-muted-foreground hover:text-foreground")}
+      >
+        <ThumbsUp size={13} strokeWidth={2} />
+      </button>
+      <button
+        type="button"
+        aria-label="Needs work"
+        onClick={() => vote("down")}
+        className={cn("grid h-6 w-6 place-items-center rounded-md transition-colors hover:bg-surface-2", voted === "down" ? "text-foreground" : "text-muted-foreground hover:text-foreground")}
+      >
+        <ThumbsDown size={13} strokeWidth={2} />
+      </button>
+    </div>
+  );
+}
+
 function ResultCard({
   text,
   meta,
   onView,
+  runId,
+  onFeedback,
   stackPosition = "single",
 }: {
   text: string;
   meta?: ResultMeta;
   onView: () => void;
+  runId?: string;
+  onFeedback?: (runId: string, verdict: "up" | "down") => void;
   stackPosition?: RunCardStackPosition;
 }) {
   const error = meta?.error;
@@ -1542,6 +1574,7 @@ function ResultCard({
             {typeof score === "number" ? (
               <span className="tnum rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">{score}/100</span>
             ) : null}
+            {runId && onFeedback && !stopped ? <FeedbackButtons onFeedback={(v) => onFeedback(runId, v)} /> : null}
             <button
               type="button"
               onClick={onView}
@@ -2700,9 +2733,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
-  const pushResult = (text: string, meta: ResultMeta): void => {
+  const pushResult = (text: string, meta: ResultMeta, runId?: string): void => {
     const materialSources = materialSourcesRef.current;
-    setMessages((m) => [...m, { id: msgId.current++, kind: "result", text, meta: materialSources.length ? { ...meta, materialSources } : meta }]);
+    setMessages((m) => [...m, { id: msgId.current++, kind: "result", text, meta: materialSources.length ? { ...meta, materialSources } : meta, runId }]);
   };
 
   // Turn the live (interleaved) stream into the transcript: a collapsed process record,
@@ -2965,6 +2998,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               ? `Done${quality}${fixes}.`
               : `Done, with remaining issues${quality}.`,
           { passed: !!ev.passed, score: s, rounds, status: "done" },
+          typeof ev.runId === "string" ? ev.runId : undefined,
         );
         if (modeRef.current === "standard") void loadDevPreview();
         else {
@@ -3982,7 +4016,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     ) : m.kind === "direction-gate" && m.directions ? (
       <DirectionCard directions={m.directions} onPick={(slug) => void runBrief(m.text || lastRunBriefRef.current, undefined, undefined, [], [], slug)} />
     ) : (
-      <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} stackPosition={stackPosition} />
+      <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} runId={m.runId} onFeedback={(runId, verdict) => void api.setRunFeedback(runId, { verdict }).catch(() => {})} stackPosition={stackPosition} />
     );
   const renderRunCardStack = (stack: Msg[], separated = false, testId = "run-card-stack"): ReactNode => (
     <div data-testid={testId} className={cn(separated && "mt-3")}>
