@@ -36,6 +36,8 @@ import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-man
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
+import { runResearchPhase } from "./research-phase.ts";
+import { buildResearchContext } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import type { AppDeps } from "./app.ts";
@@ -141,6 +143,8 @@ interface RunBody {
   variantId?: string;
   moodboardRefs?: unknown;
   effectRefs?: unknown;
+  /** Opt-in: run the pre-design Research phase (writes research/) before building. */
+  research?: boolean;
 }
 
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
@@ -431,7 +435,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     origin: origin ?? "",
   });
   const visibleBrief = appendEffectReferenceLine(appendMoodboardReferenceLine(brief, moodboardContext.labels), effectContext.labels);
-  const agentBrief = [visibleBrief, moodboardContext.promptBlock, effectContext.promptBlock].filter(Boolean).join("\n\n");
+  let agentBrief = [visibleBrief, moodboardContext.promptBlock, effectContext.promptBlock].filter(Boolean).join("\n\n");
   const userMessage = store.addMessage(conversation.id, "user", visibleBrief);
   store.updateRun(run.id, { status: "running", userMessageId: userMessage.id });
 
@@ -461,6 +465,29 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   req.on("close", unsubscribe);
   const sse = (event: unknown): void => pushEvent(run.id, event);
   sse({ type: "run-start", runId: run.id, conversationId: conversation.id, variantId: targetVariantId });
+
+  // Optional pre-design Research phase (opt-in via body.research). It writes the
+  // research/ directory, then its report is prepended to the brief so the build is
+  // grounded in real discovery. Idempotent; a soft failure just proceeds without it.
+  if (body.research === true) {
+    sse({ type: "phase-start", phase: "research", runId: run.id });
+    const research = await runResearchPhase({
+      dir,
+      brief: visibleBrief,
+      skill: skill ? { id: skill.id, name: skill.name } : undefined,
+      designSystemName: designSystem.name,
+      hasUserReferences: moodboardContext.labels.length > 0 || effectContext.labels.length > 0,
+      agentCommand: runAgentCommand,
+      model: runModel,
+      env: agentEnv,
+      signal: ctrl.signal,
+    });
+    if (research.produced) {
+      const researchContext = await buildResearchContext(dir);
+      if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
+    }
+    sse({ type: "phase-end", phase: "research", produced: research.produced, error: research.error });
+  }
 
   // Record the agent's interleaved process so the conversation can be restored after
   // navigation/restart without losing streamed text or the original tool order.

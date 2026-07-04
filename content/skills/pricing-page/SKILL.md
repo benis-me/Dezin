@@ -9,17 +9,34 @@ designSystem: true
 
 # Pricing page
 
-Build a single `index.html` pricing surface that makes the decision easy.
+A pricing surface makes a decision easy. Research the real plans and the buyer's doubt,
+structure the choice, then build it.
+
+## Research
+
+- The product's real tiers, prices, and what actually gates each one. Use them verbatim
+  if the brief has them; otherwise study comparable products to propose a credible shape
+  and label the assumptions.
+- The buyer's hesitation at this price point — what they need to believe to upgrade — and
+  answer it on the page.
+- How competitors anchor and frame their recommended tier; borrow the framing that fits.
 
 ## Structure
 
-- **3–4 tiers** (Hick's Law / choice overload). Mark **exactly one** "Recommended" — distinguished by more than color (a border in --accent, a subtle lift, a label).
-- Each tier: name, price (tabular-nums), a one-line who-it's-for, and a short, scannable feature list — group features into ≤5 chunks (Miller).
-- One primary CTA per tier; the recommended tier's CTA is the loudest element.
-- Optional: a monthly/annual toggle, and a comparison row only if it earns its space.
+- **3–4 tiers** (Hick's Law). Mark **exactly one** "Recommended", distinguished by more
+  than color — a border in `--accent`, a subtle lift, a label.
+- Each tier: name, price (`tabular-nums`), a one-line who-it's-for, and a scannable
+  feature list grouped into ≤5 chunks (Miller).
+- One primary CTA per tier; the recommended tier's CTA is the loudest element. Add a
+  monthly/annual toggle or a comparison row only if it earns its space.
+
+## The distinctive move
+
+The one element that removes the real doubt at this price — a concrete outcome, an honest
+"who should NOT buy this", a worked usage example, a guarantee. That candor is what makes
+a pricing page feel trustworthy rather than templated.
 
 ## Craft
 
-- Prices use `tabular-nums`; align them. Real numbers or a clearly-labelled placeholder — never invented "save 90%".
-- One accent across the whole section, concentrated on the recommended tier. Cards use 1px borders, not shadows; no rounded-card-with-left-border.
-- Cover the empty/loading state if prices load dynamically.
+- Prices use `tabular-nums`; align them. Concentrate the single accent on the recommended
+  tier. Cover the empty/loading state if prices load dynamically.

@@ -9,22 +9,28 @@ designSystem: true
 
 # Slide deck
 
-Build a self-contained `index.html` deck of 16:9 slides that reads from across a room.
+A deck is an argument delivered one idea at a time, readable from across a room. Research
+the narrative, structure the sequence, then build slides that breathe.
 
-## Frame
+## Research
 
-- Each slide is a `1280×720` (or `1920×1080`) section; scale-to-fit to the viewport.
-- Keyboard nav (←/→), a slide counter, and a print stylesheet (one slide per page).
-- Safe margins: keep content within ~8% of every edge.
+- The audience and the single decision or takeaway the deck exists to produce. A pitch
+  deck, a conference talk, and an internal review need different arcs.
+- The real content — figures, quotes, examples — for each beat. A deck with invented
+  numbers dies under one informed question; pull real ones from the brief or research.
+- The narrative spine: the 8–15 beats that carry the argument, and where it needs a
+  breath or a section reset.
 
-## Per slide
+## Structure
 
-- **One idea.** A slide is a headline + at most one supporting element (a stat, a chart, a quote, an image).
-- Display type is large (48–96px) with tight tracking (−0.02em); body never below 24px.
-- Alternate slide rhythm: a dense slide, then a breathing one. Section dividers reset attention.
-- Real content only — no "Lorem", no invented metrics. Pull figures from the brief.
+- Each slide is a `1280×720` (or `1920×1080`) section, scaled to fit; keyboard nav
+  (←/→), a slide counter, and a print stylesheet (one slide per page).
+- **One idea per slide** — a headline plus at most one supporting element (a stat, a
+  chart, a quote, an image). Safe margins: content within ~8% of every edge.
+- Alternate rhythm: a dense slide, then a breathing one; section dividers reset attention.
 
-## Craft
+## The distinctive move
 
-One accent, used to mark the single most important thing per slide. Borders/whitespace
-over boxes and shadows. Paste the design system's `:root` verbatim; everything via var().
+The one slide people remember — a single number rendered huge, an unexpected comparison,
+one image that lands the point. Build the deck around it. Display type is large
+(48–96px, tight tracking); body never below 24px.
