@@ -253,8 +253,8 @@ function questionMessage(text: string, runId: string): string {
   return JSON.stringify({ question: { text, runId } });
 }
 
-function directionGateMessage(directions: Array<{ slug: string; title: string }>, runId: string): string {
-  return JSON.stringify({ directionGate: { directions: directions.map((d) => ({ slug: d.slug, title: d.title })), runId } });
+function directionGateMessage(directions: Array<{ slug: string; title: string; markdown: string }>, runId: string, brief: string): string {
+  return JSON.stringify({ directionGate: { directions, runId, brief } });
 }
 
 function processMessage(items: ProcessItem[], elapsedMs?: number): string {
@@ -497,9 +497,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const directions = chosenDirection ? [] : await listDirections(dir);
       if (directions.length >= 2) {
         const options = directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown), markdown: d.markdown }));
-        store.addMessage(conversation.id, "system", directionGateMessage(options, run.id));
+        store.addMessage(conversation.id, "system", directionGateMessage(options, run.id, visibleBrief));
         store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
-        sse({ type: "direction-gate", runId: run.id, directions: options });
+        sse({ type: "direction-gate", runId: run.id, directions: options, brief: visibleBrief });
         sse({ type: "run-cancelled", runId: run.id, reason: "direction" });
         finishRun(run.id);
         unsubscribe();

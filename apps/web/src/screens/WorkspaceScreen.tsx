@@ -213,8 +213,9 @@ interface ResultMeta {
 interface Msg {
   id: number;
   dbId?: string;
-  kind: "user" | "assistant" | "result" | "process" | "question" | "visual-review";
+  kind: "user" | "assistant" | "result" | "process" | "question" | "visual-review" | "direction-gate";
   text: string;
+  directions?: Array<{ slug: string; title: string; markdown: string }>;
   meta?: ResultMeta;
   steps?: string[];
   items?: LiveItem[];
@@ -731,6 +732,23 @@ function toMsg(m: Message, id: number): Msg {
           runId: typeof parsed.question.runId === "string" ? parsed.question.runId : undefined,
           at: m.createdAt,
         };
+      }
+      if (isRecord(parsed) && isRecord(parsed.directionGate) && Array.isArray(parsed.directionGate.directions)) {
+        const directions = (parsed.directionGate.directions as unknown[]).filter((d): d is { slug: string; title: string; markdown: string } => {
+          const o = d as { slug?: unknown; title?: unknown; markdown?: unknown } | null;
+          return !!o && typeof o.slug === "string" && typeof o.title === "string" && typeof o.markdown === "string";
+        });
+        if (directions.length) {
+          return {
+            id,
+            dbId: m.id,
+            kind: "direction-gate",
+            text: typeof parsed.directionGate.brief === "string" ? parsed.directionGate.brief : "",
+            directions,
+            runId: typeof parsed.directionGate.runId === "string" ? parsed.directionGate.runId : undefined,
+            at: m.createdAt,
+          };
+        }
       }
       if (isRecord(parsed) && isRecord(parsed.process)) {
         const items = normalizeLiveItems(parsed.process.items);
@@ -1541,6 +1559,45 @@ function ResultCard({
           <span className="min-w-0 flex-1 truncate">{materialSources.join(" · ")}</span>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function directionSummary(markdown: string): string {
+  const body = markdown
+    .replace(/^#\s+.*$/m, "")
+    .replace(/[#*`>]/g, "")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+  return body.length > 260 ? `${body.slice(0, 260).trimEnd()}…` : body;
+}
+
+function DirectionCard({
+  directions,
+  onPick,
+}: {
+  directions: Array<{ slug: string; title: string; markdown: string }>;
+  onPick: (slug: string) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-card/70 px-3 py-2.5">
+      <div className="flex items-center gap-2.5">
+        <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-surface-2 text-foreground">
+          <MousePointerClick size={12} strokeWidth={2} />
+        </span>
+        <p className="text-sm font-medium text-foreground">Pick a direction to build</p>
+      </div>
+      <div className="mt-2.5 grid gap-2">
+        {directions.map((d) => (
+          <div key={d.slug} className="rounded-md border border-border bg-background p-2.5">
+            <p className="text-sm font-medium text-foreground">{d.title}</p>
+            <p className="mt-1 whitespace-pre-line text-xs leading-relaxed text-muted-foreground">{directionSummary(d.markdown)}</p>
+            <Button size="sm" variant="outline" className="mt-2" onClick={() => onPick(d.slug)}>
+              Build this direction
+            </Button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2943,11 +3000,28 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         setLiveStatus(null);
         break;
       }
+      case "direction-gate": {
+        const directions = Array.isArray(ev.directions)
+          ? (ev.directions as unknown[]).filter((d): d is { slug: string; title: string; markdown: string } => {
+              const o = d as { slug?: unknown; title?: unknown; markdown?: unknown } | null;
+              return !!o && typeof o.slug === "string" && typeof o.title === "string" && typeof o.markdown === "string";
+            })
+          : [];
+        if (directions.length) {
+          materializeLive({ emitSummary: false });
+          setMessages((m) => [
+            ...m,
+            { id: msgId.current++, kind: "direction-gate", text: typeof ev.brief === "string" ? ev.brief : "", directions, runId: typeof ev.runId === "string" ? ev.runId : undefined },
+          ]);
+        }
+        setLiveStatus(null);
+        break;
+      }
       case "run-cancelled":
         terminalEventRef.current = true;
         activeRunIdRef.current = null;
         setLiveStatus(null);
-        if (ev.reason === "question") {
+        if (ev.reason === "question" || ev.reason === "direction") {
           liveItemsRef.current = [];
           currentTurnTextRef.current = "";
           finalSummaryTextRef.current = "";
@@ -3000,15 +3074,18 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
   };
 
+  const lastRunBriefRef = useRef("");
   const runBrief = async (
     brief: string,
     agentOverride?: string,
     modelOverride?: string,
     refs: MoodboardRunRef[] = [],
     effectRefs: EffectRunRef[] = [],
+    directionSlug?: string,
   ): Promise<void> => {
     const text = brief.trim();
     if (!text || runningRef.current) return;
+    lastRunBriefRef.current = text;
 
     if (projectId === "new") {
       try {
@@ -3024,7 +3101,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       return;
     }
 
-    push("user", text);
+    if (!directionSlug) push("user", text);
     runningRef.current = true;
     terminalEventRef.current = false;
     activeRunIdRef.current = null;
@@ -3041,6 +3118,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           model: modelOverride || runModel || undefined,
           moodboardRefs: refs.length ? refs : undefined,
           effectRefs: effectRefs.length ? effectRefs : undefined,
+          directionSlug,
         },
         ctrl.signal,
       );
@@ -3901,6 +3979,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       <VisualReviewRecord review={m.visualReview} stackPosition={stackPosition} />
     ) : m.kind === "question" ? (
       <QuestionCard question={m.text} onAnswer={(answer) => void runBrief(answer)} />
+    ) : m.kind === "direction-gate" && m.directions ? (
+      <DirectionCard directions={m.directions} onPick={(slug) => void runBrief(m.text || lastRunBriefRef.current, undefined, undefined, [], [], slug)} />
     ) : (
       <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} stackPosition={stackPosition} />
     );

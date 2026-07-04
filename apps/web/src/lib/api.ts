@@ -178,6 +178,8 @@ export interface RunInput {
   /** Per-run overrides (fall back to Settings). */
   agentCommand?: string;
   model?: string;
+  /** Chosen design direction slug — skips the direction gate; the build uses this direction. */
+  directionSlug?: string;
 }
 
 export interface PromptOptimizeInput {
