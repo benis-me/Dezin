@@ -1835,3 +1835,60 @@ test("daemon start rejects a second instance for the same data dir", async () =>
     });
   }
 });
+
+test("research-enabled run writes research/ and grounds the build in the report", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {
+    mkdirSync(join(input.dir, "research"), { recursive: true });
+    writeFileSync(join(input.dir, "research", "research.md"), "# Research\n\nKey finding: real users skim.");
+    return { ran: true, produced: true };
+  };
+  await withRunServer(
+    runner,
+    async ({ base }) => {
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero", research: true }),
+      });
+      assert.equal(res.status, 200);
+      const events = parseSse(await res.text());
+      const types = events.map((e) => e.type);
+      assert.ok(types.includes("phase-start"));
+      assert.ok(types.includes("phase-end"));
+      assert.ok(types.includes("run-done"));
+      assert.equal(events.find((e) => e.type === "phase-end")!.produced, true);
+      // the build turn's brief was grounded in the research report
+      assert.ok(runner.calls.length >= 1);
+      assert.match(runner.calls[0]!.message, /Key finding: real users skim/);
+      assert.match(runner.calls[0]!.message, /research report/i);
+    },
+    { researchPhase },
+  );
+});
+
+test("runs without the research flag skip the research phase", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  let called = false;
+  const researchPhase: NonNullable<AppDeps["researchPhase"]> = async () => {
+    called = true;
+    return { ran: true, produced: false };
+  };
+  await withRunServer(
+    runner,
+    async ({ base }) => {
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.equal(called, false);
+      assert.doesNotMatch(runner.calls[0]!.message, /research report/i);
+    },
+    { researchPhase },
+  );
+});

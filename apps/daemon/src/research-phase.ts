@@ -39,6 +39,9 @@ export interface ResearchPhaseResult {
   error?: string;
 }
 
+/** Injectable research runner (AppDeps.researchPhase) so tests can skip the real agent. */
+export type ResearchPhaseRunner = (input: ResearchPhaseInput) => Promise<ResearchPhaseResult>;
+
 /** Web research + downloads + writing several files legitimately takes minutes. */
 const DEFAULT_RESEARCH_TIMEOUT_MS = 8 * 60_000;
 

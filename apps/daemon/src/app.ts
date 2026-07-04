@@ -19,6 +19,7 @@ import { serveProjectFile, serveFileFromBase, projectDir } from "./serve-static.
 import { figToJson, summarizeFig } from "./parse-fig.ts";
 import { serveWeb, defaultWebDir } from "./serve-web.ts";
 import { handleRun, handleRunStream, handleCancelRun } from "./run-handler.ts";
+import type { ResearchPhaseRunner } from "./research-phase.ts";
 import { handleExport, handleImportProject } from "./export-handler.ts";
 import { handleListFiles } from "./files-handler.ts";
 import {
@@ -94,6 +95,8 @@ export interface AppDeps {
   titleGenerator?: TitleGenerator;
   /** Prompt optimizer hook; tests can avoid launching a real agent. */
   promptOptimizer?: PromptOptimizer;
+  /** Research phase hook; tests can avoid launching a real research agent. */
+  researchPhase?: ResearchPhaseRunner;
   /** Moodboard chat one-shot agent hook; tests can avoid launching a real CLI. */
   moodboardAgentText?: MoodboardAgentTextRunner;
   /** Provider model-list fetcher; tests can avoid real network calls. */
