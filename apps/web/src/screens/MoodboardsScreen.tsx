@@ -3,6 +3,7 @@ import { Archive, ArchiveRestore, ArrowRight, ImagePlus, Images, LayoutGrid, Lis
 import type { Moodboard, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
+import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
 import { useToast } from "../components/Toast.tsx";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
@@ -45,7 +46,7 @@ function BoardThumb({ coverUrl }: { coverUrl?: string | null }) {
   return (
     <div className="aspect-[4/3] overflow-hidden border-b border-border bg-surface-2">
       {coverUrl ? (
-        <img src={coverUrl} alt="" className="h-full w-full object-cover" />
+        <img src={coverUrl} alt="" draggable={false} className="h-full w-full object-cover" />
       ) : (
         <div className="dz-canvas grid h-full w-full place-items-center text-muted-foreground/60">
           <Images size={28} strokeWidth={1.5} />
@@ -90,6 +91,7 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
   }, [api, toast]);
 
   useEffect(() => refresh(), [refresh]);
+  useAutoRefresh(refresh);
 
   const applyImageSettings = useCallback((settings: Settings) => {
     const models = imageModelOptions(settings);
@@ -497,7 +499,7 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
                 <StaggerItem as="li" key={board.id} className="border-b border-border last:border-0">
                   <div onClick={() => onOpenBoard(board.id)} className="group flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-2/50">
                     <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
-                      {board.coverUrl ? <img src={board.coverUrl} alt="" className="h-full w-full object-cover" /> : <div className="dz-canvas h-full w-full" />}
+                      {board.coverUrl ? <img src={board.coverUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : <div className="dz-canvas h-full w-full" />}
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium text-foreground">{board.name}</p>

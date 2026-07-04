@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Eye, Info, Palette, Puzzle, Server, SlidersHorizontal, Sun, Type } from "lucide-react";
 import { Button, Picker, Textarea, Loading, Badge, ScrollArea, Switch, Input } from "../components/ui/index.ts";
 import { cn } from "../lib/utils.ts";
@@ -26,16 +26,26 @@ function mergeSettingsSaveResponse(current: Settings | null, next: Settings): Se
   return merged;
 }
 
-const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = [
-  { id: "appearance", label: "Appearance", icon: Palette },
-  { id: "provider", label: "Agents", icon: Server },
-  { id: "models", label: "Providers", icon: SlidersHorizontal },
-  { id: "quality", label: "Quality", icon: Eye },
-  { id: "defaults", label: "Defaults", icon: SlidersHorizontal },
-  { id: "instructions", label: "Custom instructions", icon: Type },
-  { id: "extension", label: "Browser extension", icon: Puzzle },
-  { id: "about", label: "About", icon: Info },
+// Grouped into related pairs; a divider is drawn between groups in the sidebar.
+const SECTION_GROUPS: { id: SectionId; label: string; icon: typeof Palette }[][] = [
+  [
+    { id: "provider", label: "Agents", icon: Server },
+    { id: "models", label: "Providers", icon: SlidersHorizontal },
+  ],
+  [
+    { id: "appearance", label: "Appearance", icon: Palette },
+    { id: "defaults", label: "Defaults", icon: SlidersHorizontal },
+  ],
+  [
+    { id: "quality", label: "Quality", icon: Eye },
+    { id: "instructions", label: "Custom instructions", icon: Type },
+  ],
+  [
+    { id: "extension", label: "Browser extension", icon: Puzzle },
+    { id: "about", label: "About", icon: Info },
+  ],
 ];
+const SECTIONS: { id: SectionId; label: string; icon: typeof Palette }[] = SECTION_GROUPS.flat();
 
 function parseInitialSettingsTarget(initialSection?: string): { section: SectionId; focusTarget: ImageActionModelField | null } {
   const normalized = initialSection === "connection" || initialSection === "media" ? "models" : initialSection;
@@ -213,27 +223,32 @@ export function SettingsScreen({
           <div className="truncate text-[11px] text-muted-foreground">Local workspace</div>
         </div>
         <div className="mt-1 flex flex-col gap-0.5">
-          {SECTIONS.map((s) => {
-            const Icon = s.icon;
-            const active = section === s.id;
-            return (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => setSection(s.id)}
-                aria-current={active ? "page" : undefined}
-                className={cn(
-                  "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors",
-                  active
-                    ? "bg-background text-foreground ring-1 ring-border"
-                    : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-                )}
-              >
-                <Icon size={15} strokeWidth={1.75} className={active ? "text-primary" : ""} />
-                {s.label}
-              </button>
-            );
-          })}
+          {SECTION_GROUPS.map((group, gi) => (
+            <Fragment key={gi}>
+              {gi > 0 ? <div className="my-1.5 border-t border-border" /> : null}
+              {group.map((s) => {
+                const Icon = s.icon;
+                const active = section === s.id;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setSection(s.id)}
+                    aria-current={active ? "page" : undefined}
+                    className={cn(
+                      "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors",
+                      active
+                        ? "bg-background text-foreground ring-1 ring-border"
+                        : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
+                    )}
+                  >
+                    <Icon size={15} strokeWidth={1.75} className={active ? "text-primary" : ""} />
+                    {s.label}
+                  </button>
+                );
+              })}
+            </Fragment>
+          ))}
         </div>
         <div className="mt-auto px-2 pt-3 text-[11px] text-muted-foreground">
           {version ? `Daemon v${version}` : "Local-first · no telemetry"}

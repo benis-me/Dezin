@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { Card, Badge, Button, Loading, Segmented } from "../components/ui/index.ts";
 import { BrandGlyph, hasBrandLogo } from "../components/design-system-logos.tsx";
 import { useApi } from "../lib/api-context.tsx";
+import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
 import { navigate } from "../router.tsx";
 import type { DesignSystemCard, Swatch } from "../lib/api.ts";
 
@@ -58,16 +59,15 @@ export function DesignSystemsScreen() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "built-in" | "custom">("all");
 
-  useEffect(() => {
-    let alive = true;
+  const refresh = useCallback(() => {
     api
       .listDesignSystems()
-      .then((s) => alive && setSystems(s))
-      .catch((e) => alive && setError(e instanceof Error ? e.message : "failed to load"));
-    return () => {
-      alive = false;
-    };
+      .then(setSystems)
+      .catch((e) => setError(e instanceof Error ? e.message : "failed to load"));
   }, [api]);
+
+  useEffect(() => refresh(), [refresh]);
+  useAutoRefresh(refresh);
 
   return (
     <div className="relative h-full w-full overflow-auto">

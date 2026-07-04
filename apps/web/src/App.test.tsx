@@ -87,7 +87,7 @@ test("creating a project asks the daemon for a generated title in the background
   );
 
   fireEvent.change(screen.getByLabelText("Describe your design"), { target: { value: "A dashboard for pricing experiments" } });
-  fireEvent.click(screen.getByLabelText("Build"));
+  fireEvent.click(screen.getByLabelText("Design"));
 
   await waitFor(() => expect(createProject).toHaveBeenCalled());
   await waitFor(() => expect(generateProjectTitle).toHaveBeenCalledWith("p1", "A dashboard for pricing experiments"));

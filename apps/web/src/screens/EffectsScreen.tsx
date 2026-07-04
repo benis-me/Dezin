@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Plus, Sparkles } from "lucide-react";
 import { Badge, Button, Card, Dialog, Input, Loading, SearchInput, Segmented } from "../components/ui/index.ts";
 import { useApi } from "../lib/api-context.tsx";
+import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
 import { navigate } from "../router.tsx";
 import type { EffectCard } from "../lib/api.ts";
 
@@ -9,7 +10,7 @@ function EffectThumb({ effect }: { effect: EffectCard }) {
   return (
     <div data-testid={`effect-card-preview-${effect.id}`} className="relative aspect-[4/3] overflow-hidden border-b border-border bg-surface">
       {effect.previewUrl ? (
-        <img src={effect.previewUrl} alt={`${effect.name} preview`} loading="lazy" className="h-full w-full object-cover" />
+        <img src={effect.previewUrl} alt={`${effect.name} preview`} loading="lazy" draggable={false} className="h-full w-full object-cover" />
       ) : (
         <div className="grid h-full w-full place-items-center bg-[linear-gradient(135deg,var(--surface),var(--surface-2))] text-muted-foreground">
           <Sparkles size={18} strokeWidth={1.8} />
@@ -29,16 +30,15 @@ export function EffectsScreen({ startNew = false }: { startNew?: boolean }) {
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
 
-  useEffect(() => {
-    let alive = true;
+  const refresh = useCallback(() => {
     api
       .listEffects()
-      .then((items) => alive && setEffects(items))
-      .catch((e) => alive && setError(e instanceof Error ? e.message : "failed to load"));
-    return () => {
-      alive = false;
-    };
+      .then(setEffects)
+      .catch((e) => setError(e instanceof Error ? e.message : "failed to load"));
   }, [api]);
+
+  useEffect(() => refresh(), [refresh]);
+  useAutoRefresh(refresh);
 
   useEffect(() => {
     if (startNew) setDialogOpen(true);

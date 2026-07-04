@@ -49,6 +49,8 @@ import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
 import { takePendingComposer } from "../lib/pending-composer.ts";
 import { setPendingImages, setPendingAgent, setPendingRefs } from "../lib/pending-brief.ts";
+import { publishSettingsUpdated, SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
+import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
 import { fetchProjectArtifact, toBase64 } from "../lib/project-ref.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { cn } from "../lib/utils.ts";
@@ -155,7 +157,7 @@ function ProjectThumb({ coverUrl, runStatus }: { coverUrl?: string | null; runSt
   return (
     <div className="relative aspect-[16/10] overflow-hidden border-b border-border bg-surface-2">
       {coverUrl ? (
-        <img src={coverUrl} alt="" loading="lazy" className="h-full w-full object-cover object-top" />
+        <img src={coverUrl} alt="" loading="lazy" draggable={false} className="h-full w-full object-cover object-top" />
       ) : (
         <div className="dz-canvas grid h-full w-full place-items-center text-muted-foreground/40">
           <ImageIcon size={22} strokeWidth={1.5} />
@@ -165,6 +167,39 @@ function ProjectThumb({ coverUrl, runStatus }: { coverUrl?: string | null; runSt
         <ActiveRunBadge status={runStatus} />
       </div>
     </div>
+  );
+}
+
+/** A capsule toggle whose background tint AND indicator light both signal on/off. Must be
+ *  rendered inside a TooltipProvider. */
+function PillToggle({ on, label, tip, onToggle }: { on: boolean; label: string; tip: string; onToggle: () => void }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-label={label}
+          onClick={onToggle}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+            on
+              ? "border-emerald-500/30 bg-emerald-500/10 text-foreground"
+              : "border-border bg-surface-2 text-muted-foreground hover:border-border-strong hover:text-foreground",
+          )}
+        >
+          <span
+            aria-hidden
+            className={cn("size-1.5 rounded-full transition-all", on ? "bg-emerald-500 ring-2 ring-emerald-500/30" : "bg-muted-foreground/40")}
+          />
+          {label}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="max-w-64 text-pretty">
+        {tip}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -189,6 +224,10 @@ export function HomeScreen({
   const { agents, rescan: rescanAgents } = useAgents();
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
   const [settingsModel, setSettingsModel] = useState("");
+  // The two feature toggles surfaced on the home header — they ARE the global Settings values
+  // (researchEnabled / visualQaEnabled), kept in sync via the settings-updated event bus.
+  const [researchOn, setResearchOn] = useState(false);
+  const [visualReviewOn, setVisualReviewOn] = useState(false);
   const [homeAgent, setHomeAgent] = useState("");
   const [homeModel, setHomeModel] = useState("");
   const [designSystemId, setDesignSystemIdState] = useState(initialComposerPrefs.designSystemId ?? DEFAULT_DS);
@@ -231,10 +270,42 @@ export function HomeScreen({
       .finally(() => setLoading(false));
   }, [api, projectsOverride]);
 
+  // The home feature toggles write straight to global Settings (optimistic), then broadcast so
+  // the Settings screen (and anything else listening) stays in lock-step.
+  const toggleFeature = useCallback(
+    (key: "researchEnabled" | "visualQaEnabled", next: boolean) => {
+      const set = key === "researchEnabled" ? setResearchOn : setVisualReviewOn;
+      set(next);
+      api
+        .updateSettings({ [key]: next } as Partial<Settings>)
+        .then((s) => publishSettingsUpdated(s))
+        .catch(() => {
+          set(!next);
+          toast("Couldn't save that setting.", { variant: "error" });
+        });
+    },
+    [api, toast],
+  );
+
+  // Reflect changes made from the Settings screen (or another surface) without a refetch.
+  useEffect(() => {
+    const onSettings = (e: Event): void => {
+      const s = (e as CustomEvent<Settings>).detail;
+      if (!s) return;
+      setResearchOn(!!s.researchEnabled);
+      setVisualReviewOn(!!s.visualQaEnabled);
+    };
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onSettings);
+    return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettings);
+  }, []);
+
   useEffect(() => {
     if (projectsOverride) setProjects(projectsOverride);
     else refresh();
   }, [projectsOverride, refresh]);
+
+  // Keep the project list live — pick up run-status/cover changes without a manual reload.
+  useAutoRefresh(refresh, { enabled: !projectsOverride });
 
   // Consume a one-shot prefill from "remix" / template gallery.
   useEffect(() => {
@@ -299,6 +370,8 @@ export function HomeScreen({
         if (!alive) return;
         setSettingsAgent(s?.agentCommand ?? "");
         setSettingsModel(s?.model ?? "");
+        setResearchOn(!!s?.researchEnabled);
+        setVisualReviewOn(!!s?.visualQaEnabled);
       })
       .catch(() => alive && setSettingsAgent(""));
     return () => {
@@ -550,12 +623,30 @@ export function HomeScreen({
       />
       <div className="relative w-full px-7 pb-20 pt-10">
         <div className="mx-auto max-w-5xl">
-          {/* Compact tool header */}
-          <div className="max-w-2xl">
-            <h1 className="text-2xl font-semibold tracking-tight text-foreground">Start a design</h1>
-            <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
-              Describe what you want. Dezin builds a real, tasteful artifact, then lints it against its own anti-slop rules.
-            </p>
+          {/* Compact tool header — feature toggles ride the far right of the sub-line. */}
+          <div className="flex items-end justify-between gap-4">
+            <div className="max-w-2xl">
+              <h1 className="text-2xl font-semibold tracking-tight text-foreground">Start a design</h1>
+              <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+                Describe what you want. Dezin builds a real, tasteful artifact, then lints it against its own anti-slop rules.
+              </p>
+            </div>
+            <TooltipProvider>
+              <div className="flex shrink-0 items-center gap-2 pb-0.5">
+                <PillToggle
+                  on={researchOn}
+                  label="Design Research"
+                  tip="Before designing, study real competitors, audience & references into .research/, then build grounded in it. Adds time + agent tokens."
+                  onToggle={() => toggleFeature("researchEnabled", !researchOn)}
+                />
+                <PillToggle
+                  on={visualReviewOn}
+                  label="Visual Review"
+                  tip="After each build, a reviewer agent inspects the rendered screenshot & signals and drives design fixes."
+                  onToggle={() => toggleFeature("visualQaEnabled", !visualReviewOn)}
+                />
+              </div>
+            </TooltipProvider>
           </div>
 
           <div
@@ -734,10 +825,10 @@ export function HomeScreen({
                     size="lg"
                     onClick={submit}
                     disabled={optimizingPrompt || (brief.trim().length === 0 && images.length === 0)}
-                    aria-label="Build"
+                    aria-label="Design"
                     className="px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
                   >
-                    Build
+                    Design
                     <ArrowRight size={16} strokeWidth={2} />
                   </Button>
                 </div>
@@ -854,7 +945,7 @@ export function HomeScreen({
                   ? "No projects match your search. Try a different term."
                   : view === "archived"
                     ? "Projects you archive will show up here — restore them any time."
-                    : "Describe a design in the box above and hit Build to create your first project."}
+                    : "Describe a design in the box above and hit Design to create your first project."}
               </p>
             </div>
           </div>
@@ -904,7 +995,7 @@ export function HomeScreen({
                   >
                     <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
                       {p.coverUrl ? (
-                        <img src={p.coverUrl} alt="" className="h-full w-full object-cover" />
+                        <img src={p.coverUrl} alt="" draggable={false} className="h-full w-full object-cover" />
                       ) : (
                         <div className="dz-canvas grid h-full w-full place-items-center">
                           <ImageIcon size={13} strokeWidth={1.5} className="text-muted-foreground/60" />

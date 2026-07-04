@@ -224,7 +224,7 @@ test("HomeScreen Build passes the brief, skillId, and designSystemId", async () 
   await user.click(screen.getByRole("button", { name: "Design system" }));
   await user.click(await screen.findByText("Editorial"));
 
-  const build = screen.getByLabelText("Build");
+  const build = screen.getByLabelText("Design");
   expect(build).toHaveClass("rounded-lg");
   expect(build).not.toHaveClass("rounded-xl");
   expect(build).toBeDisabled();
@@ -312,7 +312,7 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
   });
 
   expect(textarea).toHaveValue("Create a finished shader microsite with sourced assets.");
-  fireEvent.click(screen.getByLabelText("Build"));
+  fireEvent.click(screen.getByLabelText("Design"));
   expect(onNewProject).toHaveBeenCalledWith("Create a finished shader microsite with sourced assets.", "frontend-design", "modern-minimal", "prototype");
 
   await user.click(screen.getByRole("button", { name: "Reject optimized prompt" }));
