@@ -73,6 +73,19 @@ test("ResearchCard renders directions as cards carrying a one-line summary", () 
   expect(cards.find((c) => c.textContent?.includes("Calm editorial"))!.getAttribute("data-selected")).toBe("false");
 });
 
+test("ResearchCard long direction titles truncate instead of overflowing the card (min-w-0)", () => {
+  const research: ResearchCardData = {
+    ...doneResearch,
+    directions: [{ slug: "b", title: "Direction B — Workbench (the convention-breaker)", summary: "A calm chat that knows it is a coding tool." }],
+  };
+  render(<ResearchCard research={research} onOpen={() => {}} />);
+  const title = screen.getByText("Direction B — Workbench (the convention-breaker)");
+  // `truncate` only clips-with-ellipsis when the flex child can shrink below its content width,
+  // which requires min-w-0 — otherwise the title overflows and the card's overflow-hidden slices it.
+  expect(title.className).toContain("truncate");
+  expect(title.className).toContain("min-w-0");
+});
+
 test("ResearchCard's search icon reflects the running state (animated while researching)", () => {
   const running: ResearchCardData = { status: "running", activities: [] };
   const { rerender } = render(<ResearchCard research={running} />);
