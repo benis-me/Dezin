@@ -143,6 +143,33 @@ test("reviewWithRetry does not retry when the first pass already produced a revi
   assert.ok(findings.some((f) => f.id === "visual-reviewed"));
 });
 
+test("agentReviewPrompt lists on-page selectors and asks the critic to anchor each finding to one", () => {
+  const input = {
+    htmlPath: "/proj/index.html",
+    projectRoot: "/proj",
+    brief: "A chat UI",
+    criticElements: [
+      { selector: ".btn-send", tag: "button", text: "Send", w: 64, h: 32, x: 1100, y: 720 },
+      { selector: "#sidebar", tag: "aside", text: "", w: 240, h: 800, x: 0, y: 0 },
+    ],
+  } as unknown as VisualQaInput;
+  const prompt = agentReviewPrompt(input, "/proj/.visual-qa/shot.png");
+  assert.match(prompt, /ON-PAGE ELEMENTS/);
+  assert.match(prompt, /\.btn-send — button "Send"/);
+  assert.match(prompt, /set "selector"/i);
+  assert.match(prompt, /"selector":"exact selector or omit"/);
+});
+
+test("parseVisualReview anchors a finding to the selector the critic returned", () => {
+  const findings = parseVisualReview(
+    JSON.stringify({
+      findings: [{ kind: "improvement", severity: "P2", selector: ".btn-send", message: "Send has redundant text + arrow.", fix: "Drop the arrow icon." }],
+    }),
+  );
+  const imp = findings.find((f) => f.id.startsWith("visual-improve"))!;
+  assert.equal(imp.selector, ".btn-send");
+});
+
 test("auditVisualArtifact is disabled by settings", async () => {
   const findings = await auditVisualArtifact({
     htmlPath: "/does/not/exist/index.html",

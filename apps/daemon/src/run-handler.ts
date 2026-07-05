@@ -159,7 +159,28 @@ const DEFAULT_AUTO_IMPROVE_MAX_ROUNDS = 8;
 const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"]);
 
 /** Max bounded design-improvement (ceiling) rounds once the floor (defects/slop) is clean. */
-const CEILING_MAX_ROUNDS = 2;
+const CEILING_MAX_ROUNDS = 3;
+/** How many times one design suggestion may be fed back before we give up on it. If the agent
+ *  keeps not applying it (the critic keeps re-raising it), re-sending it again just wastes a
+ *  round — a "verify-applied" convergence signal that beats a blind round cap. */
+const IMPROVE_RECUR_LIMIT = 1;
+
+/** Stable identity for a design suggestion across rounds — its target selector + a normalized
+ *  message prefix — so we can tell whether the SAME suggestion keeps recurring (i.e. wasn't
+ *  applied) versus a genuinely new one. */
+export function improvementKey(f: QualityFinding): string {
+  const msg = f.message.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 60);
+  return `${f.selector ?? ""}::${msg}`;
+}
+
+/** Verify-applied: return the suggestions still worth re-sending (fed back fewer than the recur
+ *  limit) and record this round's attempt in `history`. A suggestion the critic keeps re-raising
+ *  has clearly not been applied — dropping it converges the ceiling without nagging. */
+export function freshImprovements(improvements: QualityFinding[], history: Map<string, number>): QualityFinding[] {
+  const fresh = improvements.filter((f) => (history.get(improvementKey(f)) ?? 0) < IMPROVE_RECUR_LIMIT);
+  for (const f of improvements) history.set(improvementKey(f), (history.get(improvementKey(f)) ?? 0) + 1);
+  return fresh;
+}
 
 /** The lint/FLOOR score — slop + defects only. The ceiling (advisory design improvements + the
  *  "reviewed" marker) is separate and must NOT drag the floor score down. */
@@ -715,6 +736,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       let bestFloorScore = 0;
       let floorStalled = 0;
       let improvementRounds = 0;
+      const improvementHistory = new Map<string, number>(); // suggestion key → times fed back (verify-applied)
       const emitStandardPreviewUpdate = async (eventRound: number): Promise<void> => {
         try {
           const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId));
@@ -883,13 +905,16 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           }
           if (floorStalled < 2) repairFindings = defects.concat(improvements.slice(0, 3));
         } else if (improvements.length > 0 && improvementRounds < CEILING_MAX_ROUNDS) {
-          // Ceiling phase — ADVISORY design suggestions: once the floor is clean, apply the
-          // critic's improvement suggestions for a bounded number of rounds. It converges naturally
-          // — it stops when the critic returns no more suggestions, the oscillation guard trips, or
-          // this cap is hit. No design SCORE drives this: quantifying design quality is unreliable
-          // and imposes taste; the suggestions are advisory and simply run out.
-          improvementRounds += 1;
-          repairFindings = improvements;
+          // Ceiling phase — ADVISORY design suggestions. Verify-applied: only re-send suggestions
+          // that haven't already been fed back and left unapplied. A suggestion the critic keeps
+          // re-raising (same selector + message) is one the agent won't/can't apply — sending it
+          // again just burns a round. We converge when there's nothing FRESH left to try (or the
+          // cap / oscillation guard trips). No design SCORE — the suggestions simply run out.
+          const fresh = freshImprovements(improvements, improvementHistory);
+          if (fresh.length > 0) {
+            improvementRounds += 1;
+            repairFindings = fresh;
+          }
         }
         if (!repairFindings || !repairFindings.length) break;
 

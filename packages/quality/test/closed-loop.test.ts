@@ -77,3 +77,12 @@ test("blockOn can include P1", async () => {
 test("renderFindingsForAgent returns null when clean", () => {
   assert.equal(renderFindingsForAgent(lintArtifact(CLEAN_ARTIFACT)), null);
 });
+
+test("renderFindingsForAgent surfaces a target selector for precise, checkable repair", () => {
+  const block = renderFindingsForAgent([
+    { severity: "P2", id: "visual-improve-1", message: "Send has a redundant arrow.", fix: "Drop the arrow.", selector: ".btn-send" },
+  ]);
+  assert.ok(block);
+  assert.match(block!, /Target element: `\.btn-send`/);
+  assert.match(block!, /Send has a redundant arrow/);
+});

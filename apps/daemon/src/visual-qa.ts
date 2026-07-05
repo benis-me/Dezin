@@ -20,8 +20,51 @@ export interface VisualQaInput {
   brief?: string;
   /** The chosen direction's spec (its Visual Language etc.) — the critic's aesthetic contract. */
   directionSpec?: string;
+  /** Compact map of on-page elements (selector + text + box) so the critic can anchor each
+   *  finding to a specific DOM element, and the repair can target it precisely. */
+  criticElements?: CriticElement[];
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
   consoleMessages?: VisualQaConsoleMessage[];
+}
+
+/** One on-page element the critic may target, derived from the geometry snapshot. */
+export interface CriticElement {
+  selector: string;
+  tag: string;
+  text: string;
+  w: number;
+  h: number;
+  x: number;
+  y: number;
+}
+
+const INTERACTIVE_TAGS = new Set(["button", "a", "input", "textarea", "select", "label"]);
+const LANDMARK_TAGS = new Set(["header", "nav", "main", "aside", "footer", "form", "dialog", "section"]);
+
+/** Distil the raw geometry elements into a compact, identifiable set the critic can reference —
+ *  interactive controls, landmarks, id/data-id'd nodes, and anything with visible text. */
+function toCriticElements(elements: GeometryElement[]): CriticElement[] {
+  const out: CriticElement[] = [];
+  const seen = new Set<string>();
+  for (const el of elements) {
+    if (el.rect.width < 8 || el.rect.height < 8) continue;
+    const identifiable =
+      el.selector.startsWith("#") || el.selector.startsWith("[data-dezin-id") || INTERACTIVE_TAGS.has(el.tag) || LANDMARK_TAGS.has(el.tag);
+    if (!identifiable && el.text.trim().length === 0) continue;
+    if (seen.has(el.selector)) continue;
+    seen.add(el.selector);
+    out.push({
+      selector: el.selector,
+      tag: el.tag,
+      text: el.text.replace(/\s+/g, " ").trim().slice(0, 60),
+      w: Math.round(el.rect.width),
+      h: Math.round(el.rect.height),
+      x: Math.round(el.rect.left),
+      y: Math.round(el.rect.top),
+    });
+    if (out.length >= 45) break;
+  }
+  return out;
 }
 
 export type VisualQaRunner = (input: VisualQaInput) => Promise<QualityFinding[]>;
@@ -99,6 +142,9 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
       return `[${index + 1}] ${m.type}/${m.level}${where ? ` ${where}` : ""}: ${m.text}`;
     })
     .join("\n");
+  const elementList = (input.criticElements ?? [])
+    .map((e) => `- ${e.selector} — ${e.tag}${e.text ? ` "${e.text}"` : ""} ${e.w}x${e.h} at ${e.x},${e.y}`)
+    .join("\n");
   return [
     "You are a senior product designer reviewing the latest rendered result for the current Dezin conversation.",
     `Rendered screenshot (full page, top to bottom): ${screenshotRel}`,
@@ -108,12 +154,16 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
     history ? `Current conversation context:\n${history}` : "",
     brief ? `USER BRIEF:\n${brief}` : "",
     directionSpec ? `CHOSEN DIRECTION (what the build was aiming for):\n${directionSpec}` : "",
+    elementList
+      ? `ON-PAGE ELEMENTS you can target — use these EXACT selector strings (tag "text" WxH at x,y):\n${elementList}`
+      : "",
     "Use the full-page screenshot as primary evidence (it shows below-the-fold content too). You may read the artifact and assets for context, but do not create, edit, or write files.",
     "Report findings in two clearly separated kinds — do not conflate them:",
     '- kind "defect" (severity P0/P1): OBJECTIVE, verifiable problems only — overlap, clipping, elements offscreen or orphaned, content overflowing below the fold, broken or negative spacing, unreadable text (contrast/size), misalignment, or a runtime/console error. These are things that are measurably wrong. Do NOT file taste, palette, or aesthetic preferences as defects — colour and style are the user\'s call, not a bug.',
     '- kind "improvement" (severity P2): concrete, actionable design SUGGESTIONS — hierarchy, spacing/rhythm, composition, type scale, restraint, and how well the result matches the brief and chosen direction (e.g. if the direction implies near-monochrome and the build leans on a saturated accent, suggest the change). These are ADVISORY — the user decides whether to take them. Be specific, never vague taste talk.',
+    "For EVERY finding, set \"selector\" to the ONE element it is about, copied EXACTLY from the ON-PAGE ELEMENTS list above — this lets the fix target that element precisely. Omit selector only for a genuinely page-wide finding. Make each fix a concrete, verifiable change to that element.",
     "Report as many of each as genuinely matter — several, or none. Do NOT invent findings to hit a count; if nothing is objectively broken and nothing would clearly improve it, return an empty findings list.",
-    'Return JSON only, exactly: {"findings":[{"kind":"defect|improvement","severity":"P0|P1|P2","message":"...","fix":"...","snippet":"optional"}]}.',
+    'Return JSON only, exactly: {"findings":[{"kind":"defect|improvement","severity":"P0|P1|P2","selector":"exact selector or omit","message":"...","fix":"..."}]}.',
   ]
     .filter(Boolean)
     .join("\n");
@@ -257,8 +307,9 @@ export function parseVisualReview(text: string): QualityFinding[] {
   let defectN = 0;
   let improveN = 0;
   for (const item of findingsRaw) {
-    const f = item as { severity?: unknown; message?: unknown; fix?: unknown; snippet?: unknown; kind?: unknown };
+    const f = item as { severity?: unknown; message?: unknown; fix?: unknown; snippet?: unknown; kind?: unknown; selector?: unknown };
     if (!isSeverity(f.severity) || typeof f.message !== "string") continue;
+    const selector = typeof f.selector === "string" && f.selector.trim() ? f.selector.trim().slice(0, 200) : undefined;
     // "A few" of each — however many genuinely matter (or none). Sane caps guard against a
     // runaway response, but there is no forced count. Defects (P0/P1) vs design improvements (P2).
     const isImprovement = f.kind === "improvement" || (f.kind !== "defect" && f.severity === "P2");
@@ -270,6 +321,7 @@ export function parseVisualReview(text: string): QualityFinding[] {
         id: `visual-improve-${improveN}`,
         message: f.message,
         fix: typeof f.fix === "string" && f.fix ? f.fix : "Apply the design improvement described.",
+        selector,
         snippet: typeof f.snippet === "string" ? f.snippet : undefined,
       });
     } else {
@@ -280,6 +332,7 @@ export function parseVisualReview(text: string): QualityFinding[] {
         id: `visual-ai-review-${defectN}`,
         message: f.message,
         fix: typeof f.fix === "string" && f.fix ? f.fix : "Adjust the layout and visual hierarchy in the screenshot.",
+        selector,
         snippet: typeof f.snippet === "string" ? f.snippet : undefined,
       });
     }
@@ -296,7 +349,7 @@ async function collectGeometry(
   htmlPath: string,
   screenshotPath?: string,
   renderUrl?: string,
-): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[] }> {
+): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[]; elements: CriticElement[] }> {
   const consoleMessages: VisualQaConsoleMessage[] = [];
   const executablePath = findChrome();
   if (!executablePath) {
@@ -310,9 +363,11 @@ async function collectGeometry(
         },
       ],
       consoleMessages,
+      elements: [],
     };
   }
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
+  let elements: CriticElement[] = [];
   try {
     browser = await puppeteer.launch({ executablePath, headless: true, args: ["--no-sandbox", "--hide-scrollbars"] });
     const all: QualityFinding[] = [];
@@ -434,10 +489,13 @@ async function collectGeometry(
         };
       }));
       all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label));
-      if (viewport.label === "desktop" && screenshotPath) {
-        await mkdir(dirname(screenshotPath), { recursive: true });
-        // Bound the capture too — full-page screenshot of a wedged/animating page can hang.
-        await withTimeout(15_000, page.screenshot({ path: screenshotPath as `${string}.png`, type: "png", fullPage: true }));
+      if (viewport.label === "desktop") {
+        elements = toCriticElements((snapshot as GeometrySnapshot).elements ?? []);
+        if (screenshotPath) {
+          await mkdir(dirname(screenshotPath), { recursive: true });
+          // Bound the capture too — full-page screenshot of a wedged/animating page can hang.
+          await withTimeout(15_000, page.screenshot({ path: screenshotPath as `${string}.png`, type: "png", fullPage: true }));
+        }
       }
       await page.close().catch(() => {});
     }
@@ -449,6 +507,7 @@ async function collectGeometry(
         return true;
       }),
       consoleMessages,
+      elements,
     };
   } catch {
     return {
@@ -461,6 +520,7 @@ async function collectGeometry(
         },
       ],
       consoleMessages,
+      elements,
     };
   } finally {
     await browser?.close().catch(() => {});
@@ -576,6 +636,6 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
   const geometry = await collectGeometry(input.htmlPath, screenshotPath, input.renderUrl);
-  const ai = await reviewScreenshotWithAgent({ ...input, consoleMessages: geometry.consoleMessages }, screenshotPath);
+  const ai = await reviewScreenshotWithAgent({ ...input, consoleMessages: geometry.consoleMessages, criticElements: geometry.elements }, screenshotPath);
   return [...geometry.findings, ...ai];
 }

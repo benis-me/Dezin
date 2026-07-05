@@ -62,6 +62,8 @@ export interface QualityFinding {
   message: string;
   fix: string;
   snippet?: string;
+  /** CSS selector the finding targets, if any — for precise, checkable repair instructions. */
+  selector?: string;
   screenshotPath?: string;
   screenshotUrl?: string;
   reviewSummary?: string;

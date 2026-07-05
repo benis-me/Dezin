@@ -15,6 +15,8 @@ export interface Finding {
   fix: string;
   /** Optional offending source excerpt. */
   snippet?: string;
+  /** Optional CSS selector the finding targets — for precise, checkable repair instructions. */
+  selector?: string;
 }
 
 export interface LintOptions {

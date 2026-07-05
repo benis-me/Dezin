@@ -32,6 +32,7 @@ export function renderFindingsForAgent(findings: Finding[]): string | null {
   lines.push("");
   for (const f of findings) {
     lines.push(`**[${f.severity}] ${f.id}** — ${f.message}`);
+    if (f.selector) lines.push(`Target element: \`${f.selector}\` — change exactly this element.`);
     lines.push(`Fix: ${f.fix}`);
     if (f.snippet) lines.push(`Snippet: ${truncate(f.snippet, 160)}`);
     lines.push("");
