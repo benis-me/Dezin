@@ -73,6 +73,15 @@ function toRel(root: string, file: string): string {
   return relative(root, file).split(sep).join("/");
 }
 
+/** Reject if `p` doesn't settle within `ms`, so a wedged headless page (blocked main thread,
+ *  stuck WASM, perpetual animation) can never hang the capture and silently kill the critic. */
+function withTimeout<T>(ms: number, p: Promise<T>): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`visual capture step timed out after ${ms}ms`)), ms)),
+  ]);
+}
+
 export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string): string {
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const artifactRel = toRel(projectDir, input.htmlPath);
@@ -351,11 +360,13 @@ async function collectGeometry(
         });
       });
       await page.setViewport({ width: viewport.width, height: viewport.height, deviceScaleFactor: 1 });
-      await page.goto(renderUrl ?? pathToFileURL(htmlPath).href, { waitUntil: "load", timeout: 10000 });
-      // Wait for the app to actually paint before screenshotting/inspecting. A React SPA mounts
-      // AFTER `load`, so the old domcontentloaded+400ms sometimes captured a pre-mount blank frame
-      // and the critic reviewed an empty page (round-0/2 empty reviews). Poll for real content,
-      // then a short paint settle.
+      // Use `domcontentloaded`, NOT `load`: on real apps a never-settling resource (async Shiki
+      // WASM, the Vite HMR socket, a perpetual animation) can keep `load` from firing within the
+      // timeout, so `goto` throws and the whole review fails (visual-render-failed → no screenshot
+      // → the critic silently returns nothing and the run "passes" on lint alone). We do NOT need
+      // `load`: we explicitly poll for real painted content next, which is what avoids the
+      // pre-mount blank frame that motivated the earlier `load` switch.
+      await page.goto(renderUrl ?? pathToFileURL(htmlPath).href, { waitUntil: "domcontentloaded", timeout: 15000 });
       await page
         .waitForFunction(
           () => {
@@ -363,11 +374,18 @@ async function collectGeometry(
             if (!body) return false;
             return body.scrollHeight > 40 && ((body as any).innerText ?? "").trim().length > 20;
           },
-          { timeout: 4000, polling: 100 },
+          { timeout: 5000, polling: 100 },
         )
         .catch(() => {});
       await new Promise((r) => setTimeout(r, 500));
-      const snapshot = await page.evaluate(() => {
+      // Freeze animations/transitions/caret so a perpetually-animating page (streaming carets,
+      // infinite loaders) can't keep the full-page capture from settling.
+      await withTimeout(4_000, page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important;scroll-behavior:auto!important;}" })).catch(() => {});
+      // Bound the geometry read: a page that has wedged its main thread (heavy sync work, a stuck
+      // WASM load) makes page.evaluate hang forever, which would freeze the whole run with no
+      // ceiling judgment. On timeout this throws and the outer catch records a graceful
+      // visual-render-failed instead of hanging.
+      const snapshot = await withTimeout(12_000, page.evaluate(() => {
         const win = globalThis as any;
         const doc = win.document;
         const escapeCss = (value: string) => {
@@ -421,11 +439,12 @@ async function collectGeometry(
           bodyTextLength: (body.innerText ?? "").trim().length,
           elements,
         };
-      });
+      }));
       all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label));
       if (viewport.label === "desktop" && screenshotPath) {
         await mkdir(dirname(screenshotPath), { recursive: true });
-        await page.screenshot({ path: screenshotPath as `${string}.png`, type: "png", fullPage: true });
+        // Bound the capture too — full-page screenshot of a wedged/animating page can hang.
+        await withTimeout(15_000, page.screenshot({ path: screenshotPath as `${string}.png`, type: "png", fullPage: true }));
       }
       await page.close().catch(() => {});
     }
