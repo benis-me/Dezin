@@ -1,3 +1,6 @@
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { previewBridgeOriginForSrc } from "./preview-sandbox.ts";
+
 export type RuntimeErrorKind = "fatal" | "nonfatal";
 export type RuntimeErrorType = "error" | "unhandledrejection" | "console" | "resource" | "request";
 
@@ -86,4 +89,58 @@ export function dismissFatal(state: RuntimeErrorState): RuntimeErrorState {
 
 export function dismissNonFatal(state: RuntimeErrorState, sig: string): RuntimeErrorState {
   return { ...state, nonFatal: state.nonFatal.filter((e) => e.sig !== sig) };
+}
+
+const BLANK_FATAL: RuntimeError = {
+  source: "dezin", type: "runtime-error", kind: "fatal", errorType: "error",
+  message: "The preview did not render.", count: 1, at: 0, sig: "blank|The preview did not render.|:0",
+};
+
+export function usePreviewRuntimeErrors(args: {
+  iframeRef: RefObject<HTMLIFrameElement | null>;
+  previewSrc: string | null;
+  runActive: boolean;
+  watchdogMs?: number;
+  armed?: boolean;
+}): { fatal: RuntimeError | null; nonFatal: RuntimeError[]; dismissFatal(): void; dismissNonFatal(sig: string): void } {
+  const { iframeRef, previewSrc, runActive, watchdogMs = 8000, armed = true } = args;
+  const [state, setState] = useState<RuntimeErrorState>(initialRuntimeErrorState);
+  const runActiveRef = useRef(runActive);
+  runActiveRef.current = runActive;
+
+  useEffect(() => {
+    setState(resetRuntimeErrors());
+    const onMessage = (event: MessageEvent): void => {
+      const iframe = iframeRef.current;
+      if (!iframe?.contentWindow || event.source !== iframe.contentWindow) return;
+      if (event.origin !== previewBridgeOriginForSrc(previewSrc)) return;
+      const data = event.data;
+      if (isHeartbeatMessage(data)) {
+        clearTimeout(timer);
+        return;
+      }
+      if (isRuntimeErrorMessage(data)) {
+        clearTimeout(timer);
+        setState((s) => ingestRuntimeError(s, data, { runActive: runActiveRef.current }));
+      }
+    };
+    window.addEventListener("message", onMessage);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (armed && previewSrc) {
+      timer = setTimeout(() => {
+        setState((s) => (s.fatal || runActiveRef.current || s.dismissedFatalSig === BLANK_FATAL.sig ? s : { ...s, fatal: BLANK_FATAL }));
+      }, watchdogMs);
+    }
+    return () => {
+      window.removeEventListener("message", onMessage);
+      clearTimeout(timer);
+    };
+  }, [iframeRef, previewSrc, watchdogMs, armed]);
+
+  return {
+    fatal: state.fatal,
+    nonFatal: state.nonFatal,
+    dismissFatal: () => setState(dismissFatal),
+    dismissNonFatal: (sig: string) => setState((s) => dismissNonFatal(s, sig)),
+  };
 }
