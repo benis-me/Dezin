@@ -144,3 +144,22 @@ export function usePreviewRuntimeErrors(args: {
     dismissNonFatal: (sig: string) => setState((s) => dismissNonFatal(s, sig)),
   };
 }
+
+export function buildRuntimeErrorRepairPrompt(errors: RuntimeError[], ctx: { mode: string; projectPath?: string }): string {
+  const blocks = errors.map((e, i) => {
+    const lines = [
+      `${i + 1}. [${e.errorType}${e.count > 1 ? ` ×${e.count}` : ""}] ${e.message}`,
+      e.src ? `   source: ${e.src}${e.line ? `:${e.line}` : ""}` : "",
+      e.stack ? `   stack: ${e.stack}` : "",
+    ];
+    return lines.filter(Boolean).join("\n");
+  });
+  return `The live preview reported runtime errors. Find the root cause in this project's source and fix it.
+
+Build mode: ${ctx.mode}${ctx.projectPath ? `\nProject path: ${ctx.projectPath}` : ""}
+
+Runtime errors observed in the rendered preview:
+${blocks.join("\n")}
+
+Fix the underlying bug in the project's code (not by hiding the error), then confirm the preview renders without these errors.`;
+}

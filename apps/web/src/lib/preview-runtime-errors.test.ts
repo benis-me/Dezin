@@ -1,5 +1,15 @@
 import { expect, test } from "vitest";
-import { isRuntimeErrorMessage, isHeartbeatMessage, signatureOf } from "./preview-runtime-errors.ts";
+import {
+  isRuntimeErrorMessage,
+  isHeartbeatMessage,
+  signatureOf,
+  initialRuntimeErrorState,
+  ingestRuntimeError,
+  dismissFatal,
+  dismissNonFatal,
+  buildRuntimeErrorRepairPrompt,
+  type RuntimeErrorMessage,
+} from "./preview-runtime-errors.ts";
 
 const base = { source: "dezin", type: "runtime-error", kind: "fatal", errorType: "error", message: "boom", count: 1, at: 1 };
 
@@ -25,8 +35,6 @@ test("signatureOf is stable across identical errors", () => {
   );
   expect(signatureOf({ errorType: "error", message: "x" })).not.toBe(signatureOf({ errorType: "error", message: "y" }));
 });
-
-import { initialRuntimeErrorState, ingestRuntimeError, dismissFatal, dismissNonFatal } from "./preview-runtime-errors.ts";
 
 const msg = (over: Partial<RuntimeErrorMessage> = {}): RuntimeErrorMessage => ({
   source: "dezin", type: "runtime-error", kind: "nonfatal", errorType: "console", message: "m", count: 1, at: 1, ...over,
@@ -65,4 +73,16 @@ test("dismissNonFatal removes one entry by signature", () => {
   let s = ingestRuntimeError(initialRuntimeErrorState, msg({ message: "a" }), { runActive: false });
   s = dismissNonFatal(s, s.nonFatal[0].sig);
   expect(s.nonFatal).toHaveLength(0);
+});
+
+test("repair prompt includes message, stack, source and asks to fix + verify", () => {
+  const p = buildRuntimeErrorRepairPrompt(
+    [{ source: "dezin", type: "runtime-error", kind: "fatal", errorType: "error", message: "x is not a function", stack: "at App (App.tsx:10)", src: "App.tsx", line: 10, count: 2, at: 1, sig: "s" }],
+    { mode: "standard", projectPath: "/p" },
+  );
+  expect(p).toMatch(/x is not a function/);
+  expect(p).toMatch(/App\.tsx/);
+  expect(p).toMatch(/at App/);
+  expect(p.toLowerCase()).toMatch(/fix/);
+  expect(p.toLowerCase()).toMatch(/preview|render/);
 });
