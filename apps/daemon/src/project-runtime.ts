@@ -57,20 +57,32 @@ export async function ensureProjectPickerBridge(projectDir: string): Promise<boo
   const viteConfig = join(projectDir, "vite.config.js");
   if (!existsSync(viteConfig)) return false;
   const [current, template] = await Promise.all([readFile(viteConfig, "utf8"), readFile(join(templateDir(), "vite.config.js"), "utf8")]);
-  const templateBlock = template.match(PICKER_BRIDGE_BLOCK)?.[0];
-  if (!templateBlock) return false;
   const start = current.indexOf(PICKER_BRIDGE_START);
   const pluginStart = start >= 0 ? current.indexOf(PICKER_PLUGIN_START, start) : -1;
   const currentBlock = current.match(PICKER_BRIDGE_BLOCK);
-  const range =
-    start >= 0 && pluginStart > start
-      ? { start, end: pluginStart, separator: "\n" }
-      : currentBlock
-        ? { start: currentBlock.index ?? -1, end: (currentBlock.index ?? -1) + currentBlock[0].length, separator: "" }
-        : undefined;
+  const isWideRange = start >= 0 && pluginStart > start;
+  const range = isWideRange
+    ? { start, end: pluginStart }
+    : currentBlock
+      ? { start: currentBlock.index ?? -1, end: (currentBlock.index ?? -1) + currentBlock[0].length }
+      : undefined;
   if (!range || range.start < 0) return false;
+  // When the current file still has a `function dezinPicker` anchor, restore everything
+  // between the bridge declaration and that anchor — picker bridge, runtime probe, and any
+  // comments/blank lines between them — verbatim from the template, so a corrupted project
+  // gets both scripts back, not just the picker (the template slice already carries its own
+  // trailing newline, and `suffix` below starts with the plugin marker's leading newline, so
+  // no extra separator is needed). Otherwise (minimal/legacy files with no plugin-function
+  // anchor) fall back to replacing only the regex-matched PICKER_BRIDGE block.
+  const templateStart = template.indexOf(PICKER_BRIDGE_START);
+  const templatePluginStart = templateStart >= 0 ? template.indexOf(PICKER_PLUGIN_START, templateStart) : -1;
+  const templateBlock =
+    isWideRange && templateStart >= 0 && templatePluginStart > templateStart
+      ? template.slice(templateStart, templatePluginStart)
+      : template.match(PICKER_BRIDGE_BLOCK)?.[0];
+  if (!templateBlock) return false;
   const suffix = current.slice(range.end);
-  const updated = `${current.slice(0, range.start)}${templateBlock}${range.separator || (suffix.startsWith("\n") ? "" : "\n")}${suffix}`;
+  const updated = `${current.slice(0, range.start)}${templateBlock}${suffix.startsWith("\n") ? "" : "\n"}${suffix}`;
   if (updated === current) return false;
   await writeFile(viteConfig, updated);
   return true;
