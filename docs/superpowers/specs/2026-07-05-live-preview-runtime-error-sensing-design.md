@@ -12,6 +12,17 @@ This feature adds a closed **sense → surface → fix** loop on the *live, user
 
 This is the live complement to the existing headless Visual Review loop (`visual-qa.ts`), which only senses runtime errors during generation, in a headless browser, for the reviewer agent — never on the user's live preview.
 
+## Post-launch revisions (v0.22.1)
+
+Real-world use after the v0.22.0 launch surfaced three issues. The fixes below **supersede parts of the original design that follows** — read this section as the current shape of the feature.
+
+1. **Blank detection is in-frame, not a parent watchdog.** The original parent-side no-heartbeat watchdog false-fired "did not render" on slow-but-fine Standard previews: a warm preview's one-shot heartbeat arrived *before* the watchdog armed on `setupPhase`, then the freshly-armed timer had nothing to cancel it. The heartbeat and the parent watchdog are **removed**. Instead the **probe** self-detects a blank after the DOM is ready using its own `hasContent()` (authoritative — no cross-frame guessing, no arming race) and posts a `blank` fatal error only when the page genuinely renders nothing (12 s grace, so a slow render never false-fires).
+2. **Surface is a single non-masking corner bubble, not a two-tier overlay + badge.** The full-cover fatal overlay hid working content and read only "did not render." `PreviewRuntimeErrorOverlay` is now one dismissible bubble pinned bottom-right (fatal + non-fatal together); its wrapper is `pointer-events-none` so the preview stays fully visible and interactive behind it.
+3. **The probe is injected into `<head>`, not before `</body>`,** so its hooks install before the page's own scripts and parse-time errors are caught. (The picker bridge stays at body-end — it manipulates the DOM.)
+4. **Repairs bypass Research.** "Fix with Agent" is a targeted code fix, not a new design exploration, so the repair run passes `research: false`; the daemon treats `research: false` as a hard opt-out over `settings.researchEnabled`, so a repair no longer dead-ends at the Research direction gate.
+
+The `sense → surface → fix` shape, the fatal/non-fatal classification, the `runBrief` repair pipeline, the global `autoFixLiveRuntimeErrors` toggle, and the deliberately-deferred CDP layer are all unchanged.
+
 ## Scope
 
 In scope:
