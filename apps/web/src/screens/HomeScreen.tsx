@@ -566,6 +566,7 @@ export function HomeScreen({
 
   const skillName = (id?: string | null) => skills.find((s) => s.id === id)?.name;
   const dsName = (id?: string | null) => systems.find((s) => s.id === id)?.name ?? id ?? "";
+  const modeLabel = (m?: ProjectMode) => (m === "standard" ? "Standard" : "Prototype");
 
   const archivedCount = projects.filter((p) => p.archivedAt).length;
   const activeCount = projects.length - archivedCount;
@@ -963,7 +964,7 @@ export function HomeScreen({
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
                         <p className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-muted-foreground">
-                          <span className="truncate">{dsName(p.designSystemId)}</span>
+                          <span className="truncate">{dsName(p.designSystemId) || modeLabel(p.mode)}</span>
                           {skillName(p.skillId) ? (
                             <>
                               <span className="text-border-strong">·</span>
@@ -1008,7 +1009,7 @@ export function HomeScreen({
                         <ActiveRunBadge status={p.runStatus} />
                       </div>
                       <p className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
-                        <span className="truncate">{dsName(p.designSystemId)}</span>
+                        <span className="truncate">{dsName(p.designSystemId) || modeLabel(p.mode)}</span>
                         {skillName(p.skillId) ? (
                           <>
                             <span className="text-border-strong">·</span>

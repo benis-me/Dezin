@@ -116,7 +116,7 @@ export function buildRuntimeErrorRepairPrompt(errors: RuntimeError[], ctx: { mod
   const blocks = errors.map((e, i) => {
     const lines = [
       `${i + 1}. [${e.errorType}${e.count > 1 ? ` ×${e.count}` : ""}] ${e.message}`,
-      e.src ? `   source: ${e.src}${e.line ? `:${e.line}` : ""}` : "",
+      e.src ? `   source: ${e.src}${e.line ? `:${e.line}${e.col ? `:${e.col}` : ""}` : ""}` : "",
       e.stack ? `   stack: ${e.stack}` : "",
     ];
     return lines.filter(Boolean).join("\n");

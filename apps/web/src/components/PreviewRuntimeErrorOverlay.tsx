@@ -22,7 +22,7 @@ export function PreviewRuntimeErrorOverlay(props: Props) {
 
   return (
     <div className="pointer-events-none absolute bottom-3 right-3 z-20 w-[min(22rem,calc(100%-1.5rem))]">
-      <div className="pointer-events-auto overflow-hidden rounded-lg border border-border bg-card shadow-lg">
+      <div role="status" aria-live="polite" className="pointer-events-auto overflow-hidden rounded-lg border border-border bg-card shadow-lg">
         {fatal ? (
           <div className="border-b border-border p-3">
             <div className="mb-1.5 flex items-start justify-between gap-2">
