@@ -350,6 +350,63 @@ test("restored user chat bubbles render markdown", async () => {
   expect(screen.getByText("tokens").tagName).toBe("CODE");
 });
 
+test("reattaching to an in-flight run reuses the persisted Research card instead of duplicating it", async () => {
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    // History already holds the persisted research summary (research finished before this reload).
+    listMessages: async () => [
+      { id: "m1", conversationId: "c1", role: "user", content: "Design a chat UI", createdAt: 1 },
+      {
+        id: "m2",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({
+          research: { produced: true, report: true, sources: 4, assets: 6, directions: [{ slug: "console", title: "Console", summary: "Calm operator console." }] },
+        }),
+        createdAt: 2,
+      },
+    ],
+    // The latest run is still in-flight → the workspace reattaches and replays events from seq 0,
+    // re-emitting research-start / research-done for the same research phase.
+    listRuns: async () => [{ id: "r1", conversationId: "c1", status: "running", score: null, repairRounds: 0, lintPassed: false, createdAt: 3, finishedAt: null }],
+    reattachRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "research-start", runId: "r1" } as RunEvent;
+      yield { type: "research-done", runId: "r1", report: true, sources: 4, assets: 6, directions: [{ slug: "console", title: "Console" }] } as RunEvent;
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(screen.getAllByTestId("research-card").length).toBeGreaterThan(0));
+  // Exactly one card — the replay must reuse the history card, not append a duplicate.
+  expect(screen.getAllByTestId("research-card")).toHaveLength(1);
+});
+
+test("reattaching to an in-flight run reuses the persisted direction-gate card instead of duplicating it", async () => {
+  const gateDirections = [{ slug: "console", title: "Console", markdown: "# Console\n\nCalm operator console." }];
+  const fake = makeFakeApi({
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [
+      { id: "m1", conversationId: "c1", role: "user", content: "Design a chat UI", createdAt: 1 },
+      { id: "m2", conversationId: "c1", role: "system", content: JSON.stringify({ directionGate: { runId: "r1", brief: "Design a chat UI", directions: gateDirections } }), createdAt: 2 },
+    ],
+    listRuns: async () => [{ id: "r1", conversationId: "c1", status: "running", score: null, repairRounds: 0, lintPassed: false, createdAt: 3, finishedAt: null }],
+    reattachRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "direction-gate", runId: "r1", brief: "Design a chat UI", directions: gateDirections } as RunEvent;
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  // A single gate card → its one direction renders one option. A duplicate would double it.
+  await waitFor(() => expect(screen.getAllByTestId("direction-option").length).toBeGreaterThan(0));
+  expect(screen.getAllByTestId("direction-option")).toHaveLength(1);
+});
+
 test("sending a brief streams events into the chat and shows the preview + export menu", async () => {
   const user = userEvent.setup();
   const fake = makeFakeApi({

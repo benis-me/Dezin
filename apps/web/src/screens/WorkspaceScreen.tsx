@@ -3070,18 +3070,33 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           : [];
         if (directions.length) {
           materializeLive({ emitSummary: false });
-          setMessages((m) => [
-            ...m,
-            { id: msgId.current++, kind: "direction-gate", text: typeof ev.brief === "string" ? ev.brief : "", directions, runId: typeof ev.runId === "string" ? ev.runId : undefined },
-          ]);
+          // Reattach replays direction-gate too; reuse the card already loaded from history rather
+          // than appending a duplicate gate.
+          const gid = msgId.current++;
+          setMessages((m) =>
+            m.some((msg) => msg.kind === "direction-gate")
+              ? m
+              : [...m, { id: gid, kind: "direction-gate", text: typeof ev.brief === "string" ? ev.brief : "", directions, runId: typeof ev.runId === "string" ? ev.runId : undefined }],
+          );
         }
         setLiveStatus(null);
         break;
       }
       case "research-start": {
+        // Reattaching to an in-flight run replays research-start even when the research phase
+        // already finished and its summary card is in the loaded history. Reading the latest state
+        // inside the updater, reuse that card instead of appending a duplicate (activity/done route
+        // to it via researchMsgIdRef).
         const rid = msgId.current++;
-        researchMsgIdRef.current = rid;
-        setMessages((m) => [...m, { id: rid, kind: "research", text: "", research: { status: "running", activities: [] } }]);
+        setMessages((m) => {
+          const existing = m.find((msg) => msg.kind === "research");
+          if (existing) {
+            researchMsgIdRef.current = existing.id;
+            return m;
+          }
+          researchMsgIdRef.current = rid;
+          return [...m, { id: rid, kind: "research", text: "", research: { status: "running", activities: [] } }];
+        });
         setLiveStatus("Researching");
         break;
       }
