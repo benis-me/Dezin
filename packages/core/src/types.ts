@@ -297,6 +297,8 @@ export interface Settings {
   aiProviderProfiles: string;
   /** When enabled, an Agent/model reviews a rendered screenshot after generation. */
   visualQaEnabled: boolean;
+  /** When enabled, a repair run is auto-dispatched when a FATAL live-preview error is sensed while idle. */
+  autoFixLiveRuntimeErrors: boolean;
   /** Optional reviewer Agent override; empty means inherit the current project run Agent. */
   visualQaAgentCommand: string;
   /** Optional reviewer model override; empty means inherit the current project run model. */

@@ -25,6 +25,7 @@ const SETTINGS: Settings = {
   aiProviderOrganization: "org-test",
   aiProviderProfiles: "",
   visualQaEnabled: false,
+  autoFixLiveRuntimeErrors: false,
   researchEnabled: false,  visualQaAgentCommand: "",
   visualQaModel: "",
   autoImproveEnabled: true,

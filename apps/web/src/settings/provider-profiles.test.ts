@@ -36,6 +36,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
       },
     }),
     visualQaEnabled: false,
+    autoFixLiveRuntimeErrors: false,
     researchEnabled: false,    visualQaAgentCommand: "",
     visualQaModel: "",
     autoImproveEnabled: true,

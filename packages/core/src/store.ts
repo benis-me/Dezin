@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS settings (
   ai_provider_organization TEXT,
   ai_provider_profiles TEXT,
   visual_qa_enabled INTEGER NOT NULL DEFAULT 0,
+  auto_fix_live_runtime_errors INTEGER NOT NULL DEFAULT 0,
   visual_qa_agent_command TEXT,
   visual_qa_model TEXT,
   auto_improve_enabled INTEGER NOT NULL DEFAULT 1,
@@ -213,6 +214,7 @@ const DEFAULT_SETTINGS: Settings = {
   aiProviderOrganization: "",
   aiProviderProfiles: "",
   visualQaEnabled: false,
+  autoFixLiveRuntimeErrors: false,
   visualQaAgentCommand: "",
   visualQaModel: "",
   autoImproveEnabled: true,
@@ -514,6 +516,7 @@ export class Store {
     ensureColumn("settings", "ai_provider_organization", "ai_provider_organization TEXT");
     ensureColumn("settings", "ai_provider_profiles", "ai_provider_profiles TEXT");
     ensureColumn("settings", "visual_qa_enabled", "visual_qa_enabled INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("settings", "auto_fix_live_runtime_errors", "auto_fix_live_runtime_errors INTEGER NOT NULL DEFAULT 0");
     ensureColumn("settings", "visual_qa_agent_command", "visual_qa_agent_command TEXT");
     ensureColumn("settings", "visual_qa_model", "visual_qa_model TEXT");
     ensureColumn("settings", "auto_improve_enabled", "auto_improve_enabled INTEGER NOT NULL DEFAULT 1");
@@ -1329,6 +1332,7 @@ export class Store {
       aiProviderOrganization: str(r.ai_provider_organization, DEFAULT_SETTINGS.aiProviderOrganization),
       aiProviderProfiles: str(r.ai_provider_profiles, DEFAULT_SETTINGS.aiProviderProfiles),
       visualQaEnabled: Number(r.visual_qa_enabled ?? 0) === 1,
+      autoFixLiveRuntimeErrors: Number(r.auto_fix_live_runtime_errors ?? 0) === 1,
       researchEnabled: Number(r.research_enabled ?? 0) === 1,
       visualQaAgentCommand: str(r.visual_qa_agent_command, DEFAULT_SETTINGS.visualQaAgentCommand),
       visualQaModel: str(r.visual_qa_model, DEFAULT_SETTINGS.visualQaModel),
@@ -1361,6 +1365,7 @@ export class Store {
       aiProviderOrganization: patch.aiProviderOrganization ?? cur.aiProviderOrganization,
       aiProviderProfiles: patch.aiProviderProfiles ?? cur.aiProviderProfiles,
       visualQaEnabled: patch.visualQaEnabled ?? cur.visualQaEnabled,
+      autoFixLiveRuntimeErrors: patch.autoFixLiveRuntimeErrors ?? cur.autoFixLiveRuntimeErrors,
       visualQaAgentCommand: patch.visualQaAgentCommand ?? cur.visualQaAgentCommand,
       visualQaModel: patch.visualQaModel ?? cur.visualQaModel,
       autoImproveEnabled: patch.autoImproveEnabled ?? cur.autoImproveEnabled,
@@ -1373,8 +1378,8 @@ export class Store {
                                image_api_base_url, image_api_key, image_model, remove_background_model, edit_region_model, extract_layer_model,
                                video_api_base_url, video_api_key, video_model,
                                ai_provider_id, ai_provider_enabled, ai_provider_models, ai_provider_organization, ai_provider_profiles,
-                               visual_qa_enabled, visual_qa_agent_command, visual_qa_model, auto_improve_enabled, auto_improve_max_rounds, research_enabled)
-         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               visual_qa_enabled, auto_fix_live_runtime_errors, visual_qa_agent_command, visual_qa_model, auto_improve_enabled, auto_improve_max_rounds, research_enabled)
+         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            agent_command = excluded.agent_command,
            model = excluded.model,
@@ -1397,6 +1402,7 @@ export class Store {
            ai_provider_organization = excluded.ai_provider_organization,
            ai_provider_profiles = excluded.ai_provider_profiles,
            visual_qa_enabled = excluded.visual_qa_enabled,
+           auto_fix_live_runtime_errors = excluded.auto_fix_live_runtime_errors,
            visual_qa_agent_command = excluded.visual_qa_agent_command,
            visual_qa_model = excluded.visual_qa_model,
            auto_improve_enabled = excluded.auto_improve_enabled,
@@ -1425,6 +1431,7 @@ export class Store {
         next.aiProviderOrganization,
         next.aiProviderProfiles,
         next.visualQaEnabled ? 1 : 0,
+        next.autoFixLiveRuntimeErrors ? 1 : 0,
         next.visualQaAgentCommand,
         next.visualQaModel,
         next.autoImproveEnabled ? 1 : 0,

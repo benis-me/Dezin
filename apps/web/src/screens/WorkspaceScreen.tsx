@@ -2351,6 +2351,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const { agents, rescan: rescanAgents } = useAgents();
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
   const [settingsModel, setSettingsModel] = useState("");
+  const [autoFixLive, setAutoFixLive] = useState(false);
   const [runAgent, setRunAgent] = useState("");
   const [runModel, setRunModel] = useState("");
   const [diff, setDiff] = useState<{ label: string; lines: DiffLine[] } | null>(null);
@@ -3369,6 +3370,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         if (!alive) return;
         setSettingsAgent(s?.agentCommand ?? "");
         setSettingsModel(s?.model ?? "");
+        setAutoFixLive(!!s?.autoFixLiveRuntimeErrors);
       })
       .catch(() => alive && setSettingsAgent(""));
     return () => {
@@ -4052,6 +4054,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     },
     [projectMode, project?.projectPath],
   );
+  const autoFixedSigsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const fatal = runtimeErrors.fatal;
+    if (!autoFixLive || !fatal || running) return;
+    if (autoFixedSigsRef.current.has(fatal.sig)) return;
+    autoFixedSigsRef.current.add(fatal.sig);
+    fixRuntimeErrors([fatal]);
+  }, [runtimeErrors.fatal, autoFixLive, running, fixRuntimeErrors]);
 
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";

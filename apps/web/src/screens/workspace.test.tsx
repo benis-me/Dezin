@@ -1022,6 +1022,7 @@ test("/projects/new preserves the selected agent and model for the first run", a
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     visualQaEnabled: false,
+    autoFixLiveRuntimeErrors: false,
     researchEnabled: false,    visualQaAgentCommand: "",
     visualQaModel: "",
     autoImproveEnabled: true,
@@ -2709,4 +2710,28 @@ test("a fatal runtime-error shows the crash overlay and Fix dispatches a repair 
   await waitFor(() =>
     expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ brief: expect.stringMatching(/render blew up/) }), expect.anything()),
   );
+});
+
+test("auto-fix dispatches one repair when enabled and a fatal error arrives while idle", async () => {
+  const streamRun = vi.fn(() => (async function* (): AsyncGenerator<RunEvent> {})());
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        streamRun: streamRun as never,
+        listFiles: async () => [{ path: "index.html", size: 12 }],
+        listAgents: async () => AGENTS,
+        getSettings: async () => ({ agentCommand: "claude", model: "", autoFixLiveRuntimeErrors: true }) as never,
+      })}
+    >
+      <AgentsProvider>
+        <WorkspaceScreen projectId="p1" />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+  await screen.findByTitle("Artifact preview");
+  dispatchPreviewMessage({ type: "runtime-error", kind: "fatal", errorType: "error", message: "auto boom", count: 1, at: 1 });
+  await waitFor(() => expect(streamRun).toHaveBeenCalledTimes(1));
+  dispatchPreviewMessage({ type: "runtime-error", kind: "fatal", errorType: "error", message: "auto boom", count: 1, at: 1 }); // same signature must not re-fire
+  await new Promise((r) => setTimeout(r, 0));
+  expect(streamRun).toHaveBeenCalledTimes(1);
 });

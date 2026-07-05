@@ -362,6 +362,16 @@ export function SettingsScreen({
                       onBlur={(event) => save("autoImproveMaxRounds", clampRounds(event.target.value))}
                     />
                   </SettingRow>
+                  <SettingRow
+                    label="Auto-fix live preview errors"
+                    desc="Automatically send a repair run when the live preview crashes."
+                  >
+                    <Switch
+                      aria-label="Auto-fix live preview errors"
+                      checked={settings.autoFixLiveRuntimeErrors}
+                      onCheckedChange={(checked) => save("autoFixLiveRuntimeErrors", checked)}
+                    />
+                  </SettingRow>
                 </SettingsRows>
               </SettingsPanel>
             )}

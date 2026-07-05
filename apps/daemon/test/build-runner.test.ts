@@ -27,6 +27,7 @@ function settings(over: Partial<Settings>): Settings {
     aiProviderOrganization: "",
     aiProviderProfiles: "",
     visualQaEnabled: false,
+    autoFixLiveRuntimeErrors: false,
     researchEnabled: false,    visualQaAgentCommand: "",
     visualQaModel: "",
     autoImproveEnabled: true,

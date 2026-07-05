@@ -256,6 +256,14 @@ test("settings: defaults, round-trip, and partial merge", () => {
   s.close();
 });
 
+test("autoFixLiveRuntimeErrors round-trips through settings", () => {
+  const s = freshStore();
+  assert.equal(s.getSettings().autoFixLiveRuntimeErrors, false);
+  s.updateSettings({ autoFixLiveRuntimeErrors: true });
+  assert.equal(s.getSettings().autoFixLiveRuntimeErrors, true);
+  s.close();
+});
+
 test("moodboards persist nodes, assets, and messages", () => {
   const s = freshStore();
   const board = s.createMoodboard({ name: "Launch references" });
