@@ -210,6 +210,8 @@ interface ResultMeta {
   error?: boolean;
   status?: "done" | "stopped" | "failed";
   materialSources?: string[];
+  /** False when Visual Review was on but the critic never rendered/judged (only anti-slop ran). */
+  designReviewed?: boolean;
 }
 interface Msg {
   id: number;
@@ -679,6 +681,7 @@ function normalizeResultMeta(value: unknown): ResultMeta | undefined {
   if (typeof value.error === "boolean") meta.error = value.error;
   if (value.status === "done" || value.status === "stopped" || value.status === "failed") meta.status = value.status;
   if (Array.isArray(value.materialSources)) meta.materialSources = value.materialSources.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  if (typeof value.designReviewed === "boolean") meta.designReviewed = value.designReviewed;
   return meta;
 }
 
@@ -1599,6 +1602,14 @@ function ResultCard({
         <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{label}</p>
         {!error ? (
           <div className="flex shrink-0 items-center gap-2">
+            {meta?.designReviewed === false && !stopped ? (
+              <span
+                title="The automated design review could not render this project — only the anti-slop checks ran, so design quality was not assessed."
+                className="rounded-md border border-border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+              >
+                design review skipped
+              </span>
+            ) : null}
             {typeof score === "number" ? (
               <span className="tnum rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">{score}/100</span>
             ) : null}

@@ -174,6 +174,16 @@ function floorScore(findings: QualityFinding[]): number {
   return lintScore(findings.filter((f) => !f.id.startsWith("visual-improve") && f.id !== "visual-design-score"));
 }
 
+/** Whether the critic actually delivered a design judgment across the run (a score, defects, or
+ *  improvements) — as opposed to only render/capture failures. Lets us avoid reporting a clean
+ *  "reviewed" pass when the ceiling never actually ran (e.g. headless render failed every round). */
+function producedDesignReview(visualFindings: QualityFinding[]): boolean {
+  return visualFindings.some((f) => {
+    const id = String(f.id);
+    return id === "visual-design-score" || id.startsWith("visual-ai-review") || id.startsWith("visual-improve");
+  });
+}
+
 function autoImproveMaxRounds(settings: Settings, override?: number): number {
   const raw = typeof override === "number" ? override : settings.autoImproveMaxRounds;
   const value = Number.isFinite(raw) ? Math.trunc(raw) : DEFAULT_AUTO_IMPROVE_MAX_ROUNDS;
@@ -920,10 +930,18 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       }
 
       const assistantMessageId = persistTranscript(finalAssistantText);
+      // Design review was ON but never actually judged (headless render/screenshot failed every
+      // round) — don't let the run read as a clean "reviewed" pass; the floor (anti-slop) passed,
+      // the ceiling simply didn't run, and the user must know.
+      const designReviewSkipped = settings.visualQaEnabled && !producedDesignReview(visualReviewHistory);
       const quality = `, quality ${score}/100`;
       const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
-      const message = passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`;
-      store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds }));
+      const reviewNote = designReviewSkipped
+        ? " Note: the automated design review could not render this project, so only the anti-slop checks ran — design quality was not assessed."
+        : "";
+      const message =
+        (passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`) + reviewNote;
+      store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped }));
       const persistedFindings = withResolvedVisualReviewHistory(findings, visualReviewHistory);
       store.updateRun(run.id, {
         status: "succeeded",
@@ -935,7 +953,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         commitHash,
         finishedAt: Date.now(),
       });
-      sse({ type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", findings: persistedFindings });
+      sse({ type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", designReviewed: !designReviewSkipped, findings: persistedFindings });
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
         void (async () => {
@@ -1124,13 +1142,17 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const passed = !finalFindings.some((f) => f.severity === "P0");
     store.recordArtifact(project.id, artifactPath, passed);
     const assistantMessageId = persistTranscript(assistantText);
+    const designReviewSkipped = settings.visualQaEnabled && !producedDesignReview(visualReviewHistory);
     const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
     const quality = `, quality ${score}/100`;
-    const text = passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`;
+    const reviewNote = designReviewSkipped
+      ? " Note: the automated design review could not render this artifact, so only the anti-slop checks ran — design quality was not assessed."
+      : "";
+    const text = (passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`) + reviewNote;
     store.addMessage(
       conversation.id,
       "system",
-      resultMessage(text, { passed, score, rounds: repairRounds, materialSources: generatedTotal > 0 ? [`Generated image assets (${generatedTotal})`] : [] }),
+      resultMessage(text, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped, materialSources: generatedTotal > 0 ? [`Generated image assets (${generatedTotal})`] : [] }),
     );
     const persistedFindings = withResolvedVisualReviewHistory(finalFindings, visualReviewHistory);
     store.updateRun(run.id, {
@@ -1150,6 +1172,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       passed,
       rounds: repairRounds,
       score,
+      designReviewed: !designReviewSkipped,
       previewUrl: `/projects/${project.id}/preview/`,
       findings: persistedFindings,
     });

@@ -172,6 +172,44 @@ test("visual QA run emits a start event before visual QA results", async () => {
   );
 });
 
+test("a run whose critic could not render is NOT reported as a design-reviewed pass", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: false });
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, brief: "make a hero" }) });
+      const done = parseSse(await res.text()).find((e) => e.type === "run-done")!;
+      // The floor (anti-slop) still passed, but the ceiling never actually judged — the run must
+      // not read as a design-reviewed pass.
+      assert.equal(done.passed, true);
+      assert.equal(done.designReviewed, false);
+      // The persisted result message says so, so the user isn't misled.
+      const sys = store
+        .listMessages(store.listConversations(project.id)[0]!.id)
+        .find((m) => m.role === "system" && /design quality was not assessed/i.test(m.content));
+      assert.ok(sys, "expected the result message to note design review did not run");
+    },
+    { visualQa: async () => [{ severity: "P2", id: "visual-render-failed", message: "Could not render in headless Chrome.", fix: "Check the preview." }] },
+  );
+});
+
+test("a run whose critic judged the design reports designReviewed=true", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: false });
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, brief: "make a hero" }) });
+      const done = parseSse(await res.text()).find((e) => e.type === "run-done")!;
+      assert.equal(done.designReviewed, true);
+    },
+    { visualQa: async () => [{ severity: "P2", id: "visual-design-score", message: "Design quality (critic): 88/100 vs the brief.", fix: "" }] },
+  );
+});
+
 test("visual QA run persists a visual review transcript record", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   await withRunServer(
