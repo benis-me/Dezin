@@ -55,6 +55,8 @@ import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Mood
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { previewBridgeOriginForSrc, previewSandboxForSrc } from "../lib/preview-sandbox.ts";
+import { usePreviewRuntimeErrors, buildRuntimeErrorRepairPrompt, type RuntimeError } from "../lib/preview-runtime-errors.ts";
+import { PreviewRuntimeErrorOverlay } from "../components/PreviewRuntimeErrorOverlay.tsx";
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
 
@@ -4037,6 +4039,20 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (previewSrc) setPreviewSrc(previewSrc.startsWith("http") ? cacheBustPreviewUrl(previewSrc) : cacheBustPreviewUrl(api.previewUrl(projectId)));
   };
 
+  const runtimeErrors = usePreviewRuntimeErrors({
+    iframeRef: previewIframeRef,
+    previewSrc,
+    runActive: running,
+    armed: projectMode !== "standard" || setupPhase === "ready",
+  });
+  const fixRuntimeErrors = useCallback(
+    (errors: RuntimeError[]) => {
+      if (errors.length === 0) return;
+      void runBrief(buildRuntimeErrorRepairPrompt(errors, { mode: projectMode, projectPath: project?.projectPath ?? undefined }));
+    },
+    [projectMode, project?.projectPath],
+  );
+
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
   const canOpenProjectPath = Boolean((project?.projectPath || projectPath) && native?.openPath);
@@ -4777,7 +4793,18 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
               >
                 <Panel id={PREVIEW_CANVAS_PANEL} minSize="300px">
-                  <div className="flex h-full min-w-0 justify-center overflow-auto">{renderPreviewFrame()}</div>
+                  <div className="relative flex h-full min-w-0 justify-center overflow-auto">
+                    {renderPreviewFrame()}
+                    <PreviewRuntimeErrorOverlay
+                      fatal={runtimeErrors.fatal}
+                      nonFatal={runtimeErrors.nonFatal}
+                      onFixFatal={() => runtimeErrors.fatal && fixRuntimeErrors([runtimeErrors.fatal])}
+                      onFixNonFatal={() => fixRuntimeErrors(runtimeErrors.nonFatal)}
+                      onReload={refreshPreview}
+                      onDismissFatal={runtimeErrors.dismissFatal}
+                      onDismissNonFatal={runtimeErrors.dismissNonFatal}
+                    />
+                  </div>
                 </Panel>
                 {inspectOpen ? (
                   <Separator aria-label="Resize inspect panel" className={RESIZE_SEPARATOR_CLASS} />

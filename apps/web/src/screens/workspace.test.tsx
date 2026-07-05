@@ -2686,3 +2686,27 @@ test("repair rounds surface a lint status line", async () => {
   expect(await screen.findByText("Fixed it.")).toBeInTheDocument();
   expect(await screen.findByText(/after 1 fix/)).toBeInTheDocument();
 });
+
+test("a fatal runtime-error shows the crash overlay and Fix dispatches a repair run", async () => {
+  const streamRun = vi.fn(() => (async function* (): AsyncGenerator<RunEvent> {})());
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        streamRun: streamRun as never,
+        listFiles: async () => [{ path: "index.html", size: 12 }],
+        listAgents: async () => AGENTS,
+      })}
+    >
+      <AgentsProvider>
+        <WorkspaceScreen projectId="p1" />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+  await screen.findByTitle("Artifact preview"); // preview iframe present (same setup as the other preview tests)
+  dispatchPreviewMessage({ type: "runtime-error", kind: "fatal", errorType: "error", message: "render blew up", count: 1, at: 1 });
+  expect(await screen.findByText("render blew up")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: /fix with agent/i }));
+  await waitFor(() =>
+    expect(streamRun).toHaveBeenCalledWith(expect.objectContaining({ brief: expect.stringMatching(/render blew up/) }), expect.anything()),
+  );
+});
