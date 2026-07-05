@@ -1,7 +1,6 @@
 import { expect, test } from "vitest";
 import {
   isRuntimeErrorMessage,
-  isHeartbeatMessage,
   signatureOf,
   initialRuntimeErrorState,
   ingestRuntimeError,
@@ -22,11 +21,6 @@ test("isRuntimeErrorMessage rejects foreign / malformed data", () => {
   expect(isRuntimeErrorMessage({ ...base, type: "selected" })).toBe(false);
   expect(isRuntimeErrorMessage({ ...base, kind: "meh" })).toBe(false);
   expect(isRuntimeErrorMessage(null)).toBe(false);
-});
-
-test("isHeartbeatMessage accepts a valid heartbeat", () => {
-  expect(isHeartbeatMessage({ source: "dezin", type: "preview-heartbeat", phase: "first-paint", at: 2 })).toBe(true);
-  expect(isHeartbeatMessage(base)).toBe(false);
 });
 
 test("signatureOf is stable across identical errors", () => {

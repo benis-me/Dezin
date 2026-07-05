@@ -1,7 +1,5 @@
-import { useState } from "react";
 import { CircleAlert, RotateCw, X } from "lucide-react";
 import type { RuntimeError } from "../lib/preview-runtime-errors.ts";
-import { cn } from "@/lib/utils.ts";
 
 interface Props {
   fatal: RuntimeError | null;
@@ -13,53 +11,71 @@ interface Props {
   onDismissNonFatal: (sig: string) => void;
 }
 
+/**
+ * A non-blocking, dismissible bubble pinned to the bottom-right of the preview. It never
+ * masks the preview: the wrapper is `pointer-events-none` so clicks in the empty area pass
+ * through to the artifact, and only the card itself is interactive.
+ */
 export function PreviewRuntimeErrorOverlay(props: Props) {
   const { fatal, nonFatal, onFixFatal, onFixNonFatal, onReload, onDismissFatal, onDismissNonFatal } = props;
-  const [open, setOpen] = useState(false);
   if (!fatal && nonFatal.length === 0) return null;
 
   return (
-    <>
-      {fatal ? (
-        <div className="absolute inset-0 z-20 grid place-items-center bg-surface/85 backdrop-blur-sm p-6">
-          <div className="w-full max-w-md rounded-lg border border-border bg-card p-4 shadow-sm">
-            <div className="mb-2 flex items-center gap-2 text-destructive">
-              <CircleAlert size={16} strokeWidth={2} />
-              <h2 className="text-sm font-semibold">This preview crashed</h2>
+    <div className="pointer-events-none absolute bottom-3 right-3 z-20 w-[min(22rem,calc(100%-1.5rem))]">
+      <div className="pointer-events-auto overflow-hidden rounded-lg border border-border bg-card shadow-lg">
+        {fatal ? (
+          <div className="border-b border-border p-3">
+            <div className="mb-1.5 flex items-start justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-1.5 text-destructive">
+                <CircleAlert size={14} strokeWidth={2} className="shrink-0" />
+                <span className="text-xs font-semibold">Preview error</span>
+              </div>
+              <button type="button" aria-label="Dismiss" onClick={onDismissFatal} className="shrink-0 text-muted-foreground hover:text-foreground">
+                <X size={13} />
+              </button>
             </div>
-            <p className="mb-3 break-words font-mono text-xs text-foreground">{fatal.message}</p>
+            <p className="mb-2 break-words font-mono text-[11px] leading-relaxed text-foreground">{fatal.message}</p>
             {fatal.stack ? (
-              <pre className="mb-3 max-h-32 overflow-auto rounded-md border border-border bg-surface-2 p-2 font-mono text-[11px] text-muted-foreground">{fatal.stack}</pre>
+              <pre className="mb-2 max-h-24 overflow-auto rounded-md border border-border bg-surface-2 p-1.5 font-mono text-[10px] leading-relaxed text-muted-foreground">{fatal.stack}</pre>
             ) : null}
-            <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={onFixFatal} className="rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background hover:opacity-90">Fix with Agent</button>
-              <button type="button" onClick={onReload} className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-surface-2"><RotateCw size={12} strokeWidth={1.8} />Reload</button>
-              <button type="button" onClick={onDismissFatal} className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-surface-2">Dismiss</button>
+            <div className="flex flex-wrap gap-1.5">
+              <button type="button" onClick={onFixFatal} className="rounded-md bg-foreground px-2.5 py-1 text-[11px] font-medium text-background hover:opacity-90">
+                Fix with Agent
+              </button>
+              <button type="button" onClick={onReload} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-[11px] text-foreground hover:bg-surface-2">
+                <RotateCw size={11} strokeWidth={1.8} />
+                Reload
+              </button>
             </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
 
-      {nonFatal.length > 0 ? (
-        <div className="absolute bottom-3 right-3 z-20">
-          <button type="button" onClick={() => setOpen((v) => !v)} className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2.5 py-1 text-xs font-medium text-destructive hover:bg-destructive/15">
-            <CircleAlert size={12} strokeWidth={2} />Errors · {nonFatal.length}
-          </button>
-          {open ? (
-            <div className="mt-2 w-80 rounded-lg border border-border bg-card p-2 shadow-sm">
-              <ul className="max-h-56 space-y-1 overflow-auto">
-                {nonFatal.map((e) => (
-                  <li key={e.sig} className={cn("flex items-start justify-between gap-2 rounded-md px-2 py-1 text-[11px]")}>
-                    <span className="min-w-0 break-words font-mono text-muted-foreground">{e.message}{e.count > 1 ? ` ×${e.count}` : ""}</span>
-                    <button type="button" aria-label="Dismiss" onClick={() => onDismissNonFatal(e.sig)} className="shrink-0 text-muted-foreground hover:text-foreground"><X size={12} /></button>
-                  </li>
-                ))}
-              </ul>
-              <button type="button" onClick={onFixNonFatal} className="mt-2 w-full rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background hover:opacity-90">Fix with Agent</button>
+        {nonFatal.length > 0 ? (
+          <div className="p-2">
+            <div className="mb-1 flex items-center justify-between px-1">
+              <span className="text-[11px] font-medium text-muted-foreground">
+                {nonFatal.length} console {nonFatal.length === 1 ? "error" : "errors"}
+              </span>
+              <button type="button" onClick={onFixNonFatal} className="text-[11px] font-medium text-foreground hover:underline">
+                Fix with Agent
+              </button>
             </div>
-          ) : null}
-        </div>
-      ) : null}
-    </>
+            <ul className="max-h-32 space-y-0.5 overflow-auto">
+              {nonFatal.map((e) => (
+                <li key={e.sig} className="flex items-start justify-between gap-2 rounded-md px-1 py-0.5">
+                  <span className="min-w-0 break-words font-mono text-[10px] text-muted-foreground">
+                    {e.message}
+                    {e.count > 1 ? ` ×${e.count}` : ""}
+                  </span>
+                  <button type="button" aria-label="Dismiss" onClick={() => onDismissNonFatal(e.sig)} className="shrink-0 text-muted-foreground hover:text-foreground">
+                    <X size={11} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }

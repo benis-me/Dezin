@@ -3206,6 +3206,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     refs: MoodboardRunRef[] = [],
     effectRefs: EffectRunRef[] = [],
     directionSlug?: string,
+    opts?: { research?: boolean },
   ): Promise<void> => {
     const text = brief.trim();
     if (!text || runningRef.current) return;
@@ -3243,6 +3244,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           moodboardRefs: refs.length ? refs : undefined,
           effectRefs: effectRefs.length ? effectRefs : undefined,
           directionSlug,
+          research: opts?.research,
         },
         ctrl.signal,
       );
@@ -4049,12 +4051,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     iframeRef: previewIframeRef,
     previewSrc,
     runActive: running,
-    armed: projectMode !== "standard" || setupPhase === "ready",
   });
   const fixRuntimeErrors = useCallback(
     (errors: RuntimeError[]) => {
       if (errors.length === 0) return;
-      void runBrief(buildRuntimeErrorRepairPrompt(errors, { mode: projectMode, projectPath: project?.projectPath ?? undefined }));
+      // Repairs are targeted code fixes — never route them through Research / the direction gate.
+      void runBrief(buildRuntimeErrorRepairPrompt(errors, { mode: projectMode, projectPath: project?.projectPath ?? undefined }), undefined, undefined, [], [], undefined, { research: false });
     },
     [projectMode, project?.projectPath],
   );

@@ -42,11 +42,12 @@ if(document.body)init();else document.addEventListener('DOMContentLoaded',init);
 // regress the picker bridge above; this string must stay byte-identical to serve-static.ts.
 const RUNTIME_PROBE = `<script data-dezin-runtime-probe>(function(){
 if(window.__dezinRuntimeProbe)return;window.__dezinRuntimeProbe=1;
-var MAXLEN=2000,SIGCAP=50,WIN=1000,seen={},order=[];
+var MAXLEN=2000,SIGCAP=50,WIN=1000,seen={},order=[],fatalSeen=false;
 function hasContent(){try{var b=document.body;return !!(b&&b.scrollHeight>40&&(b.innerText||'').trim().length>20);}catch(_){return true;}}
 function trunc(s){s=String(s==null?'':s);return s.length>MAXLEN?s.slice(0,MAXLEN):s;}
 function safe(o){try{return JSON.stringify(o);}catch(_){return String(o);}}
 function post(kind,errorType,message,stack,src,line,col){
+  if(kind==='fatal')fatalSeen=true;
   var sig=errorType+'|'+message+'|'+(src||'')+':'+(line||0),now=Date.now(),rec=seen[sig];
   if(rec){rec.count++;if(now-rec.last<WIN)return;rec.last=now;}
   else{rec={count:1,last:now};seen[sig]=rec;order.push(sig);if(order.length>SIGCAP)delete seen[order.shift()];}
@@ -64,10 +65,10 @@ window.addEventListener('unhandledrejection',function(e){
 var _err=console.error;console.error=function(){try{var p=[];for(var i=0;i<arguments.length;i++){var a=arguments[i];p.push(a&&a.stack?a.stack:(a&&typeof a==='object'?safe(a):String(a)));}post('nonfatal','console',p.join(' '));}catch(_){}return _err.apply(console,arguments);};
 try{var _f=window.fetch;if(_f)window.fetch=function(){var args=arguments,u=args[0];return _f.apply(this,args).then(function(res){try{if(res&&res.status>=400)post('nonfatal','request',res.status+' '+(res.url||''),undefined,res.url||'');}catch(_){}return res;},function(err){try{post('nonfatal','request','fetch failed '+(typeof u==='string'?u:(u&&u.url)||''),err&&err.stack,typeof u==='string'?u:'');}catch(_){}throw err;});};}catch(_){}
 try{var _o=XMLHttpRequest.prototype.open,_s=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.open=function(m,u){this.__dezinUrl=u;return _o.apply(this,arguments);};XMLHttpRequest.prototype.send=function(){var x=this;x.addEventListener('load',function(){try{if(x.status>=400)post('nonfatal','request',x.status+' '+(x.__dezinUrl||''),undefined,x.__dezinUrl||'');}catch(_){}});x.addEventListener('error',function(){try{post('nonfatal','request','request failed '+(x.__dezinUrl||''),undefined,x.__dezinUrl||'');}catch(_){}});return _s.apply(this,arguments);};}catch(_){}
-function beat(){try{parent.postMessage({source:'dezin',type:'preview-heartbeat',phase:'first-paint',at:Date.now()},'*');}catch(_){}}
-function firstPaint(n){if(hasContent()){beat();return;}if(n<=0)return;setTimeout(function(){firstPaint(n-1);},150);}
-function init(){firstPaint(20);}
-if(document.body)init();else document.addEventListener('DOMContentLoaded',init);
+var rendered=false,blankDone=false;
+function blankCheck(deadline){if(rendered||blankDone)return;if(hasContent()){rendered=true;return;}if(fatalSeen){blankDone=true;return;}if(Date.now()>=deadline){blankDone=true;post('fatal','blank','The preview loaded but rendered nothing.');return;}setTimeout(function(){blankCheck(deadline);},250);}
+function startBlank(){blankCheck(Date.now()+12000);}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',startBlank);else startBlank();
 })();</script>`;
 
 function dezinPicker() {
@@ -75,8 +76,11 @@ function dezinPicker() {
     name: "dezin-picker",
     apply: "serve",
     transformIndexHtml(html) {
-      const bridges = PICKER_BRIDGE + RUNTIME_PROBE;
-      return html.includes("</body>") ? html.replace("</body>", bridges + "</body>") : html + bridges;
+      // Runtime probe as early as possible (inside <head>, before the page's own scripts, so
+      // parse-time errors are caught); picker bridge stays at body end — it manipulates the DOM.
+      const head = html.match(/<head[^>]*>/i);
+      const withProbe = head ? html.slice(0, head.index + head[0].length) + RUNTIME_PROBE + html.slice(head.index + head[0].length) : RUNTIME_PROBE + html;
+      return withProbe.includes("</body>") ? withProbe.replace("</body>", PICKER_BRIDGE + "</body>") : withProbe + PICKER_BRIDGE;
     },
   };
 }

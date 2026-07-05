@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { previewBridgeOriginForSrc } from "./preview-sandbox.ts";
 
 export type RuntimeErrorKind = "fatal" | "nonfatal";
-export type RuntimeErrorType = "error" | "unhandledrejection" | "console" | "resource" | "request";
+export type RuntimeErrorType = "error" | "unhandledrejection" | "console" | "resource" | "request" | "blank";
 
 export interface RuntimeErrorMessage {
   source: "dezin";
@@ -18,13 +18,6 @@ export interface RuntimeErrorMessage {
   at: number;
 }
 
-export interface PreviewHeartbeatMessage {
-  source: "dezin";
-  type: "preview-heartbeat";
-  phase: "first-paint";
-  at: number;
-}
-
 const KINDS = new Set<RuntimeErrorKind>(["fatal", "nonfatal"]);
 
 export function isRuntimeErrorMessage(data: unknown): data is RuntimeErrorMessage {
@@ -33,11 +26,6 @@ export function isRuntimeErrorMessage(data: unknown): data is RuntimeErrorMessag
     d && typeof d === "object" && d.source === "dezin" && d.type === "runtime-error" &&
       typeof d.message === "string" && typeof d.kind === "string" && KINDS.has(d.kind as RuntimeErrorKind),
   );
-}
-
-export function isHeartbeatMessage(data: unknown): data is PreviewHeartbeatMessage {
-  const d = data as Partial<PreviewHeartbeatMessage> | null;
-  return Boolean(d && typeof d === "object" && d.source === "dezin" && d.type === "preview-heartbeat");
 }
 
 export function signatureOf(m: Pick<RuntimeErrorMessage, "errorType" | "message" | "src" | "line">): string {
@@ -91,19 +79,12 @@ export function dismissNonFatal(state: RuntimeErrorState, sig: string): RuntimeE
   return { ...state, nonFatal: state.nonFatal.filter((e) => e.sig !== sig) };
 }
 
-const BLANK_FATAL: RuntimeError = {
-  source: "dezin", type: "runtime-error", kind: "fatal", errorType: "error",
-  message: "The preview did not render.", count: 1, at: 0, sig: "blank|The preview did not render.|:0",
-};
-
 export function usePreviewRuntimeErrors(args: {
   iframeRef: RefObject<HTMLIFrameElement | null>;
   previewSrc: string | null;
   runActive: boolean;
-  watchdogMs?: number;
-  armed?: boolean;
 }): { fatal: RuntimeError | null; nonFatal: RuntimeError[]; dismissFatal(): void; dismissNonFatal(sig: string): void } {
-  const { iframeRef, previewSrc, runActive, watchdogMs = 8000, armed = true } = args;
+  const { iframeRef, previewSrc, runActive } = args;
   const [state, setState] = useState<RuntimeErrorState>(initialRuntimeErrorState);
   const runActiveRef = useRef(runActive);
   runActiveRef.current = runActive;
@@ -115,27 +96,13 @@ export function usePreviewRuntimeErrors(args: {
       if (!iframe?.contentWindow || event.source !== iframe.contentWindow) return;
       if (event.origin !== previewBridgeOriginForSrc(previewSrc)) return;
       const data = event.data;
-      if (isHeartbeatMessage(data)) {
-        clearTimeout(timer);
-        return;
-      }
       if (isRuntimeErrorMessage(data)) {
-        clearTimeout(timer);
         setState((s) => ingestRuntimeError(s, data, { runActive: runActiveRef.current }));
       }
     };
     window.addEventListener("message", onMessage);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    if (armed && previewSrc) {
-      timer = setTimeout(() => {
-        setState((s) => (s.fatal || runActiveRef.current || s.dismissedFatalSig === BLANK_FATAL.sig ? s : { ...s, fatal: BLANK_FATAL }));
-      }, watchdogMs);
-    }
-    return () => {
-      window.removeEventListener("message", onMessage);
-      clearTimeout(timer);
-    };
-  }, [iframeRef, previewSrc, watchdogMs, armed]);
+    return () => window.removeEventListener("message", onMessage);
+  }, [iframeRef, previewSrc]);
 
   return {
     fatal: state.fatal,

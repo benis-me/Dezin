@@ -84,6 +84,40 @@ async function createProject(base: string, body: object = { name: "P" }, daemonT
   return (await res.json()) as { id: string };
 }
 
+test("research:false opts out of the Research phase even when it is enabled in Settings", async () => {
+  let researchCalls = 0;
+  const researchPhase = async () => {
+    researchCalls++;
+    return { ran: true, produced: false };
+  };
+  await withRunServer(
+    new FakeRunner({ artifacts: [CLEAN, CLEAN], texts: ["done", "done"] }),
+    async ({ base, store }) => {
+      store.updateSettings({ researchEnabled: true });
+      const project = await createProject(base);
+
+      // A repair run opts out explicitly — the Research phase must be skipped despite the setting.
+      const optOut = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "fix the crash", research: false }),
+      });
+      await optOut.text();
+      assert.equal(researchCalls, 0, "research:false must skip the Research phase");
+
+      // Sanity: with the setting on and no opt-out, the phase runs.
+      const normal = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "iterate on it" }),
+      });
+      await normal.text();
+      assert.ok(researchCalls >= 1, "Research must run when enabled and not opted out");
+    },
+    { researchPhase },
+  );
+});
+
 test("clean run: streams SSE, persists, serves the artifact back", async () => {
   await withRunServer(new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }), async ({ base, store }) => {
     const project = await createProject(base);

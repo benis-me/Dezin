@@ -199,6 +199,8 @@ export interface RunInput {
   model?: string;
   /** Chosen design direction slug — skips the direction gate; the build uses this direction. */
   directionSlug?: string;
+  /** Explicit Research opt-out: `false` skips the Research phase even when it's enabled in Settings (repair runs use this). */
+  research?: boolean;
 }
 
 export interface PromptOptimizeInput {
