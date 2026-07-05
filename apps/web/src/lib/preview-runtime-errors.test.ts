@@ -25,3 +25,44 @@ test("signatureOf is stable across identical errors", () => {
   );
   expect(signatureOf({ errorType: "error", message: "x" })).not.toBe(signatureOf({ errorType: "error", message: "y" }));
 });
+
+import { initialRuntimeErrorState, ingestRuntimeError, dismissFatal, dismissNonFatal } from "./preview-runtime-errors.ts";
+
+const msg = (over: Partial<RuntimeErrorMessage> = {}): RuntimeErrorMessage => ({
+  source: "dezin", type: "runtime-error", kind: "nonfatal", errorType: "console", message: "m", count: 1, at: 1, ...over,
+});
+
+test("ingest routes fatal and non-fatal into separate buckets", () => {
+  let s = initialRuntimeErrorState;
+  s = ingestRuntimeError(s, msg({ kind: "fatal", errorType: "error", message: "died" }), { runActive: false });
+  s = ingestRuntimeError(s, msg({ message: "warn" }), { runActive: false });
+  expect(s.fatal?.message).toBe("died");
+  expect(s.nonFatal.map((e) => e.message)).toEqual(["warn"]);
+});
+
+test("ingest dedupes non-fatal by signature and keeps latest count", () => {
+  let s = initialRuntimeErrorState;
+  s = ingestRuntimeError(s, msg({ message: "dup", count: 1 }), { runActive: false });
+  s = ingestRuntimeError(s, msg({ message: "dup", count: 4 }), { runActive: false });
+  expect(s.nonFatal).toHaveLength(1);
+  expect(s.nonFatal[0].count).toBe(4);
+});
+
+test("runActive suppresses fatal (buffers nothing visible)", () => {
+  const s = ingestRuntimeError(initialRuntimeErrorState, msg({ kind: "fatal", message: "x" }), { runActive: true });
+  expect(s.fatal).toBeNull();
+});
+
+test("a dismissed fatal signature does not re-open until it changes", () => {
+  let s = ingestRuntimeError(initialRuntimeErrorState, msg({ kind: "fatal", errorType: "error", message: "z" }), { runActive: false });
+  s = dismissFatal(s);
+  expect(s.fatal).toBeNull();
+  s = ingestRuntimeError(s, msg({ kind: "fatal", errorType: "error", message: "z" }), { runActive: false });
+  expect(s.fatal).toBeNull();
+});
+
+test("dismissNonFatal removes one entry by signature", () => {
+  let s = ingestRuntimeError(initialRuntimeErrorState, msg({ message: "a" }), { runActive: false });
+  s = dismissNonFatal(s, s.nonFatal[0].sig);
+  expect(s.nonFatal).toHaveLength(0);
+});

@@ -40,3 +40,50 @@ export function isHeartbeatMessage(data: unknown): data is PreviewHeartbeatMessa
 export function signatureOf(m: Pick<RuntimeErrorMessage, "errorType" | "message" | "src" | "line">): string {
   return `${m.errorType}|${m.message}|${m.src ?? ""}:${m.line ?? 0}`;
 }
+
+export interface RuntimeError extends RuntimeErrorMessage {
+  sig: string;
+}
+
+export interface RuntimeErrorState {
+  fatal: RuntimeError | null;
+  nonFatal: RuntimeError[];
+  dismissedFatalSig: string | null;
+}
+
+export const initialRuntimeErrorState: RuntimeErrorState = {
+  fatal: null,
+  nonFatal: [],
+  dismissedFatalSig: null,
+};
+
+export function resetRuntimeErrors(): RuntimeErrorState {
+  return { fatal: null, nonFatal: [], dismissedFatalSig: null };
+}
+
+const NONFATAL_CAP = 50;
+
+export function ingestRuntimeError(
+  state: RuntimeErrorState,
+  msg: RuntimeErrorMessage,
+  opts: { runActive: boolean },
+): RuntimeErrorState {
+  const sig = signatureOf(msg);
+  const entry: RuntimeError = { ...msg, sig };
+
+  if (msg.kind === "fatal") {
+    if (opts.runActive || state.dismissedFatalSig === sig) return state;
+    return { ...state, fatal: entry };
+  }
+
+  const rest = state.nonFatal.filter((e) => e.sig !== sig);
+  return { ...state, nonFatal: [...rest, entry].slice(-NONFATAL_CAP) };
+}
+
+export function dismissFatal(state: RuntimeErrorState): RuntimeErrorState {
+  return { ...state, fatal: null, dismissedFatalSig: state.fatal?.sig ?? state.dismissedFatalSig };
+}
+
+export function dismissNonFatal(state: RuntimeErrorState, sig: string): RuntimeErrorState {
+  return { ...state, nonFatal: state.nonFatal.filter((e) => e.sig !== sig) };
+}
