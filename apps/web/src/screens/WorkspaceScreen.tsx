@@ -93,6 +93,10 @@ const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg
 const FLOATING_COMPOSER_FADE_PX = 48;
 const SCROLL_TO_BOTTOM_GAP_PX = 12;
 const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
+// Per-conversation cap on unattended auto-fix dispatches. Bounds a pathological
+// "each repair yields a different crash" chain from firing unbounded runs.
+// Manual "Fix with Agent" clicks are not subject to this cap.
+export const AUTO_FIX_MAX_PER_CONVERSATION = 3;
 
 function queueKey(projectId: string): string {
   return `dezin.workspace.queue.${projectId}`;
@@ -4055,10 +4059,16 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     [projectMode, project?.projectPath],
   );
   const autoFixedSigsRef = useRef<Set<string>>(new Set());
+  // Reset the auto-fix cap/dedupe set whenever the active conversation changes, so the
+  // per-conversation cap below doesn't carry over stale attempts from a prior conversation.
+  useEffect(() => {
+    autoFixedSigsRef.current = new Set();
+  }, [activeConvId]);
   useEffect(() => {
     const fatal = runtimeErrors.fatal;
     if (!autoFixLive || !fatal || running) return;
     if (autoFixedSigsRef.current.has(fatal.sig)) return;
+    if (autoFixedSigsRef.current.size >= AUTO_FIX_MAX_PER_CONVERSATION) return;
     autoFixedSigsRef.current.add(fatal.sig);
     fixRuntimeErrors([fatal]);
   }, [runtimeErrors.fatal, autoFixLive, running, fixRuntimeErrors]);

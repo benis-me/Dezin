@@ -1,7 +1,13 @@
 import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
-import { buildProjectAnalysisPrompt, computeMarkupPosition, isPreviewBridgeMessage, WorkspaceScreen } from "./WorkspaceScreen.tsx";
+import {
+  AUTO_FIX_MAX_PER_CONVERSATION,
+  buildProjectAnalysisPrompt,
+  computeMarkupPosition,
+  isPreviewBridgeMessage,
+  WorkspaceScreen,
+} from "./WorkspaceScreen.tsx";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type { RunEvent, RunSummary } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
@@ -2734,4 +2740,40 @@ test("auto-fix dispatches one repair when enabled and a fatal error arrives whil
   dispatchPreviewMessage({ type: "runtime-error", kind: "fatal", errorType: "error", message: "auto boom", count: 1, at: 1 }); // same signature must not re-fire
   await new Promise((r) => setTimeout(r, 0));
   expect(streamRun).toHaveBeenCalledTimes(1);
+});
+
+test("auto-fix stops dispatching once the per-conversation cap is reached", async () => {
+  const streamRun = vi.fn(() => (async function* (): AsyncGenerator<RunEvent> {})());
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        streamRun: streamRun as never,
+        listFiles: async () => [{ path: "index.html", size: 12 }],
+        listAgents: async () => AGENTS,
+        getSettings: async () => ({ agentCommand: "claude", model: "", autoFixLiveRuntimeErrors: true }) as never,
+      })}
+    >
+      <AgentsProvider>
+        <WorkspaceScreen projectId="p1" />
+      </AgentsProvider>
+    </ApiProvider>,
+  );
+  await screen.findByTitle("Artifact preview");
+
+  // Each dispatch uses a distinct `message` so signature-dedupe doesn't mask the cap.
+  // `running` (and the error model's `runActive` gate) must settle back to false between
+  // dispatches — otherwise the next fatal is dropped by ingestRuntimeError, not the cap —
+  // so we waitFor each streamRun call to register before firing the next distinct fatal.
+  const distinctFatals = ["crash one", "crash two", "crash three", "crash four", "crash five"];
+  for (let i = 0; i < distinctFatals.length; i++) {
+    dispatchPreviewMessage({ type: "runtime-error", kind: "fatal", errorType: "error", message: distinctFatals[i], count: 1, at: i + 1 });
+    if (i < AUTO_FIX_MAX_PER_CONVERSATION) {
+      await waitFor(() => expect(streamRun).toHaveBeenCalledTimes(i + 1));
+    } else {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+
+  expect(streamRun.mock.calls.length).toBeLessThanOrEqual(AUTO_FIX_MAX_PER_CONVERSATION);
+  expect(streamRun).toHaveBeenCalledTimes(AUTO_FIX_MAX_PER_CONVERSATION);
 });

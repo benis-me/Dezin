@@ -4,6 +4,7 @@ import { useRef } from "react";
 import { usePreviewRuntimeErrors } from "./preview-runtime-errors.ts";
 
 afterEach(cleanup);
+afterEach(() => vi.useRealTimers());
 
 function harness(previewSrc: string, runActive = false) {
   const iframe = document.createElement("iframe");
