@@ -160,25 +160,27 @@ const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"])
 
 /** Max bounded design-improvement (ceiling) rounds once the floor (defects/slop) is clean. */
 const CEILING_MAX_ROUNDS = 3;
-/** How many times one design suggestion may be fed back before we give up on it. If the agent
- *  keeps not applying it (the critic keeps re-raising it), re-sending it again just wastes a
- *  round — a "verify-applied" convergence signal that beats a blind round cap. */
+/** How many times one advisory SUGGESTION is re-sent before we give up (the agent isn't taking it). */
 const IMPROVE_RECUR_LIMIT = 1;
+/** How many times one objective DEFECT is retried before we give up — the model keeps failing to
+ *  fix it, so spinning on it wastes rounds; stop, and surface it as unresolved instead. */
+const DEFECT_RECUR_LIMIT = 2;
 
-/** Stable identity for a design suggestion across rounds — its target selector + a normalized
- *  message prefix — so we can tell whether the SAME suggestion keeps recurring (i.e. wasn't
- *  applied) versus a genuinely new one. */
-export function improvementKey(f: QualityFinding): string {
-  const msg = f.message.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 60);
-  return `${f.selector ?? ""}::${msg}`;
+/** Looser cross-round identity for a finding. The critic rephrases its prose every round, so the
+ *  message is an unreliable key — the target SELECTOR is the stable anchor for "same issue on the
+ *  same element". Falls back to a normalized message only when there's no selector. */
+export function recurKey(f: QualityFinding): string {
+  if (f.selector) return `sel:${f.selector.toLowerCase()}`;
+  return `msg:${f.message.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 40)}`;
 }
 
-/** Verify-applied: return the suggestions still worth re-sending (fed back fewer than the recur
- *  limit) and record this round's attempt in `history`. A suggestion the critic keeps re-raising
- *  has clearly not been applied — dropping it converges the ceiling without nagging. */
-export function freshImprovements(improvements: QualityFinding[], history: Map<string, number>): QualityFinding[] {
-  const fresh = improvements.filter((f) => (history.get(improvementKey(f)) ?? 0) < IMPROVE_RECUR_LIMIT);
-  for (const f of improvements) history.set(improvementKey(f), (history.get(improvementKey(f)) ?? 0) + 1);
+/** Verify-applied: return the findings still worth re-sending (fed back fewer than `limit` times)
+ *  and record this round's attempt in `history`. A finding the critic keeps re-raising unchanged
+ *  is one the agent won't/can't apply — dropping it converges the loop (for suggestions) or gives
+ *  up gracefully instead of spinning on a defect the model can't fix. */
+export function freshFindings(findings: QualityFinding[], history: Map<string, number>, limit: number): QualityFinding[] {
+  const fresh = findings.filter((f) => (history.get(recurKey(f)) ?? 0) < limit);
+  for (const f of findings) history.set(recurKey(f), (history.get(recurKey(f)) ?? 0) + 1);
   return fresh;
 }
 
@@ -737,6 +739,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       let floorStalled = 0;
       let improvementRounds = 0;
       const improvementHistory = new Map<string, number>(); // suggestion key → times fed back (verify-applied)
+      const defectHistory = new Map<string, number>(); // defect key → times retried (give-up guard)
+      const stuckDefectKeys = new Set<string>(); // defects the agent repeatedly failed to fix
       const emitStandardPreviewUpdate = async (eventRound: number): Promise<void> => {
         try {
           const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId));
@@ -892,29 +896,28 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           (f) => AUTO_REPAIR_SEVERITIES.has(f.severity) && !f.id.startsWith("visual-improve") && f.id !== "visual-reviewed",
         );
         const improvements = findings.filter((f) => f.id.startsWith("visual-improve"));
+        // Give-up guard: a defect the critic keeps re-raising unchanged is one the model can't fix
+        // — record it as stuck (surfaced to the user) and stop retrying it so the loop doesn't spin.
+        for (const d of defects) if ((defectHistory.get(recurKey(d)) ?? 0) >= DEFECT_RECUR_LIMIT) stuckDefectKeys.add(recurKey(d));
+        const liveDefects = freshFindings(defects, defectHistory, DEFECT_RECUR_LIMIT);
+        const freshImps = freshFindings(improvements, improvementHistory, IMPROVE_RECUR_LIMIT);
 
         let repairFindings: QualityFinding[] | null = null;
-        if (defects.length > 0) {
-          // Floor phase — the objective GATE: fix defects/slop, but stop if the score stalls for
-          // 2 rounds (stuck).
+        if (liveDefects.length > 0) {
+          // Floor phase — the objective GATE: fix the defects the model can still make progress on,
+          // but stop if the lint score stalls for 2 rounds.
           if (score > bestFloorScore) {
             bestFloorScore = score;
             floorStalled = 0;
           } else {
             floorStalled += 1;
           }
-          if (floorStalled < 2) repairFindings = defects.concat(improvements.slice(0, 3));
-        } else if (improvements.length > 0 && improvementRounds < CEILING_MAX_ROUNDS) {
-          // Ceiling phase — ADVISORY design suggestions. Verify-applied: only re-send suggestions
-          // that haven't already been fed back and left unapplied. A suggestion the critic keeps
-          // re-raising (same selector + message) is one the agent won't/can't apply — sending it
-          // again just burns a round. We converge when there's nothing FRESH left to try (or the
-          // cap / oscillation guard trips). No design SCORE — the suggestions simply run out.
-          const fresh = freshImprovements(improvements, improvementHistory);
-          if (fresh.length > 0) {
-            improvementRounds += 1;
-            repairFindings = fresh;
-          }
+          if (floorStalled < 2) repairFindings = liveDefects.concat(freshImps.slice(0, 3));
+        } else if (freshImps.length > 0 && improvementRounds < CEILING_MAX_ROUNDS) {
+          // Ceiling phase — ADVISORY design suggestions, verify-applied. Converges when nothing
+          // FRESH remains (or the cap / oscillation guard trips). No design SCORE.
+          improvementRounds += 1;
+          repairFindings = freshImps;
         }
         if (!repairFindings || !repairFindings.length) break;
 
@@ -955,9 +958,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const reviewNote = designReviewSkipped
         ? " Note: the automated design review could not render this project, so only the anti-slop checks ran — design quality was not assessed."
         : "";
+      const stuckNote = stuckDefectKeys.size
+        ? ` ${stuckDefectKeys.size} issue${stuckDefectKeys.size > 1 ? "s" : ""} the auto-fixer couldn't resolve after repeated tries — see Quality for the specifics.`
+        : "";
       const message =
-        (passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`) + reviewNote;
-      store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped }));
+        (passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`) + reviewNote + stuckNote;
+      store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped, unresolved: stuckDefectKeys.size }));
       const persistedFindings = withResolvedVisualReviewHistory(findings, visualReviewHistory);
       store.updateRun(run.id, {
         status: "succeeded",

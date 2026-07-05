@@ -212,6 +212,8 @@ interface ResultMeta {
   materialSources?: string[];
   /** False when Visual Review was on but the critic never rendered/judged (only anti-slop ran). */
   designReviewed?: boolean;
+  /** Count of defects the auto-fixer repeatedly failed to resolve (gave up on). */
+  unresolved?: number;
 }
 interface Msg {
   id: number;
@@ -688,6 +690,7 @@ function normalizeResultMeta(value: unknown): ResultMeta | undefined {
   if (value.status === "done" || value.status === "stopped" || value.status === "failed") meta.status = value.status;
   if (Array.isArray(value.materialSources)) meta.materialSources = value.materialSources.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
   if (typeof value.designReviewed === "boolean") meta.designReviewed = value.designReviewed;
+  if (typeof value.unresolved === "number" && value.unresolved > 0) meta.unresolved = value.unresolved;
   return meta;
 }
 
@@ -1614,6 +1617,14 @@ function ResultCard({
                 className="rounded-md border border-border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
               >
                 design review skipped
+              </span>
+            ) : null}
+            {meta?.unresolved && !stopped ? (
+              <span
+                title="The auto-fixer flagged these repeatedly but couldn't resolve them — they need a manual look (see the Quality tab)."
+                className="rounded-md border border-border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+              >
+                {meta.unresolved} unresolved
               </span>
             ) : null}
             {typeof score === "number" ? (
