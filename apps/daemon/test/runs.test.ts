@@ -206,7 +206,7 @@ test("a run whose critic judged the design reports designReviewed=true", async (
       const done = parseSse(await res.text()).find((e) => e.type === "run-done")!;
       assert.equal(done.designReviewed, true);
     },
-    { visualQa: async () => [{ severity: "P2", id: "visual-design-score", message: "Design quality (critic): 88/100 vs the brief.", fix: "" }] },
+    { visualQa: async () => [{ severity: "P2", id: "visual-reviewed", message: "Automated design review completed.", fix: "" }] },
   );
 });
 

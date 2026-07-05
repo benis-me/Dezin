@@ -161,26 +161,19 @@ const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"])
 /** Max bounded design-improvement (ceiling) rounds once the floor (defects/slop) is clean. */
 const CEILING_MAX_ROUNDS = 2;
 
-/** The critic's 0-100 design score, if it emitted one (rides as the visual-design-score finding). */
-function readDesignScore(findings: QualityFinding[]): number | null {
-  const f = findings.find((x) => x.id === "visual-design-score");
-  const m = f?.message.match(/(\d{1,3})\s*\/\s*100/);
-  return m ? Math.max(0, Math.min(100, Number(m[1]))) : null;
-}
-
-/** The lint/FLOOR score — slop + defects only. Ceiling signal (design improvements, the
- *  critic's design score) is separate and must NOT drag the floor score down. */
+/** The lint/FLOOR score — slop + defects only. The ceiling (advisory design improvements + the
+ *  "reviewed" marker) is separate and must NOT drag the floor score down. */
 function floorScore(findings: QualityFinding[]): number {
-  return lintScore(findings.filter((f) => !f.id.startsWith("visual-improve") && f.id !== "visual-design-score"));
+  return lintScore(findings.filter((f) => !f.id.startsWith("visual-improve") && f.id !== "visual-reviewed"));
 }
 
-/** Whether the critic actually delivered a design judgment across the run (a score, defects, or
- *  improvements) — as opposed to only render/capture failures. Lets us avoid reporting a clean
- *  "reviewed" pass when the ceiling never actually ran (e.g. headless render failed every round). */
+/** Whether the critic actually ran and judged across the run (produced the visual-reviewed marker
+ *  or any real finding) — as opposed to only render/capture failures. Lets us avoid reporting a
+ *  clean "reviewed" pass when the ceiling never actually ran (e.g. headless render failed). */
 function producedDesignReview(visualFindings: QualityFinding[]): boolean {
   return visualFindings.some((f) => {
     const id = String(f.id);
-    return id === "visual-design-score" || id.startsWith("visual-ai-review") || id.startsWith("visual-improve");
+    return id === "visual-reviewed" || id.startsWith("visual-ai-review") || id.startsWith("visual-improve");
   });
 }
 
@@ -722,7 +715,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       let bestFloorScore = 0;
       let floorStalled = 0;
       let improvementRounds = 0;
-      let prevDesignScore = -1;
       const emitStandardPreviewUpdate = async (eventRound: number): Promise<void> => {
         try {
           const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId));
@@ -875,14 +867,14 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         if (!settings.autoImproveEnabled || repairRounds >= maxRepairRounds) break;
 
         const defects = findings.filter(
-          (f) => AUTO_REPAIR_SEVERITIES.has(f.severity) && !f.id.startsWith("visual-improve") && f.id !== "visual-design-score",
+          (f) => AUTO_REPAIR_SEVERITIES.has(f.severity) && !f.id.startsWith("visual-improve") && f.id !== "visual-reviewed",
         );
         const improvements = findings.filter((f) => f.id.startsWith("visual-improve"));
-        const critiqueScore = readDesignScore(findings);
 
         let repairFindings: QualityFinding[] | null = null;
         if (defects.length > 0) {
-          // Floor phase: fix defects/slop, but stop if the score stalls for 2 rounds (stuck).
+          // Floor phase — the objective GATE: fix defects/slop, but stop if the score stalls for
+          // 2 rounds (stuck).
           if (score > bestFloorScore) {
             bestFloorScore = score;
             floorStalled = 0;
@@ -890,14 +882,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             floorStalled += 1;
           }
           if (floorStalled < 2) repairFindings = defects.concat(improvements.slice(0, 3));
-        } else if (
-          improvements.length > 0 &&
-          improvementRounds < CEILING_MAX_ROUNDS &&
-          (critiqueScore === null || critiqueScore > prevDesignScore)
-        ) {
-          // Ceiling phase: bounded design-quality upgrades while the critic's score rises.
+        } else if (improvements.length > 0 && improvementRounds < CEILING_MAX_ROUNDS) {
+          // Ceiling phase — ADVISORY design suggestions: once the floor is clean, apply the
+          // critic's improvement suggestions for a bounded number of rounds. It converges naturally
+          // — it stops when the critic returns no more suggestions, the oscillation guard trips, or
+          // this cap is hit. No design SCORE drives this: quantifying design quality is unreliable
+          // and imposes taste; the suggestions are advisory and simply run out.
           improvementRounds += 1;
-          if (critiqueScore !== null) prevDesignScore = critiqueScore;
           repairFindings = improvements;
         }
         if (!repairFindings || !repairFindings.length) break;

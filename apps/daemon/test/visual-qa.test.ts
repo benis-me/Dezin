@@ -62,10 +62,9 @@ test("findingsFromGeometry flags a thin below-the-fold strip (orphaned element),
   assert.ok(!longPage.some((f) => f.id === "visual-below-fold-strip"));
 });
 
-test("parseVisualReview splits defects from design improvements and reads the design score", () => {
+test("parseVisualReview splits objective defects from advisory improvements and marks the review", () => {
   const findings = parseVisualReview(
     JSON.stringify({
-      designScore: 82,
       findings: [
         { kind: "defect", severity: "P1", message: "The header overflows below the fold.", fix: "Fix the grid rows." },
         { kind: "improvement", severity: "P2", message: "Tighten the hero hierarchy: raise the headline, mute the subhead.", fix: "Adjust type scale." },
@@ -73,16 +72,17 @@ test("parseVisualReview splits defects from design improvements and reads the de
       ],
     }),
   );
+  // No 0-100 score — just objective defects, advisory improvements, and a "reviewed" marker.
   const ids = findings.map((f) => f.id);
-  assert.deepEqual(ids, ["visual-ai-review-1", "visual-improve-1", "visual-improve-2", "visual-design-score"]);
+  assert.deepEqual(ids, ["visual-ai-review-1", "visual-improve-1", "visual-improve-2", "visual-reviewed"]);
   assert.equal(findings.find((f) => f.id === "visual-ai-review-1")!.severity, "P1");
   assert.equal(findings.filter((f) => f.id.startsWith("visual-improve")).length, 2);
-  assert.match(findings.find((f) => f.id === "visual-design-score")!.message, /82\/100/);
+  assert.ok(!findings.some((f) => /\/100/.test(f.message)), "no design score");
 });
 
-test("parseVisualReview tolerates no improvements and no score (already excellent)", () => {
-  const findings = parseVisualReview(JSON.stringify({ designScore: 96, findings: [] }));
-  assert.deepEqual(findings.map((f) => f.id), ["visual-design-score"]);
+test("parseVisualReview marks a clean review even with no findings", () => {
+  const findings = parseVisualReview(JSON.stringify({ findings: [] }));
+  assert.deepEqual(findings.map((f) => f.id), ["visual-reviewed"]);
 });
 
 test("parseVisualReview normalizes model-returned findings", () => {
@@ -95,13 +95,13 @@ test("parseVisualReview normalizes model-returned findings", () => {
     }),
   );
 
-  assert.equal(findings.length, 1);
+  assert.equal(findings.filter((f) => f.id.startsWith("visual-ai-review")).length, 1);
   assert.equal(findings[0]?.id, "visual-ai-review-1");
   assert.equal(findings[0]?.severity, "P1");
   assert.match(findings[0]?.message ?? "", /CTA overlaps/);
 });
 
-test("agentReviewPrompt hands the critic the direction spec, verifies palette first, and scores by rubric", () => {
+test("agentReviewPrompt supplies the direction and separates objective defects from advisory suggestions, with no score", () => {
   const input = {
     htmlPath: "/proj/index.html",
     projectRoot: "/proj",
@@ -109,38 +109,38 @@ test("agentReviewPrompt hands the critic the direction spec, verifies palette fi
     directionSpec: "# Console\n\n## Visual language\n- Near-monochrome base; quiet mono blocks.",
   } as unknown as VisualQaInput;
   const prompt = agentReviewPrompt(input, "/proj/.visual-qa/shot.png");
-  // The chosen direction is actually supplied to the critic (previously it never was).
+  // The chosen direction is supplied so the critic can reference it — as ADVISORY suggestions.
   assert.match(prompt, /Near-monochrome base/);
   assert.match(prompt, /CHOSEN DIRECTION/);
-  // Direction/palette alignment is judged FIRST, and a palette violation is a defect (P1).
-  assert.match(prompt, /DIRECTION ALIGNMENT/);
-  assert.match(prompt, /PALETTE/);
-  assert.match(prompt, /defect \(P1\)/i);
-  // Score is an anchored rubric, not a vibe.
-  assert.match(prompt, /directionAlignment \(0-40\)/);
-  assert.match(prompt, /AT MOST/);
+  // Defects are OBJECTIVE only; taste/palette is an advisory improvement, not a defect.
+  assert.match(prompt, /OBJECTIVE/);
+  assert.match(prompt, /ADVISORY/);
+  assert.match(prompt, /taste, palette, or aesthetic preferences as defects/i);
+  // No design score anywhere.
+  assert.ok(!/designScore/.test(prompt), "prompt must not ask for a design score");
+  assert.ok(!/\b0-100\b/.test(prompt), "prompt must not ask for a 0-100 rating");
 });
 
-test("reviewWithRetry retries once when a pass returns no designScore, and keeps the scored pass", async () => {
-  const scored = parseVisualReview(JSON.stringify({ designScore: 82, findings: [] }));
+test("reviewWithRetry retries once when a pass produced no review at all, and keeps the reviewed pass", async () => {
+  const reviewed = parseVisualReview(JSON.stringify({ findings: [] }));
   let calls = 0;
   const findings = await reviewWithRetry(async () => {
     calls += 1;
-    return calls === 1 ? [] : scored; // empty first (blank capture), judged on retry
+    return calls === 1 ? [] : reviewed; // unparseable first, a real review on retry
   });
   assert.equal(calls, 2);
-  assert.ok(findings.some((f) => f.id === "visual-design-score"));
+  assert.ok(findings.some((f) => f.id === "visual-reviewed"));
 });
 
-test("reviewWithRetry does not retry when the first pass already produced a score", async () => {
-  const scored = parseVisualReview(JSON.stringify({ designScore: 90, findings: [] }));
+test("reviewWithRetry does not retry when the first pass already produced a review (even a clean one)", async () => {
+  const reviewed = parseVisualReview(JSON.stringify({ findings: [] }));
   let calls = 0;
   const findings = await reviewWithRetry(async () => {
     calls += 1;
-    return scored;
+    return reviewed;
   });
   assert.equal(calls, 1);
-  assert.ok(findings.some((f) => f.id === "visual-design-score"));
+  assert.ok(findings.some((f) => f.id === "visual-reviewed"));
 });
 
 test("auditVisualArtifact is disabled by settings", async () => {

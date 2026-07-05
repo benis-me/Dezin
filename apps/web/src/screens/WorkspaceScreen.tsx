@@ -493,6 +493,12 @@ function isAgentVisualFinding(finding: QualityFinding): boolean {
   return finding.id.startsWith("visual-ai-review-") || finding.id === "visual-agent-review-failed" || finding.id === "visual-screenshot-missing";
 }
 
+/** Internal "the critic ran" marker — carries the review summary/screenshot, but is not itself an
+ *  issue, so it must not show as a finding or count toward any lane. */
+function isVisualReviewMarker(finding: QualityFinding): boolean {
+  return finding.id === "visual-reviewed";
+}
+
 function isResolvedVisualReviewFinding(finding: QualityFinding): boolean {
   return finding.reviewStatus === "resolved";
 }
@@ -622,8 +628,8 @@ function buildQualityLanes(input: {
   checks: QualityCheckState;
 }): QualityLane[] {
   const staticFindings = input.findings.filter((finding) => !isVisualFinding(finding));
-  const visualFindings = input.findings.filter(isVisualFinding);
-  const geometryFindings = visualFindings.filter((finding) => !isAgentVisualFinding(finding));
+  const visualFindings = input.findings.filter(isVisualFinding); // includes the "reviewed" marker → visual QA counts as having run
+  const geometryFindings = visualFindings.filter((finding) => !isAgentVisualFinding(finding) && !isVisualReviewMarker(finding));
   const agentFindings = visualFindings.filter(isAgentVisualFinding);
   const activeGeometryFindings = geometryFindings.filter((finding) => !isResolvedVisualReviewFinding(finding));
   const activeAgentFindings = agentFindings.filter((finding) => !isResolvedVisualReviewFinding(finding));
