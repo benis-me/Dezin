@@ -121,6 +121,26 @@ test("agentReviewPrompt supplies the direction and separates objective defects f
   assert.ok(!/\b0-100\b/.test(prompt), "prompt must not ask for a 0-100 rating");
 });
 
+test("agentReviewPrompt gates defects to provable pixel breakage and rejects inferred scroll causes", () => {
+  const input = {
+    htmlPath: "/proj/index.html",
+    projectRoot: "/proj",
+    brief: "A calm chat UI",
+  } as unknown as VisualQaInput;
+  const prompt = agentReviewPrompt(input, "/proj/.visual-qa/shot.png");
+  // A defect must be PROVABLE from the pixels — a closed list, not open-ended judgement.
+  assert.match(prompt, /prove from the pixels/i);
+  // The falsifiability test: if a correct implementation could produce this same frame, it is not a defect.
+  assert.match(prompt, /could a correct, deliberate implementation produce this exact screenshot/i);
+  assert.match(prompt, /not a defect/i);
+  // Describe the visible breakage, never an inferred runtime cause (the scroll false-positive class).
+  assert.match(prompt, /do NOT file scroll position/i);
+  // The capture is described honestly — no false unconditional "full page" claim, and content that is
+  // merely scrolled out of view is explicitly NORMAL, not missing.
+  assert.ok(!/full page, top to bottom/i.test(prompt), "must not claim an unconditional full-page capture");
+  assert.match(prompt, /scrolled out of view/i);
+});
+
 test("reviewWithRetry retries once when a pass produced no review at all, and keeps the reviewed pass", async () => {
   const reviewed = parseVisualReview(JSON.stringify({ findings: [] }));
   let calls = 0;
