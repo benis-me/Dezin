@@ -48,6 +48,39 @@ test("ResearchCard is not interactive while research is still running", () => {
   expect(onOpen).not.toHaveBeenCalled();
 });
 
+test("ResearchCard header shows plain-text status after the title, an open arrow, and no 'Open' label", () => {
+  render(<ResearchCard research={doneResearch} chosenSlug="bold" onOpen={() => {}} />);
+  // Status is plain text (no rounded tag), placed after the title.
+  expect(screen.getByTestId("research-status").textContent).toContain("grounded");
+  // An open affordance is a right-arrow at the far end — the word "Open" is gone.
+  expect(screen.getByTestId("research-open-arrow")).toBeTruthy();
+  expect(screen.getByTestId("research-card").textContent).not.toContain("Open");
+});
+
+test("ResearchCard renders directions as cards carrying a one-line summary", () => {
+  const research: ResearchCardData = {
+    ...doneResearch,
+    directions: [
+      { slug: "bold", title: "Bold terminal", summary: "Big monospace type with one loud accent." },
+      { slug: "calm", title: "Calm editorial", summary: "Quiet whitespace and a serif display face." },
+    ],
+  };
+  render(<ResearchCard research={research} chosenSlug="bold" onOpen={() => {}} />);
+  const cards = screen.getAllByTestId("research-card-direction");
+  const bold = cards.find((c) => c.textContent?.includes("Bold terminal"))!;
+  expect(bold.textContent).toContain("Big monospace type");
+  expect(bold.getAttribute("data-selected")).toBe("true");
+  expect(cards.find((c) => c.textContent?.includes("Calm editorial"))!.getAttribute("data-selected")).toBe("false");
+});
+
+test("ResearchCard's search icon reflects the running state (animated while researching)", () => {
+  const running: ResearchCardData = { status: "running", activities: [] };
+  const { rerender } = render(<ResearchCard research={running} />);
+  expect(screen.getByTestId("research-search-icon").getAttribute("data-running")).toBe("true");
+  rerender(<ResearchCard research={doneResearch} chosenSlug="bold" onOpen={() => {}} />);
+  expect(screen.getByTestId("research-search-icon").getAttribute("data-running")).toBe("false");
+});
+
 test("DirectionCard picks a direction, marks it selected, and locks further picks (one-shot)", () => {
   const onPick = vi.fn();
   render(<DirectionCard directions={directions} onPick={onPick} />);

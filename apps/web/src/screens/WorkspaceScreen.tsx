@@ -694,6 +694,17 @@ function normalizeResultMeta(value: unknown): ResultMeta | undefined {
   return meta;
 }
 
+/** Parse the research card's directions from a persisted meta / SSE payload, carrying the optional blurb. */
+function parseResearchDirections(value: unknown): ResearchCardData["directions"] {
+  if (!Array.isArray(value)) return [];
+  const out: NonNullable<ResearchCardData["directions"]> = [];
+  for (const d of value) {
+    if (!isRecord(d) || typeof d.slug !== "string" || typeof d.title !== "string") continue;
+    out.push({ slug: d.slug, title: d.title, summary: typeof d.summary === "string" ? d.summary : undefined });
+  }
+  return out;
+}
+
 function normalizeLiveItems(value: unknown): LiveItem[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item): LiveItem[] => {
@@ -776,12 +787,7 @@ function toMsg(m: Message, id: number): Msg {
       }
       if (isRecord(parsed) && isRecord(parsed.research)) {
         const r = parsed.research;
-        const directions = Array.isArray(r.directions)
-          ? (r.directions as unknown[]).filter((d): d is { slug: string; title: string } => {
-              const o = d as { slug?: unknown; title?: unknown } | null;
-              return !!o && typeof o.slug === "string" && typeof o.title === "string";
-            })
-          : [];
+        const directions = parseResearchDirections(r.directions);
         return {
           id,
           dbId: m.id,
@@ -3097,12 +3103,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "research-done": {
         setResearchRefreshKey((k) => k + 1); // fresh research landed → reload the Research tab
         const rid = researchMsgIdRef.current;
-        const directions = Array.isArray(ev.directions)
-          ? (ev.directions as unknown[]).filter((d): d is { slug: string; title: string } => {
-              const o = d as { slug?: unknown; title?: unknown } | null;
-              return !!o && typeof o.slug === "string" && typeof o.title === "string";
-            })
-          : [];
+        const directions = parseResearchDirections(ev.directions);
         const done = {
           status: "done" as const,
           report: ev.report === true,

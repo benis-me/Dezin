@@ -9,6 +9,7 @@
  */
 
 import { useState, type KeyboardEvent } from "react";
+import { motion } from "motion/react";
 import { Check, ChevronDown, ChevronRight, Download, FileCode2, Globe, MousePointerClick, Search, Sparkles } from "lucide-react";
 import { Markdown } from "../components/Markdown.tsx";
 import { cn } from "../lib/utils.ts";
@@ -26,7 +27,7 @@ export interface ResearchCardData {
   report?: boolean;
   sources?: number;
   assets?: number;
-  directions?: Array<{ slug: string; title: string }>;
+  directions?: Array<{ slug: string; title: string; summary?: string }>;
   error?: string;
 }
 
@@ -65,6 +66,23 @@ function OptionRadio({ selected }: { selected: boolean }) {
   );
 }
 
+/** A magnifier that scans in a small loop while research runs, then settles once it's done ("find"). */
+function AnimatedSearchIcon({ running }: { running: boolean }) {
+  return (
+    <span data-testid="research-search-icon" data-running={running ? "true" : "false"} aria-hidden className="shrink-0 text-muted-foreground">
+      <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+        <motion.g
+          animate={running ? { x: [0, 2.4, -1.6, 0], y: [0, -1.6, 2.4, 0] } : { x: 0, y: 0 }}
+          transition={running ? { duration: 1.8, repeat: Infinity, ease: "easeInOut" } : { duration: 0.3, ease: "easeOut" }}
+        >
+          <circle cx="10.5" cy="10.5" r="6.5" />
+          <line x1="15.5" y1="15.5" x2="20" y2="20" />
+        </motion.g>
+      </svg>
+    </span>
+  );
+}
+
 /**
  * The pre-design Research phase's dedicated card — live steps, then a results summary.
  * When `onOpen` is provided (research deliverables exist) the whole card opens the Research tab.
@@ -94,32 +112,21 @@ export function ResearchCard({ research, chosenSlug, onOpen }: { research: Resea
       {/* Single header row — the ONE divider lives under it (below), never doubled. */}
       <div className="flex items-center justify-between gap-3 px-3 py-2">
         <div className="flex min-w-0 items-center gap-2">
-          <Search size={14} strokeWidth={1.9} className="shrink-0 text-muted-foreground" />
+          <AnimatedSearchIcon running={running} />
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
-              Research
-              {interactive ? (
-                <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-muted-foreground">
-                  · Open<ChevronRight size={11} strokeWidth={2} />
-                </span>
-              ) : null}
+              <span>Research</span>
+              {/* Run status as plain text after the title, separated by "·" — no tag. */}
+              <span data-testid="research-status" className="inline-flex items-center gap-1 font-medium text-muted-foreground">
+                <span aria-hidden>·</span>
+                {running ? "researching" : report ? "grounded" : "no report"}
+              </span>
             </div>
             <div className="truncate text-[11px] text-muted-foreground">{running ? "Studying competitors, audience & references" : "Discovery complete"}</div>
           </div>
         </div>
-        <span
-          className={cn(
-            "flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium",
-            running
-              ? "border-border bg-surface-2 text-muted-foreground"
-              : report
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                : "border-border bg-surface-2 text-muted-foreground",
-          )}
-        >
-          {running ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" /> : <Check size={11} strokeWidth={2.4} />}
-          {running ? "researching" : report ? "grounded" : "no report"}
-        </span>
+        {/* Far end: a right arrow signalling the card opens the Research tab. */}
+        {interactive ? <ChevronRight data-testid="research-open-arrow" size={16} strokeWidth={2} className="shrink-0 self-center text-muted-foreground" /> : null}
       </div>
 
       {/* Body — a single bordered region (one divider), holding live steps or the results. */}
@@ -147,22 +154,34 @@ export function ResearchCard({ research, chosenSlug, onOpen }: { research: Resea
             {directions.length ? <span className="text-muted-foreground">{directions.length} directions</span> : null}
           </div>
           {directions.length ? (
-            <div className="mt-2 flex flex-wrap gap-1.5">
+            <div className="mt-2 grid gap-1.5">
               {directions.map((d) => {
                 const selected = !!chosenSlug && d.slug === chosenSlug;
+                const dimmed = !!chosenSlug && !selected; // once a direction is chosen, the others recede
                 return (
-                  <span
+                  <div
                     key={d.slug}
                     data-testid="research-card-direction"
                     data-selected={selected ? "true" : "false"}
                     className={cn(
-                      "inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-[10px]",
-                      selected ? "border-primary/50 bg-primary/10 font-medium text-primary" : "border-border bg-surface-2 text-muted-foreground",
+                      "flex items-start gap-2 rounded-md border p-2 text-left transition-colors",
+                      selected ? "border-primary/60 bg-primary/5 ring-1 ring-primary/20" : "border-border bg-background",
+                      dimmed && "opacity-55",
                     )}
                   >
-                    {selected ? <Check size={10} strokeWidth={3} className="shrink-0" /> : null}
-                    <span className="truncate">{d.title}</span>
-                  </span>
+                    <OptionRadio selected={selected} />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className="truncate text-xs font-medium text-foreground">{d.title}</span>
+                        {selected ? (
+                          <span className="inline-flex shrink-0 items-center rounded-full bg-primary px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-primary-foreground">
+                            Chosen
+                          </span>
+                        ) : null}
+                      </span>
+                      {d.summary ? <span className="mt-0.5 line-clamp-2 block text-[11px] leading-snug text-muted-foreground">{d.summary}</span> : null}
+                    </span>
+                  </div>
                 );
               })}
             </div>

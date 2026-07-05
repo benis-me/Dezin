@@ -38,7 +38,7 @@ import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizePr
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { runResearchPhase } from "./research-phase.ts";
-import { buildResearchContext, directionPath, directionTitle, listDirections, listAssets, readSources, researchExists, writeChosenDirection } from "../../../packages/research/src/index.ts";
+import { buildResearchContext, directionPath, directionTitle, directionBlurb, listDirections, listAssets, readSources, researchExists, writeChosenDirection } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import type { AppDeps } from "./app.ts";
@@ -312,7 +312,7 @@ export interface ResearchSummary {
   report: boolean;
   sources: number;
   assets: number;
-  directions: Array<{ slug: string; title: string }>;
+  directions: Array<{ slug: string; title: string; summary: string }>;
 }
 
 /** Read the .research/ tree into a compact summary for the UI (best-effort). */
@@ -326,7 +326,7 @@ async function summarizeResearch(dir: string): Promise<Omit<ResearchSummary, "pr
     report: researchExists(dir),
     sources: sources.length,
     assets: assets.length,
-    directions: directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown) })),
+    directions: directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown), summary: directionBlurb(d.markdown) })),
   };
 }
 
