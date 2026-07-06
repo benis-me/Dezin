@@ -12,6 +12,12 @@ export { lintArtifact, hasFindings } from "./lint-artifact.ts";
 export {
   detectComputedFindings,
   MIN_BODY_FONT_PX,
+  AA_NORMAL_CONTRAST,
+  AA_LARGE_CONTRAST,
+  MIN_LINE_HEIGHT_RATIO,
+  MAX_LINE_LENGTH_CH,
+  MIN_TYPE_SCALE_RATIO,
+  TRACKING_FLOOR_EM,
   type ComputedElement,
   type ComputedStyle,
   type ComputedRect,

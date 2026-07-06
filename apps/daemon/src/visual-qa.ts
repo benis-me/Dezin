@@ -150,8 +150,8 @@ interface GeometrySnapshot {
   elements: GeometryElement[];
   /** The page's opaque background (body, else html) — for the cream/sand-surface check. */
   pageBackground?: string;
-  /** The page's declared design tokens (font families + resolved palette colors) — for drift checks. */
-  designTokens?: { fonts: string[]; colors: Array<{ r: number; g: number; b: number }> };
+  /** The page's declared design tokens (font families + resolved palette colors + radius scale) — for drift checks. */
+  designTokens?: { fonts: string[]; colors: Array<{ r: number; g: number; b: number }>; radii?: number[] };
 }
 
 const VIEWPORTS = [
@@ -619,6 +619,12 @@ async function collectGeometry(
           const p = (m[1] ?? "").split(/[\s,/]+/).map((n: string) => parseFloat(n));
           if (p.length >= 3 && (p[3] === undefined || p[3] >= 1)) tokenColors.push({ r: p[0]!, g: p[1]!, b: p[2]! });
         }
+        const RADIUS_TOKENS = ["--radius", "--radius-sm", "--radius-md", "--radius-lg", "--radius-xl", "--rounded", "--rounded-sm", "--rounded-lg"];
+        const tokenRadii: number[] = [];
+        for (const t of RADIUS_TOKENS) {
+          const rm = /(-?\d*\.?\d+)(px|rem)/.exec(rootStyle.getPropertyValue(t).trim());
+          if (rm) tokenRadii.push(rm[2] === "rem" ? parseFloat(rm[1]!) * 16 : parseFloat(rm[1]!));
+        }
         doc.body.removeChild(probe);
         return {
           viewport: { width: win.innerWidth, height: win.innerHeight },
@@ -628,7 +634,7 @@ async function collectGeometry(
           },
           bodyTextLength: (body.innerText ?? "").trim().length,
           pageBackground: opaqueBg(bodyBg) ? bodyBg : opaqueBg(htmlBg) ? htmlBg : undefined,
-          designTokens: { fonts: tokenFonts, colors: tokenColors },
+          designTokens: { fonts: tokenFonts, colors: tokenColors, radii: tokenRadii },
           elements,
         };
       }));

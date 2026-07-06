@@ -147,9 +147,9 @@ export interface ComputedContext {
   provider?: string;
   /** The page's computed background (body, else html) — for the cream/sand-surface check. */
   pageBackground?: string;
-  /** The page's own declared design tokens (font families + resolved palette colors), read from
-   *  :root — for drift detection: a rendered font/color outside the declared set is drift. */
-  designTokens?: { fonts: string[]; colors: Array<{ r: number; g: number; b: number }> };
+  /** The page's own declared design tokens (font families + resolved palette colors + radius scale),
+   *  read from :root — for drift detection: a rendered font/color/radius outside the declared set is drift. */
+  designTokens?: { fonts: string[]; colors: Array<{ r: number; g: number; b: number }>; radii?: number[] };
 }
 
 /** An element carries real, readable copy (not a decorative/empty node). */
@@ -569,20 +569,55 @@ function colorDistance(a: { r: number; g: number; b: number }, b: { r: number; g
   return Math.sqrt((a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2);
 }
 
-/** design-system-color — a chromatic rendered color that matches no palette token. */
+/** design-system-color — a chromatic rendered color (text OR background) matching no palette token. */
 function checkDesignSystemColor(el: ComputedElement, ctx: ComputedContext): Finding[] {
   const tokens = ctx.designTokens;
-  if (!tokens || tokens.colors.length === 0 || !isTextBearing(el)) return [];
-  const c = parseColor(el.style.color);
-  if (!c || c.a < 1 || chromaSpread(c) < DRIFT_MIN_CHROMA) return []; // neutrals aren't palette colors
-  const nearest = Math.min(...tokens.colors.map((t) => colorDistance(c, t)));
-  if (nearest <= DRIFT_MATCH_DISTANCE) return [];
+  if (!tokens || tokens.colors.length === 0) return [];
+  const out: Finding[] = [];
+  const drift = (raw: string | undefined, where: string): void => {
+    const c = parseColor(raw);
+    if (!c || c.a < 1 || chromaSpread(c) < DRIFT_MIN_CHROMA) return; // neutrals aren't palette colors
+    const nearest = Math.min(...tokens.colors.map((t) => colorDistance(c, t)));
+    if (nearest <= DRIFT_MATCH_DISTANCE) return;
+    out.push({
+      severity: "P2",
+      id: "design-system-color",
+      message: `${el.selector} ${where} uses a chromatic color that matches no palette token (nearest is ~${Math.round(nearest)} off in RGB).`,
+      fix: "Bind a palette token (--accent / --fg / --success…) instead of hardcoding a new hue.",
+      selector: el.selector,
+    });
+  };
+  if (isTextBearing(el)) drift(el.style.color, "text");
+  drift(el.style.backgroundColor, "background");
+  return out;
+}
+
+/** First length in a border-radius value, in px (rem → px). */
+function parseRadiusPx(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const m = /(-?\d*\.?\d+)(px|rem)/.exec(raw);
+  if (!m) return null;
+  const n = parseFloat(m[1]!);
+  return m[2] === "rem" ? n * 16 : n;
+}
+
+/** design-system-radius — a corner radius off the declared --radius-* scale (pills/sharp exempt). */
+function checkDesignSystemRadius(el: ComputedElement, ctx: ComputedContext): Finding[] {
+  const radii = ctx.designTokens?.radii;
+  if (!radii || radii.length === 0) return [];
+  const r = parseRadiusPx(el.style.borderRadius);
+  if (r === null || r <= 0) return [];
+  // Pills (radius ≈ half the smaller side, or a huge value) are intentional, not scale drift.
+  const half = Math.min(el.rect.width, el.rect.height) / 2;
+  if (r >= half - 1 || r >= 500) return [];
+  const nearest = Math.min(...radii.map((t) => Math.abs(t - r)));
+  if (nearest <= 2) return [];
   return [
     {
       severity: "P2",
-      id: "design-system-color",
-      message: `${el.selector} uses a chromatic color that matches no palette token (nearest is ~${Math.round(nearest)} off in RGB).`,
-      fix: "Bind a palette token (--accent / --fg / --success…) instead of hardcoding a new hue.",
+      id: "design-system-radius",
+      message: `${el.selector} uses ${Math.round(r)}px border-radius — not on the design system's radius scale.`,
+      fix: "Bind a --radius-* token; keep corner radii on the declared scale.",
       selector: el.selector,
     },
   ];
@@ -620,6 +655,7 @@ const ELEMENT_CHECKS: ReadonlyArray<(el: ComputedElement, ctx: ComputedContext) 
   checkDarkGlow,
   checkDesignSystemFont,
   checkDesignSystemColor,
+  checkDesignSystemRadius,
   checkGptThinBorderWideShadow,
 ];
 

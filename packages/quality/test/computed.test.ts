@@ -287,6 +287,31 @@ test("does not flag a token color or a neutral", () => {
   assert.equal(neutral.some((f) => f.id === "design-system-color"), false);
 });
 
+test("flags a chromatic BACKGROUND outside the palette (not just text color)", () => {
+  const findings = detectComputedFindings(
+    [el({ selector: ".panel", text: "", rect: { x: 0, y: 0, width: 240, height: 120 }, style: { backgroundColor: "rgb(220, 40, 120)", fontSizePx: 16 } })],
+    COLOR_CTX,
+  );
+  assert.ok(findings.some((f) => f.id === "design-system-color"));
+});
+
+// ── design-system drift (radius) ──────────────────────────────────────────────
+const RADIUS_CTX = { designTokens: { fonts: [], colors: [], radii: [6, 8, 12, 999] } };
+
+test("flags a border-radius off the token scale", () => {
+  const findings = detectComputedFindings([el({ selector: ".box", text: "", rect: { x: 0, y: 0, width: 240, height: 120 }, style: { borderRadius: "20px" } })], RADIUS_CTX);
+  assert.ok(findings.some((f) => f.id === "design-system-radius"));
+});
+
+test("does not flag a token radius, sharp corners, or a pill", () => {
+  const onScale = detectComputedFindings([el({ selector: ".box", text: "", rect: { x: 0, y: 0, width: 240, height: 120 }, style: { borderRadius: "8px" } })], RADIUS_CTX);
+  assert.equal(onScale.some((f) => f.id === "design-system-radius"), false);
+  const sharp = detectComputedFindings([el({ selector: ".box", text: "", rect: { x: 0, y: 0, width: 240, height: 120 }, style: { borderRadius: "0px" } })], RADIUS_CTX);
+  assert.equal(sharp.some((f) => f.id === "design-system-radius"), false);
+  const pill = detectComputedFindings([el({ selector: ".pill", text: "", rect: { x: 0, y: 0, width: 80, height: 32 }, style: { borderRadius: "999px" } })], RADIUS_CTX);
+  assert.equal(pill.some((f) => f.id === "design-system-radius"), false);
+});
+
 // ── provider fingerprint: gpt-thin-border-wide-shadow ─────────────────────────
 test("flags a 1px border paired with a wide soft shadow when GPT generated the run", () => {
   const findings = detectComputedFindings(

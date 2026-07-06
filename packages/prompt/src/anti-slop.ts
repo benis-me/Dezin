@@ -5,7 +5,16 @@
  * it never produces them in the first place.
  */
 
-import { slopRules } from "../../quality/src/index.ts";
+import {
+  slopRules,
+  AA_NORMAL_CONTRAST,
+  AA_LARGE_CONTRAST,
+  MIN_LINE_HEIGHT_RATIO,
+  MAX_LINE_LENGTH_CH,
+  MIN_BODY_FONT_PX,
+  MIN_TYPE_SCALE_RATIO,
+  TRACKING_FLOOR_EM,
+} from "../../quality/src/index.ts";
 
 export function renderAntiSlopContract(): string {
   const indigo = slopRules.AI_DEFAULT_INDIGO.join(", ");
@@ -40,6 +49,17 @@ Dezin taste, also enforced:
   neutrals do the work.
 - ALL-CAPS text always gets ≥${slopRules.ALL_CAPS_TRACKING_FLOOR_EM}em letter-spacing. No gradient-clipped text. Keep
   border-radius on the brand's radius scale.
+
+## Rendered-quality bar — a headless browser checks the RESULT; hit these first pass
+
+Cheaper to get right up front than to be corrected after render:
+- **Contrast.** Body ≥ ${AA_NORMAL_CONTRAST}:1, large/bold ≥ ${AA_LARGE_CONTRAST}:1 vs the ACTUAL background. Muted-gray-on-tint is the #1 miss — verify muted/placeholder text clears ${AA_NORMAL_CONTRAST}:1.
+- **Readability.** line-height ≥ ${MIN_LINE_HEIGHT_RATIO} on running text; body measure ≤ ${MAX_LINE_LENGTH_CH}ch (max-width); body ≥ ${MIN_BODY_FONT_PX}px; display tracking no tighter than ${TRACKING_FLOOR_EM}em. Give heading levels a real step (≥${MIN_TYPE_SCALE_RATIO}×).
+- **Components.** No nested cards (a box inside a box — flatten to one surface); no rounded icon-tile stacked above every heading (icon inline); no chromatic neon glow on dark.
+- **Colour.** No violet/purple DISPLAY text; no warm cream/sand page background (use a true off-white or a brand tint). Keep fonts, colours, radii ON the token scale — off-scale reads as drift.
+- **Rhythm.** Vary vertical spacing on a scale (16 / 24 / 40 / 64), don't repeat one value everywhere.
+- **Copy.** No marketing clichés (elevate / seamless / unleash / supercharge / world-class), no repeated "X. No Y." cadence, don't over-reach for em-dashes.
+- **Motion.** Exponential ease-out; never bounce/elastic curves; all motion behind \`prefers-reduced-motion\`.
 
 Add soul the right way: ~80% proven patterns + ~20% one distinctive move (a type choice,
 a proportion, one memorable micro-interaction, one product-specific detail). If an
