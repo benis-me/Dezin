@@ -148,6 +148,8 @@ interface GeometrySnapshot {
   elements: GeometryElement[];
   /** The page's opaque background (body, else html) — for the cream/sand-surface check. */
   pageBackground?: string;
+  /** The page's declared design tokens (font families + resolved palette colors) — for drift checks. */
+  designTokens?: { fonts: string[]; colors: Array<{ r: number; g: number; b: number }> };
 }
 
 const VIEWPORTS = [
@@ -587,6 +589,36 @@ async function collectGeometry(
         };
         const bodyBg = win.getComputedStyle(body).backgroundColor;
         const htmlBg = win.getComputedStyle(root).backgroundColor;
+        // The page's OWN declared design tokens, read from :root — the reference the drift checks
+        // compare the rendered result against (font families by name; colors resolved to rgb via a
+        // hidden probe so the browser handles oklch/hsl/hex for us). Probe is added AFTER the element
+        // sweep and removed before returning, so it never appears in `elements`.
+        const rootStyle = win.getComputedStyle(root);
+        const FONT_TOKENS = ["--font-display", "--font-body", "--font-mono", "--font-sans", "--font-serif", "--font-heading"];
+        const COLOR_TOKENS = [
+          "--bg", "--surface", "--surface-2", "--fg", "--fg-2", "--muted", "--border", "--border-strong",
+          "--accent", "--accent-fg", "--accent-2", "--primary", "--secondary", "--success", "--warn", "--danger",
+        ];
+        const tokenFonts: string[] = [];
+        for (const t of FONT_TOKENS) {
+          const fam = (rootStyle.getPropertyValue(t).split(",")[0] ?? "").replace(/["']/g, "").trim().toLowerCase();
+          if (fam && !tokenFonts.includes(fam)) tokenFonts.push(fam);
+        }
+        const probe = doc.createElement("span");
+        probe.style.cssText = "position:absolute;left:-9999px;visibility:hidden;pointer-events:none";
+        doc.body.appendChild(probe);
+        const tokenColors: Array<{ r: number; g: number; b: number }> = [];
+        for (const t of COLOR_TOKENS) {
+          const v = rootStyle.getPropertyValue(t).trim();
+          if (!v) continue;
+          probe.style.color = "";
+          probe.style.color = v;
+          const m = /rgba?\(([^)]+)\)/.exec(win.getComputedStyle(probe).color);
+          if (!m) continue;
+          const p = (m[1] ?? "").split(/[\s,/]+/).map((n: string) => parseFloat(n));
+          if (p.length >= 3 && (p[3] === undefined || p[3] >= 1)) tokenColors.push({ r: p[0]!, g: p[1]!, b: p[2]! });
+        }
+        doc.body.removeChild(probe);
         return {
           viewport: { width: win.innerWidth, height: win.innerHeight },
           document: {
@@ -595,6 +627,7 @@ async function collectGeometry(
           },
           bodyTextLength: (body.innerText ?? "").trim().length,
           pageBackground: opaqueBg(bodyBg) ? bodyBg : opaqueBg(htmlBg) ? htmlBg : undefined,
+          designTokens: { fonts: tokenFonts, colors: tokenColors },
           elements,
         };
       }));
@@ -605,7 +638,11 @@ async function collectGeometry(
         // Deterministic computed-style findings — contrast, type, spacing, component tells — run
         // on the desktop render only (viewport-independent) and are bounded so they can't flood repair.
         computedFindings = boundComputedFindings(
-          detectComputedFindings(toComputedElements(desktopElements), { ...computedCtx, pageBackground: (snapshot as GeometrySnapshot).pageBackground }),
+          detectComputedFindings(toComputedElements(desktopElements), {
+            ...computedCtx,
+            pageBackground: (snapshot as GeometrySnapshot).pageBackground,
+            designTokens: (snapshot as GeometrySnapshot).designTokens,
+          }),
         );
         if (screenshotPath) {
           await mkdir(dirname(screenshotPath), { recursive: true });

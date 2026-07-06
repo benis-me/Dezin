@@ -60,6 +60,31 @@ export const DARK_BG_LUM = 0.15;
 export const GLOW_CHROMA = 40;
 export const GLOW_BLUR_PX = 12;
 
+/** Design-system color drift: only chromatic colors count, and a token match is within this RGB distance. */
+export const DRIFT_MIN_CHROMA = 24;
+export const DRIFT_MATCH_DISTANCE = 16;
+
+/** Generic font keywords that are never "drift" — they're the fallback tail of any stack. */
+const GENERIC_FONTS = new Set([
+  "ui-sans-serif",
+  "ui-serif",
+  "ui-monospace",
+  "ui-rounded",
+  "system-ui",
+  "sans-serif",
+  "serif",
+  "monospace",
+  "-apple-system",
+  "blinkmacsystemfont",
+  "cursive",
+  "fantasy",
+  "math",
+  "emoji",
+  "inherit",
+  "initial",
+  "unset",
+]);
+
 /** A rendered element's box, in CSS px, relative to the viewport. */
 export interface ComputedRect {
   x: number;
@@ -117,6 +142,9 @@ export interface ComputedContext {
   provider?: string;
   /** The page's computed background (body, else html) — for the cream/sand-surface check. */
   pageBackground?: string;
+  /** The page's own declared design tokens (font families + resolved palette colors), read from
+   *  :root — for drift detection: a rendered font/color outside the declared set is drift. */
+  designTokens?: { fonts: string[]; colors: Array<{ r: number; g: number; b: number }> };
 }
 
 /** An element carries real, readable copy (not a decorative/empty node). */
@@ -465,6 +493,51 @@ function checkIconTileStack(elements: ComputedElement[]): Finding[] {
   return out;
 }
 
+/** The first family in a font stack, unquoted and lowercased. */
+function primaryFamily(fontFamily: string): string {
+  return (fontFamily.split(",")[0] ?? "").replace(/["']/g, "").trim().toLowerCase();
+}
+
+/** design-system-font — a rendered typeface outside the page's own declared --font-* families. */
+function checkDesignSystemFont(el: ComputedElement, ctx: ComputedContext): Finding[] {
+  const tokens = ctx.designTokens;
+  if (!tokens || !isTextBearing(el) || !el.style.fontFamily) return [];
+  const fam = primaryFamily(el.style.fontFamily);
+  if (!fam || GENERIC_FONTS.has(fam) || tokens.fonts.includes(fam)) return [];
+  return [
+    {
+      severity: "P2",
+      id: "design-system-font",
+      message: `${el.selector} uses "${fam}" — not one of the design system's declared font families.`,
+      fix: `Bind a declared token family (${tokens.fonts.join(", ") || "the --font-* tokens"}); don't introduce a new typeface.`,
+      selector: el.selector,
+    },
+  ];
+}
+
+function colorDistance(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): number {
+  return Math.sqrt((a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2);
+}
+
+/** design-system-color — a chromatic rendered color that matches no palette token. */
+function checkDesignSystemColor(el: ComputedElement, ctx: ComputedContext): Finding[] {
+  const tokens = ctx.designTokens;
+  if (!tokens || tokens.colors.length === 0 || !isTextBearing(el)) return [];
+  const c = parseColor(el.style.color);
+  if (!c || c.a < 1 || chromaSpread(c) < DRIFT_MIN_CHROMA) return []; // neutrals aren't palette colors
+  const nearest = Math.min(...tokens.colors.map((t) => colorDistance(c, t)));
+  if (nearest <= DRIFT_MATCH_DISTANCE) return [];
+  return [
+    {
+      severity: "P2",
+      id: "design-system-color",
+      message: `${el.selector} uses a chromatic color that matches no palette token (nearest is ~${Math.round(nearest)} off in RGB).`,
+      fix: "Bind a palette token (--accent / --fg / --success…) instead of hardcoding a new hue.",
+      selector: el.selector,
+    },
+  ];
+}
+
 /** Per-element checks, each pure: (element) -> findings. */
 const ELEMENT_CHECKS: ReadonlyArray<(el: ComputedElement, ctx: ComputedContext) => Finding[]> = [
   checkTinyText,
@@ -475,6 +548,8 @@ const ELEMENT_CHECKS: ReadonlyArray<(el: ComputedElement, ctx: ComputedContext) 
   checkAiPurpleText,
   checkExtremeNegativeTracking,
   checkDarkGlow,
+  checkDesignSystemFont,
+  checkDesignSystemColor,
 ];
 
 /** Whole-document checks that need every element at once (outline order, repetition). */

@@ -251,3 +251,38 @@ test("does not flag an icon tile that is not sitting above a heading", () => {
   const tile = el({ selector: ".feature .icon", text: "", rect: { x: 0, y: 0, width: 48, height: 48 }, style: { hasIconChild: true, borderRadius: "12px" } });
   assert.equal(detectComputedFindings([tile]).some((f) => f.id === "icon-tile-stack"), false);
 });
+
+// ── design-system drift (font) ────────────────────────────────────────────────
+const FONT_CTX = { designTokens: { fonts: ["geist", "jetbrains mono"], colors: [] } };
+
+test("flags a font outside the design system's declared families", () => {
+  const findings = detectComputedFindings([el({ selector: "h1", tag: "h1", text: "Title", style: { fontSizePx: 40, fontFamily: '"Playfair Display", serif' } })], FONT_CTX);
+  assert.ok(findings.some((f) => f.id === "design-system-font"));
+});
+
+test("does not flag a declared font or a bare generic family", () => {
+  const declared = detectComputedFindings([el({ tag: "p", text: "Body copy here.", style: { fontFamily: '"Geist", ui-sans-serif, sans-serif' } })], FONT_CTX);
+  assert.equal(declared.some((f) => f.id === "design-system-font"), false);
+  const generic = detectComputedFindings([el({ tag: "p", text: "Body copy here.", style: { fontFamily: "ui-sans-serif, system-ui, sans-serif" } })], FONT_CTX);
+  assert.equal(generic.some((f) => f.id === "design-system-font"), false);
+});
+
+test("skips font drift when no design tokens are supplied", () => {
+  const findings = detectComputedFindings([el({ tag: "h1", text: "Title", style: { fontSizePx: 40, fontFamily: '"Playfair Display", serif' } })]);
+  assert.equal(findings.some((f) => f.id === "design-system-font"), false);
+});
+
+// ── design-system drift (color) ───────────────────────────────────────────────
+const COLOR_CTX = { designTokens: { fonts: [], colors: [{ r: 37, g: 99, b: 235 }] } }; // --accent #2563eb only
+
+test("flags a chromatic color outside the token palette", () => {
+  const findings = detectComputedFindings([el({ selector: ".cta", text: "Buy now", style: { color: "rgb(16, 185, 129)", effectiveBg: "rgb(255, 255, 255)", fontSizePx: 16 } })], COLOR_CTX);
+  assert.ok(findings.some((f) => f.id === "design-system-color"));
+});
+
+test("does not flag a token color or a neutral", () => {
+  const onToken = detectComputedFindings([el({ selector: "a", text: "Link", style: { color: "rgb(37, 99, 235)", effectiveBg: "rgb(255, 255, 255)", fontSizePx: 16 } })], COLOR_CTX);
+  assert.equal(onToken.some((f) => f.id === "design-system-color"), false);
+  const neutral = detectComputedFindings([el({ text: "Body copy here.", style: { color: "rgb(80, 80, 80)", effectiveBg: "rgb(255, 255, 255)", fontSizePx: 16 } })], COLOR_CTX);
+  assert.equal(neutral.some((f) => f.id === "design-system-color"), false);
+});
