@@ -49,3 +49,27 @@ test("regression: a justify + multiple-h1 page lands in a mid band (two P1)", ()
   const s = lintScore(lintArtifact(mid));
   assert.ok(s >= 80 && s < 100, `expected mid band [80,100), got ${s}`);
 });
+
+import { scoreTrend } from "../src/score.ts";
+
+test("scoreTrend summarizes latest vs previous (most-recent first)", () => {
+  const t = scoreTrend([90, 80, 70]);
+  assert.equal(t.latest, 90);
+  assert.equal(t.previous, 80);
+  assert.equal(t.delta, 10);
+  assert.equal(t.direction, "up");
+  assert.equal(t.average, 80);
+  assert.equal(t.count, 3);
+});
+
+test("scoreTrend reports a downward move and handles sparse history", () => {
+  assert.equal(scoreTrend([70, 85]).direction, "down");
+  const one = scoreTrend([88]);
+  assert.equal(one.latest, 88);
+  assert.equal(one.previous, null);
+  assert.equal(one.direction, "none");
+  const none = scoreTrend([]);
+  assert.equal(none.latest, null);
+  assert.equal(none.direction, "none");
+  assert.equal(none.count, 0);
+});

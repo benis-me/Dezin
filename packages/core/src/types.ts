@@ -69,6 +69,18 @@ export interface QualityFinding {
   reviewSummary?: string;
   reviewStatus?: "active" | "resolved";
   reviewRound?: number;
+  /** Both the deterministic detector and the independent design review flagged this element. */
+  corroborated?: boolean;
+}
+
+/** A persistent quality false-positive suppression (across runs). */
+export interface QualityIgnoreEntry {
+  id: string;
+  projectId: string;
+  ruleId: string;
+  /** A specific element, or null to suppress the whole rule. */
+  selector: string | null;
+  createdAt: number;
 }
 
 export interface RunFeedback {

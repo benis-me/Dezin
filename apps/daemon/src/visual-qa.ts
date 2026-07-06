@@ -5,7 +5,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
-import { detectComputedFindings, type ComputedContext, type ComputedElement as QualityComputedElement, type ComputedStyle } from "../../../packages/quality/src/index.ts";
+import { detectComputedFindings, markCorroboration, type ComputedContext, type ComputedElement as QualityComputedElement, type ComputedStyle } from "../../../packages/quality/src/index.ts";
 import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
 import { findChrome } from "./capture-cover.ts";
 import { buildAgentEnv } from "./agent-env.ts";
@@ -795,6 +795,9 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
   const geometry = await collectGeometry(input.htmlPath, screenshotPath, input.renderUrl, { provider: input.provider });
+  // Blind dual-assessment: the agent critic never sees the deterministic findings; we cross-check
+  // AFTER, tagging elements both lanes independently flagged as corroborated (higher confidence).
   const ai = await reviewScreenshotWithAgent({ ...input, consoleMessages: geometry.consoleMessages, criticElements: geometry.elements }, screenshotPath);
-  return [...geometry.findings, ...ai];
+  const synthesized = markCorroboration(geometry.findings, ai);
+  return [...synthesized.deterministic, ...synthesized.agent];
 }

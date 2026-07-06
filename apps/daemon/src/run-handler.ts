@@ -25,7 +25,7 @@ import {
 import { defaultRegistry } from "../../../packages/design/src/index.ts";
 import { loadSkills, findSkill, selectSkill, defaultSkillsDir, type SkillInfo } from "../../../packages/skills/src/index.ts";
 import { loadCraftSections } from "../../../packages/craft/src/index.ts";
-import { lintArtifact, lintScore, renderFindingsForAgent } from "../../../packages/quality/src/index.ts";
+import { lintArtifact, lintScore, renderFindingsForAgent, applyIgnores } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
@@ -459,6 +459,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const imageApiKey = imageRuntime.apiKey || settings.imageApiKey;
   const project = store.getProject(body.projectId);
   if (!project) return sendError(res, 404, "project not found");
+  // Persistent false-positive suppression — drop findings the user has dismissed on prior runs.
+  const qualityIgnores = store.listQualityIgnores(project.id);
+  const suppress = (findings: QualityFinding[]): QualityFinding[] => applyIgnores(findings, qualityIgnores) as QualityFinding[];
   // deps.runner is the test override; production builds from settings (live changes apply).
   const runner =
     deps.runner ??
@@ -845,7 +848,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         await emitStandardPreviewUpdate(round);
 
         const staticSurface = await collectStandardLintSurface(dir);
-        const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface, { mode: "standard", provider: runProviderFamily }) : []) as QualityFinding[];
+        const staticFindings = suppress((staticSurface.trim() ? lintArtifact(staticSurface, { mode: "standard", provider: runProviderFamily }) : []) as QualityFinding[]);
         if (staticFindings.length) sse({ type: "static-quality", round, findings: staticFindings });
         let visualFindings: QualityFinding[] = [];
         if (settings.visualQaEnabled) {
@@ -873,7 +876,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
               directionSpec: chosenDirectionSpec,
             });
           }
-          visualFindings = markVisualReviewRound(withVisualScreenshotUrl(visualFindings, screenshotUrl), round);
+          visualFindings = suppress(markVisualReviewRound(withVisualScreenshotUrl(visualFindings, screenshotUrl), round));
           visualReviewHistory = [...visualReviewHistory, ...visualFindings];
           sse({ type: "visual-qa", runId: run.id, round, enabled: settings.visualQaEnabled, findings: visualFindings });
           queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
@@ -1098,11 +1101,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const reviewCurrentArtifact = async (round: number, staticFindings: QualityFinding[]): Promise<void> => {
       const screenshotUrl = `${previewUrl}.visual-qa/screenshot.png`;
       if (settings.visualQaEnabled) sse({ ...visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl), runId: run.id });
-      const visualFindings = markVisualReviewRound(withVisualScreenshotUrl(await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
+      const visualFindings = suppress(markVisualReviewRound(withVisualScreenshotUrl(await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
         projectRoot: dir,
         renderUrl,
         directionSpec: chosenDirectionSpec,
-      }), screenshotUrl), round);
+      }), screenshotUrl), round));
       visualReviewHistory = [...visualReviewHistory, ...visualFindings];
       sse({ type: "visual-qa", runId: run.id, round, enabled: settings.visualQaEnabled, findings: visualFindings });
       queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
@@ -1164,7 +1167,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       currentHtml = repaired.artifactHtml || currentHtml;
       repairRounds = nextRound;
       await writeCurrentArtifact();
-      const staticFindings = lintArtifact(currentHtml, { provider: runProviderFamily }) as QualityFinding[];
+      const staticFindings = suppress(lintArtifact(currentHtml, { provider: runProviderFamily }) as QualityFinding[]);
       await reviewCurrentArtifact(nextRound, staticFindings);
     }
 

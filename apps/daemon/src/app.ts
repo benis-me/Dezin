@@ -15,6 +15,7 @@ import type { CreateProjectInput, Project, Settings } from "../../../packages/co
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import type { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
+import { scoreTrend } from "../../../packages/quality/src/index.ts";
 import { serveProjectFile, serveFileFromBase, projectDir } from "./serve-static.ts";
 import { figToJson, summarizeFig } from "./parse-fig.ts";
 import { serveWeb, defaultWebDir } from "./serve-web.ts";
@@ -663,6 +664,41 @@ const routes: Route[] = [
       if (all) return sendJson(res, 200, deps.store.listRuns(params.id!));
       const active = deps.store.ensureMainVariant(params.id!);
       sendJson(res, 200, deps.store.listRuns(params.id!, active.id));
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/quality-ignores",
+    handler: (_req, res, params, deps) => {
+      if (!deps.store.getProject(params.id!)) return sendError(res, 404, "project not found");
+      sendJson(res, 200, deps.store.listQualityIgnores(params.id!));
+    },
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/quality-ignores",
+    handler: async (req, res, params, deps) => {
+      if (!deps.store.getProject(params.id!)) return sendError(res, 404, "project not found");
+      const body = (await readJsonBody(req)) as { ruleId?: string; selector?: string | null } | null;
+      if (!body || typeof body.ruleId !== "string" || !body.ruleId.trim()) return sendError(res, 400, "ruleId is required");
+      sendJson(res, 201, deps.store.addQualityIgnore(params.id!, body.ruleId.trim(), body.selector?.trim() || null));
+    },
+  },
+  {
+    method: "DELETE",
+    pattern: "/api/projects/:id/quality-ignores/:ignoreId",
+    handler: (_req, res, params, deps) => {
+      deps.store.removeQualityIgnore(params.ignoreId!);
+      sendJson(res, 200, { ok: true });
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/quality-trend",
+    handler: (_req, res, params, deps) => {
+      if (!deps.store.getProject(params.id!)) return sendError(res, 404, "project not found");
+      const scores = deps.store.listRuns(params.id!).map((r) => r.score).filter((s): s is number => typeof s === "number");
+      sendJson(res, 200, scoreTrend(scores));
     },
   },
   {

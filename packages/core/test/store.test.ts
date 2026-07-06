@@ -378,3 +378,18 @@ test("updateRun throws on unknown id", () => {
   assert.throws(() => s.updateRun("nope", { status: "failed" }), /run not found/);
   s.close();
 });
+
+test("quality ignores: add, list, and remove persist per project", () => {
+  const s = freshStore();
+  const p = s.createProject({ name: "P" });
+  const a = s.addQualityIgnore(p.id, "low-contrast", "p.muted");
+  s.addQualityIgnore(p.id, "cream-palette", null);
+  const list = s.listQualityIgnores(p.id);
+  assert.equal(list.length, 2);
+  assert.ok(list.some((i) => i.ruleId === "low-contrast" && i.selector === "p.muted"));
+  assert.ok(list.some((i) => i.ruleId === "cream-palette" && i.selector === null));
+  s.removeQualityIgnore(a.id);
+  const after = s.listQualityIgnores(p.id);
+  assert.equal(after.length, 1);
+  assert.equal(after[0]!.ruleId, "cream-palette");
+});

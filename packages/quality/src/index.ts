@@ -17,7 +17,9 @@ export {
   type ComputedRect,
   type ComputedContext,
 } from "./computed.ts";
-export { lintScore, scoreGrade } from "./score.ts";
+export { lintScore, scoreGrade, scoreTrend, type ScoreTrend } from "./score.ts";
+export { applyIgnores, type QualityIgnore } from "./ignore.ts";
+export { markCorroboration } from "./synthesis.ts";
 export { renderFindingsForAgent } from "./render-findings.ts";
 export {
   lintAndRepair,

@@ -17,6 +17,9 @@ export interface Finding {
   snippet?: string;
   /** Optional CSS selector the finding targets — for precise, checkable repair instructions. */
   selector?: string;
+  /** True when the deterministic detector AND the independent design review both flagged this
+   *  element — a blind-dual-assessment agreement, i.e. higher confidence it's real. */
+  corroborated?: boolean;
 }
 
 export interface LintOptions {

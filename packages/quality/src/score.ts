@@ -23,3 +23,24 @@ export function scoreGrade(score: number): "A" | "B" | "C" | "D" | "F" {
   if (score >= 40) return "D";
   return "F";
 }
+
+export interface ScoreTrend {
+  latest: number | null;
+  previous: number | null;
+  delta: number | null;
+  direction: "up" | "down" | "flat" | "none";
+  average: number | null;
+  count: number;
+}
+
+/** Summarize a project's recent quality scores (MOST-RECENT FIRST) into a trend. */
+export function scoreTrend(scores: readonly number[]): ScoreTrend {
+  const count = scores.length;
+  if (count === 0) return { latest: null, previous: null, delta: null, direction: "none", average: null, count: 0 };
+  const latest = scores[0]!;
+  const previous = count > 1 ? scores[1]! : null;
+  const delta = previous === null ? null : latest - previous;
+  const direction = delta === null ? "none" : delta > 0 ? "up" : delta < 0 ? "down" : "flat";
+  const average = Math.round(scores.reduce((s, n) => s + n, 0) / count);
+  return { latest, previous, delta, direction, average, count };
+}

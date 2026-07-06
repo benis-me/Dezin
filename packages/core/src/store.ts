@@ -25,6 +25,7 @@ import type {
   EffectPreset,
   MessageRole,
   QualityFinding,
+  QualityIgnoreEntry,
   RunStatus,
   CreateProjectInput,
   CreateMoodboardInput,
@@ -540,6 +541,15 @@ export class Store {
       created_at INTEGER NOT NULL
     );`);
     ensureColumn("moodboard_messages", "conversation_id", "conversation_id TEXT REFERENCES moodboard_conversations(id) ON DELETE CASCADE");
+    // Persistent quality false-positive suppression (across runs). selector NULL = whole rule.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS quality_ignores (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      rule_id TEXT NOT NULL,
+      selector TEXT,
+      created_at INTEGER NOT NULL
+    );`);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_quality_ignores_project ON quality_ignores(project_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_runs_project_variant_status ON runs(project_id, variant_id, status);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_moodboard_conversations_board ON moodboard_conversations(board_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_moodboard_messages_conversation ON moodboard_messages(conversation_id);");
@@ -1235,6 +1245,31 @@ export class Store {
           .all(projectId, variantId) as Row[])
       : (this.db.prepare(`SELECT * FROM runs WHERE project_id = ? ORDER BY created_at DESC, rowid DESC`).all(projectId) as Row[]);
     return rows.map(asRun);
+  }
+
+  /** Add a persistent quality false-positive suppression (selector null = suppress the whole rule). */
+  addQualityIgnore(projectId: string, ruleId: string, selector: string | null = null): QualityIgnoreEntry {
+    const id = this.clock.id();
+    const createdAt = this.clock.now();
+    this.db
+      .prepare(`INSERT INTO quality_ignores (id, project_id, rule_id, selector, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(id, projectId, ruleId, selector, createdAt);
+    return { id, projectId, ruleId, selector, createdAt };
+  }
+
+  listQualityIgnores(projectId: string): QualityIgnoreEntry[] {
+    const rows = this.db.prepare(`SELECT * FROM quality_ignores WHERE project_id = ? ORDER BY created_at DESC`).all(projectId) as Row[];
+    return rows.map((r) => ({
+      id: r.id as string,
+      projectId: r.project_id as string,
+      ruleId: r.rule_id as string,
+      selector: (r.selector as string | null) ?? null,
+      createdAt: r.created_at as number,
+    }));
+  }
+
+  removeQualityIgnore(id: string): void {
+    this.db.prepare(`DELETE FROM quality_ignores WHERE id = ?`).run(id);
   }
 
   /** Recent runs the user marked 👍 (most recent first) — exemplars to ground future builds. */
