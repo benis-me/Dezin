@@ -615,6 +615,33 @@ function checkDarkPureBlack(html: string): Finding[] {
   return [];
 }
 
+/**
+ * Bounce/overshoot easing — a cubic-bezier whose control points under- or overshoot
+ * (y1 < 0 or y2 > 1). Read from SOURCE, not computed style: the visual-QA capture
+ * freezes `transition`/`animation` to stabilise the screenshot, which erases the
+ * declared curve, so declared easing must be linted from the artifact text.
+ */
+function checkBounceEasing(html: string): Finding[] {
+  const re = /cubic-bezier\(\s*[-\d.]+\s*,\s*(-?[\d.]+)\s*,\s*[-\d.]+\s*,\s*(-?[\d.]+)\s*\)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const y1 = parseFloat(m[1] ?? "0");
+    const y2 = parseFloat(m[2] ?? "0");
+    if (y1 < 0 || y2 > 1) {
+      return [
+        {
+          severity: "P2",
+          id: "bounce-easing",
+          message: "Bounce/overshoot easing (a cubic-bezier that under- or overshoots) — feels dated and tacky.",
+          fix: "Use an exponential ease-out like cubic-bezier(0.22, 1, 0.36, 1); avoid bounce/elastic curves.",
+          snippet: m[0],
+        },
+      ];
+    }
+  }
+  return [];
+}
+
 const SEVERITY_ORDER: Record<string, number> = { P0: 0, P1: 1, P2: 2 };
 
 /**
@@ -656,6 +683,7 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
     ...checkPositiveTabindex(html),
     ...checkReducedMotion(html),
     ...checkDarkPureBlack(html),
+    ...checkBounceEasing(html),
     ...checkExternalImages(html),
     ...checkRawHex(html),
     ...checkAccentOveruse(html, accentCap),

@@ -13,7 +13,8 @@
  */
 
 import type { Finding } from "./types.ts";
-import { chromaSpread, compositeOver, contrastRatio, parseColor } from "./color.ts";
+import { chromaSpread, compositeOver, contrastRatio, parseColor, relativeLuminance, rgbToHsl } from "./color.ts";
+import { letterSpacingToEm } from "./css.ts";
 
 /** Body/readability floor: text below this rendered px is hard to read. */
 export const MIN_BODY_FONT_PX = 12;
@@ -33,6 +34,31 @@ export const CHROMATIC_MIN_SPREAD = 40;
 /** Body copy needs line-height ≥ this ratio; display type above LEADING_DISPLAY_PX is exempt. */
 export const MIN_LINE_HEIGHT_RATIO = 1.3;
 export const LEADING_DISPLAY_PX = 28;
+
+/** Adjacent heading levels closer than this size ratio read as a flat hierarchy. */
+export const MIN_TYPE_SCALE_RATIO = 1.2;
+/** Reading measure ceiling; ~0.5×font-size approximates one `ch`. */
+export const MAX_LINE_LENGTH_CH = 80;
+export const CH_PER_FONT_PX = 0.5;
+/** Monotonous spacing: one value covering ≥ dominance share of ≥ sample vertical spacings. */
+export const MONOTONOUS_DOMINANCE = 0.85;
+export const MONOTONOUS_MIN_SAMPLES = 12;
+/** Cream/sand page background: light, warm-hued, and tinted (not pure white, not saturated). */
+export const CREAM_MIN_L = 0.85;
+export const CREAM_MIN_S = 0.08;
+export const CREAM_MAX_S = 0.6;
+export const CREAM_MIN_H = 30;
+export const CREAM_MAX_H = 100;
+/** Saturated violet/purple display text — the hue band + saturation floor of the AI palette tell. */
+export const PURPLE_MIN_H = 255;
+export const PURPLE_MAX_H = 320;
+export const PURPLE_MIN_S = 0.25;
+/** Display letter-spacing floor (em); tighter than this and glyphs touch. */
+export const TRACKING_FLOOR_EM = -0.05;
+/** dark-glow: a dark surface (luminance below) wearing a chromatic shadow with a big blur. */
+export const DARK_BG_LUM = 0.15;
+export const GLOW_CHROMA = 40;
+export const GLOW_BLUR_PX = 12;
 
 /** A rendered element's box, in CSS px, relative to the viewport. */
 export interface ComputedRect {
@@ -63,8 +89,10 @@ export interface ComputedStyle {
   textTransform?: string;
   borderRadius?: string;
   boxShadow?: string;
-  transition?: string;
-  animation?: string;
+  /** Card-like box (has a visible border or box-shadow) — for the nested-card check. Eval-computed. */
+  cardLike?: boolean;
+  /** Contains an <svg>/icon descendant — for the icon-tile-above-heading check. Eval-computed. */
+  hasIconChild?: boolean;
   /** Longhand paddings/margins in px, for spacing-rhythm and cramped-padding checks. */
   paddingTopPx?: number;
   paddingRightPx?: number;
@@ -87,6 +115,8 @@ export interface ComputedElement {
 export interface ComputedContext {
   /** Provider id that generated this run (e.g. "claude", "codex", "gemini"), for model-fingerprint rules. */
   provider?: string;
+  /** The page's computed background (body, else html) — for the cream/sand-surface check. */
+  pageBackground?: string;
 }
 
 /** An element carries real, readable copy (not a decorative/empty node). */
@@ -203,16 +233,259 @@ function checkSkippedHeading(elements: ComputedElement[]): Finding[] {
   return [];
 }
 
+/** line-length — running text set wider than the reading-measure ceiling. */
+function checkLineLength(el: ComputedElement): Finding[] {
+  if (!isTextBearing(el) || el.text.trim().length < 80) return [];
+  if (/^h[1-6]$/.test(el.tag)) return []; // headings legitimately span wide
+  const fs = el.style.fontSizePx;
+  if (fs === undefined || fs > 24) return [];
+  const ch = el.rect.width / (fs * CH_PER_FONT_PX);
+  if (ch <= MAX_LINE_LENGTH_CH) return [];
+  return [
+    {
+      severity: "P2",
+      id: "line-length",
+      message: `${el.selector} runs ~${Math.round(ch)}ch wide — past the ~${MAX_LINE_LENGTH_CH}ch comfort ceiling for reading.`,
+      fix: "Cap the measure with max-width (~65–75ch / ~40rem) on running text.",
+      selector: el.selector,
+    },
+  ];
+}
+
+/** ai-purple-text — saturated violet/purple on display type: the textbook AI palette tell. */
+function checkAiPurpleText(el: ComputedElement): Finding[] {
+  if (!isTextBearing(el)) return [];
+  const fs = el.style.fontSizePx;
+  const isDisplay = /^h[1-3]$/.test(el.tag) || (fs !== undefined && fs >= 20);
+  if (!isDisplay) return [];
+  const c = parseColor(el.style.color);
+  if (!c || c.a < 0.5) return [];
+  const { h, s } = rgbToHsl(c);
+  if (h >= PURPLE_MIN_H && h <= PURPLE_MAX_H && s >= PURPLE_MIN_S) {
+    return [
+      {
+        severity: "P1",
+        id: "ai-purple-text",
+        message: `Display text in ${el.selector} is saturated violet/purple (hue ~${Math.round(h)}) — the textbook AI palette tell.`,
+        fix: "Bind the design system's foreground/accent tokens; reserve one deliberate accent instead of violet display type.",
+        selector: el.selector,
+      },
+    ];
+  }
+  return [];
+}
+
+/** extreme-negative-tracking — display letter-spacing so tight glyphs touch. */
+function checkExtremeNegativeTracking(el: ComputedElement): Finding[] {
+  if (!isTextBearing(el)) return [];
+  const fs = el.style.fontSizePx;
+  const isDisplay = /^h[1-3]$/.test(el.tag) || (fs !== undefined && fs >= 24);
+  if (!isDisplay || !el.style.letterSpacing) return [];
+  const { em } = letterSpacingToEm(el.style.letterSpacing, fs ?? null);
+  if (em === null || em >= TRACKING_FLOOR_EM) return [];
+  return [
+    {
+      severity: "P2",
+      id: "extreme-negative-tracking",
+      message: `${el.selector} sets letter-spacing ${em.toFixed(3)}em — tighter than the ${TRACKING_FLOOR_EM}em floor; glyphs start to touch.`,
+      fix: "Ease display tracking to no tighter than -0.04em.",
+      selector: el.selector,
+    },
+  ];
+}
+
+/** Largest blur radius (px) declared in a box-shadow string (the 3rd length of each layer). */
+function shadowBlurPx(shadow: string): number {
+  const noColor = shadow.replace(/rgba?\([^)]+\)|#[0-9a-f]+/gi, " ");
+  const nums = (noColor.match(/-?\d*\.?\d+px/g) ?? []).map((s) => Math.abs(parseFloat(s)));
+  return nums.length >= 3 ? nums[2]! : 0;
+}
+
+/** dark-glow — a chromatic neon glow on a dark surface. */
+function checkDarkGlow(el: ComputedElement): Finding[] {
+  const bg = parseColor(el.style.backgroundColor);
+  if (!bg || bg.a < 1 || relativeLuminance(bg) > DARK_BG_LUM) return [];
+  const shadow = el.style.boxShadow;
+  if (!shadow || shadow === "none") return [];
+  const colorMatch = /rgba?\([^)]+\)/.exec(shadow);
+  const sc = colorMatch ? parseColor(colorMatch[0]) : null;
+  if (!sc || sc.a === 0 || chromaSpread(sc) < GLOW_CHROMA) return [];
+  const blur = shadowBlurPx(shadow);
+  if (blur < GLOW_BLUR_PX) return [];
+  return [
+    {
+      severity: "P2",
+      id: "dark-glow",
+      message: `${el.selector} wears a chromatic neon glow (~${Math.round(blur)}px blur) on a dark surface — a stock AI flourish.`,
+      fix: "Replace the colored glow with a hairline border or a restrained neutral shadow.",
+      selector: el.selector,
+    },
+  ];
+}
+
+/** flat-type-hierarchy — adjacent heading levels too close in size to establish rank. */
+function checkFlatTypeHierarchy(elements: ComputedElement[]): Finding[] {
+  const sizeByLevel = new Map<number, number>();
+  for (const el of elements) {
+    const m = /^h([1-6])$/.exec(el.tag);
+    if (!m || !isTextBearing(el)) continue;
+    const fs = el.style.fontSizePx;
+    if (fs === undefined) continue;
+    const level = parseInt(m[1]!, 10);
+    sizeByLevel.set(level, Math.max(sizeByLevel.get(level) ?? 0, fs));
+  }
+  const levels = [...sizeByLevel.keys()].sort((a, b) => a - b);
+  for (let i = 0; i + 1 < levels.length; i++) {
+    const a = sizeByLevel.get(levels[i]!)!;
+    const b = sizeByLevel.get(levels[i + 1]!)!;
+    const bigger = Math.max(a, b);
+    const smaller = Math.min(a, b);
+    if (smaller > 0 && bigger / smaller < MIN_TYPE_SCALE_RATIO) {
+      return [
+        {
+          severity: "P2",
+          id: "flat-type-hierarchy",
+          message: `h${levels[i]} and h${levels[i + 1]} are nearly the same size (${bigger}px vs ${smaller}px) — the type hierarchy reads flat.`,
+          fix: "Open the scale: give each level a clear step (≥1.25×), or drop an unused level.",
+        },
+      ];
+    }
+  }
+  return [];
+}
+
+/** monotonous-spacing — one vertical spacing value dominates, so the layout has no rhythm. */
+function checkMonotonousSpacing(elements: ComputedElement[]): Finding[] {
+  const values: number[] = [];
+  for (const el of elements) {
+    for (const v of [el.style.paddingTopPx, el.style.paddingBottomPx, el.style.marginTopPx, el.style.marginBottomPx]) {
+      if (typeof v === "number" && v > 0) values.push(Math.round(v));
+    }
+  }
+  if (values.length < MONOTONOUS_MIN_SAMPLES) return [];
+  const freq = new Map<number, number>();
+  for (const v of values) freq.set(v, (freq.get(v) ?? 0) + 1);
+  const top = Math.max(...freq.values());
+  if (top / values.length < MONOTONOUS_DOMINANCE) return [];
+  return [
+    {
+      severity: "P2",
+      id: "monotonous-spacing",
+      message: `One spacing value covers ${Math.round((100 * top) / values.length)}% of the vertical spacing — the layout has little rhythm.`,
+      fix: "Vary spacing on a scale (e.g. 16 / 24 / 40 / 64) so grouping and emphasis read.",
+    },
+  ];
+}
+
+/** cream-palette — the warm cream/sand page surface that reads as the 2026 AI default. */
+function checkCreamPalette(_elements: ComputedElement[], ctx: ComputedContext): Finding[] {
+  const bg = parseColor(ctx.pageBackground);
+  if (!bg || bg.a < 1) return [];
+  const { h, s, l } = rgbToHsl(bg);
+  if (l > CREAM_MIN_L && s >= CREAM_MIN_S && s <= CREAM_MAX_S && h >= CREAM_MIN_H && h <= CREAM_MAX_H) {
+    return [
+      {
+        severity: "P2",
+        id: "cream-palette",
+        message: `The page background is a warm cream/sand (hsl ~${Math.round(h)}, ${Math.round(s * 100)}%, ${Math.round(l * 100)}%) — the saturated AI default for "tasteful" surfaces.`,
+        fix: "Use a true off-white (chroma 0), a committed brand color, or a clearly brand-owned tinted neutral instead.",
+      },
+    ];
+  }
+  return [];
+}
+
+function rectArea(r: ComputedRect): number {
+  return r.width * r.height;
+}
+
+/** inner sits within outer (2px slack for sub-pixel rounding). */
+function rectContains(outer: ComputedRect, inner: ComputedRect): boolean {
+  return (
+    inner.x >= outer.x - 2 &&
+    inner.y >= outer.y - 2 &&
+    inner.x + inner.width <= outer.x + outer.width + 2 &&
+    inner.y + inner.height <= outer.y + outer.height + 2
+  );
+}
+
+function horizontallyOverlaps(a: ComputedRect, b: ComputedRect): boolean {
+  return a.x < b.x + b.width && b.x < a.x + a.width;
+}
+
+/** nested-cards — a card-like box contained inside a larger card-like box. */
+function checkNestedCards(elements: ComputedElement[]): Finding[] {
+  const cards = elements.filter((e) => e.style.cardLike && e.rect.width >= 80 && e.rect.height >= 40);
+  const out: Finding[] = [];
+  const seen = new Set<string>();
+  for (const inner of cards) {
+    for (const outer of cards) {
+      if (outer === inner) continue;
+      if (rectArea(outer.rect) > rectArea(inner.rect) * 1.2 && rectContains(outer.rect, inner.rect)) {
+        if (!seen.has(inner.selector)) {
+          seen.add(inner.selector);
+          out.push({
+            severity: "P2",
+            id: "nested-cards",
+            message: `${inner.selector} is a card nested inside another card — nested cards are the lazy answer.`,
+            fix: "Flatten it: drop the outer card's chrome (border/shadow/background) and let one surface carry the group.",
+            selector: inner.selector,
+          });
+        }
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/** icon-tile-stack — a small rounded icon tile stacked directly above a heading. */
+function checkIconTileStack(elements: ComputedElement[]): Finding[] {
+  const headings = elements.filter((e) => /^h[1-6]$/.test(e.tag));
+  const out: Finding[] = [];
+  for (const el of elements) {
+    if (!el.style.hasIconChild) continue;
+    const { width: w, height: h } = el.rect;
+    if (w < 32 || w > 128 || h < 32 || h > 128) continue;
+    const aspect = w / h;
+    if (aspect < 0.7 || aspect > 1.4) continue;
+    if ((parseFloat(el.style.borderRadius ?? "0") || 0) <= 0) continue;
+    const tileBottom = el.rect.y + h;
+    const below = headings.find((hd) => hd.rect.y >= tileBottom - 6 && hd.rect.y <= tileBottom + 32 && horizontallyOverlaps(el.rect, hd.rect));
+    if (below) {
+      out.push({
+        severity: "P2",
+        id: "icon-tile-stack",
+        message: `${el.selector} is a rounded icon tile stacked above a heading — the universal AI feature-card template.`,
+        fix: "Drop the tile: set the icon inline with the heading, or remove the boxed background entirely.",
+        selector: el.selector,
+      });
+    }
+  }
+  return out;
+}
+
 /** Per-element checks, each pure: (element) -> findings. */
 const ELEMENT_CHECKS: ReadonlyArray<(el: ComputedElement, ctx: ComputedContext) => Finding[]> = [
   checkTinyText,
   checkLowContrast,
   checkGrayOnColor,
   checkTightLeading,
+  checkLineLength,
+  checkAiPurpleText,
+  checkExtremeNegativeTracking,
+  checkDarkGlow,
 ];
 
 /** Whole-document checks that need every element at once (outline order, repetition). */
-const DOCUMENT_CHECKS: ReadonlyArray<(els: ComputedElement[], ctx: ComputedContext) => Finding[]> = [checkSkippedHeading];
+const DOCUMENT_CHECKS: ReadonlyArray<(els: ComputedElement[], ctx: ComputedContext) => Finding[]> = [
+  checkSkippedHeading,
+  checkFlatTypeHierarchy,
+  checkMonotonousSpacing,
+  checkCreamPalette,
+  checkNestedCards,
+  checkIconTileStack,
+];
 
 /**
  * Run every computed-style check over the rendered snapshot and return the union

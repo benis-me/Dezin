@@ -146,6 +146,8 @@ interface GeometrySnapshot {
   document: { scrollWidth: number; scrollHeight: number };
   bodyTextLength?: number;
   elements: GeometryElement[];
+  /** The page's opaque background (body, else html) — for the cream/sand-surface check. */
+  pageBackground?: string;
 }
 
 const VIEWPORTS = [
@@ -551,20 +553,40 @@ async function collectGeometry(
                 textTransform: styles.textTransform,
                 borderRadius: styles.borderRadius,
                 boxShadow: styles.boxShadow,
-                transition: styles.transition,
-                animation: styles.animation,
                 paddingTopPx: parseFloat(styles.paddingTop) || 0,
                 paddingRightPx: parseFloat(styles.paddingRight) || 0,
                 paddingBottomPx: parseFloat(styles.paddingBottom) || 0,
                 paddingLeftPx: parseFloat(styles.paddingLeft) || 0,
                 marginTopPx: parseFloat(styles.marginTop) || 0,
                 marginBottomPx: parseFloat(styles.marginBottom) || 0,
+                cardLike:
+                  Math.max(
+                    parseFloat(styles.borderTopWidth) || 0,
+                    parseFloat(styles.borderRightWidth) || 0,
+                    parseFloat(styles.borderBottomWidth) || 0,
+                    parseFloat(styles.borderLeftWidth) || 0,
+                  ) >= 1 || (styles.boxShadow && styles.boxShadow !== "none")
+                    ? true
+                    : undefined,
+                // querySelector is gated to tile-sized boxes so it isn't run on every node.
+                hasIconChild:
+                  rect.width >= 32 && rect.width <= 128 && rect.height >= 32 && rect.height <= 128 && el.querySelector('svg,[class*="icon" i]')
+                    ? true
+                    : undefined,
               },
             };
           })
           .filter(Boolean);
         const root = doc.documentElement;
         const body = doc.body;
+        const opaqueBg = (c: string): boolean => {
+          const m = /rgba?\(([^)]+)\)/.exec(c || "");
+          if (!m) return false;
+          const p = (m[1] ?? "").split(/[\s,/]+/).map((n: string) => parseFloat(n));
+          return (p.length >= 4 ? p[3] ?? 1 : 1) >= 1;
+        };
+        const bodyBg = win.getComputedStyle(body).backgroundColor;
+        const htmlBg = win.getComputedStyle(root).backgroundColor;
         return {
           viewport: { width: win.innerWidth, height: win.innerHeight },
           document: {
@@ -572,6 +594,7 @@ async function collectGeometry(
             scrollHeight: Math.max(root.scrollHeight, body.scrollHeight),
           },
           bodyTextLength: (body.innerText ?? "").trim().length,
+          pageBackground: opaqueBg(bodyBg) ? bodyBg : opaqueBg(htmlBg) ? htmlBg : undefined,
           elements,
         };
       }));
@@ -581,7 +604,9 @@ async function collectGeometry(
         elements = toCriticElements(desktopElements);
         // Deterministic computed-style findings — contrast, type, spacing, component tells — run
         // on the desktop render only (viewport-independent) and are bounded so they can't flood repair.
-        computedFindings = boundComputedFindings(detectComputedFindings(toComputedElements(desktopElements), computedCtx));
+        computedFindings = boundComputedFindings(
+          detectComputedFindings(toComputedElements(desktopElements), { ...computedCtx, pageBackground: (snapshot as GeometrySnapshot).pageBackground }),
+        );
         if (screenshotPath) {
           await mkdir(dirname(screenshotPath), { recursive: true });
           // Bound the capture too — full-page screenshot of a wedged/animating page can hang.

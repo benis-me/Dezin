@@ -209,3 +209,13 @@ test("color craft: dark theme must not use pure black/white", () => {
   // a pure-white background in a LIGHT context is fine
   assert.ok(!has(lintArtifact(`<style>:root { --bg: #ffffff; }</style>`), "dark-pure-black"));
 });
+
+test("flags bounce/overshoot easing in source CSS (frozen out of computed style, so linted here)", () => {
+  const html = `<style>.card{transition:transform .3s cubic-bezier(0.68,-0.55,0.27,1.55)}</style><div class="card"></div>`;
+  assert.ok(ids(lintArtifact(html)).includes("bounce-easing"));
+});
+
+test("does not flag a well-behaved ease-out curve", () => {
+  const html = `<style>.card{transition:transform .3s cubic-bezier(0.22,1,0.36,1)}</style><div class="card"></div>`;
+  assert.equal(ids(lintArtifact(html)).includes("bounce-easing"), false);
+});

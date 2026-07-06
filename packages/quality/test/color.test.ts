@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chromaSpread, compositeOver, contrastRatio, parseColor, relativeLuminance } from "../src/color.ts";
+import { chromaSpread, compositeOver, contrastRatio, parseColor, relativeLuminance, rgbToHsl } from "../src/color.ts";
 
 const near = (a: number, b: number, eps = 0.01) => assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`);
 
@@ -35,4 +35,19 @@ test("compositeOver blends a semi-transparent color onto an opaque background", 
 test("chromaSpread separates neutral gray from a chromatic color", () => {
   assert.equal(chromaSpread({ r: 128, g: 128, b: 128 }), 0);
   assert.equal(chromaSpread({ r: 200, g: 40, b: 40 }), 160);
+});
+
+test("rgbToHsl derives hue/sat/lightness, incl. AI-purple and cream", () => {
+  const red = rgbToHsl({ r: 255, g: 0, b: 0 });
+  near(red.h, 0);
+  near(red.s, 1);
+  near(red.l, 0.5);
+  // #7c3aed — the textbook AI violet.
+  const violet = rgbToHsl({ r: 124, g: 58, b: 237 });
+  assert.ok(violet.h > 250 && violet.h < 275, `violet hue ${violet.h}`);
+  assert.ok(violet.s > 0.6, `violet is saturated ${violet.s}`);
+  // #f5f0e1 — the AI "cream/sand" surface.
+  const cream = rgbToHsl({ r: 245, g: 240, b: 225 });
+  assert.ok(cream.h > 35 && cream.h < 60 && cream.l > 0.85, `cream ${JSON.stringify(cream)}`);
+  assert.equal(rgbToHsl({ r: 128, g: 128, b: 128 }).s, 0);
 });

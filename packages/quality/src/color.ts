@@ -77,3 +77,23 @@ export function compositeOver(fg: Rgba, bg: { r: number; g: number; b: number })
 export function chromaSpread(c: { r: number; g: number; b: number }): number {
   return Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b);
 }
+
+/** Convert sRGB (0–255) to HSL: hue in [0,360), saturation & lightness in [0,1]. */
+export function rgbToHsl(c: { r: number; g: number; b: number }): { h: number; s: number; l: number } {
+  const r = c.r / 255;
+  const g = c.g / 255;
+  const b = c.b / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  const l = (max + min) / 2;
+  if (d === 0) return { h: 0, s: 0, l };
+  const s = d / (1 - Math.abs(2 * l - 1));
+  let h: number;
+  if (max === r) h = ((g - b) / d) % 6;
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h *= 60;
+  if (h < 0) h += 360;
+  return { h, s, l };
+}
