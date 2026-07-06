@@ -3113,10 +3113,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         if (rid !== null && typeof ev.text === "string") {
           const kind = typeof ev.kind === "string" ? ev.kind : "note";
           const text = ev.text;
+          // Older events predate the dual-track split — default to "product" so the card's
+          // single-lane fallback (no `track` anywhere) still applies for pre-existing runs.
+          const track = ev.track === "visual" ? "visual" : "product";
           setMessages((m) =>
             m.map((msg) =>
               msg.id === rid && msg.research
-                ? { ...msg, research: { ...msg.research, activities: [...msg.research.activities, { kind, text }] } }
+                ? { ...msg, research: { ...msg.research, activities: [...msg.research.activities, { kind, text, track }] } }
                 : msg,
             ),
           );
@@ -4883,7 +4886,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               emptyPane(running ? "Generating…" : "Your preview will appear here")
             )
           ) : tab === "Research" ? (
-            <ResearchPanel research={research} assetUrl={(p) => api.researchAssetUrl(projectId, p)} />
+            <ResearchPanel research={research} assetUrl={(p) => api.researchAssetUrl(projectId, p)} visualAssetUrl={(p) => api.researchVisualAssetUrl(projectId, p)} />
           ) : tab === "Files" ? (
             <FilesPanel files={displayFiles} activeFile={displayActiveFile} fileText={displayFileText} running={displayRunning} onOpen={openDisplayedFile} />
           ) : tab === "Quality" ? (

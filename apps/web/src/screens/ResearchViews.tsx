@@ -18,6 +18,8 @@ import type { ResearchDetail } from "../lib/api.ts";
 export interface ResearchActivityItem {
   kind: string;
   text: string;
+  /** Which research track this step belongs to. Absent on older events (treated as "product"). */
+  track?: "product" | "visual";
 }
 
 /** Live + final state of the pre-design Research phase (its dedicated transcript card). */
@@ -73,6 +75,25 @@ function AnimatedSearchIcon({ running }: { running: boolean }) {
   );
 }
 
+/** One lane of research activity steps (used standalone, or as one of two lanes when tracks are present). */
+function ResearchActivityList({ activities, label }: { activities: ResearchActivityItem[]; label?: string }) {
+  return (
+    <div>
+      {label ? <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">{label}</div> : null}
+      <ul className="space-y-1">
+        {activities.map((a, index) => (
+          <li key={index} className="flex items-center gap-2 text-muted-foreground">
+            <span className="text-muted-foreground/70">
+              <ResearchActivityIcon kind={a.kind} />
+            </span>
+            <span className="truncate">{a.text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /**
  * The pre-design Research phase's dedicated card — live steps, then a results summary.
  * When `onOpen` is provided (research deliverables exist) the whole card opens the Research tab.
@@ -93,6 +114,7 @@ export function ResearchCard({
   const { status, activities, report, sources = 0, assets = 0, directions = [], error } = research;
   const running = status === "running";
   const recent = activities.slice(-14);
+  const hasTracks = activities.some((a) => !!a.track);
   const [selected, setSelected] = useState<string | null>(null);
   // Direction gate open: pick one direction INLINE, then Submit. Once a choice is persisted
   // (chosenSlug arrives), the card locks to a read-only display of the chosen one.
@@ -137,16 +159,18 @@ export function ResearchCard({
 
       {/* Body — a single bordered region (one divider), holding live steps or the results. */}
       {running && recent.length > 0 ? (
-        <ul className="max-h-44 space-y-1 overflow-auto border-t border-border px-3 py-2 text-[11px]">
-          {recent.map((a, index) => (
-            <li key={index} className="flex items-center gap-2 text-muted-foreground">
-              <span className="text-muted-foreground/70">
-                <ResearchActivityIcon kind={a.kind} />
-              </span>
-              <span className="truncate">{a.text}</span>
-            </li>
-          ))}
-        </ul>
+        hasTracks ? (
+          <div className="max-h-44 overflow-auto border-t border-border px-3 py-2 text-[11px]">
+            <div className="grid grid-cols-2 gap-3">
+              <ResearchActivityList activities={recent.filter((a) => (a.track ?? "product") === "product")} label="Product" />
+              <ResearchActivityList activities={recent.filter((a) => a.track === "visual")} label="Visual" />
+            </div>
+          </div>
+        ) : (
+          <div className="max-h-44 overflow-auto border-t border-border px-3 py-2 text-[11px]">
+            <ResearchActivityList activities={recent} />
+          </div>
+        )
       ) : running ? (
         <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">Launching research…</div>
       ) : null}
@@ -222,7 +246,17 @@ export function ResearchCard({
 }
 
 /** The Research tab — renders the .research/ deliverables: directions, report, assets, sources. */
-export function ResearchPanel({ research, assetUrl }: { research: ResearchDetail | null; assetUrl: (assetPath: string) => string }) {
+export function ResearchPanel({
+  research,
+  assetUrl,
+  visualAssetUrl,
+}: {
+  research: ResearchDetail | null;
+  assetUrl: (assetPath: string) => string;
+  /** URL builder for VISUAL-track assets (separate from the product track's assetUrl). */
+  visualAssetUrl?: (assetPath: string) => string;
+}) {
+  const [subTab, setSubTab] = useState<"product" | "visual">("product");
   if (!research?.exists) {
     return <div className="flex h-full items-center justify-center bg-surface p-6 text-center text-sm text-muted-foreground">No research for this project yet.</div>;
   }
@@ -232,10 +266,96 @@ export function ResearchPanel({ research, assetUrl }: { research: ResearchDetail
   const chosenSlug = research.chosenSlug;
   // Rewrite markdown image paths (assets/foo.png) to served URLs so the report renders图文并茂.
   const reportMd = (research.report ?? "").replace(/(!\[[^\]]*\]\()(?:\.\/)?(assets\/[^)\s]+)(\))/g, (_m, pre, path, post) => `${pre}${assetUrl(path)}${post}`);
+  const visual = research.visual;
+  const hasVisual = !!visual?.exists;
+  const visualSources = visual?.sources ?? [];
+  const visualAssets = visual?.assets ?? [];
+  const visualReportMd = visualAssetUrl
+    ? (visual?.report ?? "").replace(/(!\[[^\]]*\]\()(?:\.\/)?(assets\/[^)\s]+)(\))/g, (_m, pre, path, post) => `${pre}${visualAssetUrl(path)}${post}`)
+    : (visual?.report ?? "");
   return (
     <div className="h-full overflow-auto bg-surface">
       <div className="mx-auto max-w-3xl space-y-6 p-4">
-        {directions.length ? (
+        {hasVisual ? (
+          <div role="tablist" aria-label="Research track" className="inline-flex items-center gap-1 rounded-lg border border-border bg-card p-1">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={subTab === "product"}
+              onClick={() => setSubTab("product")}
+              className={cn(
+                "rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                subTab === "product" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              Product
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={subTab === "visual"}
+              onClick={() => setSubTab("visual")}
+              className={cn(
+                "rounded-md px-3 py-1 text-xs font-medium transition-colors",
+                subTab === "visual" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              Visual
+            </button>
+          </div>
+        ) : null}
+        {subTab === "visual" && hasVisual ? (
+          <>
+            {visualReportMd ? (
+              <section className="rounded-lg border border-border bg-card p-4">
+                <Markdown className="space-y-2 text-sm text-foreground [&_img]:my-2 [&_img]:rounded-md [&_img]:border [&_img]:border-border">{visualReportMd}</Markdown>
+              </section>
+            ) : null}
+            {visualAssets.length ? (
+              <section>
+                <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collected imagery · {visualAssets.length}</h3>
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+                  {visualAssets.map((a) => (
+                    <a key={a} href={visualAssetUrl?.(a)} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-md border border-border bg-card transition hover:border-muted-foreground/40">
+                      <img src={visualAssetUrl?.(a)} alt={a} loading="lazy" className="aspect-video w-full object-cover" />
+                    </a>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+            {visualSources.length ? (
+              <section>
+                <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Sources · {visualSources.length}</h3>
+                <ul className="space-y-1.5">
+                  {visualSources.map((s, index) => (
+                    <li key={s.id ?? index} className="flex items-baseline gap-2 text-[13px]">
+                      {s.platform ? <span className="shrink-0 rounded bg-surface-2 px-1 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">{s.platform}</span> : null}
+                      {s.url ? (
+                        <a href={s.url} target="_blank" rel="noreferrer" className="truncate text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground">
+                          {s.title || s.url}
+                        </a>
+                      ) : (
+                        <span className="truncate text-foreground">{s.title || "source"}</span>
+                      )}
+                      {s.designer ? <span className="shrink-0 text-muted-foreground">{s.designer}</span> : null}
+                      <span
+                        className={cn(
+                          "ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                          s.reached === false ? "bg-destructive/10 text-destructive" : "bg-primary/10 text-primary",
+                        )}
+                      >
+                        {s.reached === false ? "blocked" : "reached"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+            {/* Task 7 mounts the visual moodboard canvas here. */}
+            <div data-testid="visual-moodboard-mount" />
+          </>
+        ) : null}
+        {subTab === "product" && directions.length ? (
           <section>
             <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Candidate directions</h3>
             {/* One direction per row; expanded content scrolls inside a bounded height. */}
@@ -271,12 +391,12 @@ export function ResearchPanel({ research, assetUrl }: { research: ResearchDetail
             </div>
           </section>
         ) : null}
-        {reportMd ? (
+        {subTab === "product" && reportMd ? (
           <section className="rounded-lg border border-border bg-card p-4">
             <Markdown className="space-y-2 text-sm text-foreground [&_img]:my-2 [&_img]:rounded-md [&_img]:border [&_img]:border-border">{reportMd}</Markdown>
           </section>
         ) : null}
-        {assets.length ? (
+        {subTab === "product" && assets.length ? (
           <section>
             <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Collected references · {assets.length}</h3>
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
@@ -288,7 +408,7 @@ export function ResearchPanel({ research, assetUrl }: { research: ResearchDetail
             </div>
           </section>
         ) : null}
-        {sources.length ? (
+        {subTab === "product" && sources.length ? (
           <section>
             <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Sources · {sources.length}</h3>
             <ul className="space-y-1.5">

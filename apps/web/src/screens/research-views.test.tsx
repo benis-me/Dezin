@@ -160,3 +160,39 @@ test("ResearchPanel puts each expanded direction body in a bounded scroll contai
   expect(scroller).toBeTruthy();
   expect(scroller!.className).toMatch(/max-h-/);
 });
+
+test("ResearchPanel shows Product and Visual sub-tabs; Visual renders the collected imagery + sources", async () => {
+  const research = {
+    exists: true, report: "# Product\n\nUsers skim.", sources: [], directions: [], assets: [],
+    visual: {
+      exists: true, report: "# Visual\n\n![hero](assets/hero.png)\n\nMono palette.",
+      sources: [{ id: "s1", title: "Shot", url: "https://dribbble.com/shots/1", platform: "dribbble", designer: "Jane", reached: true }],
+      assets: ["visual/assets/hero.png"], boardId: "board-1",
+    },
+  };
+  const { getByRole, findByText, getByText } = render(
+    <ResearchPanel research={research as any} assetUrl={(p) => `/a/${p}`} visualAssetUrl={(p) => `/v/${p}`} />,
+  );
+  getByText(/Users skim/);                         // Product visible by default
+  getByRole("tab", { name: /visual/i }).click();   // switch to Visual
+  await findByText(/Mono palette/);
+  getByText(/dribbble/i);
+  getByText(/Jane/);
+});
+
+test("ResearchCard splits activities into product and visual lanes", () => {
+  const { getByText } = render(
+    <ResearchCard
+      research={{
+        status: "running",
+        activities: [
+          { kind: "search", text: "scanning rival landing pages", track: "product" },
+          { kind: "search", text: "dribbble shots", track: "visual" },
+        ] as any,
+      }}
+    />,
+  );
+  getByText(/rival landing pages/);
+  getByText(/dribbble shots/);
+  getByText(/visual/i); // a lane label
+});

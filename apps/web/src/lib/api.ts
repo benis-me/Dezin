@@ -174,6 +174,11 @@ export interface ResearchSourceItem {
   url?: string;
   takeaways?: string[];
   assets?: string[];
+  /** Visual-track fields (dribbble/behance/etc.) — absent on product sources. */
+  platform?: string;
+  designer?: string;
+  reached?: boolean;
+  authority?: string;
 }
 /** The .research/ deliverables for the Research tab. `exists:false` → hide the tab. */
 export interface ResearchDetail {
@@ -184,6 +189,14 @@ export interface ResearchDetail {
   assets?: string[];
   /** The candidate direction the user picked at the gate, if any. */
   chosenSlug?: string;
+  /** The parallel visual-research track's deliverables, if the visual track ran. */
+  visual?: {
+    exists: boolean;
+    report: string;
+    sources: ResearchDetail["sources"];
+    assets: string[];
+    boardId?: string;
+  };
 }
 
 export interface RunInput {
@@ -554,6 +567,8 @@ export interface ApiClient {
   getResearch(id: string): Promise<ResearchDetail>;
   /** URL serving a collected research asset image, given its `assets/<name>` path. */
   researchAssetUrl(id: string, assetPath: string): string;
+  /** URL serving a collected VISUAL research asset image, given its `assets/<name>` (or `visual/assets/<name>`) path. */
+  researchVisualAssetUrl(id: string, assetPath: string): string;
   variantPreviewUrl(id: string, vid: string): string;
   exportUrl(id: string, scope?: "source" | "full"): string;
   importProject(file: Blob): Promise<Project>;
@@ -799,6 +814,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     refUrl: (id, refPath) => `${baseUrl}/api/projects/${enc(id)}/refs/${refPath.replace(/^\.refs\//, "").split("/").map(encodeURIComponent).join("/")}`,
     getResearch: (id) => json<ResearchDetail>(`/api/projects/${enc(id)}/research`),
     researchAssetUrl: (id, assetPath) => `${baseUrl}/api/projects/${enc(id)}/research/assets/${assetPath.replace(/^assets\//, "").split("/").map(encodeURIComponent).join("/")}`,
+    researchVisualAssetUrl: (id, assetPath) => `${baseUrl}/api/projects/${enc(id)}/research/visual/assets/${assetPath.replace(/^(visual\/)?assets\//, "").split("/").map(encodeURIComponent).join("/")}`,
     variantPreviewUrl: (id, vid) => `${baseUrl}/api/projects/${enc(id)}/variants/${enc(vid)}/preview/`,
     exportUrl: (id, scope = "source") => `${baseUrl}/api/projects/${enc(id)}/export${scope === "full" ? "?scope=full" : ""}`,
     importProject: (file) =>

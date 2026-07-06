@@ -93,6 +93,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     refUrl: (id: string, refPath: string) => `/api/projects/${id}/refs/${refPath.replace(/^\.refs\//, "")}`,
     getResearch: async () => ({ exists: false }),
     researchAssetUrl: (id: string, assetPath: string) => `/api/projects/${id}/research/assets/${assetPath.replace(/^assets\//, "")}`,
+    researchVisualAssetUrl: (_id: string, p: string) => `/v/${p}`,
     variantPreviewUrl: (id: string, vid: string) => `/api/projects/${id}/variants/${vid}/preview/`,
     exportUrl: (id: string, scope = "source") => `/api/projects/${id}/export${scope === "full" ? "?scope=full" : ""}`,
     importProject: notImpl as ApiClient["importProject"],
