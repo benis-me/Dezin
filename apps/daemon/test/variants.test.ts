@@ -316,3 +316,32 @@ test("prototype variants keep root snapshot switching behavior", async () => {
     assert.ok(existsSync(join(root, ".variants", variant.id, "index.html")), "prototype keeps inactive snapshots");
   });
 });
+
+test("variant fan-out forks N seeded variations without stealing the active variant", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Fanout" }); // prototype by default
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "index.html"), "<main>base design here</main>");
+    const main = store.ensureMainVariant(project.id);
+
+    const res = await fetch(`${base}/api/projects/${project.id}/variants/fanout`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ count: 3 }),
+    });
+    assert.equal(res.status, 200);
+    const out = (await res.json()) as { created: string[]; plan: { count: number }; variants: Array<{ id: string; name: string }> };
+    assert.equal(out.plan.count, 3);
+    assert.equal(out.created.length, 3);
+
+    // each new variant is seeded with a copy of the current root artifact
+    for (const vid of out.created) {
+      const seeded = join(dir, ".variants", vid, "index.html");
+      assert.ok(existsSync(seeded), `variant ${vid} should be seeded`);
+      assert.match(readFileSync(seeded, "utf8"), /base design here/);
+    }
+    // the fan-out does not activate any of them — main stays active
+    assert.equal(store.getActiveVariantId(project.id) ?? main.id, main.id);
+  });
+});

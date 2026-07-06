@@ -5,6 +5,7 @@
 export type {
   Project,
   Conversation,
+  Variant,
   Message,
   Run,
   Artifact,
@@ -30,5 +31,6 @@ export type {
   SaveMoodboardNodeInput,
   Settings,
   QualityFinding,
+  QualityIgnoreEntry,
 } from "./types.ts";
 export { Store, type StoreClock } from "./store.ts";

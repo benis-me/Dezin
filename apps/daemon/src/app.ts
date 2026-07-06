@@ -27,6 +27,7 @@ import { handleListFiles } from "./files-handler.ts";
 import { handleGetResearch } from "./research-handler.ts";
 import {
   handleListVariants,
+  handleVariantFanout,
   handleCreateVariant,
   handleForkMessage,
   handleActivateVariant,
@@ -710,6 +711,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/projects/:id/variants",
     handler: (req, res, params, deps) => handleCreateVariant(req, res, params, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/variants/fanout",
+    handler: (req, res, params, deps) => handleVariantFanout(req, res, params, deps),
   },
   {
     method: "POST",

@@ -12,6 +12,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { sendJson, sendError, readJsonBody } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import type { AppDeps } from "./app.ts";
+import type { Variant } from "../../../packages/core/src/index.ts";
+import { planVariantFanout } from "./variant-fanout.ts";
 import {
   createStandardVariantWorktree,
   createStandardVariantWorktreeFromCommit,
@@ -78,6 +80,41 @@ export async function handleCreateVariant(req: IncomingMessage, res: ServerRespo
   if (project.mode === "standard") (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
   deps.store.setActiveVariant(id, v.id);
   sendJson(res, 200, deps.store.listVariants(id));
+}
+
+/**
+ * Scoped-variant fan-out: fork N variants from the current state so the same scoped edit can be
+ * generated as N independent variations. Does NOT activate any — the web runs the brief into each
+ * returned variant (existing per-variant run path) and compares via the variant switcher.
+ */
+export async function handleVariantFanout(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+  const id = params.id!;
+  const project = deps.store.getProject(id);
+  if (!project) return sendError(res, 404, "project not found");
+  const body = (await readJsonBody(req)) as { count?: number } | null;
+  const plan = planVariantFanout(body?.count ?? 3);
+  const active = deps.store.ensureMainVariant(id);
+  const created: Variant[] = [];
+  try {
+    for (const spec of plan.variants) {
+      const variant = deps.store.createVariant(id, spec.name);
+      created.push(variant);
+      if (project.mode === "standard") {
+        await createStandardVariantWorktree(deps, id, active.id, variant.id);
+      } else {
+        // Seed the new prototype variant with a copy of the current root so activating it later
+        // (to run a variation into it) restores that content instead of a blank snapshot.
+        await snapshot(projectDir(deps.dataDir, id), snapDir(deps.dataDir, id, variant.id));
+      }
+    }
+  } catch (err) {
+    for (const c of created) {
+      if (project.mode === "standard") await removeStandardVariantWorktree(deps, id, c.id).catch(() => {});
+      deps.store.deleteVariant(c.id);
+    }
+    return sendError(res, 409, err instanceof Error ? err.message : "could not create the variant fan-out");
+  }
+  sendJson(res, 200, { plan, created: created.map((v) => v.id), variants: deps.store.listVariants(id) });
 }
 
 function versionSnapshotPath(dataDir: string, projectId: string, runId: string): string {
