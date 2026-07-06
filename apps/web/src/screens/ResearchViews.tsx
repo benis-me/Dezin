@@ -37,6 +37,8 @@ export interface ResearchCardData {
   assets?: number;
   directions?: Array<{ slug: string; title: string; summary?: string }>;
   error?: string;
+  /** The parallel visual-research track's counts. Absent/zero on older events — render defensively. */
+  visual?: { produced: boolean; assets: number; sources: number };
 }
 
 /** Small icon for one research step kind. */
@@ -117,7 +119,8 @@ export function ResearchCard({
    *  Submit button commits the pick (nothing runs until Submit). */
   onPick?: (slug: string) => void;
 }) {
-  const { status, activities, report, sources = 0, assets = 0, directions = [], error } = research;
+  const { status, activities, report, sources = 0, assets = 0, directions = [], error, visual } = research;
+  const showVisual = !!visual && (visual.produced || visual.assets > 0 || visual.sources > 0);
   const running = status === "running";
   const recent = activities.slice(-14);
   const hasTracks = activities.some((a) => !!a.track);
@@ -189,6 +192,15 @@ export function ResearchCard({
             <span className="text-muted-foreground">{assets} assets</span>
             {directions.length ? <span className="text-muted-foreground">{directions.length} directions</span> : null}
           </div>
+          {showVisual ? (
+            <div data-testid="research-card-visual" className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+              <span className={visual!.produced ? "font-medium text-foreground" : "text-muted-foreground"}>
+                {visual!.produced ? "Visual" : "No visual research"}
+              </span>
+              <span className="text-muted-foreground">{visual!.sources} sources</span>
+              <span className="text-muted-foreground">{visual!.assets} assets</span>
+            </div>
+          ) : null}
           {directions.length ? (
             <div className="mt-2 grid gap-1.5">
               {directions.map((d) => {

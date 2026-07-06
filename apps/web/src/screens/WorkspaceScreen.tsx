@@ -702,6 +702,15 @@ function normalizeResultMeta(value: unknown): ResultMeta | undefined {
 }
 
 /** Parse the research card's directions from a persisted meta / SSE payload, carrying the optional blurb. */
+function parseResearchVisual(value: unknown): ResearchCardData["visual"] {
+  if (!isRecord(value)) return undefined;
+  return {
+    produced: value.produced === true,
+    assets: typeof value.assets === "number" ? value.assets : 0,
+    sources: typeof value.sources === "number" ? value.sources : 0,
+  };
+}
+
 function parseResearchDirections(value: unknown): ResearchCardData["directions"] {
   if (!Array.isArray(value)) return [];
   const out: NonNullable<ResearchCardData["directions"]> = [];
@@ -808,6 +817,7 @@ function toMsg(m: Message, id: number): Msg {
             assets: typeof r.assets === "number" ? r.assets : 0,
             directions,
             error: typeof r.error === "string" ? r.error : undefined,
+            visual: parseResearchVisual(r.visual),
           },
           at: m.createdAt,
         };
@@ -3137,6 +3147,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           assets: typeof ev.assets === "number" ? ev.assets : 0,
           directions,
           error: typeof ev.error === "string" ? ev.error : undefined,
+          visual: parseResearchVisual(ev.visual),
         };
         if (rid !== null) {
           setMessages((m) => m.map((msg) => (msg.id === rid && msg.research ? { ...msg, research: { ...msg.research, ...done } } : msg)));

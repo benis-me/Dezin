@@ -35,12 +35,6 @@ export function VisualResearchBoard({ boardId }: { boardId: string }) {
     };
   }, [api, boardId]);
 
-  useEffect(() => {
-    return () => {
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    };
-  }, []);
-
   const flushPendingNodes = useCallback(() => {
     const inputs = pendingSaveInputs.current;
     if (!inputs) return;
@@ -54,6 +48,16 @@ export function VisualResearchBoard({ boardId }: { boardId: string }) {
       .then((saved) => setNodes(saved))
       .catch(() => {});
   }, [api, boardId]);
+
+  useEffect(() => {
+    return () => {
+      // A rearrange made <350ms before unmount (or a boardId change) would otherwise be lost:
+      // the debounce timer is still pending, so flush it (fire-and-forget — nothing to set state
+      // on once torn down) BEFORE clearing it. flushPendingNodes is stable per boardId, so this
+      // re-registers (and correctly flushes the OLD board's pending save) if boardId ever changes.
+      if (saveTimer.current) flushPendingNodes();
+    };
+  }, [flushPendingNodes]);
 
   const persistNodes = useCallback(
     (inputs: SaveMoodboardNodeInput[]) => {
