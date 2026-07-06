@@ -44,7 +44,7 @@ import { AgentOutputText } from "../components/AgentOutputText.tsx";
 import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { Markdown } from "../components/Markdown.tsx";
-import { DirectionCard, ResearchCard, ResearchPanel, type ResearchCardData } from "./ResearchViews.tsx";
+import { ResearchCard, ResearchPanel, type ResearchCardData } from "./ResearchViews.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -4143,6 +4143,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const transcriptBlocks = useMemo(() => groupAssistantTurns(transcriptRows), [transcriptRows]);
   const composerOverlayH = composerH + FLOATING_COMPOSER_FADE_PX;
   const messageBottomPadding = composerOverlayH + MESSAGE_BOTTOM_CLEARANCE_PX;
+  // The direction gate is now hosted INLINE in the Research card (no separate card). A pick is
+  // pending when a direction-gate message exists and nothing has been chosen yet; submitting reuses
+  // the gate's brief and continues the run with the chosen direction.
+  const hasPendingDirectionGate = !research?.chosenSlug && messages.some((m) => m.kind === "direction-gate");
+  const submitDirection = (slug: string): void => {
+    const gate = messages.find((m) => m.kind === "direction-gate");
+    const brief = gate?.text || lastRunBriefRef.current;
+    if (brief.trim()) void runBrief(brief, undefined, undefined, [], [], slug);
+  };
   const renderTranscriptMessage = (m: Msg, stackPosition: RunCardStackPosition = "single"): ReactNode =>
     m.kind === "user" ? (
       <UserMessage
@@ -4159,24 +4168,33 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       <VisualReviewRecord review={m.visualReview} stackPosition={stackPosition} />
     ) : m.kind === "question" ? (
       <QuestionCard question={m.text} onAnswer={(answer) => void runBrief(answer)} />
-    ) : m.kind === "direction-gate" && m.directions ? (
-      <DirectionCard
-        directions={m.directions}
+    ) : m.kind === "direction-gate" ? null : m.kind === "research" && m.research ? (
+      <ResearchCard
+        research={m.research}
         chosenSlug={research?.chosenSlug}
-        onPick={(slug) => void runBrief(m.text || lastRunBriefRef.current, undefined, undefined, [], [], slug)}
+        onOpen={research?.exists ? () => setTab("Research") : undefined}
+        onPick={hasPendingDirectionGate ? submitDirection : undefined}
       />
-    ) : m.kind === "research" && m.research ? (
-      <ResearchCard research={m.research} chosenSlug={research?.chosenSlug} onOpen={research?.exists ? () => setTab("Research") : undefined} />
     ) : (
       <ResultCard text={m.text} meta={m.meta} onView={() => setTab("Preview")} runId={m.runId} onFeedback={(runId, verdict) => void api.setRunFeedback(runId, { verdict }).catch(() => {})} stackPosition={stackPosition} />
     );
-  const renderRunCardStack = (stack: Msg[], separated = false, testId = "run-card-stack"): ReactNode => (
-    <div data-testid={testId} className={cn(separated && "mt-3")}>
-      {stack.map((m, index) => (
-        <Fragment key={m.id}>{renderTranscriptMessage(m, runCardStackPosition(index, stack.length))}</Fragment>
-      ))}
-    </div>
-  );
+  const renderRunCardStack = (stack: Msg[], separated = false, testId = "run-card-stack"): ReactNode => {
+    // Small left-aligned label naming the Version this run produced, shown above the Processed card.
+    const stackRunId = stack.map((m) => m.runId).find((id): id is string => !!id) ?? null;
+    const version = findVersionSelection(versionGroups, stackRunId);
+    return (
+      <div data-testid={testId} className={cn(separated && "mt-3")}>
+        {version ? (
+          <div data-testid="run-stack-version" className="mb-1 pl-0.5 text-left text-[11px] font-medium text-muted-foreground">
+            {version.label}
+          </div>
+        ) : null}
+        {stack.map((m, index) => (
+          <Fragment key={m.id}>{renderTranscriptMessage(m, runCardStackPosition(index, stack.length))}</Fragment>
+        ))}
+      </div>
+    );
+  };
   const renderPreviewFrame = (): ReactNode => (
     <iframe
       key={previewSrc ?? "artifact-preview"}

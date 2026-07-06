@@ -10,7 +10,7 @@
 
 import { useState, type KeyboardEvent } from "react";
 import { motion } from "motion/react";
-import { Check, ChevronDown, ChevronRight, Download, FileCode2, Globe, MousePointerClick, Search, Sparkles } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Download, FileCode2, Globe, Search, Sparkles } from "lucide-react";
 import { Markdown } from "../components/Markdown.tsx";
 import { cn } from "../lib/utils.ts";
 import type { ResearchDetail } from "../lib/api.ts";
@@ -29,16 +29,6 @@ export interface ResearchCardData {
   assets?: number;
   directions?: Array<{ slug: string; title: string; summary?: string }>;
   error?: string;
-}
-
-/** A direction's summary prose — its markdown minus the heading/markup, clamped. */
-export function directionSummary(markdown: string): string {
-  const body = markdown
-    .replace(/^#\s+.*$/m, "")
-    .replace(/[#*`>]/g, "")
-    .replace(/\n{2,}/g, "\n")
-    .trim();
-  return body.length > 260 ? `${body.slice(0, 260).trimEnd()}…` : body;
 }
 
 /** Small icon for one research step kind. */
@@ -87,11 +77,27 @@ function AnimatedSearchIcon({ running }: { running: boolean }) {
  * The pre-design Research phase's dedicated card — live steps, then a results summary.
  * When `onOpen` is provided (research deliverables exist) the whole card opens the Research tab.
  */
-export function ResearchCard({ research, chosenSlug, onOpen }: { research: ResearchCardData; chosenSlug?: string; onOpen?: () => void }) {
+export function ResearchCard({
+  research,
+  chosenSlug,
+  onOpen,
+  onPick,
+}: {
+  research: ResearchCardData;
+  chosenSlug?: string;
+  onOpen?: () => void;
+  /** When provided and no direction is chosen yet, the directions become selectable inline and a
+   *  Submit button commits the pick (nothing runs until Submit). */
+  onPick?: (slug: string) => void;
+}) {
   const { status, activities, report, sources = 0, assets = 0, directions = [], error } = research;
   const running = status === "running";
   const recent = activities.slice(-14);
-  const interactive = !running && !!onOpen;
+  const [selected, setSelected] = useState<string | null>(null);
+  // Direction gate open: pick one direction INLINE, then Submit. Once a choice is persisted
+  // (chosenSlug arrives), the card locks to a read-only display of the chosen one.
+  const pickable = !running && !!onPick && !chosenSlug && directions.length > 0;
+  const interactive = !running && !pickable && !!onOpen; // whole-card click opens the tab — but never while picking
   const activateKey = (e: KeyboardEvent<HTMLElement>): void => {
     if (interactive && (e.key === "Enter" || e.key === " ")) {
       e.preventDefault();
@@ -156,24 +162,24 @@ export function ResearchCard({ research, chosenSlug, onOpen }: { research: Resea
           {directions.length ? (
             <div className="mt-2 grid gap-1.5">
               {directions.map((d) => {
-                const selected = !!chosenSlug && d.slug === chosenSlug;
-                const dimmed = !!chosenSlug && !selected; // once a direction is chosen, the others recede
-                return (
-                  <div
-                    key={d.slug}
-                    data-testid="research-card-direction"
-                    data-selected={selected ? "true" : "false"}
-                    className={cn(
-                      "flex items-start gap-2 rounded-md border p-2 text-left transition-colors",
-                      selected ? "border-primary/60 bg-primary/5 ring-1 ring-primary/20" : "border-border bg-background",
-                      dimmed && "opacity-55",
-                    )}
-                  >
-                    <OptionRadio selected={selected} />
+                const isChosen = !!chosenSlug && d.slug === chosenSlug;
+                const isSelected = pickable && selected === d.slug;
+                const active = isChosen || isSelected;
+                const dimmed = !!chosenSlug && !isChosen; // once a direction is chosen, the others recede
+                // No outer shadow ring on the selected direction — just a border + tint.
+                const optionClass = cn(
+                  "flex w-full items-start gap-2 rounded-md border p-2 text-left transition-colors",
+                  active ? "border-primary/60 bg-primary/5" : "border-border bg-background",
+                  pickable && !active && "cursor-pointer hover:border-muted-foreground/40 hover:bg-surface-2",
+                  dimmed && "opacity-55",
+                );
+                const inner = (
+                  <>
+                    <OptionRadio selected={active} />
                     <span className="min-w-0 flex-1">
                       <span className="flex items-center gap-1.5">
                         <span className="min-w-0 truncate text-xs font-medium text-foreground">{d.title}</span>
-                        {selected ? (
+                        {isChosen ? (
                           <span className="inline-flex shrink-0 items-center rounded-full bg-primary px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-primary-foreground">
                             Chosen
                           </span>
@@ -181,87 +187,37 @@ export function ResearchCard({ research, chosenSlug, onOpen }: { research: Resea
                       </span>
                       {d.summary ? <span className="mt-0.5 line-clamp-2 block text-[11px] leading-snug text-muted-foreground">{d.summary}</span> : null}
                     </span>
+                  </>
+                );
+                return pickable ? (
+                  <button key={d.slug} type="button" data-testid="research-card-direction" data-selected={active ? "true" : "false"} aria-pressed={isSelected} onClick={() => setSelected(d.slug)} className={optionClass}>
+                    {inner}
+                  </button>
+                ) : (
+                  <div key={d.slug} data-testid="research-card-direction" data-selected={active ? "true" : "false"} className={optionClass}>
+                    {inner}
                   </div>
                 );
               })}
             </div>
           ) : null}
+          {pickable ? (
+            <button
+              type="button"
+              data-testid="research-submit-direction"
+              disabled={!selected}
+              onClick={() => {
+                if (selected) onPick!(selected);
+              }}
+              className="mt-2 w-full rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Submit
+            </button>
+          ) : null}
           {error ? <p className="mt-1 text-destructive">{error}</p> : null}
         </div>
       ) : null}
     </section>
-  );
-}
-
-/**
- * The direction gate — pick one candidate direction to build. Picking commits immediately
- * (it starts the build), so the picked option locks in and the others dim. On reload the
- * historical pick arrives via `chosenSlug`.
- */
-export function DirectionCard({
-  directions,
-  chosenSlug,
-  onPick,
-}: {
-  directions: Array<{ slug: string; title: string; markdown: string }>;
-  chosenSlug?: string;
-  onPick: (slug: string) => void;
-}) {
-  const [picked, setPicked] = useState<string | null>(null);
-  const selectedSlug = picked ?? chosenSlug ?? null;
-  const resolved = selectedSlug !== null;
-  const justPicked = picked !== null; // fresh pick this session vs a choice restored on reload
-  const choose = (slug: string): void => {
-    if (resolved) return; // one-shot: the pick already started the build
-    setPicked(slug);
-    onPick(slug);
-  };
-  return (
-    <div className="rounded-lg border border-border bg-card/70 px-3 py-2.5">
-      <div className="flex items-center gap-2.5">
-        <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-surface-2 text-foreground">
-          <MousePointerClick size={12} strokeWidth={2} />
-        </span>
-        <p className="text-sm font-medium text-foreground">{resolved ? (justPicked ? "Building your chosen direction" : "Chosen direction") : "Pick a direction to build"}</p>
-      </div>
-      <div className="mt-2.5 grid gap-2">
-        {directions.map((d) => {
-          const selected = d.slug === selectedSlug;
-          return (
-            <button
-              key={d.slug}
-              type="button"
-              data-testid="direction-option"
-              data-selected={selected ? "true" : "false"}
-              aria-pressed={selected}
-              disabled={resolved}
-              onClick={() => choose(d.slug)}
-              className={cn(
-                "flex w-full items-start gap-2.5 rounded-md border p-2.5 text-left transition-colors",
-                selected
-                  ? "border-primary/60 bg-primary/5 ring-1 ring-primary/20"
-                  : resolved
-                    ? "border-border bg-background opacity-55"
-                    : "cursor-pointer border-border bg-background hover:border-muted-foreground/40 hover:bg-surface-2",
-              )}
-            >
-              <OptionRadio selected={selected} />
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-foreground">{d.title}</span>
-                  {selected ? (
-                    <span className="inline-flex items-center gap-0.5 rounded-full bg-primary px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-primary-foreground">
-                      {justPicked ? "Building" : "Chosen"}
-                    </span>
-                  ) : null}
-                </span>
-                <span className="mt-1 block whitespace-pre-line text-xs leading-relaxed text-muted-foreground">{directionSummary(d.markdown)}</span>
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
   );
 }
 
@@ -291,7 +247,7 @@ export function ResearchPanel({ research, assetUrl }: { research: ResearchDetail
                     key={d.slug}
                     data-testid="panel-direction"
                     data-selected={selected ? "true" : "false"}
-                    className={cn("group rounded-lg border bg-card", selected ? "border-primary/50 ring-1 ring-primary/20" : "border-border")}
+                    className={cn("group rounded-lg border bg-card", selected ? "border-primary/50" : "border-border")}
                   >
                     <summary className="flex cursor-pointer list-none items-center gap-2.5 p-3 marker:content-['']">
                       <OptionRadio selected={selected} />

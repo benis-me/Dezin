@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import { DirectionCard, ResearchCard, ResearchPanel, type ResearchCardData } from "./ResearchViews.tsx";
+import { ResearchCard, ResearchPanel, type ResearchCardData } from "./ResearchViews.tsx";
 import type { ResearchDetail } from "../lib/api.ts";
 
 afterEach(cleanup);
@@ -94,29 +94,41 @@ test("ResearchCard's search icon reflects the running state (animated while rese
   expect(screen.getByTestId("research-search-icon").getAttribute("data-running")).toBe("false");
 });
 
-test("DirectionCard picks a direction, marks it selected, and locks further picks (one-shot)", () => {
-  const onPick = vi.fn();
-  render(<DirectionCard directions={directions} onPick={onPick} />);
-  const options = screen.getAllByTestId("direction-option");
-  fireEvent.click(options[0]!);
-  expect(onPick).toHaveBeenCalledWith("bold");
+const gateResearch: ResearchCardData = {
+  ...doneResearch,
+  directions: [
+    { slug: "bold", title: "Bold terminal", summary: "Big monospace type." },
+    { slug: "calm", title: "Calm editorial", summary: "Quiet whitespace." },
+  ],
+};
 
-  const after = screen.getAllByTestId("direction-option");
-  expect(after[0]!.getAttribute("data-selected")).toBe("true");
-  expect(after[1]!.getAttribute("data-selected")).toBe("false");
-  // Picking commits the build; a second click must not re-trigger a run.
-  fireEvent.click(after[1]!);
-  expect(onPick).toHaveBeenCalledTimes(1);
+test("ResearchCard hosts the direction gate inline: click selects, only Submit commits the pick", () => {
+  const onPick = vi.fn();
+  render(<ResearchCard research={gateResearch} onPick={onPick} onOpen={() => {}} />);
+  const options = screen.getAllByTestId("research-card-direction");
+  // Selecting a direction must NOT submit — nothing runs until Submit.
+  fireEvent.click(options[0]!);
+  expect(onPick).not.toHaveBeenCalled();
+  expect(options[0]!.getAttribute("data-selected")).toBe("true");
+  fireEvent.click(screen.getByTestId("research-submit-direction"));
+  expect(onPick).toHaveBeenCalledWith("bold");
 });
 
-test("DirectionCard reflects a previously chosen direction on reload and stays locked", () => {
-  const onPick = vi.fn();
-  render(<DirectionCard directions={directions} chosenSlug="calm" onPick={onPick} />);
-  const options = screen.getAllByTestId("direction-option");
-  const calm = options.find((o) => o.textContent?.includes("Calm editorial"))!;
-  expect(calm.getAttribute("data-selected")).toBe("true");
-  fireEvent.click(options.find((o) => o.textContent?.includes("Bold terminal"))!);
-  expect(onPick).not.toHaveBeenCalled();
+test("ResearchCard Submit is disabled until a direction is selected", () => {
+  render(<ResearchCard research={gateResearch} onPick={() => {}} onOpen={() => {}} />);
+  const submit = screen.getByTestId("research-submit-direction") as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+  fireEvent.click(screen.getAllByTestId("research-card-direction")[0]!);
+  expect(submit.disabled).toBe(false);
+});
+
+test("ResearchCard: a chosen direction locks the gate (no Submit) and carries no outer shadow ring", () => {
+  render(<ResearchCard research={gateResearch} chosenSlug="bold" onPick={() => {}} onOpen={() => {}} />);
+  // Once chosen, there is no Submit and the directions are display-only.
+  expect(screen.queryByTestId("research-submit-direction")).toBeNull();
+  const bold = screen.getAllByTestId("research-card-direction").find((c) => c.textContent?.includes("Bold terminal"))!;
+  expect(bold.getAttribute("data-selected")).toBe("true");
+  expect(bold.className).not.toMatch(/\bring-/);
 });
 
 test("ResearchPanel lays directions out one-per-row (not a 2-col grid) and marks the chosen one", () => {

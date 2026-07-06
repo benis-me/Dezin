@@ -563,8 +563,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // The chosen direction's spec, if research produced one — handed to the critic as its aesthetic
   // contract so it judges palette/soul alignment, not just micro-polish.
   let chosenDirectionSpec: string | undefined;
-  const userMessage = store.addMessage(conversation.id, "user", visibleBrief);
-  store.updateRun(run.id, { status: "running", userMessageId: userMessage.id });
+  // Building a pre-chosen direction is a CONTINUATION of the original brief that already researched
+  // on the prior run. Re-persisting its user message and re-running research here would surface the
+  // user message + the research card TWICE on reload — so detect it and skip that duplicate work.
+  const buildingChosenDirection = !!body.directionSlug?.trim();
+  const alreadyResearched = buildingChosenDirection && researchExists(dir);
+  const userMessage = alreadyResearched ? null : store.addMessage(conversation.id, "user", visibleBrief);
+  store.updateRun(run.id, userMessage ? { status: "running", userMessageId: userMessage.id } : { status: "running" });
 
   // Open the SSE stream + register the run with the broker. Events are buffered + persisted to
   // a per-run log so another client can reattach (after navigating away, or an app restart) and
@@ -596,7 +601,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // Optional pre-design Research phase (opt-in via body.research). It writes the
   // research/ directory, then its report is prepended to the brief so the build is
   // grounded in real discovery. Idempotent; a soft failure just proceeds without it.
-  if (body.research !== false && (body.research === true || settings.researchEnabled || process.env.DEZIN_RESEARCH === "1")) {
+  if (!alreadyResearched && body.research !== false && (body.research === true || settings.researchEnabled || process.env.DEZIN_RESEARCH === "1")) {
     sse({ type: "research-start", runId: run.id });
     const research = await (deps.researchPhase ?? runResearchPhase)({
       dir,
@@ -636,6 +641,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const researchContext = await buildResearchContext(dir, chosenDirection);
       if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
     }
+  } else if (alreadyResearched) {
+    // The prior run already researched + produced the directions. Wire the chosen direction into
+    // THIS build (its spec for the critic + the research context in the brief) WITHOUT re-running
+    // research — re-running it re-persists the user message + research card and redoes the work.
+    const chosenDirection = body.directionSlug!.trim();
+    await writeChosenDirection(dir, chosenDirection).catch(() => {});
+    chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
+    const researchContext = await buildResearchContext(dir, chosenDirection);
+    if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
   }
 
   // Exemplar retrieval: reference the user's previously-kept (👍) designs so the build
@@ -938,7 +952,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           repairSnapshotCommits.add(commitHash);
           store.createImportedRun(project.id, conversation.id, {
             variantId: targetVariantId,
-            userMessageId: userMessage.id,
+            userMessageId: userMessage?.id,
             commitHash,
             status: "succeeded",
             repairRounds,

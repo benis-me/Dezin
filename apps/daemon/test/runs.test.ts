@@ -2034,6 +2034,43 @@ test("a run with directionSlug skips the gate and builds the chosen direction", 
   );
 });
 
+test("picking a direction does not re-run research or duplicate the user/research message on reload", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  let researchCalls = 0;
+  const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {
+    researchCalls += 1;
+    return researchWithDirections(input);
+  };
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      const project = await createProject(base);
+      store.updateSettings({ researchEnabled: true });
+      // Run 1: research → direction gate (cancels before build).
+      await (await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, brief: "make a hero" }) })).text();
+      const convId = store.listConversations(project.id)[0]!.id;
+      // Run 2: pick a direction, SAME conversation → build (no `research` flag, mirroring the client).
+      await (await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, brief: "make a hero", directionSlug: "alpha", conversationId: convId }) })).text();
+
+      const messages = store.listMessages(convId);
+      const userMessages = messages.filter((m) => m.role === "user");
+      const researchMessages = messages.filter((m) => {
+        if (m.role !== "system") return false;
+        try {
+          return !!(JSON.parse(m.content) as { research?: unknown }).research;
+        } catch {
+          return false;
+        }
+      });
+      assert.equal(researchCalls, 1, "research must not re-run when building a pre-chosen direction");
+      assert.equal(userMessages.length, 1, "the brief is ONE user message — the pick must not duplicate it");
+      assert.equal(researchMessages.length, 1, "ONE research summary message — the pick must not duplicate it");
+      assert.ok(runner.calls.length >= 1, "the chosen direction still builds");
+    },
+    { researchPhase },
+  );
+});
+
 test("a run records its model, agent, and agent-selected skill for attribution", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   await withRunServer(runner, async ({ base, store }) => {

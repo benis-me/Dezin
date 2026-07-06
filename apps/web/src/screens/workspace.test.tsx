@@ -390,16 +390,26 @@ test("reattaching to an in-flight run reuses the persisted Research card instead
   expect(screen.getAllByTestId("research-card")).toHaveLength(1);
 });
 
-test("reattaching to an in-flight run reuses the persisted direction-gate card instead of duplicating it", async () => {
+test("reattaching to an in-flight run does not duplicate the research direction gate (hosted inline in the Research card)", async () => {
   const gateDirections = [{ slug: "console", title: "Console", markdown: "# Console\n\nCalm operator console." }];
   const fake = makeFakeApi({
     listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    // The daemon persists BOTH a research summary and a direction-gate; the gate now renders as the
+    // inline picker inside the Research card.
     listMessages: async () => [
       { id: "m1", conversationId: "c1", role: "user", content: "Design a chat UI", createdAt: 1 },
-      { id: "m2", conversationId: "c1", role: "system", content: JSON.stringify({ directionGate: { runId: "r1", brief: "Design a chat UI", directions: gateDirections } }), createdAt: 2 },
+      {
+        id: "m2",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({ research: { produced: true, report: true, sources: 0, assets: 0, directions: [{ slug: "console", title: "Console", summary: "Calm operator console." }] } }),
+        createdAt: 2,
+      },
+      { id: "m3", conversationId: "c1", role: "system", content: JSON.stringify({ directionGate: { runId: "r1", brief: "Design a chat UI", directions: gateDirections } }), createdAt: 3 },
     ],
-    listRuns: async () => [{ id: "r1", conversationId: "c1", status: "running", score: null, repairRounds: 0, lintPassed: false, createdAt: 3, finishedAt: null }],
+    listRuns: async () => [{ id: "r1", conversationId: "c1", status: "running", score: null, repairRounds: 0, lintPassed: false, createdAt: 4, finishedAt: null }],
     reattachRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "research-start", runId: "r1" } as RunEvent;
       yield { type: "direction-gate", runId: "r1", brief: "Design a chat UI", directions: gateDirections } as RunEvent;
     },
   });
@@ -408,9 +418,11 @@ test("reattaching to an in-flight run reuses the persisted direction-gate card i
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
-  // A single gate card → its one direction renders one option. A duplicate would double it.
-  await waitFor(() => expect(screen.getAllByTestId("direction-option").length).toBeGreaterThan(0));
-  expect(screen.getAllByTestId("direction-option")).toHaveLength(1);
+  // One Research card hosts the gate → its one direction renders one option, with an inline Submit.
+  // A reattach replay must reuse the persisted card, not double it.
+  await waitFor(() => expect(screen.getAllByTestId("research-card-direction").length).toBeGreaterThan(0));
+  expect(screen.getAllByTestId("research-card-direction")).toHaveLength(1);
+  expect(screen.getByTestId("research-submit-direction")).toBeTruthy();
 });
 
 test("sending a brief streams events into the chat and shows the preview + export menu", async () => {
@@ -520,6 +532,8 @@ test("completed runs collapse the interleaved process above the final summary", 
       yield { type: "activity", activity: { kind: "text", text: " Tightened the layout." } };
       yield { type: "run-done", runId: "r-process", passed: true, rounds: 0, score: 100, previewUrl: "/projects/p1/preview/", findings: [] };
     },
+    // The completed run is a version, so the stack carries a version label above the Processed card.
+    listRuns: async () => [{ id: "r-process", conversationId: "c1", status: "succeeded", score: 100, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 }],
   });
 
   render(
@@ -535,6 +549,7 @@ test("completed runs collapse the interleaved process above the final summary", 
   expect(screen.getByText("Drafted the hero. Tightened the layout.")).toBeInTheDocument();
   expect(screen.queryByText("Editing App.tsx")).toBeNull();
   const stack = await screen.findByTestId("run-card-stack");
+  expect(await within(stack).findByTestId("run-stack-version")).toHaveTextContent("v1");
   expect(within(stack).getByRole("button", { name: "1 step" })).toBeInTheDocument();
   expect(within(stack).getByText(/Done, quality 100\/100/)).toBeInTheDocument();
   const stackedCards = within(stack).getAllByTestId("run-card-stack-item");
