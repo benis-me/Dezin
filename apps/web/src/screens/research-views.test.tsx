@@ -3,6 +3,10 @@ import { afterEach, expect, test, vi } from "vitest";
 import { ResearchCard, ResearchPanel, type ResearchCardData } from "./ResearchViews.tsx";
 import type { ResearchDetail } from "../lib/api.ts";
 
+vi.mock("../moodboard/MoodboardCanvas.tsx", () => ({
+  MoodboardCanvas: (props: { nodes: unknown[] }) => <div data-testid="visual-moodboard" data-nodes={props.nodes.length} />,
+}));
+
 afterEach(cleanup);
 
 const doneResearch: ResearchCardData = {

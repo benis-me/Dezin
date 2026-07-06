@@ -8,12 +8,18 @@
  * `chosenSlug`, persisted server-side (.research/chosen) so it survives reload.
  */
 
-import { useState, type KeyboardEvent } from "react";
+import { lazy, Suspense, useState, type KeyboardEvent } from "react";
 import { motion } from "motion/react";
 import { Check, ChevronDown, ChevronRight, Download, FileCode2, Globe, Search, Sparkles } from "lucide-react";
 import { Markdown } from "../components/Markdown.tsx";
 import { cn } from "../lib/utils.ts";
 import type { ResearchDetail } from "../lib/api.ts";
+
+// Lazy: pulls in MoodboardCanvas (leafer-react canvas runtime), which must not load eagerly on
+// ResearchViews' import path (WorkspaceScreen imports this module statically for every project).
+const VisualResearchBoard = lazy(() =>
+  import("./VisualResearchBoard.tsx").then((module) => ({ default: module.VisualResearchBoard })),
+);
 
 export interface ResearchActivityItem {
   kind: string;
@@ -351,8 +357,13 @@ export function ResearchPanel({
                 </ul>
               </section>
             ) : null}
-            {/* Task 7 mounts the visual moodboard canvas here. */}
-            <div data-testid="visual-moodboard-mount" />
+            <div data-testid="visual-moodboard-mount">
+              {visual?.boardId ? (
+                <Suspense fallback={null}>
+                  <VisualResearchBoard boardId={visual.boardId} />
+                </Suspense>
+              ) : null}
+            </div>
           </>
         ) : null}
         {subTab === "product" && directions.length ? (
