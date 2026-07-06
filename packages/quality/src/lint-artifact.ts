@@ -684,6 +684,49 @@ function checkProviderTells(html: string, provider?: string): Finding[] {
   return out;
 }
 
+/** Sharp, unambiguous marketing clichés (the ones that are almost always filler). */
+const MARKETING_CLICHES =
+  /\b(elevate|seamless(?:ly)?|unleash|supercharge|world[- ]class|enterprise[- ]grade|next[- ]gen(?:eration)?|cutting[- ]edge|revolutioni[sz]e|synergy|paradigm|game[- ]chang(?:er|ing)|best[- ]in[- ]class|turbocharge)\b/i;
+
+/**
+ * Copy self-audit — re-read the visible strings and flag the AI copy tics: buzzword clichés,
+ * the "X. No Y." manufactured-contrast cadence, and em-dash over-reach. Advisory (P2): the
+ * user owns voice, so these are suggestions, not defects.
+ */
+function checkCopyAudit(html: string): Finding[] {
+  const out: Finding[] = [];
+  const text = html.replace(/<[^>]+>/g, " ");
+  const cliche = MARKETING_CLICHES.exec(text);
+  if (cliche) {
+    out.push({
+      severity: "P2",
+      id: "marketing-cliche",
+      message: `Marketing cliché in the copy ("${cliche[0]}") — reads as generic AI filler.`,
+      fix: "Say the specific, product-true thing instead of a buzzword.",
+      snippet: cliche[0],
+    });
+  }
+  const cadence = text.match(/[a-z]\.\s+(?:no|not|never|just)\b/gi);
+  if (cadence && cadence.length >= 3) {
+    out.push({
+      severity: "P2",
+      id: "aphoristic-cadence",
+      message: `Manufactured-contrast cadence ("X. No Y.") repeated ${cadence.length}× — an AI copy tic.`,
+      fix: "Vary sentence shape; say what it IS, not a string of rebuttals.",
+    });
+  }
+  const emDashes = (text.match(/—/g) ?? []).length;
+  if (emDashes > 3) {
+    out.push({
+      severity: "P2",
+      id: "em-dash-overuse",
+      message: `${emDashes} em-dashes in the copy — AI over-reaches for them; vary the punctuation.`,
+      fix: "Replace some em-dashes with commas, periods, or restructured sentences.",
+    });
+  }
+  return out;
+}
+
 const SEVERITY_ORDER: Record<string, number> = { P0: 0, P1: 1, P2: 2 };
 
 /**
@@ -726,6 +769,7 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
     ...checkReducedMotion(html),
     ...checkDarkPureBlack(html),
     ...checkBounceEasing(html),
+    ...checkCopyAudit(html),
     ...checkProviderTells(html, options.provider),
     ...checkExternalImages(html),
     ...checkRawHex(html),

@@ -236,3 +236,17 @@ test("provider tells: img:hover transform flagged for Gemini, not others", () =>
   assert.ok(ids(lintArtifact(html, { provider: "gemini" })).includes("image-hover-transform"));
   assert.equal(ids(lintArtifact(html, { provider: "gpt" })).includes("image-hover-transform"), false);
 });
+
+test("copy audit: flags marketing cliches, not plain product copy", () => {
+  assert.ok(ids(lintArtifact(`<h1>Elevate your workflow</h1><p>A seamless, world-class experience.</p>`)).includes("marketing-cliche"));
+  assert.equal(ids(lintArtifact(`<h1>Track your expenses</h1><p>See where your money goes each month.</p>`)).includes("marketing-cliche"), false);
+});
+
+test("copy audit: flags manufactured-contrast cadence repeated 3+ times", () => {
+  assert.ok(ids(lintArtifact(`<p>Fast. No waiting. Simple. No clutter. Clear. No noise.</p>`)).includes("aphoristic-cadence"));
+});
+
+test("copy audit: flags em-dash overuse but not a single em-dash", () => {
+  assert.ok(ids(lintArtifact(`<p>This — that — and the other — plus one more — really.</p>`)).includes("em-dash-overuse"));
+  assert.equal(ids(lintArtifact(`<p>This — is perfectly fine.</p>`)).includes("em-dash-overuse"), false);
+});

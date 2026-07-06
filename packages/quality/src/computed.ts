@@ -410,6 +410,51 @@ function checkMonotonousSpacing(elements: ComputedElement[]): Finding[] {
   ];
 }
 
+/** An uppercase, tightly-tracked, short label — the "eyebrow" kicker above a heading. */
+function isEyebrow(el: ComputedElement): boolean {
+  if (!isTextBearing(el)) return false;
+  const t = el.text.trim();
+  if (t.length > 30) return false;
+  const fs = el.style.fontSizePx;
+  if (fs === undefined || fs > 14) return false;
+  const upper = el.style.textTransform === "uppercase" || (!/[a-z]/.test(t) && /[A-Z]/.test(t));
+  if (!upper || !el.style.letterSpacing) return false;
+  const { em } = letterSpacingToEm(el.style.letterSpacing, fs);
+  return em !== null && em > 0.03;
+}
+
+/** repeated-eyebrows — the same uppercase-tracked kicker on section after section. */
+function checkRepeatedEyebrows(elements: ComputedElement[]): Finding[] {
+  const count = elements.filter(isEyebrow).length;
+  if (count < 3) return [];
+  return [
+    {
+      severity: "P2",
+      id: "repeated-eyebrows",
+      message: `${count} uppercase tracked eyebrow labels — one is a brand accent, but one on nearly every section is AI grammar.`,
+      fix: "Keep at most one eyebrow per ~3 sections; let the headings carry the rest.",
+    },
+  ];
+}
+
+/** numbered-section-markers — decorative 01 / 02 / 03 scaffolding (small, not big stat numbers). */
+function checkNumberedMarkers(elements: ComputedElement[]): Finding[] {
+  const count = elements.filter((e) => {
+    const fs = e.style.fontSizePx;
+    if (fs === undefined || fs > 20) return false; // big display numbers are stats, not markers
+    return /^\d{2}$/.test(e.text.trim());
+  }).length;
+  if (count < 3) return [];
+  return [
+    {
+      severity: "P2",
+      id: "numbered-section-markers",
+      message: `${count} decorative two-digit section numbers (01 / 02 / 03…) — scaffolding by reflex reads as AI grammar.`,
+      fix: "Drop the numbers unless the section IS a real sequence; let the headings stand on their own.",
+    },
+  ];
+}
+
 /** cream-palette — the warm cream/sand page surface that reads as the 2026 AI default. */
 function checkCreamPalette(_elements: ComputedElement[], ctx: ComputedContext): Finding[] {
   const bg = parseColor(ctx.pageBackground);
@@ -586,6 +631,8 @@ const DOCUMENT_CHECKS: ReadonlyArray<(els: ComputedElement[], ctx: ComputedConte
   checkCreamPalette,
   checkNestedCards,
   checkIconTileStack,
+  checkRepeatedEyebrows,
+  checkNumberedMarkers,
 ];
 
 /**

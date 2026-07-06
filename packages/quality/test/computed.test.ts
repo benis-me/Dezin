@@ -311,3 +311,25 @@ test("does not flag a thin border with only a tight shadow", () => {
   );
   assert.equal(findings.some((f) => f.id === "gpt-thin-border-wide-shadow"), false);
 });
+
+// ── composition: repeated eyebrows ────────────────────────────────────────────
+const eyebrow = (i: number) => el({ selector: `.s${i} .eyebrow`, tag: "span", text: "FEATURES", style: { fontSizePx: 12, textTransform: "uppercase", letterSpacing: "1.5px" } });
+
+test("flags an uppercase-tracked eyebrow repeated across sections", () => {
+  assert.ok(detectComputedFindings([eyebrow(1), eyebrow(2), eyebrow(3)]).some((f) => f.id === "repeated-eyebrows"));
+});
+
+test("does not flag one or two eyebrows", () => {
+  assert.equal(detectComputedFindings([eyebrow(1), eyebrow(2)]).some((f) => f.id === "repeated-eyebrows"), false);
+});
+
+// ── composition: numbered section markers ─────────────────────────────────────
+test("flags decorative two-digit section markers", () => {
+  const mk = (n: string) => el({ selector: ".sec .num", tag: "span", text: n, style: { fontSizePx: 14, letterSpacing: "1px" } });
+  assert.ok(detectComputedFindings([mk("01"), mk("02"), mk("03")]).some((f) => f.id === "numbered-section-markers"));
+});
+
+test("does not flag large display stat numbers", () => {
+  const stat = (n: string) => el({ selector: ".stat", tag: "div", text: n, style: { fontSizePx: 48 } });
+  assert.equal(detectComputedFindings([stat("42"), stat("88"), stat("95")]).some((f) => f.id === "numbered-section-markers"), false);
+});
