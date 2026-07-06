@@ -16,6 +16,7 @@ import type { DesignSystem } from "../../design/src/index.ts";
 import { INJECTION_RESISTANCE, IDENTITY_CHARTER, SELF_CRITIQUE, ANTI_ROLEPLAY } from "./charter.ts";
 import { renderAntiSlopContract } from "./anti-slop.ts";
 import { renderDirectionBlock, type Direction } from "./directions.ts";
+import { renderDialsBlock, type Dials } from "./dials.ts";
 
 /** One row of the skill catalog exposed to the agent for on-demand loading. */
 export interface SkillCatalogEntry {
@@ -49,6 +50,8 @@ export interface ComposeInput {
   craft?: string;
   /** A visual direction to follow when no design system is active. */
   direction?: Direction;
+  /** Inferred design dials (variance/motion/density) that cascade to every decision. */
+  dials?: Dials;
   /** When true, the agent may request generated imagery via data-gen-prompt. */
   imageGen?: boolean;
   /** Build mode — "prototype" (single index.html) or "standard" (real Vite project). */
@@ -229,6 +232,8 @@ export function composeSystemPrompt(input: ComposeInput = {}): string {
   } else if (input.direction) {
     parts.push(renderDirectionBlock(input.direction));
   }
+
+  if (input.dials) parts.push(renderDialsBlock(input.dials));
 
   parts.push(FONTS);
   parts.push(ASSET_SOURCING);

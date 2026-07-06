@@ -17,3 +17,4 @@ export {
   type Direction,
   type DirectionPalette,
 } from "./directions.ts";
+export { inferDials, renderDialsBlock, type Dials } from "./dials.ts";

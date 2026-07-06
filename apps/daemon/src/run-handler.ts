@@ -9,7 +9,7 @@ import { mkdir, readdir, readFile, writeFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { composeSystemPrompt } from "../../../packages/prompt/src/index.ts";
+import { composeSystemPrompt, inferDials } from "../../../packages/prompt/src/index.ts";
 import {
   generateArtifact,
   runTurnWithRetry,
@@ -524,6 +524,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     craft: craft || undefined,
     imageGen: Boolean(imageApiKey && imageBaseUrl),
     mode: project.mode,
+    // Variance/motion/density inferred from the brief — bind the design to explicit targets.
+    dials: inferDials(body.brief.trim()),
   });
 
   const brief = body.brief.trim();
