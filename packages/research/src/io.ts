@@ -17,6 +17,12 @@ import {
   reportPath,
   researchDir,
   sourcesPath,
+  VISUAL_DIRNAME,
+  visualAssetsDir,
+  visualDir,
+  visualMoodboardPointerPath,
+  visualReportPath,
+  visualSourcesPath,
 } from "./convention.ts";
 import { buildBriefMarkdown, parseBriefMarkdown } from "./brief.ts";
 import { parseSources, serializeSources } from "./sources.ts";
@@ -101,13 +107,53 @@ export async function readChosenDirection(projectDir: string): Promise<string | 
   return slug ? slug : null;
 }
 
+/** True when a visual research report has been produced for this project. */
+export function visualResearchExists(projectDir: string): boolean {
+  return existsSync(visualReportPath(projectDir));
+}
+
+export async function readVisualReport(projectDir: string): Promise<string | null> {
+  return readText(visualReportPath(projectDir));
+}
+
+export async function readVisualSources(projectDir: string): Promise<ResearchSource[]> {
+  return parseSources(await readText(visualSourcesPath(projectDir)));
+}
+
+/** Relative asset paths (visual/assets/*) that actually exist on disk. */
+export async function listVisualAssets(projectDir: string): Promise<string[]> {
+  try {
+    const entries = await readdir(visualAssetsDir(projectDir), { withFileTypes: true });
+    return entries.filter((e) => e.isFile()).map((e) => `${VISUAL_DIRNAME}/${ASSETS_DIRNAME}/${e.name}`).sort();
+  } catch {
+    return [];
+  }
+}
+
+export async function readVisualMoodboardId(projectDir: string): Promise<string | null> {
+  const raw = await readText(visualMoodboardPointerPath(projectDir));
+  if (!raw) return null;
+  try {
+    const id = (JSON.parse(raw) as { boardId?: unknown }).boardId;
+    return typeof id === "string" && id ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeVisualMoodboardId(projectDir: string, boardId: string): Promise<void> {
+  await mkdir(visualDir(projectDir), { recursive: true });
+  await writeFile(visualMoodboardPointerPath(projectDir), `${JSON.stringify({ boardId }, null, 2)}\n`, "utf8");
+}
+
 /**
  * A compact research context block to prepend to the build phase's brief, so the
  * high-fidelity turn is grounded in the discovery it just did.
  */
 export async function buildResearchContext(projectDir: string, chosenDirectionSlug?: string): Promise<string | null> {
   const report = await readReport(projectDir);
-  if (!report) return null;
+  const visualReport = await readVisualReport(projectDir);
+  if (!report && !visualReport) return null;
   const assets = await listAssets(projectDir);
   const parts = [
     `A research report has been produced in \`${basename(researchDir(projectDir))}/\`. It is authoritative — build on it, do not re-research.`,
@@ -119,7 +165,12 @@ export async function buildResearchContext(projectDir: string, chosenDirectionSl
     const chosen = await readText(directionPath(projectDir, chosenDirectionSlug));
     if (chosen) parts.push(`## Chosen direction — build THIS one\n\n${chosen.trim()}`);
   }
-  parts.push(`## Research report\n\n${report.trim()}`);
+  if (report) parts.push(`## Research report\n\n${report.trim()}`);
+  if (visualReport) parts.push(`## Visual research (design-site inspiration)\n\n${visualReport.trim()}`);
+  const visualAssets = await listVisualAssets(projectDir);
+  if (visualAssets.length) {
+    parts.push(`Visual reference imagery is available locally: ${visualAssets.map((a) => `\`${join("research", a)}\``).join(", ")}. Study these real screenshots as source material.`);
+  }
   return parts.join("\n\n");
 }
 

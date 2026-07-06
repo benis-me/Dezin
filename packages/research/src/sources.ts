@@ -4,6 +4,21 @@ import type { ResearchSource, SourceKind } from "./types.ts";
 
 const KINDS: readonly SourceKind[] = ["competitor", "inspiration", "article", "data", "asset"];
 
+/** Low-authority hosts (SEO/content mills, AI-listicle mills) dropped at parse time. */
+export const JUNK_DOMAINS: readonly string[] = [
+  "medium.com", "quora.com", "slideshare.net", "scribd.com", "coursehero.com",
+  "geeksforgeeks.org", "w3schools.com", "tutorialspoint.com", "javatpoint.com",
+];
+
+function hostOf(url: string | undefined): string {
+  if (!url) return "";
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -27,6 +42,15 @@ export function normalizeSource(value: unknown, index = 0): ResearchSource | nul
   };
   if (typeof value.url === "string" && value.url.trim()) source.url = value.url.trim();
   if (typeof value.capturedAt === "string" && value.capturedAt.trim()) source.capturedAt = value.capturedAt.trim();
+  const host = hostOf(source.url);
+  if (host && JUNK_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`))) return null;
+  const authorityRaw = value.authority;
+  source.authority = authorityRaw === "primary" || authorityRaw === "secondary" ? authorityRaw : "unknown";
+  const platform = typeof value.platform === "string" ? value.platform.trim() : "";
+  if (platform) source.platform = platform;
+  const designer = typeof value.designer === "string" ? value.designer.trim() : "";
+  if (designer) source.designer = designer;
+  if (typeof value.reached === "boolean") source.reached = value.reached;
   return source;
 }
 

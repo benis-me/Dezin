@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { collectSourceAssets, normalizeSource, parseSources, serializeSources } from "../src/sources.ts";
+import { JUNK_DOMAINS } from "../src/index.ts";
 
 test("parseSources round-trips through serializeSources", () => {
   const sources = [
-    { id: "stripe", kind: "competitor" as const, title: "Stripe", url: "https://stripe.com", takeaways: ["clean tiers"], assets: ["assets/stripe.png"] },
+    { id: "stripe", kind: "competitor" as const, title: "Stripe", url: "https://stripe.com", takeaways: ["clean tiers"], assets: ["assets/stripe.png"], authority: "unknown" as const },
   ];
   assert.deepEqual(parseSources(serializeSources(sources)), sources);
 });
@@ -36,4 +37,16 @@ test("collectSourceAssets dedupes across sources", () => {
     ]),
   );
   assert.deepEqual(collectSourceAssets(sources), ["assets/x.png", "assets/y.png"]);
+});
+
+test("normalizeSource drops junk-domain sources and defaults authority to unknown", () => {
+  assert.equal(normalizeSource({ title: "listicle", url: "https://medium.com/@x/top-10", kind: "article" }), null);
+  const ok = normalizeSource({ title: "Stripe docs", url: "https://stripe.com/docs", kind: "article" })!;
+  assert.equal(ok.authority, "unknown");
+  const primary = normalizeSource({ title: "Stripe", url: "https://stripe.com", kind: "competitor", authority: "primary", platform: "dribbble", designer: "Jane", reached: true })!;
+  assert.equal(primary.authority, "primary");
+  assert.equal(primary.platform, "dribbble");
+  assert.equal(primary.designer, "Jane");
+  assert.equal(primary.reached, true);
+  assert.ok(JUNK_DOMAINS.includes("medium.com"));
 });

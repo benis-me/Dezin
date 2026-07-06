@@ -21,6 +21,14 @@ export interface ResearchSource {
   takeaways: string[];
   /** Relative paths under research/, e.g. "assets/stripe-pricing.png". */
   assets: string[];
+  /** Provenance quality: primary (official/first-party), secondary (reputable), or unknown. */
+  authority?: "primary" | "secondary" | "unknown";
+  /** Design platform for visual sources (dribbble/behance/awwwards/mobbin/pinterest/other). */
+  platform?: string;
+  /** Attributed designer/author, when known. */
+  designer?: string;
+  /** Whether the site was actually reachable (false = cited but blocked/login-walled). */
+  reached?: boolean;
 }
 
 /** The distilled design brief (research/brief.md) — intake output. */

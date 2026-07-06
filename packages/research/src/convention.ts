@@ -43,3 +43,23 @@ export function directionPath(projectDir: string, slug: string): string {
 export function chosenPath(projectDir: string): string {
   return join(researchDir(projectDir), CHOSEN_FILE);
 }
+
+export const VISUAL_DIRNAME = "visual";
+export const VISUAL_REPORT_FILE = "visual.md";
+export const VISUAL_MOODBOARD_FILE = "moodboard.json";
+
+export function visualDir(projectDir: string): string {
+  return join(researchDir(projectDir), VISUAL_DIRNAME);
+}
+export function visualReportPath(projectDir: string): string {
+  return join(visualDir(projectDir), VISUAL_REPORT_FILE);
+}
+export function visualSourcesPath(projectDir: string): string {
+  return join(visualDir(projectDir), SOURCES_FILE);
+}
+export function visualAssetsDir(projectDir: string): string {
+  return join(visualDir(projectDir), ASSETS_DIRNAME);
+}
+export function visualMoodboardPointerPath(projectDir: string): string {
+  return join(visualDir(projectDir), VISUAL_MOODBOARD_FILE);
+}
