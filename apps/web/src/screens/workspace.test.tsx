@@ -2636,9 +2636,13 @@ test("generated material sources render only in the run result card", async () =
   expect(screen.getByText("Generated image assets (2)")).toBeInTheDocument();
 });
 
-test("the variant fan-out button is exposed and enables once there's a brief", async () => {
+test("the variant fan-out button is exposed on Standard projects and enables once there's a brief", async () => {
   render(
-    <ApiProvider client={makeFakeApi()}>
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+      })}
+    >
       <WorkspaceScreen projectId="p1" />
     </ApiProvider>,
   );
@@ -2649,6 +2653,21 @@ test("the variant fan-out button is exposed and enables once there's a brief", a
   expect(button).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "explore bolder hero directions" } });
   expect(button).toBeEnabled();
+});
+
+test("the variant fan-out button is hidden on Prototype projects (targeted variant runs are Standard-only)", async () => {
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({ id: "p1", name: "Proto", skillId: null, designSystemId: "modern-minimal", mode: "prototype", createdAt: 1, updatedAt: 1 }),
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByLabelText("Message");
+  expect(screen.queryByLabelText("Generate variants")).toBeNull();
 });
 
 test("a non-perfect restored score without stored findings does not claim clean", async () => {

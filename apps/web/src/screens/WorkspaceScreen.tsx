@@ -3281,7 +3281,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const runVariantFanout = async (count = 3): Promise<void> => {
     const text = input.trim();
-    if (!isExisting || !text || runningRef.current) return;
+    // Fan-out forks each variation into its own git worktree and runs into it; the daemon only
+    // supports targeted variant runs in Standard mode, so this is Standard-only.
+    if (!isExisting || !text || runningRef.current || projectMode !== "standard") return;
     runningRef.current = true;
     terminalEventRef.current = false;
     activeRunIdRef.current = null;
@@ -4598,7 +4600,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     onModelChange={changeRunModel}
                     onRescan={rescanAgents}
                   />
-                  {SHOW_VARIANT_FANOUT_BUTTON ? (
+                  {SHOW_VARIANT_FANOUT_BUTTON && projectMode === "standard" ? (
                     <ToolbarTooltip label="Generate 3 variants">
                       <Button
                         aria-label="Generate variants"
