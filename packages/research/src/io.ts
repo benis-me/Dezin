@@ -117,7 +117,9 @@ export async function readVisualReport(projectDir: string): Promise<string | nul
 }
 
 export async function readVisualSources(projectDir: string): Promise<ResearchSource[]> {
-  return parseSources(await readText(visualSourcesPath(projectDir)));
+  // Visual sources are image-centric; tolerate a missing title (synthesize a label) so an image's
+  // provenance (url/platform/designer) isn't silently dropped by the strict product-source parser.
+  return parseSources(await readText(visualSourcesPath(projectDir)), { synthesizeTitle: true });
 }
 
 /** Relative asset paths (visual/assets/*) that actually exist on disk. */

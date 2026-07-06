@@ -4,8 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  visualDir, visualReportPath, visualAssetsDir, visualMoodboardPointerPath,
-  visualResearchExists, readVisualReport, listVisualAssets,
+  visualDir, visualReportPath, visualAssetsDir, visualMoodboardPointerPath, visualSourcesPath,
+  visualResearchExists, readVisualReport, listVisualAssets, readVisualSources,
   readVisualMoodboardId, writeVisualMoodboardId, buildResearchContext,
 } from "../src/index.ts";
 
@@ -37,6 +37,20 @@ test("visual moodboard pointer round-trips", async () => {
   assert.equal(await readVisualMoodboardId(p), null);
   await writeVisualMoodboardId(p, "board-123");
   assert.equal(await readVisualMoodboardId(p), "board-123");
+});
+
+test("readVisualSources tolerates a title-less visual source (identified by url/platform/designer)", async () => {
+  const p = proj();
+  mkdirSync(visualDir(p), { recursive: true });
+  writeFileSync(
+    visualSourcesPath(p),
+    JSON.stringify([{ id: "s1", platform: "behance", designer: "Ana", url: "https://behance.net/x", assets: ["assets/x.png"], reached: true }]),
+  );
+  const sources = await readVisualSources(p);
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0]!.designer, "Ana");
+  assert.equal(sources[0]!.platform, "behance");
+  assert.deepEqual(sources[0]!.assets, ["assets/x.png"]);
 });
 
 test("buildResearchContext folds in BOTH the product report and the visual report + assets", async () => {

@@ -39,6 +39,16 @@ test("collectSourceAssets dedupes across sources", () => {
   assert.deepEqual(collectSourceAssets(sources), ["assets/x.png", "assets/y.png"]);
 });
 
+test("parseSources with synthesizeTitle keeps a title-less source, labelling it by designer/platform; default drops it", () => {
+  const text = JSON.stringify([{ platform: "dribbble", designer: "Jane", url: "https://dribbble.com/shots/1", assets: ["assets/a.png"] }]);
+  assert.equal(parseSources(text).length, 0); // default: title required → dropped
+  const lenient = parseSources(text, { synthesizeTitle: true });
+  assert.equal(lenient.length, 1);
+  assert.equal(lenient[0]!.title, "Jane · dribbble");
+  assert.equal(lenient[0]!.designer, "Jane");
+  assert.deepEqual(lenient[0]!.assets, ["assets/a.png"]);
+});
+
 test("normalizeSource drops junk-domain sources and defaults authority to unknown", () => {
   assert.equal(normalizeSource({ title: "listicle", url: "https://medium.com/@x/top-10", kind: "article" }), null);
   const ok = normalizeSource({ title: "Stripe docs", url: "https://stripe.com/docs", kind: "article" })!;

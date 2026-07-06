@@ -27,9 +27,17 @@ function strArray(value: unknown): string[] {
 }
 
 /** Coerce one raw entry into a ResearchSource, or null if it lacks the essentials. */
-export function normalizeSource(value: unknown, index = 0): ResearchSource | null {
+export function normalizeSource(value: unknown, index = 0, opts: { synthesizeTitle?: boolean } = {}): ResearchSource | null {
   if (!isRecord(value)) return null;
-  const title = typeof value.title === "string" ? value.title.trim() : "";
+  let title = typeof value.title === "string" ? value.title.trim() : "";
+  if (!title && opts.synthesizeTitle) {
+    // Visual/image references are identified by their image + url/platform/designer; a title is
+    // optional there, so synthesize a display label rather than dropping the image's provenance.
+    const d = typeof value.designer === "string" ? value.designer.trim() : "";
+    const p = typeof value.platform === "string" ? value.platform.trim() : "";
+    const u = typeof value.url === "string" ? value.url.trim() : "";
+    title = [d, p].filter(Boolean).join(" · ") || u || "Visual reference";
+  }
   if (!title) return null;
   const kind: SourceKind = KINDS.includes(value.kind as SourceKind) ? (value.kind as SourceKind) : "inspiration";
   const id = typeof value.id === "string" && value.id.trim() ? value.id.trim() : `source-${index + 1}`;
@@ -55,7 +63,7 @@ export function normalizeSource(value: unknown, index = 0): ResearchSource | nul
 }
 
 /** Parse sources.json text into a validated ResearchSource[]. Never throws. */
-export function parseSources(text: string | null | undefined): ResearchSource[] {
+export function parseSources(text: string | null | undefined, opts: { synthesizeTitle?: boolean } = {}): ResearchSource[] {
   if (!text || !text.trim()) return [];
   let value: unknown;
   try {
@@ -64,7 +72,7 @@ export function parseSources(text: string | null | undefined): ResearchSource[] 
     return [];
   }
   if (!Array.isArray(value)) return [];
-  return value.map((item, index) => normalizeSource(item, index)).filter((s): s is ResearchSource => s !== null);
+  return value.map((item, index) => normalizeSource(item, index, opts)).filter((s): s is ResearchSource => s !== null);
 }
 
 /** Serialize sources to pretty JSON text. */
