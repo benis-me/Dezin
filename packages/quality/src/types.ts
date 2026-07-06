@@ -41,4 +41,10 @@ export interface LintOptions {
   bannedAccentHexes?: string[];
   /** Disable the Dezin-specific extensions (shadow-card, gradient-text, oversized-radius). */
   disableDezinRules?: boolean;
+  /**
+   * The model family that generated the artifact ("gpt" | "gemini" | "claude" | "other"),
+   * enabling provider-specific source tells (e.g. GPT stripe gradients, Gemini img:hover
+   * transforms). Omitted → no provider-gated rules run.
+   */
+  provider?: string;
 }

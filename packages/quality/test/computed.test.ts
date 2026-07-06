@@ -286,3 +286,28 @@ test("does not flag a token color or a neutral", () => {
   const neutral = detectComputedFindings([el({ text: "Body copy here.", style: { color: "rgb(80, 80, 80)", effectiveBg: "rgb(255, 255, 255)", fontSizePx: 16 } })], COLOR_CTX);
   assert.equal(neutral.some((f) => f.id === "design-system-color"), false);
 });
+
+// ── provider fingerprint: gpt-thin-border-wide-shadow ─────────────────────────
+test("flags a 1px border paired with a wide soft shadow when GPT generated the run", () => {
+  const findings = detectComputedFindings(
+    [el({ selector: ".card", text: "", rect: { x: 0, y: 0, width: 320, height: 180 }, style: { borderMaxPx: 1, boxShadow: "rgba(0, 0, 0, 0.1) 0px 8px 24px 0px" } })],
+    { provider: "gpt" },
+  );
+  assert.ok(findings.some((f) => f.id === "gpt-thin-border-wide-shadow"));
+});
+
+test("does not flag the same pattern for a non-GPT provider", () => {
+  const findings = detectComputedFindings(
+    [el({ selector: ".card", text: "", rect: { x: 0, y: 0, width: 320, height: 180 }, style: { borderMaxPx: 1, boxShadow: "rgba(0, 0, 0, 0.1) 0px 8px 24px 0px" } })],
+    { provider: "claude" },
+  );
+  assert.equal(findings.some((f) => f.id === "gpt-thin-border-wide-shadow"), false);
+});
+
+test("does not flag a thin border with only a tight shadow", () => {
+  const findings = detectComputedFindings(
+    [el({ selector: ".card", text: "", rect: { x: 0, y: 0, width: 320, height: 180 }, style: { borderMaxPx: 1, boxShadow: "rgba(0, 0, 0, 0.1) 0px 1px 2px 0px" } })],
+    { provider: "gpt" },
+  );
+  assert.equal(findings.some((f) => f.id === "gpt-thin-border-wide-shadow"), false);
+});

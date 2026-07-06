@@ -18,6 +18,8 @@ export interface VisualQaInput {
   screenshotPath?: string;
   agentCommand?: string;
   model?: string;
+  /** Model family ("gpt"|"gemini"|"claude"|"other") that GENERATED the artifact — for provider-fingerprint rules. */
+  provider?: string;
   brief?: string;
   /** The chosen direction's spec (its Visual Language etc.) — the critic's aesthetic contract. */
   directionSpec?: string;
@@ -521,6 +523,12 @@ async function collectGeometry(
             const styles = win.getComputedStyle(el);
             const rect = el.getBoundingClientRect();
             if (styles.display === "none" || styles.visibility === "hidden" || rect.width <= 0 || rect.height <= 0) return null;
+            const borderMaxPx = Math.max(
+              parseFloat(styles.borderTopWidth) || 0,
+              parseFloat(styles.borderRightWidth) || 0,
+              parseFloat(styles.borderBottomWidth) || 0,
+              parseFloat(styles.borderLeftWidth) || 0,
+            );
             return {
               selector: selectorFor(el),
               tag: el.tagName.toLowerCase(),
@@ -561,15 +569,8 @@ async function collectGeometry(
                 paddingLeftPx: parseFloat(styles.paddingLeft) || 0,
                 marginTopPx: parseFloat(styles.marginTop) || 0,
                 marginBottomPx: parseFloat(styles.marginBottom) || 0,
-                cardLike:
-                  Math.max(
-                    parseFloat(styles.borderTopWidth) || 0,
-                    parseFloat(styles.borderRightWidth) || 0,
-                    parseFloat(styles.borderBottomWidth) || 0,
-                    parseFloat(styles.borderLeftWidth) || 0,
-                  ) >= 1 || (styles.boxShadow && styles.boxShadow !== "none")
-                    ? true
-                    : undefined,
+                borderMaxPx,
+                cardLike: borderMaxPx >= 1 || (styles.boxShadow && styles.boxShadow !== "none") ? true : undefined,
                 // querySelector is gated to tile-sized boxes so it isn't run on every node.
                 hasIconChild:
                   rect.width >= 32 && rect.width <= 128 && rect.height >= 32 && rect.height <= 128 && el.querySelector('svg,[class*="icon" i]')
@@ -793,7 +794,7 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
   }
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
-  const geometry = await collectGeometry(input.htmlPath, screenshotPath, input.renderUrl);
+  const geometry = await collectGeometry(input.htmlPath, screenshotPath, input.renderUrl, { provider: input.provider });
   const ai = await reviewScreenshotWithAgent({ ...input, consoleMessages: geometry.consoleMessages, criticElements: geometry.elements }, screenshotPath);
   return [...geometry.findings, ...ai];
 }

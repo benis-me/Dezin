@@ -50,6 +50,7 @@ export {
   AGENT_PROVIDERS,
   GENERIC_AGENTS,
   getProvider,
+  providerFamily,
   probeVersion,
   runCapture,
   augmentedPath,

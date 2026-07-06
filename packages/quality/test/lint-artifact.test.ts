@@ -219,3 +219,20 @@ test("does not flag a well-behaved ease-out curve", () => {
   const html = `<style>.card{transition:transform .3s cubic-bezier(0.22,1,0.36,1)}</style><div class="card"></div>`;
   assert.equal(ids(lintArtifact(html)).includes("bounce-easing"), false);
 });
+
+test("provider tells: repeating-gradient stripes flagged for GPT, not others", () => {
+  const html = `<style>.hero{background:repeating-linear-gradient(45deg,#eee 0 10px,#fff 10px 20px)}</style><div class="hero">x</div>`;
+  assert.ok(ids(lintArtifact(html, { provider: "gpt" })).includes("repeating-stripes"));
+  assert.equal(ids(lintArtifact(html, { provider: "claude" })).includes("repeating-stripes"), false);
+});
+
+test("provider tells: codex grid-overlay background flagged for GPT", () => {
+  const html = `<style>.grid{background-image:linear-gradient(to right,#eee 1px,transparent 1px),linear-gradient(to bottom,#eee 1px,transparent 1px);background-size:24px 24px}</style><div class="grid">x</div>`;
+  assert.ok(ids(lintArtifact(html, { provider: "gpt" })).includes("codex-grid-background"));
+});
+
+test("provider tells: img:hover transform flagged for Gemini, not others", () => {
+  const html = `<style>.card img:hover{transform:scale(1.05)}</style><div class="card"><img src="a.png" alt="a"></div>`;
+  assert.ok(ids(lintArtifact(html, { provider: "gemini" })).includes("image-hover-transform"));
+  assert.equal(ids(lintArtifact(html, { provider: "gpt" })).includes("image-hover-transform"), false);
+});

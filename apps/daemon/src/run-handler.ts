@@ -15,6 +15,7 @@ import {
   runTurnWithRetry,
   GenericCliRunner,
   getProvider,
+  providerFamily,
   extractAskUserQuestion,
   extractFinalSummary,
   isAbortError,
@@ -422,6 +423,8 @@ async function runVisualQa(
       settings,
       agentCommand: reviewerAgentCommand(settings, agentCommand),
       model: reviewerModel(settings, model),
+      // The fingerprint is about who GENERATED the artifact, not who reviews it.
+      provider: providerFamily(getProvider(agentCommand)?.id, model),
       brief,
       conversationHistory,
       ...options,
@@ -448,6 +451,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const settings = store.getSettings();
   const runAgentCommand = body.agentCommand || settings.agentCommand || "claude";
   const runModel = body.model || settings.model || undefined;
+  // The generating model family — enables provider-fingerprint quality rules (GPT/Gemini tells).
+  const runProviderFamily = providerFamily(getProvider(runAgentCommand)?.id, runModel);
   const agentEnv = buildAgentEnv(settings, runAgentCommand);
   const imageRuntime = providerRuntimeConfig(settings, settings.aiProviderId);
   const imageBaseUrl = imageRuntime.baseUrl || settings.imageApiBaseUrl;
@@ -838,7 +843,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         await emitStandardPreviewUpdate(round);
 
         const staticSurface = await collectStandardLintSurface(dir);
-        const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface, { mode: "standard" }) : []) as QualityFinding[];
+        const staticFindings = (staticSurface.trim() ? lintArtifact(staticSurface, { mode: "standard", provider: runProviderFamily }) : []) as QualityFinding[];
         if (staticFindings.length) sse({ type: "static-quality", round, findings: staticFindings });
         let visualFindings: QualityFinding[] = [];
         if (settings.visualQaEnabled) {
@@ -1157,7 +1162,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       currentHtml = repaired.artifactHtml || currentHtml;
       repairRounds = nextRound;
       await writeCurrentArtifact();
-      const staticFindings = lintArtifact(currentHtml) as QualityFinding[];
+      const staticFindings = lintArtifact(currentHtml, { provider: runProviderFamily }) as QualityFinding[];
       await reviewCurrentArtifact(nextRound, staticFindings);
     }
 

@@ -64,6 +64,9 @@ export const GLOW_BLUR_PX = 12;
 export const DRIFT_MIN_CHROMA = 24;
 export const DRIFT_MATCH_DISTANCE = 16;
 
+/** GPT fingerprint: a ~1px border paired with a soft shadow whose blur is at least this. */
+export const GPT_SHADOW_BLUR_PX = 16;
+
 /** Generic font keywords that are never "drift" — they're the fallback tail of any stack. */
 const GENERIC_FONTS = new Set([
   "ui-sans-serif",
@@ -114,6 +117,8 @@ export interface ComputedStyle {
   textTransform?: string;
   borderRadius?: string;
   boxShadow?: string;
+  /** Widest of the four border widths (px) — for the GPT thin-border + wide-shadow fingerprint. */
+  borderMaxPx?: number;
   /** Card-like box (has a visible border or box-shadow) — for the nested-card check. Eval-computed. */
   cardLike?: boolean;
   /** Contains an <svg>/icon descendant — for the icon-tile-above-heading check. Eval-computed. */
@@ -538,6 +543,26 @@ function checkDesignSystemColor(el: ComputedElement, ctx: ComputedContext): Find
   ];
 }
 
+/** gpt-thin-border-wide-shadow — GPT's signature: a hairline border plus a wide soft shadow. */
+function checkGptThinBorderWideShadow(el: ComputedElement, ctx: ComputedContext): Finding[] {
+  if (ctx.provider !== "gpt") return [];
+  const bw = el.style.borderMaxPx;
+  if (bw === undefined || bw < 0.5 || bw > 1.5) return [];
+  const shadow = el.style.boxShadow;
+  if (!shadow || shadow === "none") return [];
+  const blur = shadowBlurPx(shadow);
+  if (blur < GPT_SHADOW_BLUR_PX) return [];
+  return [
+    {
+      severity: "P2",
+      id: "gpt-thin-border-wide-shadow",
+      message: `${el.selector} pairs a ~1px border with a wide (~${Math.round(blur)}px) soft shadow — a GPT layout signature.`,
+      fix: "Choose one: a hairline border OR a soft shadow, not both; reserve shadows for true overlays.",
+      selector: el.selector,
+    },
+  ];
+}
+
 /** Per-element checks, each pure: (element) -> findings. */
 const ELEMENT_CHECKS: ReadonlyArray<(el: ComputedElement, ctx: ComputedContext) => Finding[]> = [
   checkTinyText,
@@ -550,6 +575,7 @@ const ELEMENT_CHECKS: ReadonlyArray<(el: ComputedElement, ctx: ComputedContext) 
   checkDarkGlow,
   checkDesignSystemFont,
   checkDesignSystemColor,
+  checkGptThinBorderWideShadow,
 ];
 
 /** Whole-document checks that need every element at once (outline order, repetition). */

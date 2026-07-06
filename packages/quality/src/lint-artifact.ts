@@ -642,6 +642,48 @@ function checkBounceEasing(html: string): Finding[] {
   return [];
 }
 
+/**
+ * Provider-fingerprint source tells — patterns specific to the model family that GENERATED
+ * the artifact. Source-based (not computed) because these live in declared CSS: hover state
+ * (Gemini) is a pseudo-class computed style can't see, and gradient/stripe backgrounds read
+ * cleanly from the text. Gated by the family so a tell is only flagged on the model that
+ * actually over-produces it.
+ */
+function checkProviderTells(html: string, provider?: string): Finding[] {
+  const out: Finding[] = [];
+  if (provider === "gpt") {
+    const stripe = /repeating-(?:linear|radial)-gradient\s*\([^;{}]*\)/i.exec(html);
+    if (stripe) {
+      out.push({
+        severity: "P2",
+        id: "repeating-stripes",
+        message: "Repeating-gradient stripes used as decoration — a GPT texture tell.",
+        fix: "Drop the striped background; use a flat surface or one restrained gradient.",
+        snippet: stripe[0].slice(0, 80),
+      });
+    }
+    if (/linear-gradient\([^)]*\b1px\b[^)]*transparent[^)]*\)/i.test(html) && /background-size\s*:/i.test(html)) {
+      out.push({
+        severity: "P2",
+        id: "codex-grid-background",
+        message: "Layered 1px linear-gradients + background-size draw a decorative grid overlay — a Codex/GPT tell.",
+        fix: "Remove the grid-overlay background; let whitespace and real structure carry the layout.",
+      });
+    }
+  }
+  if (provider === "gemini") {
+    if (/\bimg\s*:\s*hover[^{}]*\{[^{}]*transform\s*:[^{}]*(?:scale|rotate)/i.test(html)) {
+      out.push({
+        severity: "P2",
+        id: "image-hover-transform",
+        message: "transform: scale/rotate on img:hover — a Gemini interaction tell.",
+        fix: "Prefer a subtle opacity or overlay change on hover; don't scale/rotate the image itself.",
+      });
+    }
+  }
+  return out;
+}
+
 const SEVERITY_ORDER: Record<string, number> = { P0: 0, P1: 1, P2: 2 };
 
 /**
@@ -684,6 +726,7 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
     ...checkReducedMotion(html),
     ...checkDarkPureBlack(html),
     ...checkBounceEasing(html),
+    ...checkProviderTells(html, options.provider),
     ...checkExternalImages(html),
     ...checkRawHex(html),
     ...checkAccentOveruse(html, accentCap),

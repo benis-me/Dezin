@@ -46,6 +46,18 @@ export function getProvider(command: string): AgentProvider | undefined {
   return AGENT_PROVIDERS.find((p) => p.id === base || p.command === base);
 }
 
+/** The underlying model family that generated a run, for provider-fingerprint quality rules.
+ *  Derived from the provider id, with the model name overriding when a provider is model-agnostic
+ *  (e.g. cursor-agent running a GPT model). */
+export function providerFamily(providerId?: string, model?: string): "gpt" | "gemini" | "claude" | "other" {
+  const p = (providerId ?? "").toLowerCase();
+  const m = (model ?? "").toLowerCase();
+  if (p === "gemini" || /gemini/.test(m)) return "gemini";
+  if (p === "claude" || /claude/.test(m)) return "claude";
+  if (p === "codex" || p === "copilot" || /\bgpt|\bo1\b|\bo3\b|\bo4\b|codex/.test(m)) return "gpt";
+  return "other";
+}
+
 /** Back-compat map of the generic (non-Claude) CLI argv configs, keyed by id. */
 export const GENERIC_AGENTS: Record<string, GenericAgentConfig> = Object.fromEntries(
   AGENT_PROVIDERS.filter((p) => p.genericConfig).map((p) => [p.id, p.genericConfig!]),
