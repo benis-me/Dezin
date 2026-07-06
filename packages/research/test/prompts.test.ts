@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildIntakePrompt, buildResearchPrompt } from "../src/prompts.ts";
+import { buildVisualResearchPrompt } from "../src/index.ts";
 
 test("intake prompt lists the skill catalog and forbids designing", () => {
   const prompt = buildIntakePrompt({
@@ -52,4 +53,24 @@ test("research prompt still works without a skill or brand", () => {
   const prompt = buildResearchPrompt({ brief: "a resume site" });
   assert.match(prompt, /Phase: Research/);
   assert.doesNotMatch(prompt, /Research angles for/);
+});
+
+test("buildVisualResearchPrompt targets design sites, best-effort real + fallback, writes .research/visual", () => {
+  const p = buildVisualResearchPrompt({ brief: "a fintech dashboard" });
+  assert.match(p, /dribbble/i);
+  assert.match(p, /behance/i);
+  assert.match(p, /awwwards/i);
+  assert.match(p, /mobbin/i);
+  assert.match(p, /\.research\/visual\/assets/);
+  assert.match(p, /\.research\/visual\/visual\.md/);
+  assert.match(p, /reachable|blocked|fall ?back/i);
+  assert.match(p, /download/i);
+  assert.match(p, /real (product )?UI|not marketing/i);
+});
+
+test("buildResearchPrompt hardens authority: prefer primary, cite claims, label assumptions", () => {
+  const p = buildResearchPrompt({ brief: "a pricing page" });
+  assert.match(p, /primary|authoritative|first-party/i);
+  assert.match(p, /assumption/i);
+  assert.match(p, /cite|traces to|sources\.json/i);
 });

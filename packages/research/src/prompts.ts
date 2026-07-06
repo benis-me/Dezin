@@ -11,6 +11,8 @@ import {
   REPORT_FILE,
   RESEARCH_DIRNAME,
   SOURCES_FILE,
+  VISUAL_DIRNAME,
+  VISUAL_REPORT_FILE,
 } from "./convention.ts";
 
 export interface IntakeInput {
@@ -151,10 +153,45 @@ imagery, not just prose.
   synthesise them into the files yourself. A turn that ends before \`${REPORT_FILE}\` and the
   direction files exist has failed, even if searches were dispatched.
 - ${NEVER_INVENT}
+- **Authority.** Prefer PRIMARY / authoritative sources: official docs, the actual product, first-party data, reputable publications. Distrust SEO content farms, AI-generated listicles, and unsourced statistics — do not cite them. Tag each source in \`${SOURCES_FILE}\` with \`"authority": "primary" | "secondary"\`.
+- **Cite everything.** Every factual claim in the report must trace to a source id in \`${SOURCES_FILE}\`. State genuinely-unknown things as an explicit ASSUMPTION — never as fact.
 - Download every referenced image into \`${ASSETS_DIRNAME}/\`; the report must render offline.
 - Be thorough but decisive — enough to design confidently, not an encyclopedia.${brandLine}${userRefs}
 - Write in the user's language.
 - This phase ends when the files above exist. The design build is a later phase.
+
+## Brief
+
+${input.brief.trim()}`;
+}
+
+const VISUAL_PLATFORMS = ["dribbble", "behance", "awwwards", "mobbin", "pinterest"];
+
+export function buildVisualResearchPrompt(input: {
+  brief: string;
+  designSystemName?: string;
+  platforms?: string[];
+}): string {
+  const platforms = (input.platforms?.length ? input.platforms : VISUAL_PLATFORMS).join(", ");
+  const brand = input.designSystemName
+    ? `\n- Active brand: **${input.designSystemName}** — collect references that fit its spirit.`
+    : "";
+  return `# Phase: Visual Research
+
+You are a design researcher collecting VISUAL inspiration for this build — running IN PARALLEL with a separate product-research agent. Do NOT write the product report; focus only on visual direction.
+
+Use web search + page reads freely. Target professional design sites — ${platforms} — where reachable. Some (e.g. Mobbin, much of Pinterest) are login-walled or block bots: where a site is unreachable, FALL BACK to general web/image search for comparable REAL product UI. Prefer real product interfaces and design-system references over marketing pages, hero shots, stock, portraits, or logos.
+
+## Collect (write these under \`${RESEARCH_DIRNAME}/${VISUAL_DIRNAME}/\`)
+
+- \`${RESEARCH_DIRNAME}/${VISUAL_DIRNAME}/${ASSETS_DIRNAME}/\` — 8–12 DOWNLOADED images (never hotlink), kebab-case names. Each MUST be a real UI screenshot or a genuine style/type/color reference. After downloading, verify each truly shows UI/design and DELETE anything that does not.
+- \`${RESEARCH_DIRNAME}/${VISUAL_DIRNAME}/${SOURCES_FILE}\` — a JSON array; one entry per image: \`{ "id", "platform": "dribbble|behance|awwwards|mobbin|pinterest|other", "url", "designer": "<if known>", "reached": true, "takeaways": ["what this teaches: palette / type / layout / motion"], "assets": ["${ASSETS_DIRNAME}/name.png"] }\`. For a site you could NOT reach but still want to cite, add an entry with \`"reached": false\` and no asset.
+- \`${RESEARCH_DIRNAME}/${VISUAL_DIRNAME}/${VISUAL_REPORT_FILE}\` — a short curated read distilling the collected imagery into concrete direction: palette, type system, layout, motion, texture. Embed the images with relative markdown paths (\`![caption](${ASSETS_DIRNAME}/name.png)\`). END with a one-line "Reached vs. blocked" note listing which sites you actually got imagery from.
+
+## Rules
+- Finish WITHIN this turn — the files above must exist on disk before you return.
+- Never invent a source or a designer; only attribute what you can verify.${brand}
+- Write in the user's language.
 
 ## Brief
 

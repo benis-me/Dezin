@@ -32,7 +32,13 @@ export { directionTitle, directionBlurb } from "./directions.ts";
 export { renderFrontmatter, parseFrontmatter, type FrontmatterValue } from "./frontmatter.ts";
 export { buildBriefMarkdown, parseBriefMarkdown } from "./brief.ts";
 export { normalizeSource, parseSources, serializeSources, collectSourceAssets, JUNK_DOMAINS } from "./sources.ts";
-export { buildIntakePrompt, buildResearchPrompt, type IntakeInput, type ResearchInput } from "./prompts.ts";
+export {
+  buildIntakePrompt,
+  buildResearchPrompt,
+  buildVisualResearchPrompt,
+  type IntakeInput,
+  type ResearchInput,
+} from "./prompts.ts";
 export { parseResearchActivity, type ResearchActivity } from "./activity.ts";
 export {
   researchExists,
