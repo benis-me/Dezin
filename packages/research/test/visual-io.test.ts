@@ -65,3 +65,16 @@ test("buildResearchContext folds in BOTH the product report and the visual repor
   assert.match(ctx, /Mono, generous whitespace/);
   assert.match(ctx, /visual\/assets\/hero\.png/);
 });
+
+test("buildResearchContext's preamble does NOT claim a product report exists when only visual research is present", async () => {
+  const p = proj();
+  mkdirSync(visualAssetsDir(p), { recursive: true });
+  writeFileSync(visualReportPath(p), "# Visual\n\nBrutalist mono, tight grid.");
+  const ctx = (await buildResearchContext(p))!;
+  assert.ok(ctx, "expected a context block for a visual-only project");
+  // The old unconditional opening line asserted a *product* report exists — must be gone here.
+  assert.doesNotMatch(ctx, /A research report has been produced/);
+  // A visual-appropriate line should still ground the build in the (real) visual research.
+  assert.match(ctx, /Visual research has been produced/);
+  assert.match(ctx, /Brutalist mono, tight grid/);
+});

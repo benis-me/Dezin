@@ -157,8 +157,13 @@ export async function buildResearchContext(projectDir: string, chosenDirectionSl
   const visualReport = await readVisualReport(projectDir);
   if (!report && !visualReport) return null;
   const assets = await listAssets(projectDir);
+  // The opening line asserts a *product* report exists — only true when one was actually
+  // produced. A visual-only project (no product `report`) gets a visual-appropriate line
+  // instead, so the build phase isn't told a product report exists when it doesn't.
   const parts = [
-    `A research report has been produced in \`${basename(researchDir(projectDir))}/\`. It is authoritative — build on it, do not re-research.`,
+    report
+      ? `A research report has been produced in \`${basename(researchDir(projectDir))}/\`. It is authoritative — build on it, do not re-research.`
+      : `Visual research has been produced in \`${basename(researchDir(projectDir))}/${VISUAL_DIRNAME}/\`. It is authoritative for visual direction — build on it, do not re-research.`,
   ];
   if (assets.length) {
     parts.push(`Reference imagery is available locally: ${assets.map((a) => `\`${join("research", a)}\``).join(", ")}.`);

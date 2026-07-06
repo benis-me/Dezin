@@ -72,3 +72,46 @@ test("runResearchPhase runs product + visual in parallel and tags activities by 
   // The crux: both tracks were in-flight simultaneously — proves Promise.all, not sequential awaits.
   assert.equal(maxConcurrent, 2);
 });
+
+test("runResearchPhase populates error with a reason when a track never produces a report", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-rp-"));
+
+  // The visual track writes its report normally; the product track's spawner always rejects
+  // (simulating a crashed agent turn) and never writes research.md, so it never produces.
+  const spawn = async (_cmd: string, args: string[], cwd: string, opts: any) => {
+    const isVisual = args.join(" ").includes("Visual Research");
+    if (isVisual) {
+      mkdirSync(visualAssetsDir(cwd), { recursive: true });
+      writeFileSync(visualReportPath(cwd), "# Visual");
+      return { code: 0, stderr: "" };
+    }
+    throw new Error("agent crashed: ENOENT spawn claude");
+  };
+
+  const result = await runResearchPhase({ dir, brief: "a hero", agentCommand: "claude" }, spawn);
+
+  assert.equal(result.produced, false);
+  assert.equal(result.visualProduced, true);
+  assert.ok(result.error, "expected a non-undefined error reason when the product track failed to produce");
+  assert.match(result.error!, /product:/);
+  assert.match(result.error!, /agent crashed/);
+  // The visual track succeeded — its reason must not appear in the combined error.
+  assert.doesNotMatch(result.error!, /visual:/);
+});
+
+test("runResearchPhase reports a per-track reason (with prefixes) when BOTH tracks fail to produce", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-rp-"));
+
+  // Neither track writes a report; the spawner resolves with a non-zero exit code both times
+  // (no thrown error), exercising the "${command} exited …" reason path rather than a caught error.
+  const spawn = async () => ({ code: 1, stderr: "fatal: no api key configured" });
+
+  const result = await runResearchPhase({ dir, brief: "a hero", agentCommand: "claude" }, spawn);
+
+  assert.equal(result.produced, false);
+  assert.equal(result.visualProduced, false);
+  assert.ok(result.error, "expected a non-undefined error reason when both tracks failed to produce");
+  assert.match(result.error!, /product:.*claude exited with code 1/);
+  assert.match(result.error!, /visual:.*claude exited with code 1/);
+  assert.match(result.error!, /no api key configured/);
+});

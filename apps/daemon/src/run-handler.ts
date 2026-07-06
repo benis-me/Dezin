@@ -40,7 +40,19 @@ import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectE
 import { buildAgentEnv } from "./agent-env.ts";
 import { runResearchPhase } from "./research-phase.ts";
 import { syncVisualResearchMoodboard } from "./visual-research-moodboard.ts";
-import { buildResearchContext, directionPath, directionTitle, directionBlurb, listDirections, listAssets, readSources, researchExists, writeChosenDirection } from "../../../packages/research/src/index.ts";
+import {
+  buildResearchContext,
+  directionPath,
+  directionTitle,
+  directionBlurb,
+  listDirections,
+  listAssets,
+  readSources,
+  researchExists,
+  writeChosenDirection,
+  listVisualAssets,
+  readVisualSources,
+} from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import type { AppDeps } from "./app.ts";
@@ -315,20 +327,25 @@ export interface ResearchSummary {
   sources: number;
   assets: number;
   directions: Array<{ slug: string; title: string; summary: string }>;
+  /** The parallel visual-research track's counts, so the card can show both tracks. */
+  visual: { produced: boolean; assets: number; sources: number };
 }
 
 /** Read the .research/ tree into a compact summary for the UI (best-effort). */
-async function summarizeResearch(dir: string): Promise<Omit<ResearchSummary, "produced" | "error">> {
-  const [sources, assets, directions] = await Promise.all([
+async function summarizeResearch(dir: string, visualProduced: boolean): Promise<Omit<ResearchSummary, "produced" | "error">> {
+  const [sources, assets, directions, visualAssets, visualSources] = await Promise.all([
     readSources(dir).catch(() => []),
     listAssets(dir).catch(() => []),
     listDirections(dir).catch(() => []),
+    listVisualAssets(dir).catch(() => []),
+    readVisualSources(dir).catch(() => []),
   ]);
   return {
     report: researchExists(dir),
     sources: sources.length,
     assets: assets.length,
     directions: directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown), summary: directionBlurb(d.markdown) })),
+    visual: { produced: visualProduced, assets: visualAssets.length, sources: visualSources.length },
   };
 }
 
@@ -621,7 +638,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     // file) and safe to run on every research pass, independent of whether the product track
     // gates on a direction pick below — a missing/empty visual track is harmless.
     await syncVisualResearchMoodboard({ store: deps.store, dataDir: deps.dataDir, projectDir: dir }).catch(() => {});
-    const researchSummary: ResearchSummary = { produced: research.produced, error: research.error, ...(await summarizeResearch(dir)) };
+    const researchSummary: ResearchSummary = {
+      produced: research.produced,
+      error: research.error,
+      ...(await summarizeResearch(dir, research.visualProduced)),
+    };
     sse({ type: "research-done", runId: run.id, ...researchSummary });
     store.addMessage(conversation.id, "system", researchSummaryMessage(researchSummary));
     if (research.produced) {

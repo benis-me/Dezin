@@ -99,32 +99,43 @@ export async function runResearchPhase(
   // Research is non-deterministic: some turns the agent detaches the work to background
   // sub-agents and returns before they write anything, leaving the tree empty. Retry once if a
   // turn produced no report (unless the user aborted). Roughly squares the per-turn success rate.
-  const runTrack = async (track: "product" | "visual", prompt: string, alreadyDone: boolean): Promise<boolean> => {
+  const runTrack = async (
+    track: "product" | "visual",
+    prompt: string,
+    alreadyDone: boolean,
+  ): Promise<{ produced: boolean; reason?: string }> => {
     const exists = (): boolean => (track === "product" ? researchExists(input.dir) : visualResearchExists(input.dir));
-    if (alreadyDone) return true;
+    if (alreadyDone) return { produced: true };
     const MAX_ATTEMPTS = 2;
+    // Last-seen failure reason, so a track that never produces still explains why (thrown error
+    // message, or a non-zero exit's reason) instead of surfacing silence.
+    let lastReason: string | undefined;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       if (input.signal?.aborted) break;
       try {
-        await spawner(input.agentCommand, argsFor(prompt), input.dir, {
+        const { code, stderr } = await spawner(input.agentCommand, argsFor(prompt), input.dir, {
           env: input.env ?? {},
           signal: input.signal,
           timeoutMs: input.timeoutMs,
           onActivity: input.onActivity ? (a) => input.onActivity!({ ...a, track }) : undefined,
         });
+        if (code !== 0) {
+          lastReason = `${input.agentCommand} exited with code ${code}${stderr.trim() ? `: ${stderr.trim().slice(0, 300)}` : ""}`;
+        }
       } catch (err) {
-        if (exists()) return true;
+        lastReason = err instanceof Error ? err.message : String(err);
+        if (exists()) return { produced: true };
         if (err instanceof Error && /aborted/i.test(err.message)) break;
       }
-      if (exists()) return true;
+      if (exists()) return { produced: true };
       if (attempt < MAX_ATTEMPTS && !input.signal?.aborted) {
         input.onActivity?.({ kind: "note", text: `${track} research produced nothing — retrying once.`, track });
       }
     }
-    return exists();
+    return { produced: exists(), reason: exists() ? undefined : lastReason };
   };
 
-  const [produced, visualProduced] = await Promise.all([
+  const [product, visual] = await Promise.all([
     runTrack(
       "product",
       buildResearchPrompt({
@@ -137,7 +148,18 @@ export async function runResearchPhase(
     ),
     runTrack("visual", buildVisualResearchPrompt({ brief: input.brief, designSystemName: input.designSystemName }), visualDone),
   ]);
-  return { ran: true, produced, visualProduced };
+  // A project can now be visual-only (or product-only): report a per-track reason so a failed
+  // track always explains why, even when the other track succeeded.
+  const reasons = [
+    !product.produced ? `product: ${product.reason ?? "no report was produced"}` : null,
+    !visual.produced ? `visual: ${visual.reason ?? "no report was produced"}` : null,
+  ].filter((r): r is string => r !== null);
+  return {
+    ran: true,
+    produced: product.produced,
+    visualProduced: visual.produced,
+    error: reasons.length ? reasons.join("; ") : undefined,
+  };
 }
 
 function spawnResearch(
