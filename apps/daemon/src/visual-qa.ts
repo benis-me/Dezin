@@ -492,6 +492,26 @@ async function collectGeometry(
           const suffix = cls.length ? `.${cls.map(escapeCss).join(".")}` : "";
           return `${el.tagName.toLowerCase()}${suffix}`;
         };
+        // The nearest OPAQUE painted backdrop behind an element, by walking ancestors. Returns null
+        // (→ contrast skipped, no false positive) if a background-image/gradient is hit first or no
+        // solid backdrop exists — we only judge provable solid-on-solid contrast.
+        const effectiveBgOf = (start: any): string | null => {
+          let node = start;
+          let guard = 0;
+          while (node && guard++ < 40) {
+            const s = win.getComputedStyle(node);
+            if (s.backgroundImage && s.backgroundImage !== "none") return null;
+            const bg: string = s.backgroundColor || "";
+            const m = /rgba?\(([^)]+)\)/.exec(bg);
+            if (m) {
+              const parts = (m[1] ?? "").split(/[\s,/]+/).map((n: string) => parseFloat(n));
+              const alpha = parts.length >= 4 ? parts[3] ?? 1 : 1;
+              if (alpha >= 1) return bg;
+            }
+            node = node.parentElement;
+          }
+          return null;
+        };
         const elements = Array.from<any>(doc.body.querySelectorAll("*"))
           .map((el: any) => {
             const styles = win.getComputedStyle(el);
@@ -522,6 +542,7 @@ async function collectGeometry(
                 color: styles.color,
                 backgroundColor: styles.backgroundColor,
                 backgroundImage: styles.backgroundImage,
+                effectiveBg: effectiveBgOf(el) ?? undefined,
                 fontSizePx: parseFloat(styles.fontSize) || undefined,
                 fontFamily: styles.fontFamily,
                 fontWeight: parseInt(styles.fontWeight, 10) || undefined,
