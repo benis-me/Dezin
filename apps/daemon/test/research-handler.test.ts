@@ -40,6 +40,16 @@ function seedResearch(dataDir: string, store: Store) {
   return project;
 }
 
+/** Additionally scaffold the .research/visual/ tree (the visual track's deliverables) on an existing project. */
+function seedVisualResearch(dataDir: string, projectId: string) {
+  const v = join(dataDir, "projects", projectId, ".research", "visual");
+  mkdirSync(join(v, "assets"), { recursive: true });
+  writeFileSync(join(v, "visual.md"), "# Visual research\n\nMoodboard theme: brutalist mono.");
+  writeFileSync(join(v, "sources.json"), JSON.stringify([{ id: "v1", kind: "inspiration", url: "https://dribbble.com/shots/1", designer: "Jane", assets: ["assets/mono.png"] }]));
+  writeFileSync(join(v, "assets", "mono.png"), "PNGDATA-VISUAL");
+  writeFileSync(join(v, "moodboard.json"), JSON.stringify({ boardId: "board-123" }));
+}
+
 test("GET /api/projects/:id/research returns {exists:false} before any research", async () => {
   await withServer(async ({ base, store }) => {
     const project = store.createProject({ name: "P" });
@@ -72,6 +82,44 @@ test("GET /api/projects/:id/research returns the deliverables when .research exi
   });
 });
 
+test("GET /api/projects/:id/research includes the visual track's deliverables alongside product research", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = seedResearch(dataDir, store);
+    seedVisualResearch(dataDir, project.id);
+    const res = await fetch(`${base}/api/projects/${project.id}/research`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      exists: boolean;
+      visual?: {
+        exists: boolean;
+        report: string;
+        sources: Array<{ url?: string; designer?: string }>;
+        assets: string[];
+        boardId?: string;
+      };
+    };
+    assert.equal(body.exists, true);
+    assert.ok(body.visual, "expected a visual section on the response");
+    assert.equal(body.visual!.exists, true);
+    assert.match(body.visual!.report, /Moodboard theme: brutalist mono/);
+    assert.equal(body.visual!.sources.length, 1);
+    assert.equal(body.visual!.sources[0]!.designer, "Jane");
+    assert.deepEqual(body.visual!.assets, ["visual/assets/mono.png"]);
+    assert.equal(body.visual!.boardId, "board-123");
+  });
+});
+
+test("GET /api/projects/:id/research reports visual.exists === false when only product research exists", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = seedResearch(dataDir, store);
+    const res = await fetch(`${base}/api/projects/${project.id}/research`);
+    const body = (await res.json()) as { visual?: { exists: boolean; boardId?: string } };
+    assert.ok(body.visual, "expected a visual section even when the visual track hasn't produced anything");
+    assert.equal(body.visual!.exists, false);
+    assert.equal(body.visual!.boardId, undefined);
+  });
+});
+
 test("GET /api/projects/:id/research reports the chosen direction once one is picked", async () => {
   await withServer(async ({ base, dataDir, store }) => {
     const project = seedResearch(dataDir, store);
@@ -92,5 +140,15 @@ test("GET /api/projects/:id/research/assets/:name serves a collected image (publ
     const res = await fetch(`${base}/api/projects/${project.id}/research/assets/stripe.png`);
     assert.equal(res.status, 200);
     assert.equal(await res.text(), "PNGDATA");
+  });
+});
+
+test("GET /api/projects/:id/research/visual/assets/:name serves a collected VISUAL image (publicRead)", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = seedResearch(dataDir, store);
+    seedVisualResearch(dataDir, project.id);
+    const res = await fetch(`${base}/api/projects/${project.id}/research/visual/assets/mono.png`);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), "PNGDATA-VISUAL");
   });
 });

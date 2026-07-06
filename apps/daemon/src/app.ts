@@ -657,6 +657,13 @@ const routes: Route[] = [
     handler: (_req, res, { id, rest }, { dataDir }) => serveProjectFile(res, dataDir, id!, join(".research", "assets", rest ?? "")),
   },
   {
+    // Serve a collected VISUAL research asset image (publicRead so <img src> works). safeJoin blocks traversal.
+    method: "GET",
+    pattern: "/api/projects/:id/research/visual/assets/*rest",
+    publicRead: true,
+    handler: (_req, res, { id, rest }, { dataDir }) => serveProjectFile(res, dataDir, id!, join(".research", "visual", "assets", rest ?? "")),
+  },
+  {
     method: "GET",
     pattern: "/api/projects/:id/runs",
     handler: (req, res, params, deps) => {

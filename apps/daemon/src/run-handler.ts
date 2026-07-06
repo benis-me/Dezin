@@ -39,6 +39,7 @@ import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizePr
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { runResearchPhase } from "./research-phase.ts";
+import { syncVisualResearchMoodboard } from "./visual-research-moodboard.ts";
 import { buildResearchContext, directionPath, directionTitle, directionBlurb, listDirections, listAssets, readSources, researchExists, writeChosenDirection } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
@@ -613,8 +614,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       model: runModel,
       env: agentEnv,
       signal: ctrl.signal,
-      onActivity: (a) => sse({ type: "research-activity", runId: run.id, kind: a.kind, text: a.text }),
+      onActivity: (a) => sse({ type: "research-activity", runId: run.id, kind: a.kind, text: a.text, track: a.track }),
     });
+    // Best-effort: fold any visual-track assets into the project's "Visual research" moodboard
+    // so the workspace can show them immediately. Idempotent (reuses the board via a pointer
+    // file) and safe to run on every research pass, independent of whether the product track
+    // gates on a direction pick below — a missing/empty visual track is harmless.
+    await syncVisualResearchMoodboard({ store: deps.store, dataDir: deps.dataDir, projectDir: dir }).catch(() => {});
     const researchSummary: ResearchSummary = { produced: research.produced, error: research.error, ...(await summarizeResearch(dir)) };
     sse({ type: "research-done", runId: run.id, ...researchSummary });
     store.addMessage(conversation.id, "system", researchSummaryMessage(researchSummary));

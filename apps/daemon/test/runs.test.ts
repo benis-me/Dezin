@@ -1951,6 +1951,63 @@ test("research-enabled run writes research/ and grounds the build in the report"
   );
 });
 
+test("dual-track research: SSE research-activity carries track, and visual assets sync into a moodboard", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {
+    // Product track.
+    mkdirSync(join(input.dir, ".research"), { recursive: true });
+    writeFileSync(join(input.dir, ".research", "research.md"), "# Research\n\nKey finding: real users skim.");
+    // Visual track — enough for syncVisualResearchMoodboard to have something to fold in.
+    const visualAssets = join(input.dir, ".research", "visual", "assets");
+    mkdirSync(visualAssets, { recursive: true });
+    writeFileSync(join(input.dir, ".research", "visual", "visual.md"), "# Visual research\n\nMono, bold type.");
+    writeFileSync(join(visualAssets, "a.png"), "PNGDATA");
+    writeFileSync(
+      join(input.dir, ".research", "visual", "sources.json"),
+      JSON.stringify([{ id: "v1", platform: "dribbble", url: "https://dribbble.com/shots/1", assets: ["assets/a.png"] }]),
+    );
+    // Emit one activity per track so the SSE assertion below can check both tags arrive.
+    input.onActivity?.({ kind: "note", text: "product note", track: "product" });
+    input.onActivity?.({ kind: "note", text: "visual note", track: "visual" });
+    return { ran: true, produced: true, visualProduced: true };
+  };
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero", research: true }),
+      });
+      assert.equal(res.status, 200);
+      const events = parseSse(await res.text());
+      assert.ok(events.some((e) => e.type === "research-done" && e.produced === true));
+
+      // The SSE research-activity event threads the track through to the client.
+      const activity = events.filter((e) => e.type === "research-activity");
+      assert.ok(activity.some((e) => e.track === "product" && e.text === "product note"));
+      assert.ok(activity.some((e) => e.track === "visual" && e.text === "visual note"));
+
+      // The visual moodboard was synced (best-effort, after the phase resolved) — a board
+      // named "Visual research" now holds an image node for the visual-track asset.
+      const boards = store.listMoodboards();
+      const board = boards.find((b) => b.name === "Visual research");
+      assert.ok(board, "expected the visual-research moodboard to have been created");
+      const nodes = store.listMoodboardNodes(board!.id);
+      assert.equal(nodes.filter((n) => n.type === "image").length, 1);
+
+      // The visual section is now visible via the research endpoint too.
+      const research = (await (await fetch(`${base}/api/projects/${project.id}/research`)).json()) as {
+        visual?: { exists: boolean; boardId?: string };
+      };
+      assert.equal(research.visual?.exists, true);
+      assert.equal(research.visual?.boardId, board!.id);
+    },
+    { researchPhase },
+  );
+});
+
 test("runs without the research flag skip the research phase", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   let called = false;
