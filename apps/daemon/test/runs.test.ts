@@ -88,7 +88,7 @@ test("research:false opts out of the Research phase even when it is enabled in S
   let researchCalls = 0;
   const researchPhase = async () => {
     researchCalls++;
-    return { ran: true, produced: false };
+    return { ran: true, produced: false, visualProduced: false };
   };
   await withRunServer(
     new FakeRunner({ artifacts: [CLEAN, CLEAN], texts: ["done", "done"] }),
@@ -1922,7 +1922,7 @@ test("research-enabled run writes research/ and grounds the build in the report"
   const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {
     mkdirSync(join(input.dir, ".research"), { recursive: true });
     writeFileSync(join(input.dir, ".research", "research.md"), "# Research\n\nKey finding: real users skim.");
-    return { ran: true, produced: true };
+    return { ran: true, produced: true, visualProduced: false };
   };
   await withRunServer(
     runner,
@@ -1956,7 +1956,7 @@ test("runs without the research flag skip the research phase", async () => {
   let called = false;
   const researchPhase: NonNullable<AppDeps["researchPhase"]> = async () => {
     called = true;
-    return { ran: true, produced: false };
+    return { ran: true, produced: false, visualProduced: false };
   };
   await withRunServer(
     runner,
@@ -1983,7 +1983,7 @@ const researchWithDirections: NonNullable<AppDeps["researchPhase"]> = async (inp
   writeFileSync(join(input.dir, ".research", "research.md"), "# Research\n\nFindings.");
   writeFileSync(join(dirs, "alpha", "direction.md"), "# Alpha — bold\n\nBold concept for alpha.");
   writeFileSync(join(dirs, "beta", "direction.md"), "# Beta — calm\n\nCalm concept for beta.");
-  return { ran: true, produced: true };
+  return { ran: true, produced: true, visualProduced: false };
 };
 
 test("research with 2+ directions fires the direction gate and stops before build", async () => {

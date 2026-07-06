@@ -11,11 +11,15 @@
  */
 
 import { spawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
 import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
 import {
   buildResearchPrompt,
+  buildVisualResearchPrompt,
   ensureResearchScaffold,
   researchExists,
+  visualResearchExists,
+  visualAssetsDir,
   parseResearchActivity,
   type ResearchActivity,
 } from "../../../packages/research/src/index.ts";
@@ -38,71 +42,102 @@ export interface ResearchPhaseInput {
   /** Aborts the phase (run cancellation). */
   signal?: AbortSignal;
   /** Live steps from the research agent, for the workspace's Research card. */
-  onActivity?: (activity: ResearchActivity) => void;
+  onActivity?: (activity: TrackedResearchActivity) => void;
   /** Optional wall-clock cap. Omitted = no timeout (research is an explicit opt-in). */
   timeoutMs?: number;
 }
+
+/** A research activity tagged with which track (product/visual) produced it. */
+export type TrackedResearchActivity = ResearchActivity & { track: "product" | "visual" };
 
 export interface ResearchPhaseResult {
   /** Whether the agent turn actually ran (false = research already existed). */
   ran: boolean;
   /** Whether .research/research.md exists after the phase. */
   produced: boolean;
+  /** Whether .research/visual/visual.md exists after the phase. */
+  visualProduced: boolean;
   error?: string;
 }
 
 /** Injectable research runner (AppDeps.researchPhase) so tests can skip the real agent. */
 export type ResearchPhaseRunner = (input: ResearchPhaseInput) => Promise<ResearchPhaseResult>;
 
-export async function runResearchPhase(input: ResearchPhaseInput): Promise<ResearchPhaseResult> {
-  if (researchExists(input.dir)) return { ran: false, produced: true };
-  await ensureResearchScaffold(input.dir);
-
-  const prompt = buildResearchPrompt({
-    brief: input.brief,
-    skill: input.skill,
-    designSystemName: input.designSystemName,
-    hasUserReferences: input.hasUserReferences,
-  });
-  const provider = getProvider(input.agentCommand);
-  // Stream-json so we can surface the agent's live steps as they happen; the (long)
-  // prompt still rides in argv via oneShotArgs.
-  const baseArgs = provider ? provider.oneShotArgs(input.model, prompt) : ["-p", prompt];
-  const args = [...baseArgs, "--output-format", "stream-json", "--verbose"];
-
-  // Research is non-deterministic: some turns the agent detaches the work to background
-  // sub-agents and returns before they write anything, leaving the tree empty. Retry once if a
-  // turn produced no report (unless the user aborted). Roughly squares the per-turn success rate.
-  const MAX_ATTEMPTS = 2;
-  let lastError: string | undefined;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    if (input.signal?.aborted) break;
-    try {
-      const { code, stderr } = await spawnResearch(input.agentCommand, args, input.dir, {
-        env: input.env ?? {},
-        signal: input.signal,
-        timeoutMs: input.timeoutMs,
-        onActivity: input.onActivity,
-      });
-      if (researchExists(input.dir)) return { ran: true, produced: true };
-      lastError = stderr.trim().slice(0, 200) || `${input.agentCommand} exited with ${code}`;
-    } catch (err) {
-      if (researchExists(input.dir)) return { ran: true, produced: true };
-      lastError = err instanceof Error ? err.message : String(err);
-      if (/aborted/i.test(lastError)) break;
-    }
-    if (attempt < MAX_ATTEMPTS && !input.signal?.aborted) {
-      input.onActivity?.({ kind: "note", text: "Research produced no report — retrying once." });
-    }
-  }
-  return { ran: true, produced: researchExists(input.dir), error: lastError };
-}
-
-interface SpawnResearchOpts {
+export interface SpawnResearchOpts {
   env: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   timeoutMs?: number;
   onActivity?: (activity: ResearchActivity) => void;
+}
+
+/** Injectable spawn function — matches spawnResearch's signature — so tests can fake the agent. */
+export type SpawnResearchFn = (
+  command: string,
+  args: string[],
+  cwd: string,
+  opts: SpawnResearchOpts,
+) => Promise<{ code: number | null; stderr: string }>;
+
+export async function runResearchPhase(
+  input: ResearchPhaseInput,
+  spawner: SpawnResearchFn = spawnResearch,
+): Promise<ResearchPhaseResult> {
+  const productDone = researchExists(input.dir);
+  const visualDone = visualResearchExists(input.dir);
+  if (productDone && visualDone) return { ran: false, produced: true, visualProduced: true };
+  await ensureResearchScaffold(input.dir);
+  await mkdir(visualAssetsDir(input.dir), { recursive: true });
+
+  const provider = getProvider(input.agentCommand);
+  // Stream-json so we can surface the agent's live steps as they happen; the (long)
+  // prompt still rides in argv via oneShotArgs.
+  const argsFor = (prompt: string): string[] => {
+    const base = provider ? provider.oneShotArgs(input.model, prompt) : ["-p", prompt];
+    return [...base, "--output-format", "stream-json", "--verbose"];
+  };
+
+  // Research is non-deterministic: some turns the agent detaches the work to background
+  // sub-agents and returns before they write anything, leaving the tree empty. Retry once if a
+  // turn produced no report (unless the user aborted). Roughly squares the per-turn success rate.
+  const runTrack = async (track: "product" | "visual", prompt: string, alreadyDone: boolean): Promise<boolean> => {
+    const exists = (): boolean => (track === "product" ? researchExists(input.dir) : visualResearchExists(input.dir));
+    if (alreadyDone) return true;
+    const MAX_ATTEMPTS = 2;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (input.signal?.aborted) break;
+      try {
+        await spawner(input.agentCommand, argsFor(prompt), input.dir, {
+          env: input.env ?? {},
+          signal: input.signal,
+          timeoutMs: input.timeoutMs,
+          onActivity: input.onActivity ? (a) => input.onActivity!({ ...a, track }) : undefined,
+        });
+      } catch (err) {
+        if (exists()) return true;
+        if (err instanceof Error && /aborted/i.test(err.message)) break;
+      }
+      if (exists()) return true;
+      if (attempt < MAX_ATTEMPTS && !input.signal?.aborted) {
+        input.onActivity?.({ kind: "note", text: `${track} research produced nothing — retrying once.`, track });
+      }
+    }
+    return exists();
+  };
+
+  const [produced, visualProduced] = await Promise.all([
+    runTrack(
+      "product",
+      buildResearchPrompt({
+        brief: input.brief,
+        skill: input.skill,
+        designSystemName: input.designSystemName,
+        hasUserReferences: input.hasUserReferences,
+      }),
+      productDone,
+    ),
+    runTrack("visual", buildVisualResearchPrompt({ brief: input.brief, designSystemName: input.designSystemName }), visualDone),
+  ]);
+  return { ran: true, produced, visualProduced };
 }
 
 function spawnResearch(
