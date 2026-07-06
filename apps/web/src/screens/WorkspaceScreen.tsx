@@ -27,6 +27,7 @@ import {
   type TabItem,
 } from "../components/ui/index.ts";
 import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
+import { composeVariationBrief } from "../lib/variation-brief.ts";
 import { PreviewModal } from "../components/PreviewModal.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
 import {
@@ -88,7 +89,7 @@ const FILES_PREVIEW_PANEL = "preview";
 const PREVIEW_CANVAS_PANEL = "preview-canvas";
 const PREVIEW_INSPECT_PANEL = "inspect";
 const REPLAYABLE_RUN_STATUSES = new Set(["running", "pending", "cancelled", "failed"]);
-const SHOW_VARIANT_FANOUT_BUTTON: boolean = false;
+const SHOW_VARIANT_FANOUT_BUTTON: boolean = true;
 const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg-primary hover:!text-primary-foreground";
 const FLOATING_COMPOSER_FADE_PX = 48;
 const SCROLL_TO_BOTTOM_GAP_PX = 12;
@@ -3299,13 +3300,18 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         convId = conv.id;
       }
 
-      let nextVariants = variants;
-      const targets: Variant[] = [];
-      for (let i = 0; i < count; i++) {
-        nextVariants = await api.createVariant(projectId, `Variant ${nextVariants.length + 1}`);
-        const active = nextVariants.find((variant) => variant.active);
-        if (active) targets.push(active);
-      }
+      // Fork all N variations from the SAME current state (not chained), so each is a distinct
+      // take on the identical starting point. When elements are marked up, scope the edit to them.
+      const scopedBrief =
+        selectedTargets.length > 0
+          ? `${text}\n\nScoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n${selectedTargets
+              .map(formatMarkupTarget)
+              .join("\n")}`
+          : text;
+      const fanout = await api.fanoutVariants(projectId, count);
+      const nextVariants = fanout.variants;
+      const created = new Set(fanout.created);
+      const targets = nextVariants.filter((variant) => created.has(variant.id));
       setVariants(nextVariants);
 
       await Promise.all(
@@ -3314,7 +3320,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             projectId,
             conversationId: convId!,
             variantId: variant.id,
-            brief: `${text}\n\nCreate variant ${index + 1} of ${count}. Make it a distinct visual direction while preserving the user's core request.`,
+            brief: composeVariationBrief(scopedBrief, index, targets.length),
             agentCommand: runAgent || undefined,
             model: runModel || undefined,
           });

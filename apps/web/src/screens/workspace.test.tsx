@@ -2621,7 +2621,7 @@ test("generated material sources render only in the run result card", async () =
   expect(screen.getByText("Generated image assets (2)")).toBeInTheDocument();
 });
 
-test("parallel variant generation is not exposed in the composer yet", async () => {
+test("the variant fan-out button is exposed and enables once there's a brief", async () => {
   render(
     <ApiProvider client={makeFakeApi()}>
       <WorkspaceScreen projectId="p1" />
@@ -2629,7 +2629,11 @@ test("parallel variant generation is not exposed in the composer yet", async () 
   );
 
   await screen.findByLabelText("Message");
-  expect(screen.queryByLabelText("Generate variants")).toBeNull();
+  const button = screen.getByLabelText("Generate variants");
+  expect(button).toBeInTheDocument();
+  expect(button).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "explore bolder hero directions" } });
+  expect(button).toBeEnabled();
 });
 
 test("a non-perfect restored score without stored findings does not claim clean", async () => {
