@@ -5,6 +5,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
+import { detectComputedFindings, type ComputedContext, type ComputedElement as QualityComputedElement, type ComputedStyle } from "../../../packages/quality/src/index.ts";
 import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
 import { findChrome } from "./capture-cover.ts";
 import { buildAgentEnv } from "./agent-env.ts";
@@ -86,7 +87,7 @@ interface Rect {
   height: number;
 }
 
-interface GeometryElement {
+export interface GeometryElement {
   selector: string;
   tag: string;
   text: string;
@@ -98,6 +99,46 @@ interface GeometryElement {
   scrollHeight: number;
   clientWidth: number;
   clientHeight: number;
+  /** Computed-style subset (color/type/spacing) read in the browser eval, for the computed-style detector. */
+  style?: ComputedStyle;
+}
+
+/** Reshape the browser geometry snapshot into the pure detector's ComputedElement[] — drop
+ *  zero-area nodes it cannot judge, map rect to x/y, and pass the computed style through. */
+export function toComputedElements(elements: GeometryElement[]): QualityComputedElement[] {
+  const out: QualityComputedElement[] = [];
+  for (const el of elements) {
+    if (el.rect.width < 8 || el.rect.height < 8) continue;
+    out.push({
+      selector: el.selector,
+      tag: el.tag,
+      text: el.text,
+      rect: { x: el.rect.left, y: el.rect.top, width: el.rect.width, height: el.rect.height },
+      style: el.style ?? {},
+    });
+    // Bound the work: the detector is O(elements); a pathological page can't blow it up.
+    if (out.length >= 400) break;
+  }
+  return out;
+}
+
+/** De-duplicate computed findings by (id, selector) and cap them per-rule and overall, so a page
+ *  with many small defects can't flood the repair loop or the Quality panel. */
+export function boundComputedFindings(findings: QualityFinding[], perId = 3, total = 20): QualityFinding[] {
+  const seen = new Set<string>();
+  const perIdCount = new Map<string, number>();
+  const out: QualityFinding[] = [];
+  for (const f of findings) {
+    const key = `${f.id}::${f.selector ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const n = perIdCount.get(f.id) ?? 0;
+    if (n >= perId) continue;
+    perIdCount.set(f.id, n + 1);
+    out.push(f);
+    if (out.length >= total) break;
+  }
+  return out;
 }
 
 interface GeometrySnapshot {
@@ -349,6 +390,7 @@ async function collectGeometry(
   htmlPath: string,
   screenshotPath?: string,
   renderUrl?: string,
+  computedCtx: ComputedContext = {},
 ): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[]; elements: CriticElement[] }> {
   const consoleMessages: VisualQaConsoleMessage[] = [];
   const executablePath = findChrome();
@@ -368,6 +410,7 @@ async function collectGeometry(
   }
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
   let elements: CriticElement[] = [];
+  let computedFindings: QualityFinding[] = [];
   try {
     browser = await puppeteer.launch({ executablePath, headless: true, args: ["--no-sandbox", "--hide-scrollbars"] });
     const all: QualityFinding[] = [];
@@ -473,6 +516,29 @@ async function collectGeometry(
               scrollHeight: el.scrollHeight,
               clientWidth: el.clientWidth,
               clientHeight: el.clientHeight,
+              // Computed-style subset for the pure detector (colors normalized to rgb by the browser;
+              // lengths resolved to px). Optional fields JSON-drop when absent.
+              style: {
+                color: styles.color,
+                backgroundColor: styles.backgroundColor,
+                backgroundImage: styles.backgroundImage,
+                fontSizePx: parseFloat(styles.fontSize) || undefined,
+                fontFamily: styles.fontFamily,
+                fontWeight: parseInt(styles.fontWeight, 10) || undefined,
+                lineHeightPx: styles.lineHeight === "normal" ? null : parseFloat(styles.lineHeight) || null,
+                letterSpacing: styles.letterSpacing,
+                textTransform: styles.textTransform,
+                borderRadius: styles.borderRadius,
+                boxShadow: styles.boxShadow,
+                transition: styles.transition,
+                animation: styles.animation,
+                paddingTopPx: parseFloat(styles.paddingTop) || 0,
+                paddingRightPx: parseFloat(styles.paddingRight) || 0,
+                paddingBottomPx: parseFloat(styles.paddingBottom) || 0,
+                paddingLeftPx: parseFloat(styles.paddingLeft) || 0,
+                marginTopPx: parseFloat(styles.marginTop) || 0,
+                marginBottomPx: parseFloat(styles.marginBottom) || 0,
+              },
             };
           })
           .filter(Boolean);
@@ -490,7 +556,11 @@ async function collectGeometry(
       }));
       all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label));
       if (viewport.label === "desktop") {
-        elements = toCriticElements((snapshot as GeometrySnapshot).elements ?? []);
+        const desktopElements = (snapshot as GeometrySnapshot).elements ?? [];
+        elements = toCriticElements(desktopElements);
+        // Deterministic computed-style findings — contrast, type, spacing, component tells — run
+        // on the desktop render only (viewport-independent) and are bounded so they can't flood repair.
+        computedFindings = boundComputedFindings(detectComputedFindings(toComputedElements(desktopElements), computedCtx));
         if (screenshotPath) {
           await mkdir(dirname(screenshotPath), { recursive: true });
           // Bound the capture too — full-page screenshot of a wedged/animating page can hang.
@@ -501,11 +571,16 @@ async function collectGeometry(
     }
     const seen = new Set<string>();
     return {
-      findings: all.filter((finding) => {
-        if (seen.has(finding.id)) return false;
-        seen.add(finding.id);
-        return true;
-      }),
+      // Geometry findings dedupe by id (one per kind); computed findings are per-selector and
+      // already bounded, so they append after rather than collapsing to one.
+      findings: [
+        ...all.filter((finding) => {
+          if (seen.has(finding.id)) return false;
+          seen.add(finding.id);
+          return true;
+        }),
+        ...computedFindings,
+      ],
       consoleMessages,
       elements,
     };

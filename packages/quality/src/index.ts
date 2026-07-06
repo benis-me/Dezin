@@ -9,6 +9,14 @@
 
 export type { Finding, Severity, LintOptions } from "./types.ts";
 export { lintArtifact, hasFindings } from "./lint-artifact.ts";
+export {
+  detectComputedFindings,
+  MIN_BODY_FONT_PX,
+  type ComputedElement,
+  type ComputedStyle,
+  type ComputedRect,
+  type ComputedContext,
+} from "./computed.ts";
 export { lintScore, scoreGrade } from "./score.ts";
 export { renderFindingsForAgent } from "./render-findings.ts";
 export {

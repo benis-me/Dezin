@@ -3,7 +3,72 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentReviewPrompt, auditVisualArtifact, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, type VisualQaInput } from "../src/visual-qa.ts";
+import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
+import type { QualityFinding } from "../../../packages/core/src/index.ts";
+
+function geomEl(overrides: Partial<GeometryElement> = {}): GeometryElement {
+  return {
+    selector: "p",
+    tag: "p",
+    text: "Readable body copy.",
+    rect: { left: 0, top: 0, right: 200, bottom: 20, width: 200, height: 20 },
+    position: "static",
+    overflowX: "visible",
+    overflowY: "visible",
+    scrollWidth: 200,
+    scrollHeight: 20,
+    clientWidth: 200,
+    clientHeight: 20,
+    ...overrides,
+  };
+}
+
+test("toComputedElements reshapes the geometry snapshot into pure computed-style elements", () => {
+  const computed = toComputedElements([
+    geomEl({
+      selector: "p.fine",
+      text: "Legalese",
+      rect: { left: 10, top: 20, right: 210, bottom: 40, width: 200, height: 20 },
+      style: { color: "rgb(0, 0, 0)", fontSizePx: 10 },
+    }),
+  ]);
+  assert.equal(computed.length, 1);
+  assert.equal(computed[0]!.selector, "p.fine");
+  assert.equal(computed[0]!.rect.x, 10);
+  assert.equal(computed[0]!.rect.y, 20);
+  assert.equal(computed[0]!.rect.width, 200);
+  assert.equal(computed[0]!.style.fontSizePx, 10);
+});
+
+test("toComputedElements drops zero-area nodes the detector cannot judge", () => {
+  const computed = toComputedElements([
+    geomEl({ selector: "span.ghost", text: "", rect: { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 } }),
+  ]);
+  assert.equal(computed.length, 0);
+});
+
+test("boundComputedFindings dedupes by id+selector and caps per rule so the repair loop is not flooded", () => {
+  const mk = (id: string, selector: string): QualityFinding => ({ severity: "P2", id, message: "m", fix: "f", selector });
+  const out = boundComputedFindings(
+    [
+      mk("tiny-text", "a"),
+      mk("tiny-text", "a"), // exact dup → collapses
+      mk("tiny-text", "b"),
+      mk("tiny-text", "c"),
+      mk("tiny-text", "d"), // 4 distinct selectors, but per-id cap is 3
+      mk("low-contrast", "x"),
+    ],
+    3,
+    20,
+  );
+  assert.equal(out.filter((f) => f.id === "tiny-text").length, 3, "per-id cap holds");
+  assert.equal(out.filter((f) => f.id === "low-contrast").length, 1, "other rules survive");
+});
+
+test("boundComputedFindings enforces the overall total cap", () => {
+  const raw: QualityFinding[] = Array.from({ length: 30 }, (_, i) => ({ severity: "P2", id: `r${i}`, message: "m", fix: "f", selector: `s${i}` }));
+  assert.equal(boundComputedFindings(raw, 3, 20).length, 20);
+});
 
 test("findingsFromGeometry reports horizontal overflow, offscreen fixed controls, and clipped text", () => {
   const findings = findingsFromGeometry(
