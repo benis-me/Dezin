@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { detectLoginWall, looksLikeLoginWall, capturePage, captureCurrentPage } from "../src/sharingan-capture.ts";
+import { detectLoginWall, looksLikeLoginWall, capturePage, captureCurrentPage, writePagesManifest, sharinganReviewReference } from "../src/sharingan-capture.ts";
 import { SharinganSession, type DomNode } from "../src/sharingan-browser.ts";
 import { findChrome } from "../src/capture-cover.ts";
 
@@ -149,4 +149,22 @@ test("captureCurrentPage writes an asset inventory + per-node DOM styles", { ski
     await session.close();
     await new Promise<void>((r) => fixture.close(() => r()));
   }
+});
+
+test("sharinganReviewReference resolves the entry screenshot + an asset summary from the bundle", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-ref-"));
+  const pageRel = join(".sharingan", "home-abcd1234");
+  mkdirSync(join(dir, pageRel), { recursive: true });
+  writeFileSync(join(dir, pageRel, "shot-desktop.png"), "png");
+  writeFileSync(join(dir, pageRel, "assets.json"), JSON.stringify([{ url: "https://x/a.png", kind: "img", alt: "logo" }, { url: "https://x/b.png", kind: "background" }]));
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    sourceUrl: "https://x/",
+    pages: [{ url: "https://x/", title: "Home", screenshots: { desktop: join(pageRel, "shot-desktop.png"), mobile: join(pageRel, "shot-mobile.png") }, dom: join(pageRel, "dom.json"), styles: join(pageRel, "styles.json"), assets: join(pageRel, "assets.json"), links: [] }],
+  }));
+  const ref = sharinganReviewReference(dir);
+  assert.ok(ref, "returns a reference");
+  assert.equal(ref!.screenshotPath, join(dir, pageRel, "shot-desktop.png"), "absolute path to the entry desktop screenshot");
+  assert.match(ref!.assetsSummary ?? "", /2 image/);
+  // No bundle -> undefined.
+  assert.equal(sharinganReviewReference(mkdtempSync(join(tmpdir(), "shar-empty-"))), undefined);
 });

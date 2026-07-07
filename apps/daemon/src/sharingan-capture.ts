@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { SharinganSession, VIEWPORTS, type DomNode } from "./sharingan-browser.ts";
@@ -108,4 +108,29 @@ export function writePagesManifest(projectDir: string, sourceUrl: string, pages:
   mkdirSync(join(projectDir, ".sharingan"), { recursive: true });
   const manifest = { sourceUrl, pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots, dom: p.dom, styles: p.styles, assets: p.assets, links: p.links })) };
   writeFileSync(join(projectDir, ".sharingan", "pages.json"), JSON.stringify(manifest, null, 2));
+}
+
+/** Locate the Sharingan review reference for a project: the entry page's desktop screenshot (absolute
+ *  path, so the critic can read it) + a one-line summary of the source's image inventory. Returns
+ *  undefined when there is no captured bundle yet. Reads the on-disk `.sharingan/pages.json`. */
+export function sharinganReviewReference(projectDir: string): { screenshotPath: string; assetsSummary?: string } | undefined {
+  const manifestPath = join(projectDir, ".sharingan", "pages.json");
+  if (!existsSync(manifestPath)) return undefined;
+  let manifest: { pages?: Array<{ screenshots?: Record<string, string>; assets?: string }> };
+  try { manifest = JSON.parse(readFileSync(manifestPath, "utf8")); } catch { return undefined; }
+  const entry = manifest.pages?.[0];
+  const shotRel = entry?.screenshots?.desktop;
+  if (!shotRel) return undefined;
+  const screenshotPath = join(projectDir, shotRel);
+  if (!existsSync(screenshotPath)) return undefined;
+  let assetsSummary: string | undefined;
+  if (entry?.assets && existsSync(join(projectDir, entry.assets))) {
+    try {
+      const assets = JSON.parse(readFileSync(join(projectDir, entry.assets), "utf8")) as Array<{ kind: string; alt?: string; w?: number; h?: number }>;
+      const imgs = assets.filter((a) => a.kind === "img" || a.kind === "background");
+      const sample = imgs.slice(0, 4).map((a) => `${a.alt || a.kind}${a.w && a.h ? ` (${a.w}x${a.h})` : ""}`).join(", ");
+      if (imgs.length) assetsSummary = `${imgs.length} image slot${imgs.length === 1 ? "" : "s"}: ${sample}`;
+    } catch { /* ignore a malformed assets.json */ }
+  }
+  return { screenshotPath, assetsSummary };
 }

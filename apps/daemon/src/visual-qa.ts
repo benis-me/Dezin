@@ -23,6 +23,9 @@ export interface VisualQaInput {
   brief?: string;
   /** The chosen direction's spec (its Visual Language etc.) — the critic's aesthetic contract. */
   directionSpec?: string;
+  /** When this build is a Sharingan clone: the captured SOURCE screenshot (absolute path) + a short
+   *  asset summary, so the critic can judge fidelity to the source, not just generic quality. */
+  sharinganReference?: { screenshotPath: string; assetsSummary?: string };
   /** Compact map of on-page elements (selector + text + box) so the critic can anchor each
    *  finding to a specific DOM element, and the repair can target it precisely. */
   criticElements?: CriticElement[];
@@ -176,6 +179,8 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const artifactRel = toRel(projectDir, input.htmlPath);
   const screenshotRel = toRel(projectDir, screenshotPath);
+  const ref = input.sharinganReference;
+  const sourceRel = ref ? toRel(projectDir, ref.screenshotPath) : "";
   const brief = input.brief?.trim();
   const directionSpec = input.directionSpec?.trim();
   const history = (input.conversationHistory ?? [])
@@ -196,6 +201,8 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
     "You are a senior product designer reviewing the latest rendered result for the current Dezin conversation.",
     `Rendered screenshot (the page as the browser first painted it): ${screenshotRel}`,
     `Final artifact: ${artifactRel}`,
+    ref ? `Source screenshot (the ORIGINAL site you are RECONSTRUCTING — the build should match its layout, hierarchy, image slots, type scale, and palette): ${sourceRel}` : "",
+    ref?.assetsSummary ? `Source image inventory: ${ref.assetsSummary}` : "",
     input.renderUrl ? `Rendered URL: ${input.renderUrl}` : "",
     consoleMessages ? `Browser console / runtime signals:\n${consoleMessages}` : "",
     history ? `Current conversation context:\n${history}` : "",
@@ -207,7 +214,7 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
     "Use the screenshot as primary evidence. It is the page as first painted: for a plain document that is the whole page top-to-bottom, but for an app-shell layout (a fixed header/footer with a scrolling region between them) it is the initial viewport, and that scrolling region may hold more content above or below what you can see. Content that is merely scrolled out of view — e.g. an earlier message clipped at the top edge of a thread that is pinned to its latest turn — is NORMAL, not missing or broken. You may read the artifact and assets for context, but do not create, edit, or write files.",
     "Report findings in two clearly separated kinds — do not conflate them:",
     '- kind "defect" (severity P0/P1): an OBJECTIVE breakage you can PROVE from the pixels themselves. It must be one of: (1) overlap that makes something illegible or unusable; (2) text or a control sliced through its glyphs or bounds by a container edge; (3) an element the layout clearly means to show in the initial view (the primary action, the latest message, the composer) pushed off-screen or unreachable; (4) content wider than the viewport (horizontal overflow); (5) text unreadable from contrast or size; (6) a runtime/console error, broken image, or leaked placeholder (undefined, lorem, "no artifact"); (7) a copy bug in the text itself (duplicated, concatenated, or template tokens). Before filing a defect, apply this test: could a correct, deliberate implementation produce this exact screenshot? If yes, it is NOT a defect — at most an advisory improvement. Describe the visible breakage, never a cause you are inferring — do NOT file scroll position, mount behaviour, or "should be pinned to bottom": you cannot verify runtime scroll state from one static frame. Do NOT file taste, palette, or aesthetic preferences as defects — colour and style are the user\'s call, not a bug.',
-    '- kind "improvement" (severity P2): concrete, actionable design SUGGESTIONS — hierarchy, spacing/rhythm, composition, type scale, restraint, and how well the result matches the brief and chosen direction (e.g. if the direction implies near-monochrome and the build leans on a saturated accent, suggest the change). Positioning and scroll polish, affordance discoverability, and "feels unpolished or crowded" all belong here too — as suggestions, not defects. These are ADVISORY — the user decides whether to take them. Be specific, never vague taste talk.',
+    `- kind "improvement" (severity P2): concrete, actionable design SUGGESTIONS — hierarchy, spacing/rhythm, composition, type scale, restraint, and how well the result matches the brief and chosen direction (e.g. if the direction implies near-monochrome and the build leans on a saturated accent, suggest the change). Positioning and scroll polish, affordance discoverability, and "feels unpolished or crowded" all belong here too — as suggestions, not defects. These are ADVISORY — the user decides whether to take them. Be specific, never vague taste talk.${ref ? " For a Sharingan reconstruction, a divergence from the SOURCE screenshot (different layout structure, missing/empty image slot the source fills, wrong component hierarchy, off type scale or palette) is exactly this kind of advisory improvement — cite the specific gap from the source." : ""}`,
     "For EVERY finding, set \"selector\" to the ONE element it is about, copied EXACTLY from the ON-PAGE ELEMENTS list above — this lets the fix target that element precisely. Omit selector only for a genuinely page-wide finding. Make each fix a concrete, verifiable change to that element.",
     "Report as many of each as genuinely matter — several, or none. Do NOT invent findings to hit a count; if nothing is objectively broken and nothing would clearly improve it, return an empty findings list.",
     'Return JSON only, exactly: {"findings":[{"kind":"defect|improvement","severity":"P0|P1|P2","selector":"exact selector or omit","message":"...","fix":"..."}]}.',

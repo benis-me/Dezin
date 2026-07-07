@@ -58,6 +58,7 @@ import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import { ensureCaptured, capturedPageCount } from "./sharingan-handler.ts";
 import { buildSharinganContext } from "./sharingan-context.ts";
+import { sharinganReviewReference } from "./sharingan-capture.ts";
 import { SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
 import type { AppDeps } from "./app.ts";
 
@@ -457,7 +458,7 @@ async function runVisualQa(
   model: string | undefined,
   brief: string,
   conversationHistory: VisualQaInput["conversationHistory"],
-  options: Pick<VisualQaInput, "projectRoot" | "renderUrl" | "directionSpec"> = {},
+  options: Pick<VisualQaInput, "projectRoot" | "renderUrl" | "directionSpec" | "sharinganReference"> = {},
 ): Promise<QualityFinding[]> {
   if (!settings.visualQaEnabled) return [];
   try {
@@ -996,6 +997,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
               projectRoot: dir,
               renderUrl,
               directionSpec: chosenDirectionSpec,
+              sharinganReference: project.sharingan ? sharinganReviewReference(projectDir(deps.dataDir, project.id)) : undefined,
             });
           }
           visualFindings = suppress(markVisualReviewRound(withVisualScreenshotUrl(visualFindings, screenshotUrl), round));
