@@ -29,22 +29,34 @@ function emit(c: Capture, step: CaptureStep): void {
   for (const res of c.listeners) res.write(line);
 }
 
-export async function startCapture(id: string, url: string, dataDir: string, profileDir: string): Promise<void> {
+export async function startCapture(
+  id: string,
+  url: string,
+  dataDir: string,
+  profileDir: string,
+  open: (url: string, opts: { userDataDir?: string; headless?: boolean }) => Promise<SharinganSession> = SharinganSession.open,
+): Promise<void> {
   const c = get(id);
   if (c.phase === "capturing") return;
   c.phase = "capturing"; c.steps = []; c.pages = []; c.error = undefined;
   try {
-    const session = await SharinganSession.open(url, { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
+    const session = await open(url, { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
     c.session = session;
     const { page, loginRequired } = await capturePage(session, projectDir(dataDir, id), url, (s) => emit(c, s));
     if (loginRequired) { c.phase = "login-required"; return; }
     if (page) c.pages.push(page);
-    c.phase = "captured";
+    // Set the terminal phase only after the browser is down, so "captured" implies the
+    // persistent-profile lock has been released.
     await session.close();
     c.session = undefined;
+    c.phase = "captured";
   } catch (err) {
-    c.phase = "error"; c.error = err instanceof Error ? err.message : "capture failed";
+    // Capture threw after open() launched a browser holding the persistent-profile lock.
+    // Close it so it cannot leak (and free the lock), then mark the terminal phase.
+    if (c.session) { await c.session.close().catch(() => {}); c.session = undefined; }
+    c.error = err instanceof Error ? err.message : "capture failed";
     emit(c, { at: Date.now(), kind: "done", text: `Capture failed: ${c.error}` });
+    c.phase = "error";
   }
 }
 

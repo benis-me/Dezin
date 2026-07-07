@@ -8,6 +8,8 @@ import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
+import { startCapture, handleSharinganStatus } from "../src/sharingan-handler.ts";
+import type { SharinganSession } from "../src/sharingan-browser.ts";
 
 test("POST /start begins a capture and GET /status reports progress", { skip: !findChrome() && "no Chrome" }, async () => {
   const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><title>T</title><h1>Acme</h1><p>" + "w ".repeat(60) + "</p>"); });
@@ -36,5 +38,40 @@ test("POST /start begins a capture and GET /status reports progress", { skip: !f
     await new Promise<void>((r) => app.close(() => r()));
     await new Promise<void>((r) => fixture.close(() => r()));
     store.close();
+  }
+});
+
+/** Minimal raw HTTP server that proxies a single id's status via handleSharinganStatus. */
+function statusServer(id: string): Promise<{ base: string; close: () => Promise<void> }> {
+  return new Promise((resolve) => {
+    const server = createServer((_req, res) => handleSharinganStatus(res, id));
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({ base: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(() => r())) });
+    });
+  });
+}
+
+test("a failed capture closes the browser session and clears it, so a launched browser cannot leak", async () => {
+  // The contract under test is the handler's ERROR-path cleanup, not the browser
+  // itself: `open()` launches a real (in production, headful) Chrome that holds a lock
+  // on the persistent profile, so if capture throws afterward the handler MUST close
+  // that session. We inject a fake session whose capture throws mid-flight and assert
+  // close() ran — deterministic, no real Chrome, no profile-lock games.
+  let closed = false;
+  const fakeSession = {
+    navigate: async () => { throw new Error("boom: navigation blew up mid-capture"); },
+    close: async () => { closed = true; },
+  } as unknown as SharinganSession;
+
+  const id = "leak-check";
+  const status = await statusServer(id);
+  try {
+    await startCapture(id, "http://irrelevant.test/", "/tmp/unused-datadir", "/tmp/unused-profile", async () => fakeSession);
+    const s = (await (await fetch(`${status.base}/status`)).json()) as { phase: string; error?: string };
+    assert.equal(s.phase, "error", "a thrown capture lands the run in the error phase");
+    assert.equal(closed, true, "the handler must close the session on the error path so the browser cannot leak");
+  } finally {
+    await status.close();
   }
 });
