@@ -37,7 +37,10 @@ export async function startCapture(
   open: (url: string, opts: { userDataDir?: string; headless?: boolean }) => Promise<SharinganSession> = SharinganSession.open,
 ): Promise<void> {
   const c = get(id);
-  if (c.phase === "capturing") return;
+  // Refuse re-entry whenever a session is live: "capturing" (guards concurrent starts,
+  // including the open() await window) and "login-required" (a headful browser is paused
+  // open for user sign-in — re-opening would orphan it and its persistent-profile lock).
+  if (c.phase === "capturing" || c.phase === "login-required") return;
   c.phase = "capturing"; c.steps = []; c.pages = []; c.error = undefined;
   try {
     const session = await open(url, { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });

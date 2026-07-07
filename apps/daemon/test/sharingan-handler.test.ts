@@ -75,3 +75,33 @@ test("a failed capture closes the browser session and clears it, so a launched b
     await status.close();
   }
 });
+
+test("a re-start while paused for login does not orphan the open login session", async () => {
+  // After a login wall the phase is "login-required" and the session stays OPEN by design
+  // (for user sign-in). A second POST /start must NOT open a second browser and overwrite
+  // c.session — that would strand the paused headful Chrome and its persistent-profile lock.
+  let opens = 0;
+  const open = async () => {
+    opens += 1;
+    return {
+      navigate: async () => ({ status: 401, finalUrl: "http://x.test/login" }),
+      readDom: async () => [],
+      hasPasswordField: async () => false,
+      close: async () => {},
+    } as unknown as SharinganSession;
+  };
+
+  const id = "relogin";
+  const status = await statusServer(id);
+  try {
+    await startCapture(id, "http://x.test/", "/tmp/unused-datadir", "/tmp/unused-profile", open);
+    const s1 = (await (await fetch(`${status.base}/status`)).json()) as { phase: string };
+    assert.equal(s1.phase, "login-required", "capture #1 pauses at the login wall");
+
+    // Re-start while paused — must be refused, not launch a second browser.
+    await startCapture(id, "http://x.test/", "/tmp/unused-datadir", "/tmp/unused-profile", open);
+    assert.equal(opens, 1, "re-start during login-required must not launch a second browser (would orphan the paused one)");
+  } finally {
+    await status.close();
+  }
+});

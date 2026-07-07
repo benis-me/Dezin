@@ -15,6 +15,9 @@ export function detectLoginWall(input: { status: number; finalUrl: string; hasPa
 }
 
 function pageDir(url: string): string {
+  // NOTE (Phase 4): this slug is not collision-safe — two distinct URLs can collapse to the
+  // same dir after stripping non-alphanumerics and truncating to 60 chars. Harmless in Phase 1
+  // (single entry-page capture); add a short URL-hash suffix when multi-page probing lands.
   const slug = url.replace(/^https?:\/\//, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "page";
   return slug;
 }
