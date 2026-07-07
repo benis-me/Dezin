@@ -45,6 +45,7 @@ import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { ResearchCard, ResearchPanel, type ResearchCardData } from "./ResearchViews.tsx";
+import { highlightToReact } from "../lib/highlight-lite.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -1219,6 +1220,27 @@ function FilesBrowser({ files, activeFile, onOpen }: { files: ProjectFile[]; act
   );
 }
 
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|avif|ico|bmp)$/i;
+/** True when a project file should be shown as an image preview, not decoded as text. */
+function isImagePath(path: string): boolean {
+  return IMAGE_EXT.test(path);
+}
+
+/** Image preview for a project file (served as bytes) — CodeView would render its bytes as garbage. */
+function ImageFileView({ name, url }: { name: string; url: string }) {
+  return (
+    <div className="flex h-full flex-col bg-card">
+      <PanelBar className="font-mono">
+        <FileCode2 size={13} strokeWidth={1.75} />
+        {name}
+      </PanelBar>
+      <div className="flex flex-1 items-center justify-center overflow-auto bg-muted/20 p-6">
+        <img src={url} alt={name} className="max-h-full max-w-full object-contain" />
+      </div>
+    </div>
+  );
+}
+
 function CodeView({ name, text }: { name: string; text: string }) {
   const lines = text.length ? text.split("\n") : [""];
   return (
@@ -1239,7 +1261,7 @@ function CodeView({ name, text }: { name: string; text: string }) {
             ))}
           </div>
           <pre className="flex-1 py-3 pl-4 pr-6 text-foreground-2">
-            <code>{text}</code>
+            <code>{highlightToReact(text)}</code>
           </pre>
         </div>
       </div>
@@ -1253,12 +1275,14 @@ function FilesPanel({
   fileText,
   running,
   onOpen,
+  imageUrlFor,
 }: {
   files: ProjectFile[];
   activeFile: string | null;
   fileText: string;
   running: boolean;
   onOpen: (path: string) => void;
+  imageUrlFor: (path: string) => string;
 }) {
   const browserPercent = readPanelPercent(FILES_SPLIT_KEY, 38, 22, 58);
 
@@ -1282,7 +1306,15 @@ function FilesPanel({
       />
       <Panel id={FILES_PREVIEW_PANEL} minSize="240px">
         <div className="h-full min-w-0">
-          {activeFile ? <CodeView name={activeFile} text={fileText} /> : emptyPane("Select a file to preview")}
+          {activeFile ? (
+            isImagePath(activeFile) ? (
+              <ImageFileView name={activeFile} url={imageUrlFor(activeFile)} />
+            ) : (
+              <CodeView name={activeFile} text={fileText} />
+            )
+          ) : (
+            emptyPane("Select a file to preview")
+          )}
         </div>
       </Panel>
     </Group>
@@ -2960,9 +2992,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           setPreviewSrc(`${api.previewUrl(id)}?t=${typeof ev.t === "number" ? ev.t : Date.now()}`);
         }
         setTab("Preview");
+        void loadFiles(); // refresh the Files list live as the artifact is rewritten (both modes)
         if (ev.mode === "standard" || modeRef.current === "standard") {
           void loadRuns();
-          void loadFiles();
         }
         break;
       case "activity": {
@@ -3593,6 +3625,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       };
     }
     if (!activeFile) return;
+    if (isImagePath(activeFile)) {
+      // Images render via <img> (ImageFileView), not decoded text — skip the byte fetch.
+      setFileText("");
+      return () => {
+        alive = false;
+      };
+    }
     void api.getFileText(projectId, activeFile).then(
       (t) => alive && setFileText(t),
       () => alive && setFileText(""),
@@ -4922,7 +4961,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           ) : tab === "Research" ? (
             <ResearchPanel research={research} assetUrl={(p) => api.researchAssetUrl(projectId, p)} visualAssetUrl={(p) => api.researchVisualAssetUrl(projectId, p)} />
           ) : tab === "Files" ? (
-            <FilesPanel files={displayFiles} activeFile={displayActiveFile} fileText={displayFileText} running={displayRunning} onOpen={openDisplayedFile} />
+            <FilesPanel files={displayFiles} activeFile={displayActiveFile} fileText={displayFileText} running={displayRunning} onOpen={openDisplayedFile} imageUrlFor={(p) => `${api.previewUrl(projectId)}${p.split("/").map(encodeURIComponent).join("/")}`} />
           ) : tab === "Quality" ? (
             <div className="flex h-full flex-col bg-surface">
               {displayRanOnce && displayScore !== null ? (

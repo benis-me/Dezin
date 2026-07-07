@@ -1837,7 +1837,12 @@ test("the Files tab lists project files and previews the selected file's source"
   expect(screen.getByText("assets")).toBeInTheDocument();
   fireEvent.doubleClick(screen.getByText("assets"));
   fireEvent.click(await screen.findByText("style.css"));
-  expect(await screen.findByText(/--accent:#101010/)).toBeInTheDocument();
+  // The Files viewer syntax-highlights code, so `#101010` is tokenized into its own <span> —
+  // the declaration is split across nodes. Assert on the <code> element's full textContent.
+  const codeEl = await screen.findByText(
+    (_content, el) => el?.tagName === "CODE" && (el.textContent ?? "").includes("--accent:#101010"),
+  );
+  expect(codeEl).toBeInTheDocument();
 });
 
 test("the Versions dropdown groups branch versions with switching, set cover, and Restore", async () => {
