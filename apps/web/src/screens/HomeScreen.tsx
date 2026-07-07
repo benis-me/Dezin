@@ -237,6 +237,11 @@ export function HomeScreen({
   // Sharingan: clone-from-URL mode. Toggled by double-clicking the heading; forces mode to
   // "standard" and swaps the composer's textarea for a URL input (desktop-only entry).
   const [sharingan, setSharingan] = useState(false);
+  // First-run authorized-use affirmation: gates the very first Sharingan submit until the user
+  // confirms they have the right to reproduce the target site. Persisted in Settings so it only
+  // ever prompts once per install.
+  const [affirmed, setAffirmed] = useState(false);
+  const [affirmPending, setAffirmPending] = useState<null | { url: string }>(null);
   const [projects, setProjects] = useState<Project[]>(projectsOverride ?? []);
   const [loading, setLoading] = useState(!projectsOverride);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -314,6 +319,7 @@ export function HomeScreen({
       if (!s) return;
       setResearchOn(!!s.researchEnabled);
       setVisualReviewOn(!!s.visualQaEnabled);
+      setAffirmed(!!s.sharinganAffirmed);
     };
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettings);
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettings);
@@ -392,6 +398,7 @@ export function HomeScreen({
         setSettingsModel(s?.model ?? "");
         setResearchOn(!!s?.researchEnabled);
         setVisualReviewOn(!!s?.visualQaEnabled);
+        setAffirmed(!!s?.sharinganAffirmed);
       })
       .catch(() => alive && setSettingsAgent(""));
     return () => {
@@ -495,6 +502,10 @@ export function HomeScreen({
         toast("Enter a valid http(s) URL to clone.", { variant: "error" });
         return;
       }
+      if (!affirmed) {
+        setAffirmPending({ url: text });
+        return;
+      }
       onNewProject?.(text, skillId, designSystemId, "standard", { sourceUrl: text });
       return;
     }
@@ -504,6 +515,20 @@ export function HomeScreen({
     if (homeAgent) setPendingAgent(homeAgent, homeModel || undefined);
     onNewProject?.(text, skillId, designSystemId, mode);
   };
+
+  // Confirms the one-time authorized-use affirmation for Sharingan, persists it so it never
+  // prompts again on this install, and then proceeds with the deferred clone run.
+  const confirmAffirmation = useCallback(() => {
+    const pending = affirmPending;
+    if (!pending) return;
+    setAffirmed(true);
+    setAffirmPending(null);
+    api
+      .updateSettings({ sharinganAffirmed: true })
+      .then((s) => publishSettingsUpdated(s))
+      .catch(() => {});
+    onNewProject?.(pending.url, skillId, designSystemId, "standard", { sourceUrl: pending.url });
+  }, [affirmPending, api, onNewProject, skillId, designSystemId]);
 
   const updateBrief = (value: string): void => {
     setBrief(value);
@@ -1116,6 +1141,24 @@ export function HomeScreen({
             </Button>
           </div>
         </form>
+      </Dialog>
+
+      <Dialog open={affirmPending !== null} onClose={() => setAffirmPending(null)} label="Authorized use" className="max-w-md">
+        <div className="p-5">
+          <h2 className="text-base font-semibold tracking-tight">Confirm authorized use</h2>
+          <p className="mt-3 text-sm text-muted-foreground">
+            Sharingan reconstructs a site's structure and design as a new, editable project — it doesn't copy brand assets or content
+            verbatim. Only clone sites you own or are authorized to reproduce.
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={() => setAffirmPending(null)}>
+              Cancel
+            </Button>
+            <Button type="button" onClick={confirmAffirmation}>
+              I have the right to reproduce this site
+            </Button>
+          </div>
+        </div>
       </Dialog>
     </div>
   );
