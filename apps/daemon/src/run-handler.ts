@@ -599,7 +599,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // on the prior run. Re-persisting its user message and re-running research here would surface the
   // user message + the research card TWICE on reload — so detect it and skip that duplicate work.
   const buildingChosenDirection = !!body.directionSlug?.trim();
-  const alreadyResearched = buildingChosenDirection && researchExists(dir);
+  const researchOnDisk = researchExists(dir);
+  const alreadyResearched = buildingChosenDirection && researchOnDisk;
   const userMessage = alreadyResearched ? null : store.addMessage(conversation.id, "user", visibleBrief);
   store.updateRun(run.id, userMessage ? { status: "running", userMessageId: userMessage.id } : { status: "running" });
 
@@ -633,7 +634,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // Optional pre-design Research phase (opt-in via body.research). It writes the
   // research/ directory, then its report is prepended to the brief so the build is
   // grounded in real discovery. Idempotent; a soft failure just proceeds without it.
-  if (!alreadyResearched && body.research !== false && (body.research === true || settings.researchEnabled || process.env.DEZIN_RESEARCH === "1")) {
+  // Auto-Research (Settings toggle / env) runs ONLY on a project not yet researched. A follow-up
+  // turn on an already-researched project must not auto-re-enter it: research would only flash
+  // "Researching" (the phase early-returns since the report/directions already exist), then
+  // re-surface the old direction gate and cancel the run. An explicit body.research === true still
+  // forces it.
+  const autoResearch = (settings.researchEnabled || process.env.DEZIN_RESEARCH === "1") && !researchOnDisk;
+  if (!alreadyResearched && body.research !== false && (body.research === true || autoResearch)) {
     sse({ type: "research-start", runId: run.id });
     // Persist the research card from the START (not just its done-summary), updated per activity, so
     // its live Product/Visual lanes survive navigating away and back — history restore rehydrates them.

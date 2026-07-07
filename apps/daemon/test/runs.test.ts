@@ -1981,6 +1981,47 @@ test("research phase uses the configured research Agent/model override", async (
   );
 });
 
+test("a follow-up turn does not re-run Research on an already-researched project", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  let researchCalls = 0;
+  const researchPhase: NonNullable<AppDeps["researchPhase"]> = async () => {
+    researchCalls++;
+    return { ran: false, produced: true, visualProduced: false };
+  };
+  await withRunServer(
+    runner,
+    async ({ base, store, dataDir }) => {
+      store.updateSettings({ researchEnabled: true });
+      const project = await createProject(base);
+      // Simulate a project ALREADY researched on a prior run: report + 2 candidate directions on
+      // disk. A follow-up turn (no directionSlug, no explicit research:true) must NOT re-enter
+      // research — doing so flashes "Researching", re-surfaces the old direction gate, and cancels
+      // the run.
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(join(dir, ".research", "directions", "a"), { recursive: true });
+      mkdirSync(join(dir, ".research", "directions", "b"), { recursive: true });
+      writeFileSync(join(dir, ".research", "research.md"), "# Research\n\nprior");
+      writeFileSync(join(dir, ".research", "directions", "a", "direction.md"), "# Direction A");
+      writeFileSync(join(dir, ".research", "directions", "b", "direction.md"), "# Direction B");
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make the hero bigger" }),
+      });
+      assert.equal(res.status, 200);
+      const types = parseSse(await res.text()).map((e) => e.type);
+
+      assert.equal(researchCalls, 0, "a follow-up must not re-run the Research phase");
+      assert.ok(!types.includes("research-start"), "must not flash Researching on a follow-up");
+      assert.ok(!types.includes("direction-gate"), "must not re-surface the old direction gate");
+      assert.ok(!types.includes("run-cancelled"), "must not cancel the follow-up run");
+      assert.ok(types.includes("run-done"), "the follow-up build completes normally");
+    },
+    { researchPhase },
+  );
+});
+
 test("dual-track research: SSE research-activity carries track, and visual assets sync into a moodboard", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {
