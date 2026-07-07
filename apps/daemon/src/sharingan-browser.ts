@@ -132,6 +132,8 @@ export class SharinganSession {
   async click(selector: string): Promise<void> { await this.page.click(selector).catch(() => {}); }
   async scroll(y: number): Promise<void> { await this.page.evaluate((yy: number) => (globalThis as any).scrollTo(0, yy), y); }
 
+  async bringToFront(): Promise<void> { await this.page.bringToFront().catch(() => {}); }
+
   async close(): Promise<void> { await this.browser.close().catch(() => {}); }
 }
 

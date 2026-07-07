@@ -13,7 +13,7 @@ import { projectDir } from "./serve-static.ts";
 import { sendJson, readJsonBody } from "./http-util.ts";
 
 type Phase = "idle" | "capturing" | "login-required" | "captured" | "error";
-interface Capture { phase: Phase; steps: CaptureStep[]; pages: CapturedPage[]; session?: SharinganSession; listeners: Set<ServerResponse>; error?: string }
+interface Capture { phase: Phase; steps: CaptureStep[]; pages: CapturedPage[]; session?: SharinganSession; listeners: Set<ServerResponse>; url?: string; error?: string }
 
 const captures = new Map<string, Capture>();
 
@@ -45,6 +45,7 @@ export async function startCapture(
   try {
     const session = await open(url, { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
     c.session = session;
+    c.url = url;
     const { page, loginRequired } = await capturePage(session, projectDir(dataDir, id), url, (s) => emit(c, s));
     if (loginRequired) { c.phase = "login-required"; return; }
     if (page) c.pages.push(page);
@@ -69,6 +70,42 @@ export async function handleSharinganStart(req: IncomingMessage, res: ServerResp
   if (!/^https?:\/\//i.test(url)) { sendJson(res, 400, { error: "a valid http(s) url is required" }); return; }
   const profileDir = join(dataDir, ".sharingan-profile");
   void startCapture(id, url, dataDir, profileDir);
+  sendJson(res, 200, { ok: true });
+}
+
+/**
+ * Resume a capture that paused at a login wall. Re-runs `capturePage` on the SAME,
+ * now-authenticated session (the user signed in via the visible Chrome window while
+ * phase stayed "login-required"). A no-op unless that exact pause state is present —
+ * called with a stale/wrong id, or before/after the pause, it does nothing.
+ */
+export async function continueCapture(id: string, dataDir: string): Promise<void> {
+  const c = get(id);
+  if (c.phase !== "login-required" || !c.session || !c.url) return;
+  c.phase = "capturing";
+  try {
+    const { page, loginRequired } = await capturePage(c.session, projectDir(dataDir, id), c.url, (s) => emit(c, s));
+    if (loginRequired) { c.phase = "login-required"; return; }
+    if (page) c.pages.push(page);
+    await c.session.close();
+    c.session = undefined;
+    c.phase = "captured";
+  } catch (err) {
+    if (c.session) { await c.session.close().catch(() => {}); c.session = undefined; }
+    c.error = err instanceof Error ? err.message : "capture failed";
+    emit(c, { at: Date.now(), kind: "done", text: `Capture failed: ${c.error}` });
+    c.phase = "error";
+  }
+}
+
+export function handleSharinganContinue(res: ServerResponse, id: string, dataDir: string): void {
+  void continueCapture(id, dataDir);
+  sendJson(res, 200, { ok: true });
+}
+
+export function handleSharinganFocus(res: ServerResponse, id: string): void {
+  const c = get(id);
+  void c.session?.bringToFront();
   sendJson(res, 200, { ok: true });
 }
 
