@@ -37,6 +37,7 @@ import {
 import { handleGetVersion, handleGetVersionPreviewUrl, handleGetVersionDiff, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } from "./project-runtime.ts";
+import { handleSharinganStart, handleSharinganStatus, handleSharinganEvents } from "./sharingan-handler.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleCreateEffect, handleGetEffect, handleListEffects, handleUpdateEffect } from "./effects-handler.ts";
@@ -860,6 +861,21 @@ const routes: Route[] = [
       if (!existsSync(f)) return sendError(res, 404, "no cover");
       send(res, 200, readFileSync(f), "image/png");
     },
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/start",
+    handler: (req, res, p, deps) => handleSharinganStart(req, res, p.id!, deps.dataDir),
+  },
+  {
+    method: "GET",
+    pattern: "/api/sharingan/:id/status",
+    handler: (_req, res, p) => handleSharinganStatus(res, p.id!),
+  },
+  {
+    method: "GET",
+    pattern: "/api/sharingan/:id/events",
+    handler: (_req, res, p) => handleSharinganEvents(res, p.id!),
   },
 ];
 
