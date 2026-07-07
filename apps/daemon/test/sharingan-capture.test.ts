@@ -5,14 +5,46 @@ import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { detectLoginWall, capturePage, captureCurrentPage } from "../src/sharingan-capture.ts";
-import { SharinganSession } from "../src/sharingan-browser.ts";
+import { detectLoginWall, looksLikeLoginWall, capturePage, captureCurrentPage } from "../src/sharingan-capture.ts";
+import { SharinganSession, type DomNode } from "../src/sharingan-browser.ts";
 import { findChrome } from "../src/capture-cover.ts";
 
 test("detectLoginWall flags 401, auth redirects, and password-only shells", () => {
   assert.equal(detectLoginWall({ status: 401, finalUrl: "https://x/y", hasPasswordField: false, textLength: 500 }), true);
   assert.equal(detectLoginWall({ status: 200, finalUrl: "https://x/login?next=/app", hasPasswordField: false, textLength: 500 }), true);
   assert.equal(detectLoginWall({ status: 200, finalUrl: "https://x/", hasPasswordField: true, textLength: 30 }), true);
+  assert.equal(detectLoginWall({ status: 200, finalUrl: "https://x/", hasPasswordField: false, textLength: 2000 }), false);
+});
+
+const node = (tag: string, text: string): DomNode => ({ tag, classes: "", text, box: { x: 0, y: 0, w: 10, h: 10 } });
+
+// Shaped after the real tapnow OAuth wall the demo captured: "登录或注册" + provider buttons, little else.
+const OAUTH_WALL: DomNode[] = [
+  node("h1", "登录或注册"),
+  node("button", "使用 Google 继续"),
+  node("button", "使用手机号继续"),
+  node("a", "使用邮箱登录"),
+  node("p", "登录即代表你同意服务条款"),
+];
+
+const CONTENT_PAGE: DomNode[] = [
+  node("h1", "Acme Analytics"),
+  node("p", "The fastest way to understand your product usage across every channel and team."),
+  node("a", "Pricing"),
+  node("a", "Log in"), // a login LINK in the nav — must NOT trip the heuristic
+  ...Array.from({ length: 40 }, (_, i) => node("p", `Feature paragraph number ${i} describing real product value at length.`)),
+];
+
+test("looksLikeLoginWall flags an OAuth-dominated low-content page but not a content page with a login link", () => {
+  assert.equal(looksLikeLoginWall(OAUTH_WALL), true);
+  assert.equal(looksLikeLoginWall(CONTENT_PAGE), false);
+  assert.equal(looksLikeLoginWall([]), false);
+});
+
+test("detectLoginWall folds in the OAuth content heuristic via the dom field", () => {
+  assert.equal(detectLoginWall({ status: 200, finalUrl: "https://app.x/home", hasPasswordField: false, textLength: 40, dom: OAUTH_WALL }), true);
+  assert.equal(detectLoginWall({ status: 200, finalUrl: "https://app.x/home", hasPasswordField: false, textLength: 4000, dom: CONTENT_PAGE }), false);
+  // Existing 4-field callers (no dom) still behave exactly as before.
   assert.equal(detectLoginWall({ status: 200, finalUrl: "https://x/", hasPasswordField: false, textLength: 2000 }), false);
 });
 

@@ -1,17 +1,36 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { SharinganSession, VIEWPORTS } from "./sharingan-browser.ts";
+import { SharinganSession, VIEWPORTS, type DomNode } from "./sharingan-browser.ts";
 
 export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "login-required" | "done"; text: string }
 export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; links: string[] }
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth|account)(\/|\?|$)/i;
 
-export function detectLoginWall(input: { status: number; finalUrl: string; hasPasswordField: boolean; textLength: number }): boolean {
+// Multilingual login/register keywords + OAuth-provider button phrasings. Kept broad on purpose —
+// the low-content gate below is what prevents false positives on normal pages that merely link to login.
+const LOGIN_KW = /\b(log ?in|sign ?in|sign ?up|register)\b|登录|登入|注册|登录或注册|ログイン|로그인|로그아웃|sign in/gi;
+const OAUTH_BTN = /(continue|sign ?in|log ?in|signup|sign ?up) with (google|apple|github|facebook|microsoft|x|twitter)|使用\s*[^ ]{0,8}(继续|登录)|以\s*[^ ]{0,8}(继续|登录)/i;
+
+/** A page that IS a login/OAuth screen (little else on it) rather than a content page that merely links
+ *  to login. Gated on low content — a real landing page has hundreds of nodes and lots of copy, so a
+ *  nav "Log in" link never trips this; a bare "登录或注册 / 使用 Google 继续" wall does. */
+export function looksLikeLoginWall(dom: DomNode[]): boolean {
+  if (!dom.length) return false;
+  const joined = dom.map((n) => n.text).filter(Boolean).join(" ");
+  const totalText = joined.length;
+  const loginHits = (joined.match(LOGIN_KW) ?? []).length;
+  const hasOauthBtn = dom.some((n) => OAUTH_BTN.test(n.text));
+  const lowContent = dom.length <= 80 && totalText < 800;
+  return lowContent && (hasOauthBtn || loginHits >= 3);
+}
+
+export function detectLoginWall(input: { status: number; finalUrl: string; hasPasswordField: boolean; textLength: number; dom?: DomNode[] }): boolean {
   if (input.status === 401 || input.status === 403) return true;
   if (LOGIN_URL_RE.test(input.finalUrl)) return true;
   if (input.hasPasswordField && input.textLength < 80) return true;
+  if (input.dom && looksLikeLoginWall(input.dom)) return true;
   return false;
 }
 
@@ -74,7 +93,7 @@ export async function capturePage(
   const dom = await session.readDom(400);
   const hasPasswordField = await session.hasPasswordField();
   const textLength = dom.reduce((a, n) => a + n.text.length, 0);
-  if (detectLoginWall({ status: nav.status, finalUrl: nav.finalUrl, hasPasswordField, textLength })) {
+  if (detectLoginWall({ status: nav.status, finalUrl: nav.finalUrl, hasPasswordField, textLength, dom })) {
     step("login-required", `This page needs a login (${nav.finalUrl}). Sign in, then continue.`);
     return { page: null, loginRequired: true };
   }
