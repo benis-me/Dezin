@@ -1009,6 +1009,11 @@ export class Store {
     return asMessage(r);
   }
 
+  /** Replace a message's content in place (e.g., the live-research card as it accrues activities). */
+  updateMessage(id: string, content: string): void {
+    this.db.prepare(`UPDATE messages SET content = ? WHERE id = ?`).run(content, id);
+  }
+
   addImportedMessage(conversationId: string, input: { role: MessageRole; content: string; createdAt?: number }): Message {
     const id = this.clock.id();
     const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : this.clock.now();

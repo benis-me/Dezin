@@ -42,6 +42,17 @@ test("project CRUD round-trips", () => {
   s.close();
 });
 
+test("updateMessage replaces a message's content in place (not a new row)", () => {
+  const s = freshStore();
+  const p = s.createProject({ name: "P" });
+  const c = s.createConversation(p.id, "Chat");
+  const m = s.addMessage(c.id, "system", JSON.stringify({ research: { status: "running", activities: [] } }));
+  s.updateMessage(m.id, JSON.stringify({ research: { status: "running", activities: [{ kind: "search", text: "x", track: "product" }] } }));
+  const msgs = s.listMessages(c.id);
+  assert.equal(msgs.length, 1);
+  assert.match(msgs[0]!.content, /"text":"x"/);
+});
+
 test("conversations + messages preserve order", () => {
   const s = freshStore();
   const p = s.createProject({ name: "P" });

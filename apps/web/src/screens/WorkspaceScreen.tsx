@@ -721,6 +721,19 @@ function parseResearchDirections(value: unknown): ResearchCardData["directions"]
   return out;
 }
 
+/** Rehydrate the live-research card's accumulated Product/Visual steps from a persisted running card. */
+function parseResearchActivities(value: unknown): ResearchCardData["activities"] {
+  if (!Array.isArray(value)) return [];
+  const out: ResearchCardData["activities"] = [];
+  for (const item of value) {
+    if (!isRecord(item) || typeof item.text !== "string" || !item.text) continue;
+    const kind = typeof item.kind === "string" ? item.kind : "note";
+    const track = item.track === "visual" ? "visual" : item.track === "product" ? "product" : undefined;
+    out.push({ kind, text: item.text, track });
+  }
+  return out;
+}
+
 function normalizeLiveItems(value: unknown): LiveItem[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item): LiveItem[] => {
@@ -810,8 +823,8 @@ function toMsg(m: Message, id: number): Msg {
           kind: "research",
           text: "",
           research: {
-            status: "done",
-            activities: [],
+            status: r.status === "running" ? "running" : "done",
+            activities: parseResearchActivities(r.activities),
             report: r.report === true,
             sources: typeof r.sources === "number" ? r.sources : 0,
             assets: typeof r.assets === "number" ? r.assets : 0,
@@ -3110,7 +3123,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           const existing = m.find((msg) => msg.kind === "research");
           if (existing) {
             researchMsgIdRef.current = existing.id;
-            return m;
+            // A reattach replays research-start + every activity. If the rehydrated card is still
+            // RUNNING, clear its lanes so the replay rebuilds them cleanly (no doubling the activities
+            // restored from history); a done card is left as-is.
+            return existing.research?.status === "running"
+              ? m.map((msg) => (msg.id === existing.id && msg.research ? { ...msg, research: { ...msg.research, activities: [] } } : msg))
+              : m;
           }
           researchMsgIdRef.current = rid;
           return [...m, { id: rid, kind: "research", text: "", research: { status: "running", activities: [] } }];

@@ -354,6 +354,12 @@ function researchSummaryMessage(summary: ResearchSummary): string {
   return JSON.stringify({ research: summary });
 }
 
+/** The live (running) research card — persisted from research-start + updated per activity so its
+ *  Product/Visual lanes survive the user navigating away and back (history restore rehydrates them). */
+function researchCardMessage(activities: Array<{ kind: string; text: string; track?: "product" | "visual" }>): string {
+  return JSON.stringify({ research: { status: "running", activities } });
+}
+
 /** A compact HTML snippet of a kept design from any project, for cross-project exemplars. */
 function exemplarSnippet(dataDir: string, projectId: string, runId: string): string | null {
   const path = join(projectDir(dataDir, projectId), ".versions", `${runId}.html`);
@@ -621,6 +627,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // grounded in real discovery. Idempotent; a soft failure just proceeds without it.
   if (!alreadyResearched && body.research !== false && (body.research === true || settings.researchEnabled || process.env.DEZIN_RESEARCH === "1")) {
     sse({ type: "research-start", runId: run.id });
+    // Persist the research card from the START (not just its done-summary), updated per activity, so
+    // its live Product/Visual lanes survive navigating away and back — history restore rehydrates them.
+    const researchActivities: Array<{ kind: string; text: string; track?: "product" | "visual" }> = [];
+    const researchCardMsg = store.addMessage(conversation.id, "system", researchCardMessage(researchActivities));
     const research = await (deps.researchPhase ?? runResearchPhase)({
       dir,
       brief: visibleBrief,
@@ -631,7 +641,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       model: runModel,
       env: agentEnv,
       signal: ctrl.signal,
-      onActivity: (a) => sse({ type: "research-activity", runId: run.id, kind: a.kind, text: a.text, track: a.track }),
+      onActivity: (a) => {
+        researchActivities.push({ kind: a.kind, text: a.text, track: a.track });
+        store.updateMessage(researchCardMsg.id, researchCardMessage(researchActivities));
+        sse({ type: "research-activity", runId: run.id, kind: a.kind, text: a.text, track: a.track });
+      },
     });
     // Best-effort: fold any visual-track assets into the project's "Visual research" moodboard
     // so the workspace can show them immediately. Idempotent (reuses the board via a pointer
@@ -644,7 +658,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       ...(await summarizeResearch(dir, research.visualProduced)),
     };
     sse({ type: "research-done", runId: run.id, ...researchSummary });
-    store.addMessage(conversation.id, "system", researchSummaryMessage(researchSummary));
+    // Finalize the SAME card (created at research-start) with the done-summary — not a new message,
+    // so the card isn't duplicated on reload.
+    store.updateMessage(researchCardMsg.id, researchSummaryMessage(researchSummary));
     if (research.produced) {
       const chosenDirection = body.directionSlug?.trim() || undefined;
       // Direction gate: when research produced 2+ candidate directions and the caller
