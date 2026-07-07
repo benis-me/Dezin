@@ -1239,13 +1239,20 @@ export class Store {
     return row ? asRun(row) : null;
   }
 
-  markInterruptedRuns(ownerId?: string): number {
-    const res = ownerId
-      ? this.db
-          .prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending') AND owner_id = ?`)
-          .run(this.clock.now(), ownerId)
-      : this.db.prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending')`).run(this.clock.now());
-    return Number(res.changes ?? 0);
+  /** Sweep runs left 'running'/'pending' by a dead process to 'cancelled'. Returns the swept runs
+   * (id + conversationId) so the caller can persist a terminal message — their transcript is
+   * incomplete (the turn never finished), and they are no longer reattached on re-entry. */
+  markInterruptedRuns(ownerId?: string): Array<{ id: string; conversationId: string }> {
+    const rows = (
+      ownerId
+        ? this.db.prepare(`SELECT id, conversation_id FROM runs WHERE status IN ('running', 'pending') AND owner_id = ?`).all(ownerId)
+        : this.db.prepare(`SELECT id, conversation_id FROM runs WHERE status IN ('running', 'pending')`).all()
+    ) as Row[];
+    const now = this.clock.now();
+    if (ownerId)
+      this.db.prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending') AND owner_id = ?`).run(now, ownerId);
+    else this.db.prepare(`UPDATE runs SET status = 'cancelled', finished_at = ? WHERE status IN ('running', 'pending')`).run(now);
+    return rows.map((r) => ({ id: String(r.id), conversationId: String(r.conversation_id) }));
   }
 
   /** A project's runs, newest-first (createdAt desc, rowid desc tiebreak). */

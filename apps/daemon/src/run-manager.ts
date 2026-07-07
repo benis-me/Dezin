@@ -24,7 +24,6 @@ interface RunEntry {
 }
 
 const runs = new Map<string, RunEntry>();
-const activeByConversation = new Map<string, string>();
 
 export function runLogPath(dataDir: string, runId: string): string {
   return join(dataDir, ".runs", `${runId}.jsonl`);
@@ -52,7 +51,6 @@ export function createRun(meta: { runId: string; conversationId: string; dataDir
     done: false,
   };
   runs.set(meta.runId, entry);
-  activeByConversation.set(meta.conversationId, meta.runId);
   return entry.ctrl;
 }
 
@@ -91,7 +89,6 @@ export function finishRun(runId: string): void {
     if (runs.get(runId) !== e) return;
     e.done = true;
     e.emitter.emit("done");
-    if (activeByConversation.get(e.conversationId) === runId) activeByConversation.delete(e.conversationId);
     runs.delete(runId);
   });
 }
@@ -101,16 +98,6 @@ export function cancelRun(runId: string): boolean {
   if (!e) return false;
   e.ctrl.abort();
   return true;
-}
-
-/** The live run id for a conversation, if one is in flight right now. */
-export function activeRunForConversation(conversationId: string): string | undefined {
-  const id = activeByConversation.get(conversationId);
-  return id && runs.has(id) ? id : undefined;
-}
-
-export function isActive(runId: string): boolean {
-  return runs.has(runId);
 }
 
 /**

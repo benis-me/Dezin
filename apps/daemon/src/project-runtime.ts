@@ -342,6 +342,18 @@ export async function gitCommit(projectDir: string, message: string): Promise<{ 
   return { changed: true, committed: true, commitHash: head.code === 0 ? head.out.trim() : null };
 }
 
+/**
+ * Discard the working tree's uncommitted changes back to HEAD. Called when a run is cancelled or
+ * fails mid-turn so its half-written edits aren't silently bundled into the NEXT run's `git add -A`
+ * commit (and don't corrupt the workingTreeFingerprint "changed?" check). Preserves Dezin's internal
+ * dirs (.research/.versions/.refs) and .gitignore'd files (node_modules, dist).
+ */
+export async function gitDiscardChanges(projectDir: string): Promise<void> {
+  if (!existsSync(join(projectDir, ".git"))) return;
+  await run("git", ["reset", "--hard", "HEAD"], projectDir);
+  await run("git", ["clean", "-fd", "-e", ".research", "-e", ".versions", "-e", ".refs"], projectDir);
+}
+
 /** Stop all dev servers (called on daemon shutdown). */
 export function stopAllDevServers(): void {
   for (const rt of runtimes.values()) {

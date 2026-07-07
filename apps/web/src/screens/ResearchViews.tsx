@@ -8,7 +8,7 @@
  * `chosenSlug`, persisted server-side (.research/chosen) so it survives reload.
  */
 
-import { lazy, Suspense, useState, type KeyboardEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { motion } from "motion/react";
 import { Check, ChevronDown, ChevronRight, Download, FileCode2, Globe, Search, Sparkles } from "lucide-react";
 import { Markdown } from "../components/Markdown.tsx";
@@ -129,6 +129,14 @@ export function ResearchCard({
   // chosenSlug to round-trip) so the options + Submit button can no longer be changed.
   const [pendingSlug, setPendingSlug] = useState<string | null>(null);
   const committedSlug = chosenSlug ?? pendingSlug ?? undefined;
+  // If a submitted pick's run fails to start, the parent reverts its optimistic chosenSlug (set → unset).
+  // Release the local optimistic lock in that case so the gate can be picked again — but ONLY on a real
+  // revert, not merely "chosenSlug hasn't been set yet" (the normal instant-lock state after Submit).
+  const prevChosenRef = useRef<string | undefined>(chosenSlug);
+  useEffect(() => {
+    if (prevChosenRef.current && !chosenSlug && pendingSlug) setPendingSlug(null);
+    prevChosenRef.current = chosenSlug;
+  }, [chosenSlug, pendingSlug]);
   // Direction gate open: pick one direction INLINE, then Submit. Once a choice is committed
   // (Submit clicked, or chosenSlug arrives), the card locks to a read-only display of the chosen one.
   const pickable = !running && !!onPick && !committedSlug && directions.length > 0;

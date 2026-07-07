@@ -114,7 +114,10 @@ test("markInterruptedRuns only sweeps runs owned by this daemon", () => {
   s.updateRun(own.id, { status: "running" });
   s.updateRun(other.id, { status: "running" });
 
-  assert.equal(s.markInterruptedRuns("daemon-a"), 1);
+  const swept = s.markInterruptedRuns("daemon-a");
+  assert.equal(swept.length, 1);
+  assert.equal(swept[0]?.id, own.id);
+  assert.equal(swept[0]?.conversationId, c.id); // caller persists a terminal message for these
   assert.equal(s.getRun(own.id)?.status, "cancelled");
   assert.equal(s.getRun(other.id)?.status, "running");
   s.close();

@@ -89,7 +89,10 @@ const FILES_BROWSER_PANEL = "browser";
 const FILES_PREVIEW_PANEL = "preview";
 const PREVIEW_CANVAS_PANEL = "preview-canvas";
 const PREVIEW_INSPECT_PANEL = "inspect";
-const REPLAYABLE_RUN_STATUSES = new Set(["running", "pending", "cancelled", "failed"]);
+// Only LIVE runs are reattached on re-entry. Finished runs (cancelled/failed/succeeded) are fully
+// persisted, so loadMessages restores their transcript — replaying them would double-render the
+// process/assistant/result cards that are already on screen.
+const LIVE_RUN_STATUSES = new Set(["running", "pending"]);
 const SHOW_VARIANT_FANOUT_BUTTON: boolean = true;
 const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg-primary hover:!text-primary-foreground";
 const FLOATING_COMPOSER_FADE_PX = 48;
@@ -2449,6 +2452,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const qualityChecksRef = useRef<QualityCheckState>({ staticRan: false, visualRan: false, visualEnabled: null, source: "none" });
   const visualReviewMessageIdRef = useRef<number | null>(null);
   const researchMsgIdRef = useRef<number | null>(null);
+  // The conversation the currently-watched run belongs to — used to drop its events if the user
+  // switches to a different conversation mid-run (so they don't stream into the wrong transcript).
+  const activeRunConvRef = useRef<string | null>(null);
 
   const updateQualityChecks = (next: QualityCheckState | ((current: QualityCheckState) => QualityCheckState)): void => {
     const resolved = typeof next === "function" ? next(qualityChecksRef.current) : next;
@@ -2527,6 +2533,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     stickBottom.current = true;
     setShowScrollToBottom(false);
     msgId.current = 0;
+    // The live-target refs hold ids into the OLD numbering; clear them so a late event can't mutate an
+    // unrelated card after renumbering (they are re-armed on the next run-start).
+    researchMsgIdRef.current = null;
+    visualReviewMessageIdRef.current = null;
     setMessages(prior.map((m) => toMsg(m, msgId.current++)));
     scheduleScrollChatToBottom("auto");
   };
@@ -2595,8 +2605,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           updateQualityChecks({ staticRan: false, visualRan: false, visualEnabled: null, source: latest ? "persisted" : "none" });
         }
       }
-      if (latest && REPLAYABLE_RUN_STATUSES.has(latest.status) && !reattachedRunsRef.current.has(latest.id)) {
-        void reattachRun(latest.id, latest.status);
+      // Reattach the LIVE run of the conversation currently on screen (not just the active variant's
+      // newest run) — otherwise a live run in another conversation streams its cards into this one.
+      const liveForConv = sortedRuns.find((r) => r.conversationId === activeConv.current && LIVE_RUN_STATUSES.has(r.status));
+      if (liveForConv && !reattachedRunsRef.current.has(liveForConv.id)) {
+        void reattachRun(liveForConv.id, liveForConv.status);
       }
     } catch {
       // no runs yet
@@ -2824,7 +2837,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const pushResult = (text: string, meta: ResultMeta, runId?: string): void => {
     const materialSources = materialSourcesRef.current;
-    setMessages((m) => [...m, { id: msgId.current++, kind: "result", text, meta: materialSources.length ? { ...meta, materialSources } : meta, runId }]);
+    setMessages((m) => [...m, { id: msgId.current++, kind: "result", text, at: Date.now(), meta: materialSources.length ? { ...meta, materialSources } : meta, runId }]);
   };
 
   // Turn the live (interleaved) stream into the transcript: a collapsed process record,
@@ -2836,9 +2849,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const elapsedStart = turnStartedAtRef.current ?? runStartedAtRef.current;
     const elapsedMs = elapsedStart != null ? Math.max(0, Date.now() - elapsedStart) : undefined;
     const processItems = summaryBoundaryRef.current ? items : items.filter((i): i is { type: "tool"; summary: string } => i.type === "tool");
-    const next: Msg[] = processItems.length ? [{ id: msgId.current++, kind: "process", text: "", items: processItems, elapsedMs }] : [];
-    if (emitSummary && text) next.push({ id: msgId.current++, kind: "assistant", text });
-    if (steps.length) next.push({ id: msgId.current++, kind: "process", text: "", steps });
+    const nowAt = Date.now();
+    const next: Msg[] = processItems.length ? [{ id: msgId.current++, kind: "process", text: "", items: processItems, elapsedMs, at: nowAt }] : [];
+    if (emitSummary && text) next.push({ id: msgId.current++, kind: "assistant", text, at: nowAt });
+    if (steps.length) next.push({ id: msgId.current++, kind: "process", text: "", steps, at: nowAt });
     setMessages((m) => [...m, ...next]);
     liveItemsRef.current = [];
     currentTurnTextRef.current = "";
@@ -2940,6 +2954,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   };
 
   const handleEvent = (ev: RunEvent, id: string): void => {
+    // Drop events for a run whose conversation is no longer on screen (the user switched conversations
+    // mid-run) so its cards don't stream into the wrong transcript. run-start is exempt — it
+    // (re)establishes which conversation the watched run belongs to. The run keeps going server-side;
+    // its transcript is restored from persistence when its conversation is reopened.
+    if (ev.type !== "run-start" && activeRunConvRef.current && activeConv.current && activeRunConvRef.current !== activeConv.current) return;
     const seq = typeof ev.seq === "number" && Number.isFinite(ev.seq) ? ev.seq : null;
     const eventRunId = typeof ev.runId === "string" ? ev.runId : activeRunIdRef.current;
     if (seq !== null && eventRunId) {
@@ -2955,13 +2974,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         if (typeof ev.runId === "string") activeRunIdRef.current = ev.runId;
         if (typeof ev.conversationId === "string") {
           const cid = ev.conversationId;
+          activeRunConvRef.current = cid;
           setActive(cid);
           setConversations((c) =>
             c.some((x) => x.id === cid) ? c : [...c, { id: cid, projectId: id, title: "Untitled", createdAt: Date.now() }],
           );
         }
-        setLintFindings([]);
-        setScore(null);
+        // Keep the previous run's findings/score visible until THIS run's first quality result
+        // replaces them (the lint/static-quality case replaces the list) — don't blank the Quality
+        // tab for the whole research+generation window of a follow-up.
         liveQualityRef.current = false;
         updateQualityChecks({ staticRan: false, visualRan: false, visualEnabled: null, source: "live" });
         setLiveItems([]);
@@ -3334,6 +3355,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         summaryBoundaryRef.current = false;
         pushResult(`The run failed: ${err instanceof Error ? err.message : "run failed"}`, { error: true });
         toast("The run failed.", { variant: "error" });
+        // A failed direction-pick run must not leave the gate optimistically locked as "chosen" —
+        // revert so the user can pick a direction again.
+        if (directionSlug) setResearch((prev) => (prev && prev.chosenSlug === directionSlug ? { ...prev, chosenSlug: undefined } : prev));
       }
     } finally {
       runningRef.current = false;
@@ -3500,6 +3524,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (projectId === "new") return;
     let alive = true;
     liveQualityRef.current = false;
+    // New project → the per-run reattach/seq state from the previous project is stale; clear it so a
+    // stale "already reattached" flag can't block a legit reattach here (and to avoid a slow leak).
+    reattachedRunsRef.current.clear();
+    lastSeqByRunRef.current.clear();
     setScore(null);
     setLintFindings([]);
     setRanOnce(false);

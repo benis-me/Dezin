@@ -77,7 +77,12 @@ function main(): void {
   const releaseLock = acquireDaemonLock();
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
   const store = new Store(join(DATA_DIR, "app.sqlite"));
-  store.markInterruptedRuns(); // a prior process died mid-run → don't show those as running
+  // A prior process died mid-run → sweep those to cancelled AND leave a terminal message: finished
+  // runs are no longer reattached/replayed on re-entry (that double-rendered them), so an interrupted
+  // run needs a persisted terminal or its last turn looks unanswered.
+  for (const r of store.markInterruptedRuns()) {
+    store.addMessage(r.conversationId, "system", JSON.stringify({ result: { text: "Stopped — the app restarted before this run finished.", meta: {} } }));
+  }
   if (process.env.DEZIN_AGENT_CMD) store.updateSettings({ agentCommand: process.env.DEZIN_AGENT_CMD });
   // One shared registry: bundled systems + any the user has imported (persisted to disk).
   const designRegistry = new DesignRegistry([...BUNDLED_DESIGN_SYSTEMS, ...loadDesignSystems(userDesignDir(DATA_DIR))]);

@@ -29,7 +29,7 @@ import { lintArtifact, lintScore, renderFindingsForAgent, applyIgnores } from ".
 import { generateImages } from "./image-gen.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
-import { ensureDevServer, gitCommit, workingTreeFingerprint } from "./project-runtime.ts";
+import { ensureDevServer, gitCommit, gitDiscardChanges, workingTreeFingerprint } from "./project-runtime.ts";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
@@ -50,6 +50,7 @@ import {
   readSources,
   researchExists,
   writeChosenDirection,
+  readChosenDirection,
   listVisualAssets,
   readVisualSources,
 } from "../../../packages/research/src/index.ts";
@@ -235,6 +236,14 @@ function researchAgentCommand(settings: Settings, fallback: string): string {
 function researchModel(settings: Settings, fallback?: string): string | undefined {
   return settings.researchModel.trim() || fallback || settings.model || undefined;
 }
+
+/**
+ * In-memory guard that closes the TOCTOU window between findActiveRun and createRun: the DB row that
+ * makes a concurrent request lose the race isn't inserted until createRun, and there are awaits in
+ * between, so two near-simultaneous run POSTs could both pass the DB check. A synchronous check+add
+ * keyed by project:variant prevents that (the daemon is single-process). Released once the row exists.
+ */
+const startingRuns = new Set<string>();
 
 function shouldAutoRepair(settings: Settings, findings: QualityFinding[], repairRounds: number, maxRounds: number): boolean {
   if (!settings.autoImproveEnabled || repairRounds >= maxRounds) return false;
@@ -516,12 +525,17 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   }
   const activeRun = store.findActiveRun(project.id, targetVariantId);
   if (activeRun) return sendError(res, 409, "run already in progress for this project variant");
+  // Also guard the window before createRun's row exists (see startingRuns) — synchronous check+add.
+  const startKey = `${project.id}:${targetVariantId}`;
+  if (startingRuns.has(startKey)) return sendError(res, 409, "run already in progress for this project variant");
+  startingRuns.add(startKey);
   conversation ??= store.createConversation(project.id);
   let dir: string;
   try {
     dir = project.mode === "standard" ? await standardVariantArtifactDir(deps, project.id, targetVariantId) : projectDir(deps.dataDir, project.id);
     await mkdir(dir, { recursive: true });
   } catch (err) {
+    startingRuns.delete(startKey);
     return sendError(res, 409, err instanceof Error ? err.message : "variant workspace unavailable");
   }
 
@@ -577,6 +591,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     agentCommand: runAgentCommand,
     skillId: skill?.id ?? null,
   });
+  // The DB row now exists → findActiveRun guards further requests; release the in-memory lock.
+  startingRuns.delete(startKey);
   const moodboardContext = buildProjectMoodboardContext({
     store,
     dataDir: deps.dataDir,
@@ -706,6 +722,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     const chosenDirection = body.directionSlug!.trim();
     await writeChosenDirection(dir, chosenDirection).catch(() => {});
     chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
+    const researchContext = await buildResearchContext(dir, chosenDirection);
+    if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
+  } else if (researchOnDisk) {
+    // A follow-up turn on an already-researched project: we deliberately did NOT re-run research
+    // above (that would re-surface the direction gate and cancel the run). But still re-wire the
+    // previously-chosen direction's spec (the critic's aesthetic contract) and the research context
+    // into this build, so follow-ups stay grounded in the same direction/discovery as the first build.
+    const chosenDirection = (await readChosenDirection(dir).catch(() => null)) ?? undefined;
+    if (chosenDirection) chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
     const researchContext = await buildResearchContext(dir, chosenDirection);
     if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
   }
@@ -1072,6 +1097,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     } catch (err) {
       const cancelled = ctrl.signal.aborted || isAbortError(err);
       store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
+      // Discard the aborted turn's half-written edits so the NEXT run's `git add -A` doesn't silently
+      // bundle them into its version snapshot (standard mode edits src/ directly). Best-effort.
+      await gitDiscardChanges(dir).catch(() => {});
       const partial = processAssistantText();
       persistProcess();
       if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);

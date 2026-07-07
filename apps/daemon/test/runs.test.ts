@@ -329,6 +329,37 @@ test("POST /api/runs rejects a concurrent run for the same project variant", asy
   });
 });
 
+test("POST /api/runs closes the TOCTOU window: two racing runs → one starts, one 409s", async () => {
+  let releaseTurn: (() => void) | null = null;
+  const runner: AgentRunner = {
+    id: "blocked",
+    runTurn: () =>
+      new Promise((resolve) => {
+        releaseTurn = () => resolve({ text: "done", artifactHtml: CLEAN, artifactPath: "index.html" });
+      }),
+  };
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = await createProject(base);
+    const post = () =>
+      fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "race" }),
+      });
+    // Fire both before either's DB row exists. Without the in-memory lock, both could pass the
+    // findActiveRun check (the row isn't inserted until createRun, with awaits in between).
+    const [a, b] = await Promise.all([post(), post()]);
+    assert.deepEqual([a.status, b.status].sort((x, y) => x - y), [200, 409], "exactly one run starts; the other 409s");
+    assert.equal(store.listRuns(project.id).length, 1, "only one run row is created");
+    const winner = a.status === 200 ? a : b;
+    const loser = a.status === 200 ? b : a;
+    await loser.text().catch(() => {});
+    while (!releaseTurn) await delay(5);
+    releaseTurn();
+    await winner.text();
+  });
+});
+
 test("run injects referenced moodboard context into the agent message", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   await withRunServer(runner, async ({ base, dataDir, store }) => {
@@ -2003,6 +2034,7 @@ test("a follow-up turn does not re-run Research on an already-researched project
       writeFileSync(join(dir, ".research", "research.md"), "# Research\n\nprior");
       writeFileSync(join(dir, ".research", "directions", "a", "direction.md"), "# Direction A");
       writeFileSync(join(dir, ".research", "directions", "b", "direction.md"), "# Direction B");
+      writeFileSync(join(dir, ".research", "chosen"), "a\n"); // the user picked direction "a" earlier
 
       const res = await fetch(`${base}/api/runs`, {
         method: "POST",
@@ -2017,6 +2049,12 @@ test("a follow-up turn does not re-run Research on an already-researched project
       assert.ok(!types.includes("direction-gate"), "must not re-surface the old direction gate");
       assert.ok(!types.includes("run-cancelled"), "must not cancel the follow-up run");
       assert.ok(types.includes("run-done"), "the follow-up build completes normally");
+
+      // …but the follow-up build must stay GROUNDED: the research report + the previously-chosen
+      // direction are re-wired into the brief WITHOUT re-running research.
+      assert.match(runner.calls[0]!.message, /## Research report/, "follow-up brief carries the research report");
+      assert.match(runner.calls[0]!.message, /prior/, "…including the report body");
+      assert.match(runner.calls[0]!.message, /Chosen direction/, "…and the previously-chosen direction spec");
     },
     { researchPhase },
   );

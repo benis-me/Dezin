@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { ensureDevServer, ensureProjectPickerBridge, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
+import { ensureDevServer, ensureProjectPickerBridge, gitDiscardChanges, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
 
 async function waitForPortDown(url: string): Promise<void> {
   for (let i = 0; i < 20; i++) {
@@ -239,6 +239,34 @@ test("setupImportedStandardProject installs without running imported package scr
     await setupImportedStandardProject("import-postinstall-test", dir);
 
     assert.equal(existsSync(marker), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("gitDiscardChanges reverts the working tree to HEAD but preserves .research", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-discard-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "t@t.dev"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "App.jsx"), "v1");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-qm", "baseline"], { cwd: dir });
+
+    // A cancelled run's leftovers: a modified tracked file, a new untracked file, and a Dezin-internal
+    // .research dir (untracked) that must survive the discard.
+    writeFileSync(join(dir, "src", "App.jsx"), "v2-half-written");
+    writeFileSync(join(dir, "src", "New.jsx"), "leftover");
+    mkdirSync(join(dir, ".research"), { recursive: true });
+    writeFileSync(join(dir, ".research", "research.md"), "keep me");
+
+    await gitDiscardChanges(dir);
+
+    assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "v1", "tracked edit reverted to HEAD");
+    assert.equal(existsSync(join(dir, "src", "New.jsx")), false, "untracked leftover removed");
+    assert.equal(readFileSync(join(dir, ".research", "research.md"), "utf8"), "keep me", ".research preserved");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

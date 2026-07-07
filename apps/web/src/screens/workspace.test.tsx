@@ -883,14 +883,22 @@ test("live generating status uses shiny text", async () => {
   }
 });
 
-test("mount replays an interrupted run log after daemon restart", async () => {
-  const reattachRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {
-    yield { type: "run-start", runId: "r-interrupted", conversationId: "c1" };
-    yield { type: "turn-end", round: 0, text: "Partial text before quit." };
-  });
+test("mount shows an interrupted run's persisted terminal WITHOUT reattaching (no double-render)", async () => {
+  const reattachRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {});
   const fake = makeFakeApi({
     listConversations: async () => [{ id: "c1", projectId: "p1", title: "Chat", createdAt: 1 }],
-    listMessages: async () => [],
+    // Finished runs are fully persisted (start.ts writes a terminal for interrupted ones). loadMessages
+    // restores the transcript; a finished run must NOT be reattached — replaying it would double-render.
+    listMessages: async () => [
+      { id: "m-user", conversationId: "c1", role: "user", content: "make a hero", createdAt: 1 },
+      {
+        id: "m-term",
+        conversationId: "c1",
+        role: "system",
+        content: JSON.stringify({ result: { text: "Stopped — the app restarted before this run finished.", meta: {} } }),
+        createdAt: 3,
+      },
+    ],
     listRuns: async () => [
       { id: "r-interrupted", conversationId: "c1", status: "cancelled", score: null, repairRounds: 0, lintPassed: false, createdAt: 2, finishedAt: 3 },
     ],
@@ -903,9 +911,35 @@ test("mount replays an interrupted run log after daemon restart", async () => {
     </ApiProvider>,
   );
 
-  expect(await screen.findByText("Partial text before quit.")).toBeInTheDocument();
-  expect(await screen.findByText("Interrupted.")).toBeInTheDocument();
-  expect(reattachRun).toHaveBeenCalledWith("r-interrupted", expect.anything(), { afterSeq: 0 });
+  expect(await screen.findByText(/Stopped — the app restarted/)).toBeInTheDocument();
+  // The cancelled run is NOT reattached — that replay is what double-rendered finished runs on re-entry.
+  await Promise.resolve();
+  expect(reattachRun).not.toHaveBeenCalled();
+});
+
+test("re-entry reattaches the loaded conversation's live run, not another conversation's", async () => {
+  const reattachRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {});
+  const fake = makeFakeApi({
+    listConversations: async () => [
+      { id: "cA", projectId: "p1", title: "A", createdAt: 1 },
+      { id: "cB", projectId: "p1", title: "B", createdAt: 2 },
+    ],
+    listMessages: async () => [],
+    // A live run belongs to conversation A, but re-entry opens the newest conversation (B). Reattaching
+    // it (as the variant's newest run) would stream A's cards into B — it must be skipped.
+    listRuns: async () => [
+      { id: "r-live", conversationId: "cA", status: "running", score: null, repairRounds: 0, lintPassed: false, createdAt: 3, finishedAt: null },
+    ],
+    reattachRun,
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  await screen.findByLabelText("Message");
+  await new Promise((r) => setTimeout(r, 50));
+  expect(reattachRun).not.toHaveBeenCalled();
 });
 
 test("Stop explicitly cancels the active daemon run", async () => {
