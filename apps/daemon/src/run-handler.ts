@@ -712,7 +712,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // round — this sits before turnMessage is first derived from agentBrief, so the FIRST build
   // turn already sees it.
   if (project.sharingan && project.sourceUrl) {
-    await ensureCaptured(project.id, deps.dataDir, project.sourceUrl);
+    // Best-effort: never fail the build on a capture hiccup — the agent can still probe live.
+    await ensureCaptured(project.id, deps.dataDir, project.sourceUrl).catch(() => {});
     agentBrief = [
       agentBrief,
       buildSharinganContext({
