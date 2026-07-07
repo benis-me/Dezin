@@ -4166,7 +4166,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const submitDirection = (slug: string): void => {
     const gate = messages.find((m) => m.kind === "direction-gate");
     const brief = gate?.text || lastRunBriefRef.current;
-    if (brief.trim()) void runBrief(brief, undefined, undefined, [], [], slug);
+    if (brief.trim()) {
+      // Optimistic: reflect the pick in the Research tab (panel selection) immediately, before the
+      // run round-trips and the server persists .research/chosen.
+      setResearch((prev) => (prev ? { ...prev, chosenSlug: slug } : prev));
+      void runBrief(brief, undefined, undefined, [], [], slug);
+    }
   };
   const renderTranscriptMessage = (m: Msg, stackPosition: RunCardStackPosition = "single"): ReactNode =>
     m.kind === "user" ? (

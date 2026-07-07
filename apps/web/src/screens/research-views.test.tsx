@@ -135,6 +135,39 @@ test("ResearchCard: a chosen direction locks the gate (no Submit) and carries no
   expect(bold.className).not.toMatch(/\bring-/);
 });
 
+test("ResearchCard locks the picker immediately on Submit (optimistic — before chosenSlug round-trips)", () => {
+  const onPick = vi.fn();
+  // NO chosenSlug prop: the lock here comes purely from the optimistic pending state, not the server.
+  render(<ResearchCard research={gateResearch} onPick={onPick} onOpen={() => {}} />);
+  fireEvent.click(screen.getAllByTestId("research-card-direction").find((c) => c.textContent?.includes("Bold terminal"))!);
+  fireEvent.click(screen.getByTestId("research-submit-direction"));
+  expect(onPick).toHaveBeenCalledWith("bold");
+  // Locked instantly: Submit gone, options are display-only (divs, not buttons), the pick is marked.
+  expect(screen.queryByTestId("research-submit-direction")).toBeNull();
+  const options = screen.getAllByTestId("research-card-direction");
+  const bold = options.find((c) => c.textContent?.includes("Bold terminal"))!;
+  const calm = options.find((c) => c.textContent?.includes("Calm editorial"))!;
+  expect(bold.tagName).toBe("DIV");
+  expect(bold.getAttribute("data-selected")).toBe("true");
+  expect(calm.getAttribute("data-selected")).toBe("false");
+  // Options can no longer be changed — clicking another does not re-pick.
+  fireEvent.click(calm);
+  expect(onPick).toHaveBeenCalledTimes(1);
+});
+
+test("ResearchPanel Visual tab renders the moodboard mount at the TOP, before the report", async () => {
+  const research = {
+    exists: true, report: "# Product", sources: [], directions: [], assets: [],
+    visual: { exists: true, report: "# Visual\n\nMono palette.", sources: [], assets: [], boardId: "board-1" },
+  };
+  render(<ResearchPanel research={research as any} assetUrl={(p) => `/a/${p}`} visualAssetUrl={(p) => `/v/${p}`} />);
+  screen.getByRole("tab", { name: /visual/i }).click();
+  const mount = await screen.findByTestId("visual-moodboard-mount");
+  const report = screen.getByText(/Mono palette/).closest("section")!;
+  // mount precedes the report section → the report is DOCUMENT_POSITION_FOLLOWING relative to the mount.
+  expect(mount.compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
 test("ResearchPanel lays directions out one-per-row (not a 2-col grid) and marks the chosen one", () => {
   const research: ResearchDetail = {
     exists: true,

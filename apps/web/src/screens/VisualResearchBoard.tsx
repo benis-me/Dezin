@@ -83,9 +83,11 @@ export function VisualResearchBoard({ boardId }: { boardId: string }) {
   );
 
   return (
-    <div className="h-[420px] w-full overflow-hidden rounded-lg border border-border bg-surface">
+    <div className="h-[440px] w-full overflow-hidden rounded-lg border border-border bg-surface">
       <MoodboardCanvas
-        viewKey={boardId}
+        // viewKey flips from `<id>` (empty) to `<id>:ready` once nodes load, so the controller's
+        // fit-view fires AFTER the async load (not on the empty canvas) → the 12 shots fit into view.
+        viewKey={nodes.length > 0 ? `${boardId}:ready` : boardId}
         nodes={nodes}
         selectedIds={selectedIds}
         moodboardAssets={assets}

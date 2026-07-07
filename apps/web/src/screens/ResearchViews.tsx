@@ -125,9 +125,13 @@ export function ResearchCard({
   const recent = activities.slice(-14);
   const hasTracks = activities.some((a) => !!a.track);
   const [selected, setSelected] = useState<string | null>(null);
-  // Direction gate open: pick one direction INLINE, then Submit. Once a choice is persisted
-  // (chosenSlug arrives), the card locks to a read-only display of the chosen one.
-  const pickable = !running && !!onPick && !chosenSlug && directions.length > 0;
+  // Optimistic lock: the moment Submit is clicked, lock the picker (don't wait for the server's
+  // chosenSlug to round-trip) so the options + Submit button can no longer be changed.
+  const [pendingSlug, setPendingSlug] = useState<string | null>(null);
+  const committedSlug = chosenSlug ?? pendingSlug ?? undefined;
+  // Direction gate open: pick one direction INLINE, then Submit. Once a choice is committed
+  // (Submit clicked, or chosenSlug arrives), the card locks to a read-only display of the chosen one.
+  const pickable = !running && !!onPick && !committedSlug && directions.length > 0;
   const interactive = !running && !pickable && !!onOpen; // whole-card click opens the tab — but never while picking
   const activateKey = (e: KeyboardEvent<HTMLElement>): void => {
     if (interactive && (e.key === "Enter" || e.key === " ")) {
@@ -204,10 +208,10 @@ export function ResearchCard({
           {directions.length ? (
             <div className="mt-2 grid gap-1.5">
               {directions.map((d) => {
-                const isChosen = !!chosenSlug && d.slug === chosenSlug;
+                const isChosen = !!committedSlug && d.slug === committedSlug;
                 const isSelected = pickable && selected === d.slug;
                 const active = isChosen || isSelected;
-                const dimmed = !!chosenSlug && !isChosen; // once a direction is chosen, the others recede
+                const dimmed = !!committedSlug && !isChosen; // once a direction is committed, the others recede
                 // No outer shadow ring on the selected direction — just a border + tint.
                 const optionClass = cn(
                   "flex w-full items-start gap-2 rounded-md border p-2 text-left transition-colors",
@@ -249,7 +253,10 @@ export function ResearchCard({
               data-testid="research-submit-direction"
               disabled={!selected}
               onClick={() => {
-                if (selected) onPick!(selected);
+                if (selected) {
+                  setPendingSlug(selected); // lock the picker immediately (optimistic)
+                  onPick!(selected);
+                }
               }}
               className="mt-2 w-full rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -324,6 +331,16 @@ export function ResearchPanel({
         ) : null}
         {subTab === "visual" && hasVisual ? (
           <>
+            {/* Moodboard at the TOP of the Visual tab: it's the headline, and being immediately
+                visible + properly sized on tab-open lets the canvas fit-to-content and pan/zoom
+                (a below-the-fold mount inits at 0 size → empty, non-interactive canvas). */}
+            <div data-testid="visual-moodboard-mount">
+              {visual?.boardId ? (
+                <Suspense fallback={null}>
+                  <VisualResearchBoard boardId={visual.boardId} />
+                </Suspense>
+              ) : null}
+            </div>
             {visualReportMd ? (
               <section className="rounded-lg border border-border bg-card p-4">
                 <Markdown className="space-y-2 text-sm text-foreground [&_img]:my-2 [&_img]:rounded-md [&_img]:border [&_img]:border-border">{visualReportMd}</Markdown>
@@ -369,13 +386,6 @@ export function ResearchPanel({
                 </ul>
               </section>
             ) : null}
-            <div data-testid="visual-moodboard-mount">
-              {visual?.boardId ? (
-                <Suspense fallback={null}>
-                  <VisualResearchBoard boardId={visual.boardId} />
-                </Suspense>
-              ) : null}
-            </div>
           </>
         ) : null}
         {subTab === "product" && directions.length ? (
