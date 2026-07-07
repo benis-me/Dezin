@@ -59,7 +59,9 @@ export class SharinganSession {
           }),
       )
       .catch(() => {});
-    return { status: res?.status() ?? 0, finalUrl: this.page.url() };
+    const finalUrl = this.page.url();
+    try { this.origin = new URL(finalUrl).origin; } catch { /* keep the prior origin on an unparseable url */ }
+    return { status: res?.status() ?? 0, finalUrl };
   }
 
   async setViewport(v: Viewport): Promise<void> { await this.page.setViewport({ width: v.width, height: v.height, deviceScaleFactor: 1 }); }

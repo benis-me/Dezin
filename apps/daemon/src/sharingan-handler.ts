@@ -13,8 +13,20 @@ import { capturePage, type CaptureStep, type CapturedPage } from "./sharingan-ca
 import { projectDir, safeJoin } from "./serve-static.ts";
 import { sendJson, readJsonBody } from "./http-util.ts";
 
-type Phase = "idle" | "capturing" | "login-required" | "captured" | "error";
-interface Capture { phase: Phase; steps: CaptureStep[]; pages: CapturedPage[]; session?: SharinganSession; listeners: Set<ServerResponse>; url?: string; error?: string }
+type Phase = "idle" | "capturing" | "login-required" | "captured" | "error" | "probing";
+interface Capture {
+  phase: Phase;
+  steps: CaptureStep[];
+  pages: CapturedPage[];
+  session?: SharinganSession;
+  listeners: Set<ServerResponse>;
+  url?: string;
+  error?: string;
+  probeTimer?: ReturnType<typeof setTimeout>;
+}
+
+/** Idle-release window for a lazily-opened probe session (mirrors the dev-server lifecycle). */
+const SHARINGAN_PROBE_IDLE_MS = 120_000;
 
 const captures = new Map<string, Capture>();
 
@@ -28,6 +40,45 @@ function emit(c: Capture, step: CaptureStep): void {
   c.steps.push(step);
   const line = `data: ${JSON.stringify(step)}\n\n`;
   for (const res of c.listeners) res.write(line);
+}
+
+function armProbeIdle(id: string): void {
+  const c = get(id);
+  if (c.probeTimer) clearTimeout(c.probeTimer);
+  c.probeTimer = setTimeout(() => { void releaseProbeSession(id); }, SHARINGAN_PROBE_IDLE_MS);
+  c.probeTimer.unref?.();
+}
+
+/** Close and clear an idle (or explicitly released) probe session, restoring phase "captured". */
+async function releaseProbeSession(id: string): Promise<void> {
+  const c = get(id);
+  if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
+  if (c.phase !== "probing") return;
+  const s = c.session; c.session = undefined; c.phase = "captured";
+  if (s) await s.close().catch(() => {});
+}
+
+/**
+ * Lazily open (or reuse) the live probe session the build Agent drives to explore + capture
+ * key pages. Opens ON `c.url` (the entry sourceUrl) so the session's origin matches the entry
+ * capture's origin, which `discoverLinks` filters against. Refuses while the entry capture is
+ * mid-flight ("capturing"/"login-required") — those phases mean a headful browser is already
+ * live for that id, and opening a second one would orphan it. Every call resets the idle timer.
+ */
+export async function ensureProbeSession(
+  id: string,
+  dataDir: string,
+  open: (url: string, opts: { userDataDir?: string; headless?: boolean }) => Promise<SharinganSession> = SharinganSession.open,
+): Promise<SharinganSession> {
+  const c = get(id);
+  if (c.phase === "capturing" || c.phase === "login-required") throw new Error("capture in progress");
+  if (!c.session) {
+    const profileDir = join(dataDir, ".sharingan-profile");
+    c.session = await open(c.url ?? "about:blank", { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
+    c.phase = "probing";
+  }
+  armProbeIdle(id);
+  return c.session;
 }
 
 export async function startCapture(
@@ -108,6 +159,22 @@ export function handleSharinganFocus(res: ServerResponse, id: string): void {
   const c = get(id);
   void c.session?.bringToFront();
   sendJson(res, 200, { ok: true });
+}
+
+/** Drive the (lazily-opened, idle-released) probe session to a URL. Emits a "navigate" step so the Phase-3 tab shows the Agent's activity. */
+export async function handleSharinganNavigate(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
+  const body = (await readJsonBody(req)) as { url?: string };
+  const url = typeof body.url === "string" ? body.url.trim() : "";
+  if (!/^https?:\/\//i.test(url)) { sendJson(res, 400, { error: "a valid http(s) url is required" }); return; }
+  try {
+    const session = await ensureProbeSession(id, dataDir);
+    const c = get(id);
+    emit(c, { at: Date.now(), kind: "navigate", text: `Agent navigating to ${url}` });
+    const nav = await session.navigate(url);
+    sendJson(res, 200, nav);
+  } catch (err) {
+    sendJson(res, 409, { error: err instanceof Error ? err.message : "navigate failed" });
+  }
 }
 
 export function handleSharinganStatus(res: ServerResponse, id: string): void {
