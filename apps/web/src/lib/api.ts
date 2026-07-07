@@ -22,6 +22,10 @@ export interface Project {
   runStatus?: "pending" | "running" | null;
   /** Absolute on-disk project folder, when served by the local daemon. */
   projectPath?: string;
+  /** Whether this project was created by cloning a website via Sharingan. */
+  sharingan?: boolean;
+  /** The source URL Sharingan cloned this project from, when sharingan is true. */
+  sourceUrl?: string;
 }
 
 export type SetupPhase = "scaffolding" | "installing" | "ready" | "error";
