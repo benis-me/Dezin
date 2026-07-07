@@ -1,6 +1,6 @@
 {
   "name": "dezin",
-  "version": "0.28.3",
+  "version": "0.29.0",
   "private": true,
   "type": "module",
   "description": "Local-first, tasteful design generator.",
