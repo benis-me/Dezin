@@ -790,7 +790,7 @@ export function HomeScreen({
                   rows={3}
                   className="relative z-10 field-sizing-content max-h-64 min-h-[92px] w-full resize-none bg-transparent px-3 py-2.5 pr-12 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:cursor-wait disabled:opacity-75"
                 />
-                {brief.trim().length > 0 ? (
+                {brief.trim().length > 0 && !sharingan ? (
                   <TooltipProvider delayDuration={120}>
                     <div className="absolute bottom-2 right-2 z-20 flex items-center gap-1">
                       {optimizedOriginalPrompt !== null && !optimizingPrompt ? (

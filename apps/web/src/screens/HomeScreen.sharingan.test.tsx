@@ -65,6 +65,13 @@ describe("HomeScreen Sharingan mode", () => {
     expect(onNewProject).not.toHaveBeenCalled();
   });
 
+  it("hides the Optimize prompt affordance while in Sharingan mode", () => {
+    renderHome();
+    fireEvent.doubleClick(screen.getByText("Start a design"));
+    fireEvent.change(screen.getByPlaceholderText("Paste a URL to clone…"), { target: { value: "https://example.com" } });
+    expect(screen.queryByRole("button", { name: "Optimize prompt" })).not.toBeInTheDocument();
+  });
+
   it("first Sharingan run gates on the authorized-use affirmation, then proceeds", async () => {
     const onNewProject = vi.fn();
     const updateSettings = vi.fn(async (patch: Record<string, unknown>) => ({ ...(await makeFakeApi().getSettings()), ...patch }));
