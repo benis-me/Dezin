@@ -37,7 +37,7 @@ import {
 import { handleGetVersion, handleGetVersionPreviewUrl, handleGetVersionDiff, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } from "./project-runtime.ts";
-import { handleSharinganStart, handleSharinganStatus, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus } from "./sharingan-handler.ts";
+import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus } from "./sharingan-handler.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleCreateEffect, handleGetEffect, handleListEffects, handleUpdateEffect } from "./effects-handler.ts";
@@ -883,6 +883,13 @@ const routes: Route[] = [
     method: "GET",
     pattern: "/api/sharingan/:id/status",
     handler: (_req, res, p) => handleSharinganStatus(res, p.id!),
+  },
+  {
+    // Serve a captured-page screenshot (publicRead so <img src> works — it cannot send the daemon token header).
+    method: "GET",
+    pattern: "/api/sharingan/:id/shot",
+    publicRead: true,
+    handler: (req, res, p, deps) => handleSharinganShot(res, p.id!, new URL(req.url ?? "", "http://x").searchParams.get("path") ?? "", deps.dataDir),
   },
   {
     method: "GET",
