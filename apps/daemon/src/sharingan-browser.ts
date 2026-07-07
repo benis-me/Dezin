@@ -21,7 +21,7 @@ export interface DomTreeNode {
   box: { x: number; y: number; w: number; h: number };
   style: DomTreeStyle; children: DomTreeNode[];
 }
-export interface Asset { url: string; kind: "img" | "background" | "video"; alt?: string; w?: number; h?: number }
+export interface Asset { url: string; kind: "img" | "background" | "video"; alt?: string; w?: number; h?: number; local?: string }
 export interface StyleTokens { colors: string[]; fontFamilies: string[]; fontSizes: string[]; radii: string[]; shadows: string[] }
 
 type Browser = Awaited<ReturnType<typeof puppeteer.launch>>;
@@ -232,6 +232,25 @@ export class SharinganSession {
       }
       return out;
     }, maxAssets);
+  }
+
+  /** Fetch an asset's bytes in the PAGE context so it inherits the authenticated session's cookies
+   *  (some source images are login-gated). Returns the raw bytes + content-type, or null on any
+   *  failure (network error, non-2xx, CORS). Best-effort — callers treat null as "not cached". */
+  async fetchAsset(url: string): Promise<{ bytes: number[]; contentType: string } | null> {
+    return this.page.evaluate(async (u: string) => {
+      try {
+        const g = globalThis as any;
+        const res = await g.fetch(u);
+        if (!res.ok) return null;
+        const ab = await res.arrayBuffer();
+        const bytes = Array.from(new Uint8Array(ab)) as number[];
+        if (!bytes.length) return null;
+        return { bytes, contentType: res.headers.get("content-type") || "" };
+      } catch {
+        return null;
+      }
+    }, url);
   }
 
   async styleTokens(): Promise<StyleTokens> {

@@ -181,6 +181,29 @@ test("captureCurrentPage writes a NESTED dom tree with fuller per-node styles", 
   }
 });
 
+test("captureCurrentPage downloads real images into public/_assets and rewrites assets.json local paths", { skip: !findChrome() && "no Chrome" }, async () => {
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"); // minimal PNG signature bytes
+  const fixture = createServer((req, res) => {
+    if (req.url === "/logo.png") { res.writeHead(200, { "content-type": "image/png" }); res.end(png); return; }
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end('<!doctype html><html><body><h1>Acme</h1><img src="/logo.png" alt="logo" width="80" height="40"></body></html>');
+  });
+  await new Promise<void>((r) => fixture.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`;
+  const dir = mkdtempSync(join(tmpdir(), "shar-img-"));
+  const session = await SharinganSession.open(url, { userDataDir: mkdtempSync(join(tmpdir(), "shar-img-prof-")), headless: true });
+  try {
+    const page = await captureCurrentPage(session, dir, url, () => {});
+    const assets = JSON.parse(readFileSync(join(dir, page.assets), "utf8")) as Array<{ url: string; kind: string; local?: string }>;
+    const logo = assets.find((a) => a.url.endsWith("/logo.png"));
+    assert.ok(logo?.local && logo.local.startsWith("/_assets/"), "logo asset gained a local /_assets/ path");
+    assert.ok(existsSync(join(dir, "public", logo!.local!.replace(/^\//, ""))), "the image file was written under public/_assets");
+  } finally {
+    await session.close();
+    await new Promise<void>((r) => fixture.close(() => r()));
+  }
+});
+
 test("sharinganReviewReference resolves the entry screenshot + an asset summary from the bundle", () => {
   const dir = mkdtempSync(join(tmpdir(), "shar-ref-"));
   const pageRel = join(".sharingan", "home-abcd1234");

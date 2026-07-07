@@ -42,6 +42,14 @@ function firstText(nodes: DomTreeNode[], tag: string): string | undefined {
   return undefined;
 }
 
+const CT_EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif", "image/svg+xml": "svg", "image/avif": "avif" };
+function assetExt(url: string, contentType: string): string {
+  const ct = CT_EXT[contentType.split(";")[0]?.trim() ?? ""];
+  if (ct) return ct;
+  const m = /\.(png|jpe?g|webp|gif|svg|avif)(?:\?|#|$)/i.exec(url);
+  return m ? m[1]!.toLowerCase().replace("jpeg", "jpg") : "png";
+}
+
 function pageDir(url: string): string {
   // NOTE (Phase 4): collision-safe — a short sha1 hash of the FULL url is appended to the
   // human-readable slug, so two distinct URLs that collapse to the same slug (after stripping
@@ -82,8 +90,22 @@ export async function captureCurrentPage(
   writeFileSync(join(projectDir, styleRel), JSON.stringify(await session.styleTokens(), null, 0));
 
   step("assets", "Inventorying image assets");
+  const assets = await session.assets();
+  step("assets", "Downloading source images");
+  const publicAssetsDir = join(projectDir, "public", "_assets");
+  mkdirSync(publicAssetsDir, { recursive: true });
+  for (const a of assets) {
+    if (a.kind === "video") continue; // skip heavy video files; posters are inventoried as kind "img"
+    const got = await session.fetchAsset(a.url).catch(() => null);
+    if (!got) continue;
+    const name = `${createHash("sha1").update(a.url).digest("hex").slice(0, 12)}.${assetExt(a.url, got.contentType)}`;
+    try {
+      writeFileSync(join(publicAssetsDir, name), Buffer.from(got.bytes));
+      a.local = `/_assets/${name}`;
+    } catch { /* best-effort: leave a.local unset */ }
+  }
   const assetRel = join(rel, "assets.json");
-  writeFileSync(join(projectDir, assetRel), JSON.stringify(await session.assets(), null, 0));
+  writeFileSync(join(projectDir, assetRel), JSON.stringify(assets, null, 0));
 
   step("links", "Discovering same-origin links");
   const links = await session.discoverLinks();
