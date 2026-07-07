@@ -66,6 +66,8 @@ export interface CreateProjectInput {
   skillId?: string | null;
   designSystemId?: string | null;
   mode?: ProjectMode;
+  sharingan?: boolean;
+  sourceUrl?: string;
 }
 
 export type MoodboardNodeType = "image" | "image-generator" | "note" | "section" | "video";
