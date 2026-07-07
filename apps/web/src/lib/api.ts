@@ -489,7 +489,15 @@ export interface SharinganStatus {
 /** Generic SSE consumer for JSON-shaped events that aren't a RunEvent (e.g. SharinganStep). */
 export async function* consumeSseJson<T>(res: Response): AsyncGenerator<T> {
   if (!res.ok) throw new ApiError(res.status, await safeText(res));
-  const reader = res.body!.getReader();
+  if (!res.body) {
+    // Environments without a streaming body: parse the whole text.
+    for (const block of (await res.text()).split("\n\n")) {
+      const parsed = parseSseBlock(block) as T | null;
+      if (parsed) yield parsed;
+    }
+    return;
+  }
+  const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   for (;;) {
@@ -503,6 +511,12 @@ export async function* consumeSseJson<T>(res: Response): AsyncGenerator<T> {
       const parsed = parseSseBlock(block) as T | null;
       if (parsed) yield parsed;
     }
+  }
+  buffer += decoder.decode();
+  const tail = buffer.trim();
+  if (tail) {
+    const parsed = parseSseBlock(tail) as T | null;
+    if (parsed) yield parsed;
   }
 }
 
