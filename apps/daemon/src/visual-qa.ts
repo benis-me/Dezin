@@ -26,6 +26,9 @@ export interface VisualQaInput {
   /** When this build is a Sharingan clone: the captured SOURCE screenshot (absolute path) + a short
    *  asset summary, so the critic can judge fidelity to the source, not just generic quality. */
   sharinganReference?: { screenshotPath: string; assetsSummary?: string };
+  /** True for a Sharingan clone — skips the computed anti-slop detector (taste/contrast/type rules)
+   *  so faithful reproduction isn't penalized; structural geometry checks + the critic still run. */
+  isSharingan?: boolean;
   /** Compact map of on-page elements (selector + text + box) so the critic can anchor each
    *  finding to a specific DOM element, and the repair can target it precisely. */
   criticElements?: CriticElement[];
@@ -399,11 +402,18 @@ export function parseVisualReview(text: string): QualityFinding[] {
   return normalized;
 }
 
+/** The computed anti-slop detector (color/type/contrast/spacing/component tells) is skipped for
+ *  Sharingan clones — reproducing a source faithfully must not be flagged as slop. */
+export function shouldRunComputedDetector(input: Pick<VisualQaInput, "isSharingan">): boolean {
+  return !input.isSharingan;
+}
+
 async function collectGeometry(
   htmlPath: string,
   screenshotPath?: string,
   renderUrl?: string,
   computedCtx: ComputedContext = {},
+  runComputed = true,
 ): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[]; elements: CriticElement[] }> {
   const consoleMessages: VisualQaConsoleMessage[] = [];
   const executablePath = findChrome();
@@ -651,13 +661,17 @@ async function collectGeometry(
         elements = toCriticElements(desktopElements);
         // Deterministic computed-style findings — contrast, type, spacing, component tells — run
         // on the desktop render only (viewport-independent) and are bounded so they can't flood repair.
-        computedFindings = boundComputedFindings(
-          detectComputedFindings(toComputedElements(desktopElements), {
-            ...computedCtx,
-            pageBackground: (snapshot as GeometrySnapshot).pageBackground,
-            designTokens: (snapshot as GeometrySnapshot).designTokens,
-          }),
-        );
+        // Skipped entirely for Sharingan clones (runComputed=false): faithfully reproducing a
+        // source's taste is not slop.
+        computedFindings = runComputed
+          ? boundComputedFindings(
+              detectComputedFindings(toComputedElements(desktopElements), {
+                ...computedCtx,
+                pageBackground: (snapshot as GeometrySnapshot).pageBackground,
+                designTokens: (snapshot as GeometrySnapshot).designTokens,
+              }),
+            )
+          : [];
         if (screenshotPath) {
           await mkdir(dirname(screenshotPath), { recursive: true });
           // Bound the capture too — full-page screenshot of a wedged/animating page can hang.
@@ -807,7 +821,7 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
   }
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
-  const geometry = await collectGeometry(input.htmlPath, screenshotPath, input.renderUrl, { provider: input.provider });
+  const geometry = await collectGeometry(input.htmlPath, screenshotPath, input.renderUrl, { provider: input.provider }, shouldRunComputedDetector(input));
   // Blind dual-assessment: the agent critic never sees the deterministic findings; we cross-check
   // AFTER, tagging elements both lanes independently flagged as corroborated (higher confidence).
   const ai = await reviewScreenshotWithAgent({ ...input, consoleMessages: geometry.consoleMessages, criticElements: geometry.elements }, screenshotPath);

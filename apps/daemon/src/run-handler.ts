@@ -458,7 +458,7 @@ async function runVisualQa(
   model: string | undefined,
   brief: string,
   conversationHistory: VisualQaInput["conversationHistory"],
-  options: Pick<VisualQaInput, "projectRoot" | "renderUrl" | "directionSpec" | "sharinganReference"> = {},
+  options: Pick<VisualQaInput, "projectRoot" | "renderUrl" | "directionSpec" | "sharinganReference" | "isSharingan"> = {},
 ): Promise<QualityFinding[]> {
   if (!settings.visualQaEnabled) return [];
   try {
@@ -971,7 +971,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         await emitStandardPreviewUpdate(round);
 
         const staticSurface = await collectStandardLintSurface(dir);
-        const staticFindings = suppress((staticSurface.trim() ? lintArtifact(staticSurface, { mode: "standard", provider: runProviderFamily }) : []) as QualityFinding[]);
+        const staticFindings = suppress((staticSurface.trim() ? lintArtifact(staticSurface, { mode: "standard", provider: runProviderFamily, isSharingan: project.sharingan }) : []) as QualityFinding[]);
         if (staticFindings.length) sse({ type: "static-quality", round, findings: staticFindings });
         let visualFindings: QualityFinding[] = [];
         if (settings.visualQaEnabled) {
@@ -998,6 +998,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
               renderUrl,
               directionSpec: chosenDirectionSpec,
               sharinganReference: project.sharingan ? sharinganReviewReference(projectDir(deps.dataDir, project.id)) : undefined,
+              isSharingan: project.sharingan,
             });
           }
           visualFindings = suppress(markVisualReviewRound(withVisualScreenshotUrl(visualFindings, screenshotUrl), round));
@@ -1294,7 +1295,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       currentHtml = repaired.artifactHtml || currentHtml;
       repairRounds = nextRound;
       await writeCurrentArtifact();
-      const staticFindings = suppress(lintArtifact(currentHtml, { provider: runProviderFamily }) as QualityFinding[]);
+      const staticFindings = suppress(lintArtifact(currentHtml, { provider: runProviderFamily, isSharingan: project.sharingan }) as QualityFinding[]);
       await reviewCurrentArtifact(nextRound, staticFindings);
     }
 

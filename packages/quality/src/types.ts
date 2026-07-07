@@ -50,4 +50,8 @@ export interface LintOptions {
    * transforms). Omitted → no provider-gated rules run.
    */
   provider?: string;
+  /** True when linting a Sharingan CLONE. Faithful reproduction of a source must not be penalized by
+   *  the anti-slop/taste gate, so all taste + accessibility rules are skipped; only lorem/filler
+   *  (the agent failing to reproduce the real copy) is kept. */
+  isSharingan?: boolean;
 }

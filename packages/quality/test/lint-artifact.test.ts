@@ -250,3 +250,11 @@ test("copy audit: flags em-dash overuse but not a single em-dash", () => {
   assert.ok(ids(lintArtifact(`<p>This — that — and the other — plus one more — really.</p>`)).includes("em-dash-overuse"));
   assert.equal(ids(lintArtifact(`<p>This — is perfectly fine.</p>`)).includes("em-dash-overuse"), false);
 });
+
+test("lintArtifact in Sharingan mode skips the anti-slop/taste family but still catches lorem filler", () => {
+  const indigo = `<div style="background:#6366f1">x</div>`;
+  assert.ok(lintArtifact(indigo, {}).some((f) => f.id === "ai-default-indigo"), "flags indigo normally");
+  assert.ok(!lintArtifact(indigo, { isSharingan: true }).some((f) => f.id === "ai-default-indigo"), "clone mode skips the indigo/taste rule");
+  const lorem = `<p>Lorem ipsum dolor sit amet consectetur.</p>`;
+  assert.ok(lintArtifact(lorem, { isSharingan: true }).some((f) => f.id === "filler-copy"), "clone mode STILL flags lorem filler");
+});
