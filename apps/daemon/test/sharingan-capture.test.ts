@@ -48,6 +48,34 @@ test("detectLoginWall folds in the OAuth content heuristic via the dom field", (
   assert.equal(detectLoginWall({ status: 200, finalUrl: "https://x/", hasPasswordField: false, textLength: 2000 }), false);
 });
 
+test("looksLikeLoginWall does not flag short landing/waitlist pages that only repeat Sign up / Log in", () => {
+  const WAITLIST: DomNode[] = [
+    node("h1", "Join the waitlist"),
+    node("button", "Sign up free"),
+    node("p", "Already have an account? Log in"),
+    node("a", "Sign in"),
+    node("p", "Sign up in seconds — no credit card required"),
+  ];
+  assert.equal(looksLikeLoginWall(WAITLIST), false);
+});
+
+test("looksLikeLoginWall still flags an OAuth wall wrapped in a busier shell (footer/cookie chrome)", () => {
+  const busy: DomNode[] = [
+    node("h1", "登录或注册"),
+    node("button", "使用微信登录"),
+    ...Array.from({ length: 60 }, (_, i) => node("a", `Footer link ${i}`)),
+  ];
+  assert.equal(looksLikeLoginWall(busy), true);
+});
+
+test("looksLikeLoginWall does not flag a large content page that merely offers social sign-in", () => {
+  const big: DomNode[] = [
+    node("button", "Sign in with Google"),
+    ...Array.from({ length: 220 }, (_, i) => node("p", `Article paragraph ${i} with real content.`)),
+  ];
+  assert.equal(looksLikeLoginWall(big), false);
+});
+
 test("capturePage writes screenshots + dom + styles into .sharingan and reports steps", { skip: !findChrome() && "no Chrome" }, async () => {
   const html = `<!doctype html><html><head><title>Home</title><style>h1{font-size:40px;color:#111}</style></head><body><h1>Acme</h1><p>${"word ".repeat(60)}</p></body></html>`;
   const server = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end(html); });

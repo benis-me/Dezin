@@ -8,22 +8,21 @@ export interface CapturedPage { url: string; title: string; screenshots: Record<
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth|account)(\/|\?|$)/i;
 
-// Multilingual login/register keywords + OAuth-provider button phrasings. Kept broad on purpose —
-// the low-content gate below is what prevents false positives on normal pages that merely link to login.
-const LOGIN_KW = /\b(log ?in|sign ?in|sign ?up|register)\b|登录|登入|注册|登录或注册|ログイン|로그인|로그아웃|sign in/gi;
 const OAUTH_BTN = /(continue|sign ?in|log ?in|signup|sign ?up) with (google|apple|github|facebook|microsoft|x|twitter)|使用\s*[^ ]{0,8}(继续|登录)|以\s*[^ ]{0,8}(继续|登录)/i;
 
-/** A page that IS a login/OAuth screen (little else on it) rather than a content page that merely links
- *  to login. Gated on low content — a real landing page has hundreds of nodes and lots of copy, so a
- *  nav "Log in" link never trips this; a bare "登录或注册 / 使用 Google 继续" wall does. */
+/** A page that IS a login/OAuth screen (little else on it), not a content page that merely links to
+ *  login. Anchored on an OAuth/social provider BUTTON ("continue with Google", "使用微信登录") — the one
+ *  unambiguous signal a plain nav "Log in" link never produces — and gated by a node cap so a large
+ *  content page that just embeds a social sign-in in its header is not mistaken for a login wall.
+ *  Password-form login walls are handled separately by detectLoginWall's password-field heuristic;
+ *  a bare keyword page (a landing/waitlist page repeating "Sign up"/"Log in") is deliberately NOT
+ *  flagged, to avoid false positives on that common clone target. */
 export function looksLikeLoginWall(dom: DomNode[]): boolean {
   if (!dom.length) return false;
-  const joined = dom.map((n) => n.text).filter(Boolean).join(" ");
-  const totalText = joined.length;
-  const loginHits = (joined.match(LOGIN_KW) ?? []).length;
   const hasOauthBtn = dom.some((n) => OAUTH_BTN.test(n.text));
-  const lowContent = dom.length <= 80 && totalText < 800;
-  return lowContent && (hasOauthBtn || loginHits >= 3);
+  // <= 200 nodes keeps a busy-but-real login wall (footer nav, cookie banner, ToS) in scope while
+  // excluding full content pages (hundreds+ of nodes) that merely offer a social sign-in.
+  return hasOauthBtn && dom.length <= 200;
 }
 
 export function detectLoginWall(input: { status: number; finalUrl: string; hasPasswordField: boolean; textLength: number; dom?: DomNode[] }): boolean {
