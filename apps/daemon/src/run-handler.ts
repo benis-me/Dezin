@@ -746,7 +746,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // turn already sees it.
   if (project.sharingan && project.sourceUrl) {
     // Best-effort: never fail the build on a capture hiccup — the agent can still probe live.
-    await ensureCaptured(project.id, deps.dataDir, project.sourceUrl).catch(() => {});
+    await ensureCaptured(project.id, deps.dataDir, project.sourceUrl, { keepSessionForProbe: true }).catch(() => {});
     agentBrief = [
       agentBrief,
       buildSharinganContext({
