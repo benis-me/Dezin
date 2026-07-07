@@ -168,3 +168,10 @@ test("sharinganReviewReference resolves the entry screenshot + an asset summary 
   // No bundle -> undefined.
   assert.equal(sharinganReviewReference(mkdtempSync(join(tmpdir(), "shar-empty-"))), undefined);
 });
+
+test("sharinganReviewReference returns undefined for a malformed (null) manifest instead of throwing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-nullref-"));
+  mkdirSync(join(dir, ".sharingan"), { recursive: true });
+  writeFileSync(join(dir, ".sharingan", "pages.json"), "null");
+  assert.equal(sharinganReviewReference(dir), undefined);
+});

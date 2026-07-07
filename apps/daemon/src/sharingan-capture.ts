@@ -118,6 +118,7 @@ export function sharinganReviewReference(projectDir: string): { screenshotPath: 
   if (!existsSync(manifestPath)) return undefined;
   let manifest: { pages?: Array<{ screenshots?: Record<string, string>; assets?: string }> };
   try { manifest = JSON.parse(readFileSync(manifestPath, "utf8")); } catch { return undefined; }
+  if (!manifest || typeof manifest !== "object") return undefined;
   const entry = manifest.pages?.[0];
   const shotRel = entry?.screenshots?.desktop;
   if (!shotRel) return undefined;
