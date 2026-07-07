@@ -68,9 +68,10 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
         <div className="grid gap-3 sm:grid-cols-2">
           {pages.map((p) => (
             <figure key={p.url} className="overflow-hidden rounded-lg border">
-              {Object.entries(p.screenshots).slice(0, 1).map(([label, rel]) => (
-                <img key={label} alt={p.title} src={api.sharinganShotUrl(projectId, rel)} className="w-full" />
-              ))}
+              {(() => {
+                const rel = p.screenshots.desktop ?? Object.values(p.screenshots)[0];
+                return rel ? <img alt={p.title} src={api.sharinganShotUrl(projectId, rel)} className="w-full" /> : null;
+              })()}
               <figcaption className="truncate p-2 text-xs text-muted-foreground">{p.title} — {p.url}</figcaption>
             </figure>
           ))}

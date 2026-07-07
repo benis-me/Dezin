@@ -471,7 +471,7 @@ export function parseSseBlock(block: string): RunEvent | null {
 /** One step emitted while Sharingan captures a site (navigate, screenshot, login-required, etc.). */
 export interface SharinganStep {
   at: number;
-  kind: string;
+  kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "login-required" | "done";
   text: string;
 }
 

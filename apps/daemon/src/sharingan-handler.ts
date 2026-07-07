@@ -5,7 +5,7 @@
  * handling PAUSES (phase "login-required") and never bypasses auth.
  */
 
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { SharinganSession } from "./sharingan-browser.ts";
@@ -115,10 +115,18 @@ export function handleSharinganStatus(res: ServerResponse, id: string): void {
   sendJson(res, 200, { phase: c.phase, steps: c.steps.length, pages: c.pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots })), error: c.error });
 }
 
-/** Serve a captured-page screenshot PNG from `<projectDir>/.sharingan/<relPath>`. Rejects path traversal (400) and missing files (404). */
+/**
+ * Serve a captured-page screenshot PNG. `relPath` is PROJECT-DIR-relative (e.g.
+ * ".sharingan/home/shot-desktop.png"), matching exactly what `capturePage` stores in
+ * `CapturedPage.screenshots` — not `.sharingan`-relative. Still contains reads to
+ * `<projectDir>/.sharingan/` (not the whole project dir) so `/shot` can't serve arbitrary
+ * project files. Rejects path traversal / escapes (400) and missing files (404).
+ */
 export function handleSharinganShot(res: ServerResponse, id: string, relPath: string, dataDir: string): void {
-  const abs = safeJoin(join(projectDir(dataDir, id), ".sharingan"), relPath);
-  if (!abs) { sendJson(res, 400, { error: "bad path" }); return; }
+  const base = projectDir(dataDir, id);
+  const shotRoot = join(base, ".sharingan");
+  const abs = safeJoin(base, relPath);
+  if (!abs || !(abs === shotRoot || abs.startsWith(shotRoot + sep))) { sendJson(res, 400, { error: "bad path" }); return; }
   if (!existsSync(abs) || !statSync(abs).isFile()) { sendJson(res, 404, { error: "not found" }); return; }
   res.writeHead(200, { "content-type": "image/png", "cache-control": "no-cache" });
   createReadStream(abs).pipe(res);
