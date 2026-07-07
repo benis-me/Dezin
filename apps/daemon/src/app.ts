@@ -132,6 +132,13 @@ function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
 }
 
+function isHttpUrl(v: unknown): v is string {
+  if (typeof v !== "string") return false;
+  const s = v.trim();
+  if (!/^https?:\/\//i.test(s)) return false;
+  try { new URL(s); return true; } catch { return false; }
+}
+
 /** A one-shot hand-off from the browser extension: captured reference images + a note. */
 interface PendingCapture {
   images: { name: string; base64: string }[];
@@ -377,12 +384,17 @@ const routes: Route[] = [
       const { store, dataDir } = deps;
       const body = (await readJsonBody(req)) as Partial<CreateProjectInput>;
       if (!isNonEmptyString(body.name)) return sendError(res, 400, "name is required");
-      const mode = body.mode === "standard" ? "standard" : "prototype";
+      const sharingan = body.sharingan === true;
+      if (sharingan && !isHttpUrl(body.sourceUrl)) return sendError(res, 400, "sharingan requires a valid http(s) sourceUrl");
+      // Sharingan always reconstructs into a Standard project.
+      const mode = sharingan || body.mode === "standard" ? "standard" : "prototype";
       const project = store.createProject({
         name: body.name,
         skillId: body.skillId ?? null,
         designSystemId: body.designSystemId ?? null,
         mode,
+        sharingan,
+        sourceUrl: sharingan ? body.sourceUrl : undefined,
       });
       // Standard projects scaffold a real Vite project + install deps in the background.
       if (mode === "standard") void (deps.standardProjectSetup ?? setupStandardProject)(project.id, projectDir(dataDir, project.id));
