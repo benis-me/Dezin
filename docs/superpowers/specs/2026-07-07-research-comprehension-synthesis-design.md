@@ -19,6 +19,11 @@ seams are correct — the gap is entirely downstream, from two causes:
    parallel with — and blind to — the visual track and the images. The chosen
    direction (`scroll-narrative`) framed the build as a text narrative, diluting the
    visual references' "canvas-is-hero" essence.
+3. **The image paths handed to the build agent are wrong** (found while writing this
+   spec). `buildResearchContext` tells the agent the images are at
+   `research/visual/assets/…`, but they live at `.research/visual/assets/…`
+   (`RESEARCH_DIRNAME = ".research"`) — so even a willing, vision-capable agent, told
+   to open them, finds nothing at that path.
 
 (The scaffold is NOT a cause: `compose.ts:91` already tells the build agent to
 `npm install <pkg>` what the design needs, naming `three`. The agent stayed
@@ -106,13 +111,23 @@ directions still land in `directions/` and are read by the unchanged
 `listDirections`, so the direction gate + `buildResearchContext(chosenDirection)`
 keep working untouched.
 
-### Build brief force-opens the images (`packages/research/src/io.ts`)
+### Build brief: fix the image path + force-open (`packages/research/src/io.ts`)
 
-`buildResearchContext`'s visual-imagery line changes from the passive
-"Visual reference imagery is available locally: … Study these real screenshots as
-source material." to a forceful instruction: **open and study each reference image
-(list the paths) as PRIMARY visual evidence before you design — do not design from
-the text alone.** Mirrors `visual-qa.ts`'s screenshot-as-primary-evidence framing.
+Two changes to `buildResearchContext`, both on the imagery lines:
+
+1. **Fix the asset path (pre-existing bug — a third contributing cause).** Today the
+   line hands the agent `research/visual/assets/…` (hardcoded `join("research", a)` at
+   io.ts:169 and :179), but `RESEARCH_DIRNAME = ".research"`, so the files actually
+   live at `.research/visual/assets/…`. The path the agent is told to open **does not
+   exist** — even a willing, vision-capable agent finds nothing there. (The preamble
+   two lines above already uses `basename(researchDir(projectDir))` = `.research`, so
+   the block contradicts itself.) Fix: build BOTH the product-asset and visual-asset
+   paths from `basename(researchDir(projectDir))` (→ `.research/…`), matching the
+   preamble. This also fixes the product `assets/` paths, which carry the same bug.
+2. **Force-open instruction.** Change the passive "Study these real screenshots as
+   source material." to a forceful instruction: **open and study each reference image
+   (the corrected paths) as PRIMARY visual evidence before you design — do not design
+   from the text alone.** Mirrors `visual-qa.ts`'s screenshot-as-primary-evidence framing.
 
 ## Component boundaries (each testable in isolation)
 
@@ -121,7 +136,7 @@ the text alone.** Mirrors `visual-qa.ts`'s screenshot-as-primary-evidence framin
 | visual prompt: open+study each image | `prompts.ts` `buildVisualResearchPrompt` | yes | node:test (asserts open-each-image + per-image observation language) |
 | product prompt: no directions | `prompts.ts` `buildResearchPrompt` | yes | node:test (no longer instructs writing `directions/`) |
 | synthesis prompt | `prompts.ts` `buildSynthesisPrompt` (new) | yes | node:test (reads both reports + brief, writes `directions/<slug>/`, does NOT re-open images) |
-| build brief force-open | `io.ts` `buildResearchContext` | yes | node:test (asserts the strong open-images instruction) |
+| build brief: `.research` path fix + force-open | `io.ts` `buildResearchContext` | yes | node:test (asserts paths use `.research/…` not `research/…`, AND the strong open-images instruction) |
 | synthesis spawn wiring | `research-phase.ts` | glue | daemon test w/ fake spawner: product+visual write reports (no directions), synthesis writes directions/ |
 
 ## Implementation slices (order)
