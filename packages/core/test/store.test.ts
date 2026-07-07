@@ -281,6 +281,18 @@ test("autoFixLiveRuntimeErrors round-trips through settings", () => {
   s.close();
 });
 
+test("settings persist the sharinganAffirmed flag (default false)", () => {
+  const store = new Store(":memory:");
+  try {
+    assert.equal(store.getSettings().sharinganAffirmed, false);
+    const updated = store.updateSettings({ sharinganAffirmed: true });
+    assert.equal(updated.sharinganAffirmed, true);
+    assert.equal(store.getSettings().sharinganAffirmed, true);
+  } finally {
+    store.close();
+  }
+});
+
 test("moodboards persist nodes, assets, and messages", () => {
   const s = freshStore();
   const board = s.createMoodboard({ name: "Launch references" });

@@ -317,6 +317,8 @@ export interface Settings {
   visualQaEnabled: boolean;
   /** When enabled, a repair run is auto-dispatched when a FATAL live-preview error is sensed while idle. */
   autoFixLiveRuntimeErrors: boolean;
+  /** True once the user has affirmed they're authorized to reproduce a site with Sharingan (asked once, not per run). */
+  sharinganAffirmed: boolean;
   /** Optional reviewer Agent override; empty means inherit the current project run Agent. */
   visualQaAgentCommand: string;
   /** Optional reviewer model override; empty means inherit the current project run model. */

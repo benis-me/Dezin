@@ -346,6 +346,7 @@ export interface Settings {
   aiProviderProfiles: string;
   visualQaEnabled: boolean;
   autoFixLiveRuntimeErrors: boolean;
+  sharinganAffirmed: boolean;
   researchEnabled: boolean;
   researchAgentCommand: string;
   researchModel: string;
