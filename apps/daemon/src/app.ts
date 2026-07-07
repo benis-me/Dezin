@@ -37,7 +37,7 @@ import {
 import { handleGetVersion, handleGetVersionPreviewUrl, handleGetVersionDiff, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } from "./project-runtime.ts";
-import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll } from "./sharingan-handler.ts";
+import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture } from "./sharingan-handler.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleCreateEffect, handleGetEffect, handleListEffects, handleUpdateEffect } from "./effects-handler.ts";
@@ -910,6 +910,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/sharingan/:id/navigate",
     handler: (req, res, p, deps) => handleSharinganNavigate(req, res, p.id!, deps.dataDir),
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/capture",
+    handler: (req, res, p, deps) => handleSharinganCapture(req, res, p.id!, deps.dataDir),
   },
   {
     method: "GET",

@@ -8,8 +8,8 @@
 import { join, sep } from "node:path";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { SharinganSession } from "./sharingan-browser.ts";
-import { capturePage, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
+import { SharinganSession, SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
+import { capturePage, captureCurrentPage, writePagesManifest, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
 import { projectDir, safeJoin } from "./serve-static.ts";
 import { sendJson, readJsonBody } from "./http-util.ts";
 
@@ -102,7 +102,7 @@ export async function startCapture(
     c.url = url;
     const { page, loginRequired } = await capturePage(session, projectDir(dataDir, id), url, (s) => emit(c, s));
     if (loginRequired) { c.phase = "login-required"; return; }
-    if (page) c.pages.push(page);
+    if (page) { c.pages.push(page); writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages); }
     // Set the terminal phase only after the browser is down, so "captured" implies the
     // persistent-profile lock has been released.
     await session.close();
@@ -140,7 +140,7 @@ export async function continueCapture(id: string, dataDir: string): Promise<void
   try {
     const { page, loginRequired } = await capturePage(c.session, projectDir(dataDir, id), c.url, (s) => emit(c, s));
     if (loginRequired) { c.phase = "login-required"; return; }
-    if (page) c.pages.push(page);
+    if (page) { c.pages.push(page); writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages); }
     await c.session.close();
     c.session = undefined;
     c.phase = "captured";
@@ -176,6 +176,32 @@ export async function handleSharinganNavigate(req: IncomingMessage, res: ServerR
     sendJson(res, 200, nav);
   } catch (err) {
     sendJson(res, 409, { error: err instanceof Error ? err.message : "navigate failed" });
+  }
+}
+
+/**
+ * Capture the CURRENT probe-session page into the bundle (optionally navigating to
+ * `body.url` first), enforcing the Phase-4 page budget so the Agent's exploration can't
+ * grow the bundle unbounded. Over budget is a 200 `{ skipped: "budget" }`, not an error —
+ * the Agent should treat it as "stop capturing," not a failure to retry.
+ */
+export async function handleSharinganCapture(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
+  const c = get(id);
+  if (c.pages.length >= SHARINGAN_PAGE_BUDGET) { sendJson(res, 200, { skipped: "budget", budget: SHARINGAN_PAGE_BUDGET }); return; }
+  const body = (await readJsonBody(req)) as { url?: string };
+  try {
+    const session = await ensureProbeSession(id, dataDir);
+    if (typeof body.url === "string" && /^https?:\/\//i.test(body.url)) {
+      emit(c, { at: Date.now(), kind: "navigate", text: `Agent navigating to ${body.url}` });
+      await session.navigate(body.url.trim());
+    }
+    const page = await captureCurrentPage(session, projectDir(dataDir, id), session.currentUrl(), (s) => emit(c, s));
+    c.pages.push(page);
+    writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages);
+    armProbeIdle(id);
+    sendJson(res, 200, page);
+  } catch (err) {
+    sendJson(res, 409, { error: err instanceof Error ? err.message : "capture failed" });
   }
 }
 

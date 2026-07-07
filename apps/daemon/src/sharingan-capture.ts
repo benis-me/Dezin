@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { SharinganSession, VIEWPORTS } from "./sharingan-browser.ts";
 
 export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "login-required" | "done"; text: string }
@@ -15,11 +16,13 @@ export function detectLoginWall(input: { status: number; finalUrl: string; hasPa
 }
 
 function pageDir(url: string): string {
-  // NOTE (Phase 4): this slug is not collision-safe — two distinct URLs can collapse to the
-  // same dir after stripping non-alphanumerics and truncating to 60 chars. Harmless in Phase 1
-  // (single entry-page capture); add a short URL-hash suffix when multi-page probing lands.
-  const slug = url.replace(/^https?:\/\//, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "page";
-  return slug;
+  // NOTE (Phase 4): collision-safe — a short sha1 hash of the FULL url is appended to the
+  // human-readable slug, so two distinct URLs that collapse to the same slug (after stripping
+  // non-alphanumerics and truncating) still land in distinct dirs. Needed now that /capture
+  // can write multiple distinct pages per project instead of just the single entry page.
+  const slug = url.replace(/^https?:\/\//, "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "page";
+  const hash = createHash("sha1").update(url).digest("hex").slice(0, 8);
+  return `${slug}-${hash}`;
 }
 
 export async function captureCurrentPage(
