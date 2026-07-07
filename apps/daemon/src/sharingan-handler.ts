@@ -320,6 +320,21 @@ export function handleSharinganShot(res: ServerResponse, id: string, relPath: st
   createReadStream(abs).pipe(res);
 }
 
+/**
+ * Close every live session in the capture registry (entry captures and probe sessions alike).
+ * Called on daemon shutdown so a shutdown/crash can't orphan a headful Chrome holding the
+ * persistent-profile lock, which would block the next clone from opening. Best-effort: never
+ * throws, so it's safe to call unconditionally from the shutdown path.
+ */
+export async function closeAllSharinganSessions(): Promise<void> {
+  for (const c of captures.values()) {
+    if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
+    const s = c.session;
+    c.session = undefined;
+    if (s) await s.close().catch(() => {});
+  }
+}
+
 export function handleSharinganEvents(res: ServerResponse, id: string): void {
   const c = get(id);
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
