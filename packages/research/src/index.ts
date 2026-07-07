@@ -36,6 +36,7 @@ export {
   buildIntakePrompt,
   buildResearchPrompt,
   buildVisualResearchPrompt,
+  buildSynthesisPrompt,
   type IntakeInput,
   type ResearchInput,
 } from "./prompts.ts";

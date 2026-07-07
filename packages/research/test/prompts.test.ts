@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildIntakePrompt, buildResearchPrompt } from "../src/prompts.ts";
-import { buildVisualResearchPrompt } from "../src/index.ts";
+import { buildVisualResearchPrompt, buildSynthesisPrompt } from "../src/index.ts";
+import { DIRECTIONS_DIRNAME } from "../src/convention.ts";
 
 test("intake prompt lists the skill catalog and forbids designing", () => {
   const prompt = buildIntakePrompt({
@@ -18,7 +19,7 @@ test("intake prompt lists the skill catalog and forbids designing", () => {
   assert.match(prompt, /a pricing page for my saas/);
 });
 
-test("research prompt demands web research, local assets, provenance, and directions", () => {
+test("research prompt demands web research, local assets, and provenance", () => {
   const prompt = buildResearchPrompt({
     brief: "a landing page for an open-source design tool",
     skill: { id: "landing", name: "Landing page", researchAngles: ["study developer-tool landings"] },
@@ -30,7 +31,6 @@ test("research prompt demands web research, local assets, provenance, and direct
   assert.match(prompt, /Audience & user research/);
   assert.match(prompt, /research\/assets\//);
   assert.match(prompt, /research\/sources\.json/);
-  assert.match(prompt, /research\/directions\//);
   assert.match(prompt, /never\s+hotlink/i);
   assert.match(prompt, /Never invent sources/);
   assert.match(prompt, /study developer-tool landings/);
@@ -73,4 +73,28 @@ test("buildResearchPrompt hardens authority: prefer primary, cite claims, label 
   assert.match(p, /primary|authoritative|first-party/i);
   assert.match(p, /assumption/i);
   assert.match(p, /cite|traces to|sources\.json/i);
+});
+
+test("buildVisualResearchPrompt makes the agent OPEN and study each downloaded image", () => {
+  const p = buildVisualResearchPrompt({ brief: "a portfolio" });
+  assert.match(p, /open .*(each|every).*image|open and study each/i);
+  assert.match(p, /what you (actually )?see|from the pixels/i);
+});
+
+test("buildResearchPrompt no longer generates directions (moved to the synthesis step)", () => {
+  const p = buildResearchPrompt({ brief: "a pricing page" });
+  assert.doesNotMatch(p, new RegExp(`${DIRECTIONS_DIRNAME}/`)); // no directions/ path
+  assert.doesNotMatch(p, /direction\.md/);
+});
+
+test("buildSynthesisPrompt synthesizes BOTH reports + brief into directions, without re-opening images", () => {
+  const p = buildSynthesisPrompt({ brief: "a fintech dashboard" });
+  assert.match(p, /Phase: Synthesis/);
+  assert.match(p, /research\.md/); // reads product report
+  assert.match(p, /visual\.md/); // reads visual report
+  assert.match(p, new RegExp(`${DIRECTIONS_DIRNAME}/`)); // writes directions/
+  assert.match(p, /direction\.md/);
+  assert.match(p, /synthesi/i);
+  // Relies on visual.md — must NOT tell the synthesis agent to re-open the images.
+  assert.doesNotMatch(p, /open .*(each|every).*image/i);
 });

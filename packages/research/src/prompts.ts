@@ -130,9 +130,9 @@ imagery, not just prose.
 
 - \`${RESEARCH_DIRNAME}/${REPORT_FILE}\` — the synthesized report, image + text. Use the
   sections above as headings. Embed reference images with **relative** markdown paths
-  (\`![caption](${ASSETS_DIRNAME}/name.png)\`). End with **Synthesis → 2–3 candidate
-  directions**, each with a concept, an information architecture (the sections/screens in
-  order), and the ONE distinctive move that would give it soul.
+  (\`![caption](${ASSETS_DIRNAME}/name.png)\`). END with a short **Synthesis** — the key
+  product insights a designer must honor. (Candidate DIRECTIONS are produced by a later
+  synthesis step that also sees the visual research — do NOT write directions here.)
 - \`${RESEARCH_DIRNAME}/${ASSETS_DIRNAME}/\` — reference images DOWNLOADED locally (never
   hotlink), kebab-case filenames. Each asset MUST be an actual product-UI screenshot or a
   genuine style/type/color reference that directly informs the design. Do NOT save
@@ -142,16 +142,14 @@ imagery, not just prose.
 - \`${RESEARCH_DIRNAME}/${SOURCES_FILE}\` — a JSON array; one entry per source:
   \`{ "id", "kind": "competitor|inspiration|article|data|asset", "title", "url",
   "takeaways": [..], "assets": ["${ASSETS_DIRNAME}/name.png"] }\`.
-- \`${RESEARCH_DIRNAME}/${DIRECTIONS_DIRNAME}/<slug>/direction.md\` — one file per candidate
-  direction: its concept, its information architecture, and its distinctive move.
 
 ## Rules
 
 - **Do all of this work, and write every file below, WITHIN this turn — finish only after the
   files exist on disk.** Do NOT delegate the work to background processes or long-running
   sub-agents that keep running after you return: if you parallelise, WAIT for the results and
-  synthesise them into the files yourself. A turn that ends before \`${REPORT_FILE}\` and the
-  direction files exist has failed, even if searches were dispatched.
+  synthesise them into the files yourself. A turn that ends before \`${REPORT_FILE}\` exists
+  has failed, even if searches were dispatched.
 - ${NEVER_INVENT}
 - **Authority.** Prefer PRIMARY / authoritative sources: official docs, the actual product, first-party data, reputable publications. Distrust SEO content farms, AI-generated listicles, and unsourced statistics — do not cite them. Tag each source in \`${SOURCES_FILE}\` with \`"authority": "primary" | "secondary"\`.
 - **Cite everything.** Every factual claim in the report must trace to a source id in \`${SOURCES_FILE}\`. State genuinely-unknown things as an explicit ASSUMPTION — never as fact.
@@ -190,7 +188,54 @@ Use web search + page reads freely. Target professional design sites — ${platf
 
 ## Rules
 - Finish WITHIN this turn — the files above must exist on disk before you return.
+- **Actually look.** After downloading, OPEN each kept image with your file tools and study it. Write \`${VISUAL_REPORT_FILE}\` from what you SEE in the pixels — concrete, per-image observations (palette / type / layout / motion, as specific as you can), not generic prose. If you genuinely cannot open an image, say so rather than guessing its content.
 - Never invent a source or a designer; only attribute what you can verify.${brand}
+- Write in the user's language.
+
+## Brief
+
+${input.brief.trim()}`;
+}
+
+/**
+ * Synthesis prompt — after BOTH research tracks, read the product report + the visual
+ * report + the brief and produce the candidate directions from the COMPREHENSIVE
+ * understanding. Does NOT re-open the reference images: visual.md already captures the
+ * visual track's seen-it understanding.
+ */
+export function buildSynthesisPrompt(input: ResearchInput): string {
+  const brandLine = input.designSystemName
+    ? `\n- Active brand: **${input.designSystemName}** — directions must fit its spirit.`
+    : "";
+  return `# Phase: Synthesis
+
+Both research tracks are done. Do NOT design or write any artifact. Your one job: read the
+research already on disk and propose the candidate design DIRECTIONS, grounded in the FULL
+picture — product + visual + the actual need.
+
+## Read first (already written to \`${RESEARCH_DIRNAME}/\`)
+
+- \`${RESEARCH_DIRNAME}/${REPORT_FILE}\` — the product/competitive/audience/domain research.
+- \`${RESEARCH_DIRNAME}/${VISUAL_DIRNAME}/${VISUAL_REPORT_FILE}\` — the visual research: the palette /
+  type / layout / motion direction the visual agent distilled from the real reference images it
+  opened. Trust it as the visual understanding; you do NOT need to re-open the images.
+- The brief (below).
+
+If one report is missing, synthesize from whichever exists.
+
+## Produce
+
+- \`${RESEARCH_DIRNAME}/${DIRECTIONS_DIRNAME}/<slug>/direction.md\` — 2–3 candidate directions, one
+  file each (kebab-case slug). Every direction must SYNTHESIZE both tracks: state its concept, its
+  information architecture (the sections/screens in order), and the ONE distinctive move that gives
+  it soul — and it must reflect what THIS brief actually needs. If the brief + research point at a
+  rich visual/interactive treatment, say so concretely (and name the technique the build should
+  reach for); if they point at something restrained, do NOT manufacture spectacle. Directions are
+  grounded understanding, not a menu of unrelated styles.
+
+## Rules
+- Finish WITHIN this turn — the direction files must exist on disk before you return.
+- Ground every direction in the two reports; do not invent research that isn't there.${brandLine}
 - Write in the user's language.
 
 ## Brief
