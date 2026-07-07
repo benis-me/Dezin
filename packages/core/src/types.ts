@@ -23,6 +23,10 @@ export interface Project {
   designSystemId: string | null;
   /** Build mode — prototype (single HTML) or standard (real project). */
   mode: ProjectMode;
+  /** Whether this project was created by cloning a website via Sharingan. */
+  sharingan: boolean;
+  /** The source URL Sharingan cloned this project from, when sharingan is true. */
+  sourceUrl?: string;
   createdAt: number;
   updatedAt: number;
   /** When archived (soft-deleted); null when active. */
@@ -257,6 +261,8 @@ export interface CreateProjectInput {
   skillId?: string | null;
   designSystemId?: string | null;
   mode?: ProjectMode;
+  sharingan?: boolean;
+  sourceUrl?: string;
 }
 
 /** Single-row app settings (BYOK provider config + defaults). Local-first. */

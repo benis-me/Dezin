@@ -396,6 +396,17 @@ test("updateRun throws on unknown id", () => {
   s.close();
 });
 
+test("a project persists the sharingan flag and sourceUrl", () => {
+  const store = new Store(":memory:");
+  const p = store.createProject({ name: "clone", mode: "standard", sharingan: true, sourceUrl: "https://example.com" });
+  const read = store.getProject(p.id);
+  assert.equal(read?.sharingan, true);
+  assert.equal(read?.sourceUrl, "https://example.com");
+  const plain = store.createProject({ name: "normal" });
+  assert.equal(store.getProject(plain.id)?.sharingan, false);
+  store.close();
+});
+
 test("quality ignores: add, list, and remove persist per project", () => {
   const s = freshStore();
   const p = s.createProject({ name: "P" });

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS projects (
   skill_id TEXT,
   design_system_id TEXT,
   mode TEXT,
+  sharingan INTEGER NOT NULL DEFAULT 0,
+  source_url TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   archived_at INTEGER,
@@ -236,6 +238,8 @@ function asProject(r: Row): Project {
     skillId: (r.skill_id as string | null) ?? null,
     designSystemId: (r.design_system_id as string | null) ?? null,
     mode: r.mode === "standard" ? "standard" : "prototype",
+    sharingan: Number(r.sharingan ?? 0) === 1,
+    sourceUrl: (r.source_url as string | null | undefined) ?? undefined,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
     archivedAt: r.archived_at == null ? null : Number(r.archived_at),
@@ -506,6 +510,8 @@ export class Store {
     ensureColumn("runs", "score", "score INTEGER");
     ensureColumn("runs", "final_findings", "final_findings TEXT NOT NULL DEFAULT '[]'");
     ensureColumn("projects", "mode", "mode TEXT");
+    ensureColumn("projects", "sharingan", "sharingan INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("projects", "source_url", "source_url TEXT");
     ensureColumn("settings", "image_api_base_url", "image_api_base_url TEXT");
     ensureColumn("settings", "image_api_key", "image_api_key TEXT");
     ensureColumn("settings", "image_model", "image_model TEXT");
@@ -571,10 +577,20 @@ export class Store {
     const now = this.clock.now();
     this.db
       .prepare(
-        `INSERT INTO projects (id, name, skill_id, design_system_id, mode, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects (id, name, skill_id, design_system_id, mode, sharingan, source_url, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, input.name, input.skillId ?? null, input.designSystemId ?? null, input.mode ?? "prototype", now, now);
+      .run(
+        id,
+        input.name,
+        input.skillId ?? null,
+        input.designSystemId ?? null,
+        input.mode ?? "prototype",
+        input.sharingan ? 1 : 0,
+        input.sourceUrl ?? null,
+        now,
+        now,
+      );
     return this.getProject(id)!;
   }
 
