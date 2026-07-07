@@ -10,7 +10,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { SharinganSession } from "./sharingan-browser.ts";
 import { capturePage, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
-import { projectDir } from "./serve-static.ts";
+import { projectDir, safeJoin } from "./serve-static.ts";
 import { sendJson, readJsonBody } from "./http-util.ts";
 
 type Phase = "idle" | "capturing" | "login-required" | "captured" | "error";
@@ -117,9 +117,8 @@ export function handleSharinganStatus(res: ServerResponse, id: string): void {
 
 /** Serve a captured-page screenshot PNG from `<projectDir>/.sharingan/<relPath>`. Rejects path traversal (400) and missing files (404). */
 export function handleSharinganShot(res: ServerResponse, id: string, relPath: string, dataDir: string): void {
-  const rel = relPath.replace(/^[/\\]+/, "");
-  if (rel.includes("..") || rel.includes("\0")) { sendJson(res, 400, { error: "bad path" }); return; }
-  const abs = join(projectDir(dataDir, id), ".sharingan", rel);
+  const abs = safeJoin(join(projectDir(dataDir, id), ".sharingan"), relPath);
+  if (!abs) { sendJson(res, 400, { error: "bad path" }); return; }
   if (!existsSync(abs) || !statSync(abs).isFile()) { sendJson(res, 404, { error: "not found" }); return; }
   res.writeHead(200, { "content-type": "image/png", "cache-control": "no-cache" });
   createReadStream(abs).pipe(res);
