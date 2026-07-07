@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { SharinganSession, VIEWPORTS, type DomNode } from "./sharingan-browser.ts";
+import { SharinganSession, VIEWPORTS, type DomNode, type DomTreeNode } from "./sharingan-browser.ts";
 
 export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "assets" | "login-required" | "done"; text: string }
 export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; assets: string; links: string[] }
@@ -31,6 +31,15 @@ export function detectLoginWall(input: { status: number; finalUrl: string; hasPa
   if (input.hasPasswordField && input.textLength < 80) return true;
   if (input.dom && looksLikeLoginWall(input.dom)) return true;
   return false;
+}
+
+function firstText(nodes: DomTreeNode[], tag: string): string | undefined {
+  for (const n of nodes) {
+    if (n.tag === tag && n.text) return n.text;
+    const found = firstText(n.children, tag);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function pageDir(url: string): string {
@@ -64,7 +73,7 @@ export async function captureCurrentPage(
   }
 
   step("dom", "Reading DOM structure");
-  const dom = await session.readDom();
+  const dom = await session.readDomTree();
   const domRel = join(rel, "dom.json");
   writeFileSync(join(projectDir, domRel), JSON.stringify(dom, null, 0));
 
@@ -79,7 +88,7 @@ export async function captureCurrentPage(
   step("links", "Discovering same-origin links");
   const links = await session.discoverLinks();
 
-  const title = (dom.find((n) => n.tag === "h1")?.text || url).slice(0, 80);
+  const title = (firstText(dom, "h1") || url).slice(0, 80);
   step("done", "Capture complete");
   return { url, title, screenshots, dom: domRel, styles: styleRel, assets: assetRel, links };
 }

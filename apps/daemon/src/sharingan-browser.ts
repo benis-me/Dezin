@@ -12,6 +12,15 @@ export interface DomNodeStyle {
   fontSize: string; fontWeight: string; color: string; backgroundColor: string; padding: string; margin: string;
 }
 export interface DomNode { tag: string; role?: string; classes: string; text: string; box: { x: number; y: number; w: number; h: number }; style?: DomNodeStyle }
+export interface DomTreeStyle extends DomNodeStyle {
+  width: string; height: string; border: string; borderColor: string; backgroundImage: string;
+  gridTemplateColumns: string; gridTemplateRows: string; opacity: string; textAlign: string; lineHeight: string; letterSpacing: string;
+}
+export interface DomTreeNode {
+  tag: string; role?: string; classes: string; text: string;
+  box: { x: number; y: number; w: number; h: number };
+  style: DomTreeStyle; children: DomTreeNode[];
+}
 export interface Asset { url: string; kind: "img" | "background" | "video"; alt?: string; w?: number; h?: number }
 export interface StyleTokens { colors: string[]; fontFamilies: string[]; fontSizes: string[]; radii: string[]; shadows: string[] }
 
@@ -146,6 +155,48 @@ export class SharinganSession {
       };
       if (doc.body) walk(doc.body);
       return out;
+    }, maxNodes);
+  }
+
+  /** Capture the DOM as a NESTED tree (hierarchy preserved) with a fuller per-node computed-style
+   *  subset — the reproduction blueprint the Sharingan builder mirrors. Invisible subtrees (0-area)
+   *  are dropped. `maxNodes` bounds the total node count across the whole tree. Only leaf nodes carry
+   *  `text` (interior text is redundant — the children carry it). */
+  async readDomTree(maxNodes = 1500): Promise<DomTreeNode[]> {
+    return this.page.evaluate((max: number) => {
+      const win = globalThis as any;
+      const doc = win.document;
+      let count = 0;
+      const build = (el: any): any | null => {
+        if (count >= max) return null;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return null;
+        count++;
+        const s = win.getComputedStyle(el);
+        const node: any = {
+          tag: el.tagName.toLowerCase(),
+          role: el.getAttribute("role") || undefined,
+          classes: typeof el.className === "string" ? el.className : "",
+          text: (el.children.length === 0 && el.innerText ? el.innerText : "").replace(/\s+/g, " ").trim().slice(0, 200),
+          box: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+          style: {
+            display: s.display, position: s.position, flexDirection: s.flexDirection, justifyContent: s.justifyContent,
+            alignItems: s.alignItems, gap: s.gap, fontSize: s.fontSize, fontWeight: s.fontWeight, color: s.color,
+            backgroundColor: s.backgroundColor, padding: s.padding, margin: s.margin, width: s.width, height: s.height,
+            border: s.border, borderColor: s.borderColor, backgroundImage: s.backgroundImage,
+            gridTemplateColumns: s.gridTemplateColumns, gridTemplateRows: s.gridTemplateRows, opacity: s.opacity,
+            textAlign: s.textAlign, lineHeight: s.lineHeight, letterSpacing: s.letterSpacing,
+          },
+          children: [],
+        };
+        for (const c of Array.from(el.children)) {
+          const child = build(c);
+          if (child) node.children.push(child);
+        }
+        return node;
+      };
+      const root = doc.body ? build(doc.body) : null;
+      return root ? [root] : [];
     }, maxNodes);
   }
 

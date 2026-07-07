@@ -139,12 +139,42 @@ test("captureCurrentPage writes an asset inventory + per-node DOM styles", { ski
     const assets = JSON.parse(readFileSync(join(dir, page.assets), "utf8")) as Array<{ url: string; kind: string; alt?: string }>;
     assert.ok(assets.some((a) => a.kind === "img" && a.url.endsWith("/img/logo.png") && a.alt === "Acme logo"), "captured the <img> with alt");
     assert.ok(assets.some((a) => a.kind === "background" && a.url.endsWith("/img/hero.png")), "captured the CSS background-image");
-    // Per-node styles
-    const dom = JSON.parse(readFileSync(join(dir, page.dom), "utf8")) as Array<{ tag: string; style?: Record<string, string> }>;
+    // Per-node styles (dom.json is now a nested tree — flatten before searching)
+    const tree = JSON.parse(readFileSync(join(dir, page.dom), "utf8")) as Array<{ tag: string; style?: Record<string, string>; children: any[] }>;
+    const flatten = (nodes: typeof tree): typeof tree => nodes.flatMap((n) => [n, ...flatten((n.children ?? []) as typeof tree)]);
+    const dom = flatten(tree);
     const row = dom.find((n) => n.style?.display === "flex");
     assert.ok(row && row.style?.justifyContent === "center", "flex container carries computed display + justifyContent");
     const h1 = dom.find((n) => n.tag === "h1");
     assert.equal(h1?.style?.fontSize, "40px", "h1 carries its computed font size");
+  } finally {
+    await session.close();
+    await new Promise<void>((r) => fixture.close(() => r()));
+  }
+});
+
+test("captureCurrentPage writes a NESTED dom tree with fuller per-node styles", { skip: !findChrome() && "no Chrome" }, async () => {
+  const html = `<!doctype html><html><head><style>
+    #row{display:flex;justify-content:center;gap:12px;width:400px}
+    h1{font-size:40px;color:rgb(17,17,17);text-align:center}
+  </style></head><body><div id="row"><h1>Acme</h1><p>hello</p></div></body></html>`;
+  const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end(html); });
+  await new Promise<void>((r) => fixture.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`;
+  const dir = mkdtempSync(join(tmpdir(), "shar-tree-"));
+  const session = await SharinganSession.open(url, { userDataDir: mkdtempSync(join(tmpdir(), "shar-tree-prof-")), headless: true });
+  try {
+    const page = await captureCurrentPage(session, dir, url, () => {});
+    const tree = JSON.parse(readFileSync(join(dir, page.dom), "utf8")) as Array<{ tag: string; children: any[]; style: Record<string, string> }>;
+    // Root is <body>, with the #row div nested under it, and h1/p nested under that.
+    assert.equal(tree.length, 1);
+    assert.equal(tree[0]!.tag, "body");
+    const row = tree[0]!.children.find((n: any) => n.style?.display === "flex");
+    assert.ok(row, "flex row is a nested child of body");
+    assert.equal(row.style.justifyContent, "center");
+    assert.ok(row.style.width, "fuller styles: width is captured");
+    const h1 = row.children.find((n: any) => n.tag === "h1");
+    assert.ok(h1 && h1.style.textAlign === "center" && h1.text.includes("Acme"), "h1 nested under row with textAlign + text");
   } finally {
     await session.close();
     await new Promise<void>((r) => fixture.close(() => r()));
