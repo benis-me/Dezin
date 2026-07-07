@@ -56,9 +56,16 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
     default:
       return (
         <HomeScreen
-          onNewProject={async (brief, skillId, designSystemId, mode) => {
+          onNewProject={async (brief, skillId, designSystemId, mode, sharingan) => {
             try {
-              const project = await api.createProject({ name: briefToName(brief), skillId, designSystemId, mode });
+              const project = await api.createProject({
+                name: briefToName(brief),
+                skillId,
+                designSystemId,
+                mode,
+                sharingan: !!sharingan,
+                sourceUrl: sharingan?.sourceUrl,
+              });
               setPendingBrief(brief);
               void api
                 .generateProjectTitle(project.id, brief)

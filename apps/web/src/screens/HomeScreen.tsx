@@ -46,7 +46,9 @@ import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
+import { isCloneUrl } from "../lib/clone-url.ts";
 import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
+import { native } from "../lib/native.ts";
 import { takePendingComposer } from "../lib/pending-composer.ts";
 import { setPendingImages, setPendingAgent, setPendingRefs } from "../lib/pending-brief.ts";
 import { publishSettingsUpdated, SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
@@ -209,7 +211,7 @@ export function HomeScreen({
   onOpenProject,
 }: {
   projects?: Project[];
-  onNewProject?: (brief: string, skillId: string, designSystemId: string, mode: ProjectMode) => void;
+  onNewProject?: (brief: string, skillId: string, designSystemId: string, mode: ProjectMode, sharingan?: { sourceUrl: string }) => void;
   onOpenProject?: (id: string) => void;
 }) {
   const api = useApi();
@@ -232,6 +234,9 @@ export function HomeScreen({
   const [homeModel, setHomeModel] = useState("");
   const [designSystemId, setDesignSystemIdState] = useState(initialComposerPrefs.designSystemId ?? DEFAULT_DS);
   const [mode, setModeState] = useState<ProjectMode>(initialComposerPrefs.mode ?? "prototype");
+  // Sharingan: clone-from-URL mode. Toggled by double-clicking the heading; forces mode to
+  // "standard" and swaps the composer's textarea for a URL input (desktop-only entry).
+  const [sharingan, setSharingan] = useState(false);
   const [projects, setProjects] = useState<Project[]>(projectsOverride ?? []);
   const [loading, setLoading] = useState(!projectsOverride);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -260,6 +265,21 @@ export function HomeScreen({
     setModeState(value);
     writeHomeComposerPrefs({ mode: value });
   }, []);
+
+  // Sharingan is desktop-only (it drives a real browser session in the Electron main process).
+  // Entering it forces mode to "standard"; exiting just clears the flag and leaves mode as-is.
+  const toggleSharingan = useCallback(() => {
+    if (sharingan) {
+      setSharingan(false);
+      return;
+    }
+    if (!native?.isElectron) {
+      toast("Sharingan (clone from a URL) requires the desktop app.", { variant: "error" });
+      return;
+    }
+    setSharingan(true);
+    setMode("standard");
+  }, [sharingan, setMode, toast]);
 
   const refresh = useCallback(() => {
     if (projectsOverride) return;
@@ -470,6 +490,14 @@ export function HomeScreen({
     const text =
       brief.trim() ||
       (images.length ? "Recreate the reference screenshot faithfully." : refs.length ? "Build on the referenced design." : "");
+    if (sharingan) {
+      if (!isCloneUrl(text)) {
+        toast("Enter a valid http(s) URL to clone.", { variant: "error" });
+        return;
+      }
+      onNewProject?.(text, skillId, designSystemId, "standard", { sourceUrl: text });
+      return;
+    }
     if (!text) return;
     if (images.length) setPendingImages(images.map((i) => ({ name: i.name, base64: i.base64 })));
     if (refs.length) setPendingRefs(refs.map((r) => ({ name: r.name, base64: r.base64 })));
@@ -627,19 +655,23 @@ export function HomeScreen({
           {/* Compact tool header — feature toggles ride the far right of the sub-line. */}
           <div className="flex items-end justify-between gap-4">
             <div className="max-w-2xl">
-              <h1 className="text-2xl font-semibold tracking-tight text-foreground">Start a design</h1>
+              <h1 className="text-2xl font-semibold tracking-tight text-foreground" onDoubleClick={toggleSharingan}>
+                Start a design
+              </h1>
               <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
                 Describe what you want. Dezin builds a real, tasteful artifact, then lints it against its own anti-slop rules.
               </p>
             </div>
             <TooltipProvider>
               <div className="flex shrink-0 items-center gap-2 pb-0.5">
-                <PillToggle
-                  on={researchOn}
-                  label="Design Research"
-                  tip="Before designing, study real competitors, audience & references into .research/, then build grounded in it. Adds time + agent tokens."
-                  onToggle={() => toggleFeature("researchEnabled", !researchOn)}
-                />
+                {!sharingan && (
+                  <PillToggle
+                    on={researchOn}
+                    label="Design Research"
+                    tip="Before designing, study real competitors, audience & references into .research/, then build grounded in it. Adds time + agent tokens."
+                    onToggle={() => toggleFeature("researchEnabled", !researchOn)}
+                  />
+                )}
                 <PillToggle
                   on={visualReviewOn}
                   label="Visual Review"
@@ -723,7 +755,13 @@ export function HomeScreen({
                   value={brief}
                   disabled={optimizingPrompt}
                   onChange={(e) => updateBrief(e.target.value)}
-                  placeholder={images.length ? "Add notes, or just build to recreate the screenshot…" : "A pricing page with three plans, the middle one recommended…"}
+                  placeholder={
+                    sharingan
+                      ? "Paste a URL to clone…"
+                      : images.length
+                        ? "Add notes, or just build to recreate the screenshot…"
+                        : "A pricing page with three plans, the middle one recommended…"
+                  }
                   rows={3}
                   className="relative z-10 field-sizing-content max-h-64 min-h-[92px] w-full resize-none bg-transparent px-3 py-2.5 pr-12 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:cursor-wait disabled:opacity-75"
                 />
@@ -793,25 +831,39 @@ export function HomeScreen({
                   />
                   <FieldSelect label="Template" value={skillId} options={skillOptions} onChange={setSkillId} />
                   <DesignSystemSelect systems={systems} value={designSystemId} onChange={setDesignSystemId} defaultId={DEFAULT_DS} />
-                  <FieldSelect
-                    label="Mode"
-                    value={mode}
-                    onChange={setMode}
-                    options={[
-                      {
-                        value: "prototype",
-                        label: "Prototype",
-                        icon: <Zap size={15} strokeWidth={1.75} />,
-                        description: "One self-contained HTML file — fastest to iterate.",
-                      },
-                      {
-                        value: "standard",
-                        label: "Standard",
-                        icon: <Boxes size={15} strokeWidth={1.75} />,
-                        description: "A real Vite + React project with components and routing.",
-                      },
-                    ]}
-                  />
+                  {sharingan ? (
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="rounded-md border border-border px-2 py-1 text-muted-foreground opacity-70">Standard</span>
+                      <button
+                        type="button"
+                        onClick={toggleSharingan}
+                        aria-label="Exit Sharingan mode"
+                        className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
+                      >
+                        Sharingan <span aria-hidden>✕</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <FieldSelect
+                      label="Mode"
+                      value={mode}
+                      onChange={setMode}
+                      options={[
+                        {
+                          value: "prototype",
+                          label: "Prototype",
+                          icon: <Zap size={15} strokeWidth={1.75} />,
+                          description: "One self-contained HTML file — fastest to iterate.",
+                        },
+                        {
+                          value: "standard",
+                          label: "Standard",
+                          icon: <Boxes size={15} strokeWidth={1.75} />,
+                          description: "A real Vite + React project with components and routing.",
+                        },
+                      ]}
+                    />
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <AgentModelSelect
