@@ -116,3 +116,37 @@ test("captureCurrentPage captures the current page without navigating + records 
     await new Promise<void>((r) => fixture.close(() => r()));
   }
 });
+
+test("captureCurrentPage writes an asset inventory + per-node DOM styles", { skip: !findChrome() && "no Chrome" }, async () => {
+  const html = `<!doctype html><html><head><style>
+    #row{display:flex;justify-content:center;gap:12px}
+    h1{font-size:40px;color:rgb(17,17,17)}
+    .hero{background-image:url("/img/hero.png")}
+  </style></head><body>
+    <div id="row"><h1>Acme</h1></div>
+    <img src="/img/logo.png" alt="Acme logo" width="120" height="40">
+    <div class="hero" style="width:200px;height:80px">bg</div>
+  </body></html>`;
+  const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end(html); });
+  await new Promise<void>((r) => fixture.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`;
+  const dir = mkdtempSync(join(tmpdir(), "shar-rich-"));
+  const session = await SharinganSession.open(url, { userDataDir: mkdtempSync(join(tmpdir(), "shar-rich-prof-")), headless: true });
+  try {
+    const page = await captureCurrentPage(session, dir, url, () => {});
+    // Asset inventory
+    assert.ok(page.assets, "CapturedPage.assets path is set");
+    const assets = JSON.parse(readFileSync(join(dir, page.assets), "utf8")) as Array<{ url: string; kind: string; alt?: string }>;
+    assert.ok(assets.some((a) => a.kind === "img" && a.url.endsWith("/img/logo.png") && a.alt === "Acme logo"), "captured the <img> with alt");
+    assert.ok(assets.some((a) => a.kind === "background" && a.url.endsWith("/img/hero.png")), "captured the CSS background-image");
+    // Per-node styles
+    const dom = JSON.parse(readFileSync(join(dir, page.dom), "utf8")) as Array<{ tag: string; style?: Record<string, string> }>;
+    const row = dom.find((n) => n.style?.display === "flex");
+    assert.ok(row && row.style?.justifyContent === "center", "flex container carries computed display + justifyContent");
+    const h1 = dom.find((n) => n.tag === "h1");
+    assert.equal(h1?.style?.fontSize, "40px", "h1 carries its computed font size");
+  } finally {
+    await session.close();
+    await new Promise<void>((r) => fixture.close(() => r()));
+  }
+});

@@ -14,6 +14,7 @@ function fakeThatCaptures(): SharinganSession {
     setViewport: async () => {},
     screenshot: async () => Buffer.from("x"),
     styleTokens: async () => ({ colors: [], fontFamilies: [], fontSizes: [], radii: [], shadows: [] }),
+    assets: async () => [],
     discoverLinks: async () => [],
     close: async () => {},
   } as unknown as SharinganSession;

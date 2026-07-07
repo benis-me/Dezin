@@ -7,7 +7,12 @@ export const VIEWPORTS: Viewport[] = [
   { width: 1440, height: 900, label: "desktop" },
 ];
 
-export interface DomNode { tag: string; role?: string; classes: string; text: string; box: { x: number; y: number; w: number; h: number } }
+export interface DomNodeStyle {
+  display: string; position: string; flexDirection: string; justifyContent: string; alignItems: string; gap: string;
+  fontSize: string; fontWeight: string; color: string; backgroundColor: string; padding: string; margin: string;
+}
+export interface DomNode { tag: string; role?: string; classes: string; text: string; box: { x: number; y: number; w: number; h: number }; style?: DomNodeStyle }
+export interface Asset { url: string; kind: "img" | "background" | "video"; alt?: string; w?: number; h?: number }
 export interface StyleTokens { colors: string[]; fontFamilies: string[]; fontSizes: string[]; radii: string[]; shadows: string[] }
 
 type Browser = Awaited<ReturnType<typeof puppeteer.launch>>;
@@ -114,20 +119,27 @@ export class SharinganSession {
     return (await this.page.screenshot({ fullPage: opts.fullPage ?? false, type: "png" })) as Buffer;
   }
 
-  async readDom(maxNodes = 400): Promise<DomNode[]> {
+  async readDom(maxNodes = 1500): Promise<DomNode[]> {
     return this.page.evaluate((max: number) => {
-      const doc = (globalThis as any).document;
+      const win = globalThis as any;
+      const doc = win.document;
       const out: any[] = [];
       const walk = (el: any) => {
         if (out.length >= max) return;
         const r = el.getBoundingClientRect();
         if (r.width > 0 && r.height > 0) {
+          const s = win.getComputedStyle(el);
           out.push({
             tag: el.tagName.toLowerCase(),
             role: el.getAttribute("role") || undefined,
             classes: typeof el.className === "string" ? el.className : "",
             text: (el.childNodes.length && el.innerText ? el.innerText : "").replace(/\s+/g, " ").trim().slice(0, 120),
             box: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+            style: {
+              display: s.display, position: s.position, flexDirection: s.flexDirection, justifyContent: s.justifyContent,
+              alignItems: s.alignItems, gap: s.gap, fontSize: s.fontSize, fontWeight: s.fontWeight, color: s.color,
+              backgroundColor: s.backgroundColor, padding: s.padding, margin: s.margin,
+            },
           });
         }
         for (const c of Array.from(el.children)) walk(c);
@@ -135,6 +147,40 @@ export class SharinganSession {
       if (doc.body) walk(doc.body);
       return out;
     }, maxNodes);
+  }
+
+  /** Inventory the page's images: <img> (with alt + rendered size), CSS background-images, and
+   *  <video>/<source> URLs. All URLs resolved absolute. The Agent uses this to know which image slots
+   *  exist so it can fill them with free placeholders — NOT to re-host the source's brand assets. */
+  async assets(maxAssets = 80): Promise<Asset[]> {
+    return this.page.evaluate((max: number) => {
+      const win = globalThis as any;
+      const doc = win.document;
+      const abs = (u: string): string | null => { try { return new win.URL(u, win.location.href).href; } catch { return null; } };
+      const seen = new Set<string>();
+      const out: any[] = [];
+      const push = (url: string | null, kind: string, alt?: string, w?: number, h?: number) => {
+        if (!url || url.startsWith("data:") || seen.has(url) || out.length >= max) return;
+        seen.add(url);
+        out.push({ url, kind, alt: alt || undefined, w: w || undefined, h: h || undefined });
+      };
+      for (const img of Array.from<any>(doc.querySelectorAll("img"))) {
+        const r = img.getBoundingClientRect();
+        push(abs(img.currentSrc || img.src), "img", img.getAttribute("alt") || undefined, Math.round(r.width), Math.round(r.height));
+      }
+      for (const v of Array.from<any>(doc.querySelectorAll("video"))) {
+        push(abs(v.getAttribute("poster") || ""), "img", undefined);
+        push(abs(v.currentSrc || v.src || ""), "video");
+      }
+      for (const sc of Array.from<any>(doc.querySelectorAll("source"))) push(abs(sc.getAttribute("src") || ""), "video");
+      for (const el of Array.from<any>(doc.querySelectorAll("body *")).slice(0, 1500)) {
+        const bg = win.getComputedStyle(el).backgroundImage as string;
+        if (!bg || bg === "none") continue;
+        const m = /url\(["']?([^"')]+)["']?\)/.exec(bg);
+        if (m) { const r = el.getBoundingClientRect(); push(abs(m[1] ?? ""), "background", undefined, Math.round(r.width), Math.round(r.height)); }
+      }
+      return out;
+    }, maxAssets);
   }
 
   async styleTokens(): Promise<StyleTokens> {

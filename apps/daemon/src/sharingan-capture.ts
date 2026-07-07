@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { SharinganSession, VIEWPORTS, type DomNode } from "./sharingan-browser.ts";
 
-export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "login-required" | "done"; text: string }
-export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; links: string[] }
+export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "assets" | "login-required" | "done"; text: string }
+export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; assets: string; links: string[] }
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth|account)(\/|\?|$)/i;
 
@@ -64,7 +64,7 @@ export async function captureCurrentPage(
   }
 
   step("dom", "Reading DOM structure");
-  const dom = await session.readDom(400);
+  const dom = await session.readDom();
   const domRel = join(rel, "dom.json");
   writeFileSync(join(projectDir, domRel), JSON.stringify(dom, null, 0));
 
@@ -72,12 +72,16 @@ export async function captureCurrentPage(
   const styleRel = join(rel, "styles.json");
   writeFileSync(join(projectDir, styleRel), JSON.stringify(await session.styleTokens(), null, 0));
 
+  step("assets", "Inventorying image assets");
+  const assetRel = join(rel, "assets.json");
+  writeFileSync(join(projectDir, assetRel), JSON.stringify(await session.assets(), null, 0));
+
   step("links", "Discovering same-origin links");
   const links = await session.discoverLinks();
 
   const title = (dom.find((n) => n.tag === "h1")?.text || url).slice(0, 80);
   step("done", "Capture complete");
-  return { url, title, screenshots, dom: domRel, styles: styleRel, links };
+  return { url, title, screenshots, dom: domRel, styles: styleRel, assets: assetRel, links };
 }
 
 export async function capturePage(
@@ -102,6 +106,6 @@ export async function capturePage(
 
 export function writePagesManifest(projectDir: string, sourceUrl: string, pages: CapturedPage[]): void {
   mkdirSync(join(projectDir, ".sharingan"), { recursive: true });
-  const manifest = { sourceUrl, pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots, dom: p.dom, styles: p.styles, links: p.links })) };
+  const manifest = { sourceUrl, pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots, dom: p.dom, styles: p.styles, assets: p.assets, links: p.links })) };
   writeFileSync(join(projectDir, ".sharingan", "pages.json"), JSON.stringify(manifest, null, 2));
 }
