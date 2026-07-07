@@ -118,6 +118,43 @@ export async function startCapture(
   }
 }
 
+export function capturedPageCount(id: string): number {
+  return get(id).pages.length;
+}
+
+/**
+ * Kick the entry capture (if idle, or retrying after a prior error) and await it through to a
+ * terminal phase, so the build can gate on the clone actually being captured. Waits through
+ * "login-required" (the user signs in via the Phase-3 tab + Continue) but is bounded by
+ * `maxWaitMs` so a stalled login can't hang the build forever — on timeout it returns the
+ * current (non-terminal) phase and the caller proceeds best-effort.
+ */
+export async function ensureCaptured(
+  id: string,
+  dataDir: string,
+  url: string,
+  opts: { maxWaitMs?: number; pollMs?: number; open?: (url: string, o: { userDataDir?: string; headless?: boolean }) => Promise<SharinganSession> } = {},
+): Promise<Phase> {
+  const maxWaitMs = opts.maxWaitMs ?? 300_000;
+  const pollMs = opts.pollMs ?? 500;
+  const c = get(id);
+  if (c.phase === "captured") return c.phase;
+  // Kick the entry capture if nothing is in flight (idle, or retry after a prior error).
+  if (c.phase === "idle" || c.phase === "error") {
+    const profileDir = join(dataDir, ".sharingan-profile");
+    void startCapture(id, url, dataDir, profileDir, opts.open);
+  }
+  // Poll until a terminal phase, waiting through "login-required" (the user signs in via the
+  // tab + Continue). Time out (don't hang) so the build proceeds best-effort even if login stalls.
+  const deadline = Date.now() + maxWaitMs;
+  for (;;) {
+    const phase = get(id).phase;
+    if (phase === "captured" || phase === "error") return phase;
+    if (Date.now() >= deadline) return phase;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
+
 export async function handleSharinganStart(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
   const body = (await readJsonBody(req)) as { url?: string };
   const url = typeof body.url === "string" ? body.url.trim() : "";
