@@ -1951,6 +1951,36 @@ test("research-enabled run writes research/ and grounds the build in the report"
   );
 });
 
+test("research phase uses the configured research Agent/model override", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  let researchInput: { agentCommand?: string; model?: string } | undefined;
+  const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {
+    researchInput = { agentCommand: input.agentCommand, model: input.model };
+    mkdirSync(join(input.dir, ".research"), { recursive: true });
+    writeFileSync(join(input.dir, ".research", "research.md"), "# Research\n\nx");
+    return { ran: true, produced: true, visualProduced: false };
+  };
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      store.updateSettings({ researchAgentCommand: "codebuddy", researchModel: "hunyuan" });
+      const project = await createProject(base);
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero", research: true, agentCommand: "codex", model: "gpt-5" }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      // Research must use its own configured Agent/model, NOT the run's — so a vision-capable
+      // agent can be chosen for research independently of the build agent.
+      assert.equal(researchInput?.agentCommand, "codebuddy", "research uses the research Agent override");
+      assert.equal(researchInput?.model, "hunyuan", "research uses the research model override");
+    },
+    { researchPhase },
+  );
+});
+
 test("dual-track research: SSE research-activity carries track, and visual assets sync into a moodboard", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {

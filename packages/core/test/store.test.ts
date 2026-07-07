@@ -227,6 +227,8 @@ test("settings: defaults, round-trip, and partial merge", () => {
   assert.equal(d.visualQaEnabled, false);
   assert.equal(d.visualQaAgentCommand, "");
   assert.equal(d.visualQaModel, "");
+  assert.equal(d.researchAgentCommand, "");
+  assert.equal(d.researchModel, "");
   assert.equal(d.autoImproveEnabled, true);
   assert.equal(d.autoImproveMaxRounds, 8);
   assert.equal(d.videoModel, "");
@@ -239,6 +241,8 @@ test("settings: defaults, round-trip, and partial merge", () => {
     visualQaEnabled: true,
     visualQaAgentCommand: "codebuddy",
     visualQaModel: "hunyuan",
+    researchAgentCommand: "codex",
+    researchModel: "o4",
     autoImproveEnabled: false,
     autoImproveMaxRounds: 5,
   });
@@ -249,6 +253,8 @@ test("settings: defaults, round-trip, and partial merge", () => {
   assert.equal(s.getSettings().visualQaEnabled, true);
   assert.equal(s.getSettings().visualQaAgentCommand, "codebuddy");
   assert.equal(s.getSettings().visualQaModel, "hunyuan");
+  assert.equal(s.getSettings().researchAgentCommand, "codex");
+  assert.equal(s.getSettings().researchModel, "o4");
   assert.equal(s.getSettings().autoImproveEnabled, false);
   assert.equal(s.getSettings().autoImproveMaxRounds, 5);
 

@@ -27,3 +27,16 @@ export function SettingRow({ label, desc, children }: { label: string; desc?: st
     </div>
   );
 }
+
+/** A labeled sub-section inside a SettingsPanel — a small heading over its own divided rows. */
+export function SettingsGroup({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
+  return (
+    <section>
+      <div className="mb-1.5">
+        <h3 className="text-sm font-semibold tracking-tight text-foreground">{title}</h3>
+        {desc ? <p className="mt-0.5 text-xs text-muted-foreground">{desc}</p> : null}
+      </div>
+      <SettingsRows>{children}</SettingsRows>
+    </section>
+  );
+}

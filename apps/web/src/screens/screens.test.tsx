@@ -74,7 +74,7 @@ function settingsFixture(patch: Partial<Settings> = {}): Settings {
     aiProviderProfiles: "",
     visualQaEnabled: false,
     autoFixLiveRuntimeErrors: false,
-    researchEnabled: false,    visualQaAgentCommand: "",
+    researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
     visualQaModel: "",
     autoImproveEnabled: true,
     autoImproveMaxRounds: 8,
@@ -428,7 +428,7 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
       aiProviderProfiles: "",
       visualQaEnabled: false,
       autoFixLiveRuntimeErrors: false,
-      researchEnabled: false,      visualQaAgentCommand: "",
+      researchEnabled: false, researchAgentCommand: "", researchModel: "",      visualQaAgentCommand: "",
       visualQaModel: "",
       autoImproveEnabled: true,
       autoImproveMaxRounds: 8,
@@ -872,7 +872,7 @@ test("HomeScreen composer honors the saved agent + model, not the first availabl
     aiProviderProfiles: "",
     visualQaEnabled: false,
     autoFixLiveRuntimeErrors: false,
-    researchEnabled: false,    visualQaAgentCommand: "",
+    researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
     visualQaModel: "",
     autoImproveEnabled: true,
     autoImproveMaxRounds: 8,
@@ -995,6 +995,18 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
   await user.click(screen.getByRole("combobox", { name: "Visual review model" }));
   await user.click(await screen.findByRole("option", { name: "gpt-5" }));
   expect(updateSettings).toHaveBeenCalledWith({ visualQaModel: "gpt-5" });
+
+  // Design research has its own Agent/model selection, independent of Visual review.
+  expect(screen.getByRole("combobox", { name: "Research agent" })).toHaveTextContent("Same as project agent");
+  expect(screen.getByRole("combobox", { name: "Research model" })).toHaveTextContent("Same as project model");
+  await user.click(screen.getByRole("switch", { name: "Design research" }));
+  expect(updateSettings).toHaveBeenCalledWith({ researchEnabled: true });
+  await user.click(screen.getByRole("combobox", { name: "Research agent" }));
+  await user.click(await screen.findByRole("option", { name: "Codex" }));
+  expect(updateSettings).toHaveBeenCalledWith({ researchAgentCommand: "codex", researchModel: "" });
+  await user.click(screen.getByRole("combobox", { name: "Research model" }));
+  await user.click(await screen.findByRole("option", { name: "gpt-5" }));
+  expect(updateSettings).toHaveBeenCalledWith({ researchModel: "gpt-5" });
 });
 
 test("SettingsScreen keeps model API key drafts after redacted settings saves", async () => {

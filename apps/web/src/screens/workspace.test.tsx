@@ -1044,7 +1044,7 @@ test("/projects/new preserves the selected agent and model for the first run", a
     aiProviderProfiles: "",
     visualQaEnabled: false,
     autoFixLiveRuntimeErrors: false,
-    researchEnabled: false,    visualQaAgentCommand: "",
+    researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
     visualQaModel: "",
     autoImproveEnabled: true,
     autoImproveMaxRounds: 8,

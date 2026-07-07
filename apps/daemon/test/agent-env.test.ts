@@ -26,7 +26,7 @@ const SETTINGS: Settings = {
   aiProviderProfiles: "",
   visualQaEnabled: false,
   autoFixLiveRuntimeErrors: false,
-  researchEnabled: false,  visualQaAgentCommand: "",
+  researchEnabled: false, researchAgentCommand: "", researchModel: "",  visualQaAgentCommand: "",
   visualQaModel: "",
   autoImproveEnabled: true,
   autoImproveMaxRounds: 8,

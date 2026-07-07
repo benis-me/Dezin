@@ -347,6 +347,8 @@ export interface Settings {
   visualQaEnabled: boolean;
   autoFixLiveRuntimeErrors: boolean;
   researchEnabled: boolean;
+  researchAgentCommand: string;
+  researchModel: string;
   visualQaAgentCommand: string;
   visualQaModel: string;
   autoImproveEnabled: boolean;

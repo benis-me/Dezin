@@ -317,6 +317,10 @@ export interface Settings {
   visualQaModel: string;
   /** When enabled, runs do a pre-design Research phase (writes research/) before building. */
   researchEnabled: boolean;
+  /** Optional research Agent override; empty means inherit the current project run Agent. */
+  researchAgentCommand: string;
+  /** Optional research model override; empty means inherit the current project run model. */
+  researchModel: string;
   /** When enabled, Dezin feeds blocking quality findings back into the Agent automatically. */
   autoImproveEnabled: boolean;
   /** Maximum automatic repair turns after the initial generation. */

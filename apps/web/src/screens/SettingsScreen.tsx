@@ -10,7 +10,7 @@ import { agentLabel } from "../components/agent-logos.tsx";
 import { publishSettingsUpdated } from "../lib/settings-events.ts";
 import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
 import { ModelProviderSettings } from "../settings/ModelProviderSettings.tsx";
-import { SettingRow, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
+import { SettingRow, SettingsGroup, SettingsPanel, SettingsRows } from "../settings/settings-ui.tsx";
 import { IMAGE_ACTION_DEFAULTS, IMAGE_ACTION_MODEL_FIELDS, type ImageActionModelField } from "../lib/image-action-defaults.ts";
 import { imageModelOptions } from "../moodboard/useMoodboardBoard.ts";
 
@@ -198,6 +198,17 @@ export function SettingsScreen({
     { value: "", label: "Same as project model" },
     ...((visualReviewAgent?.models ?? []).map((model) => ({ value: model, label: model }))),
   ];
+  const researchAgent = settings?.researchAgentCommand ? agents.find((a) => a.command === settings.researchAgentCommand) : activeAgent;
+  const researchAgentOptions = [
+    { value: "", label: "Same as project agent" },
+    ...agents
+      .filter((agent) => agent.available || agent.command === settings?.researchAgentCommand)
+      .map((agent) => ({ value: agent.command, label: agentLabel(agent.id) })),
+  ];
+  const researchModelOptions = [
+    { value: "", label: "Same as project model" },
+    ...((researchAgent?.models ?? []).map((model) => ({ value: model, label: model }))),
+  ];
   const imageActionModelOptions = useMemo(() => {
     if (!settings) return [{ value: "", label: "None" }];
     const models = new Set(imageModelOptions(settings));
@@ -290,27 +301,62 @@ export function SettingsScreen({
 
             {section === "quality" && (
               <SettingsPanel title="Quality" desc="How Dezin generates: optional research before designing, plus checks on the finished result.">
-                <SettingsRows>
-                  <SettingRow
-                    label="Design research"
-                    desc="Before designing, the Agent researches competitors, audience, and references into .research/, then builds from it. Adds time and uses your agent's tokens."
+                <div className="space-y-8">
+                  <SettingsGroup
+                    title="Design research"
+                    desc="Before designing, an Agent researches competitors, audience, and references into .research/, then builds from it. Adds time and uses the research Agent's tokens."
                   >
-                    <Switch
-                      aria-label="Design research"
-                      checked={settings.researchEnabled}
-                      onCheckedChange={(checked) => save("researchEnabled", checked)}
-                    />
-                  </SettingRow>
-                  <SettingRow
-                    label="Agent visual review"
-                    desc="After generation, a reviewer Agent/model inspects the screenshot, conversation, and runtime signals."
+                    <SettingRow label="Enable" desc="Run the pre-design research phase before building.">
+                      <Switch
+                        aria-label="Design research"
+                        checked={settings.researchEnabled}
+                        onCheckedChange={(checked) => save("researchEnabled", checked)}
+                      />
+                    </SettingRow>
+                    <SettingRow
+                      label="Research agent"
+                      desc="Blank inherits the project run Agent. Pick a vision-capable Agent so research can actually study reference images."
+                    >
+                      <Picker
+                        ariaLabel="Research agent"
+                        className="w-52"
+                        value={settings.researchAgentCommand}
+                        onChange={(value) => savePatch({ researchAgentCommand: value, researchModel: "" })}
+                        options={researchAgentOptions}
+                      />
+                    </SettingRow>
+                    <SettingRow label="Research model" desc="Blank inherits the model used for the current project run.">
+                      {researchAgentOptions.length > 0 && researchModelOptions.length > 1 ? (
+                        <Picker
+                          ariaLabel="Research model"
+                          className="w-52"
+                          value={settings.researchModel}
+                          onChange={(value) => save("researchModel", value)}
+                          options={researchModelOptions}
+                        />
+                      ) : (
+                        <Input
+                          aria-label="Research model"
+                          className="w-52"
+                          value={settings.researchModel}
+                          placeholder="Same as project model"
+                          onChange={(event) => setLocal("researchModel", event.target.value)}
+                          onBlur={(event) => save("researchModel", event.target.value)}
+                        />
+                      )}
+                    </SettingRow>
+                  </SettingsGroup>
+                  <SettingsGroup
+                    title="Visual review"
+                    desc="After generation, a reviewer Agent/model inspects the screenshot, conversation, and runtime signals — and can auto-repair blocking issues."
                   >
-                    <Switch
-                      aria-label="Agent visual review"
-                      checked={settings.visualQaEnabled}
-                      onCheckedChange={(checked) => save("visualQaEnabled", checked)}
-                    />
-                  </SettingRow>
+                    <SettingRow label="Enable" desc="Review the rendered result after generation.">
+                      <Switch
+                        aria-label="Agent visual review"
+                        checked={settings.visualQaEnabled}
+                        onCheckedChange={(checked) => save("visualQaEnabled", checked)}
+                      />
+                    </SettingRow>
                   <SettingRow label="Review agent" desc="Blank inherits the Agent used for the current project run.">
                     <Picker
                       ariaLabel="Visual review agent"
@@ -372,7 +418,8 @@ export function SettingsScreen({
                       onCheckedChange={(checked) => save("autoFixLiveRuntimeErrors", checked)}
                     />
                   </SettingRow>
-                </SettingsRows>
+                  </SettingsGroup>
+                </div>
               </SettingsPanel>
             )}
 

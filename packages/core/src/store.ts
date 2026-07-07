@@ -127,7 +127,9 @@ CREATE TABLE IF NOT EXISTS settings (
   visual_qa_model TEXT,
   auto_improve_enabled INTEGER NOT NULL DEFAULT 1,
   auto_improve_max_rounds INTEGER NOT NULL DEFAULT 8,
-  research_enabled INTEGER NOT NULL DEFAULT 0
+  research_enabled INTEGER NOT NULL DEFAULT 0,
+  research_agent_command TEXT,
+  research_model TEXT
 );
 CREATE TABLE IF NOT EXISTS moodboards (
   id TEXT PRIMARY KEY,
@@ -221,6 +223,8 @@ const DEFAULT_SETTINGS: Settings = {
   autoImproveEnabled: true,
   autoImproveMaxRounds: 8,
   researchEnabled: false,
+  researchAgentCommand: "",
+  researchModel: "",
 };
 
 type Row = Record<string, unknown>;
@@ -523,6 +527,8 @@ export class Store {
     ensureColumn("settings", "auto_improve_enabled", "auto_improve_enabled INTEGER NOT NULL DEFAULT 1");
     ensureColumn("settings", "auto_improve_max_rounds", "auto_improve_max_rounds INTEGER NOT NULL DEFAULT 8");
     ensureColumn("settings", "research_enabled", "research_enabled INTEGER NOT NULL DEFAULT 0");
+    ensureColumn("settings", "research_agent_command", "research_agent_command TEXT");
+    ensureColumn("settings", "research_model", "research_model TEXT");
     ensureColumn("projects", "archived_at", "archived_at INTEGER");
     ensureColumn("projects", "active_variant_id", "active_variant_id TEXT");
     ensureColumn("runs", "variant_id", "variant_id TEXT");
@@ -1374,6 +1380,8 @@ export class Store {
       visualQaEnabled: Number(r.visual_qa_enabled ?? 0) === 1,
       autoFixLiveRuntimeErrors: Number(r.auto_fix_live_runtime_errors ?? 0) === 1,
       researchEnabled: Number(r.research_enabled ?? 0) === 1,
+      researchAgentCommand: str(r.research_agent_command, DEFAULT_SETTINGS.researchAgentCommand),
+      researchModel: str(r.research_model, DEFAULT_SETTINGS.researchModel),
       visualQaAgentCommand: str(r.visual_qa_agent_command, DEFAULT_SETTINGS.visualQaAgentCommand),
       visualQaModel: str(r.visual_qa_model, DEFAULT_SETTINGS.visualQaModel),
       autoImproveEnabled: Number(r.auto_improve_enabled ?? 1) === 1,
@@ -1411,6 +1419,8 @@ export class Store {
       autoImproveEnabled: patch.autoImproveEnabled ?? cur.autoImproveEnabled,
       autoImproveMaxRounds: patch.autoImproveMaxRounds ?? cur.autoImproveMaxRounds,
       researchEnabled: patch.researchEnabled ?? cur.researchEnabled,
+      researchAgentCommand: patch.researchAgentCommand ?? cur.researchAgentCommand,
+      researchModel: patch.researchModel ?? cur.researchModel,
     };
     this.db
       .prepare(
@@ -1418,8 +1428,9 @@ export class Store {
                                image_api_base_url, image_api_key, image_model, remove_background_model, edit_region_model, extract_layer_model,
                                video_api_base_url, video_api_key, video_model,
                                ai_provider_id, ai_provider_enabled, ai_provider_models, ai_provider_organization, ai_provider_profiles,
-                               visual_qa_enabled, auto_fix_live_runtime_errors, visual_qa_agent_command, visual_qa_model, auto_improve_enabled, auto_improve_max_rounds, research_enabled)
-         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               visual_qa_enabled, auto_fix_live_runtime_errors, visual_qa_agent_command, visual_qa_model, auto_improve_enabled, auto_improve_max_rounds, research_enabled,
+                               research_agent_command, research_model)
+         VALUES ('app', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            agent_command = excluded.agent_command,
            model = excluded.model,
@@ -1447,7 +1458,9 @@ export class Store {
            visual_qa_model = excluded.visual_qa_model,
            auto_improve_enabled = excluded.auto_improve_enabled,
            auto_improve_max_rounds = excluded.auto_improve_max_rounds,
-           research_enabled = excluded.research_enabled`,
+           research_enabled = excluded.research_enabled,
+           research_agent_command = excluded.research_agent_command,
+           research_model = excluded.research_model`,
       )
       .run(
         next.agentCommand,
@@ -1477,6 +1490,8 @@ export class Store {
         next.autoImproveEnabled ? 1 : 0,
         next.autoImproveMaxRounds,
         next.researchEnabled ? 1 : 0,
+        next.researchAgentCommand,
+        next.researchModel,
       );
     return next;
   }

@@ -228,6 +228,14 @@ function reviewerModel(settings: Settings, fallback?: string): string | undefine
   return settings.visualQaModel.trim() || fallback || settings.model || undefined;
 }
 
+function researchAgentCommand(settings: Settings, fallback: string): string {
+  return settings.researchAgentCommand.trim() || fallback || settings.agentCommand || "claude";
+}
+
+function researchModel(settings: Settings, fallback?: string): string | undefined {
+  return settings.researchModel.trim() || fallback || settings.model || undefined;
+}
+
 function shouldAutoRepair(settings: Settings, findings: QualityFinding[], repairRounds: number, maxRounds: number): boolean {
   if (!settings.autoImproveEnabled || repairRounds >= maxRounds) return false;
   return findings.some((finding) => AUTO_REPAIR_SEVERITIES.has(finding.severity));
@@ -637,8 +645,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       skill: skill ? { id: skill.id, name: skill.name } : undefined,
       designSystemName: designSystem.name,
       hasUserReferences: moodboardContext.labels.length > 0 || effectContext.labels.length > 0,
-      agentCommand: runAgentCommand,
-      model: runModel,
+      agentCommand: researchAgentCommand(settings, runAgentCommand),
+      model: researchModel(settings, runModel),
       env: agentEnv,
       signal: ctrl.signal,
       onActivity: (a) => {
