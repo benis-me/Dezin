@@ -201,8 +201,9 @@ export class SharinganSession {
   }
 
   /** Inventory the page's images: <img> (with alt + rendered size), CSS background-images, and
-   *  <video>/<source> URLs. All URLs resolved absolute. The Agent uses this to know which image slots
-   *  exist so it can fill them with free placeholders — NOT to re-host the source's brand assets. */
+   *  <video>/<source> URLs. All URLs resolved absolute. captureCurrentPage downloads these (via
+   *  fetchAsset, using the authenticated session) into the project's public/_assets/ so the clone can
+   *  reproduce the source's real imagery 1:1 (v3 faithful-reproduction; authorized-use gated). */
   async assets(maxAssets = 80): Promise<Asset[]> {
     return this.page.evaluate((max: number) => {
       const win = globalThis as any;

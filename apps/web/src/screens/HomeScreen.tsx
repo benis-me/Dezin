@@ -1139,8 +1139,8 @@ export function HomeScreen({
         <div className="p-5">
           <h2 className="text-base font-semibold tracking-tight">Confirm authorized use</h2>
           <p className="mt-3 text-sm text-muted-foreground">
-            Sharingan reconstructs a site's structure and design as a new, editable project — it doesn't copy brand assets or content
-            verbatim. Only clone sites you own or are authorized to reproduce.
+            Sharingan reproduces a site — its structure, design, and imagery — as a new, editable project, including the source's
+            real images and content. Only clone sites you own or are authorized to reproduce.
           </p>
           <div className="mt-5 flex justify-end gap-2">
             <Button type="button" variant="ghost" onClick={() => setAffirmPending(null)}>
