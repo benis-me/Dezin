@@ -179,6 +179,62 @@ export async function handleSharinganNavigate(req: IncomingMessage, res: ServerR
   }
 }
 
+/**
+ * Ensure the probe session, emit a step (so the Phase-3 tab shows the Agent's activity), run
+ * `fn` against it, and normalize success/failure into a discriminated result the callers below
+ * turn into `200`/`409` responses.
+ */
+async function withProbe<T>(
+  id: string,
+  dataDir: string,
+  kind: CaptureStep["kind"],
+  text: string,
+  fn: (s: SharinganSession) => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  try {
+    const s = await ensureProbeSession(id, dataDir);
+    emit(get(id), { at: Date.now(), kind, text });
+    return { ok: true, value: await fn(s) };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "probe failed" };
+  }
+}
+
+/** Read up to 400 visible DOM nodes (tag/role/classes/text/box) from the live probe page. */
+export async function handleSharinganReadDom(res: ServerResponse, id: string, dataDir: string): Promise<void> {
+  const r = await withProbe(id, dataDir, "dom", "Agent reading DOM", (s) => s.readDom(400));
+  r.ok ? sendJson(res, 200, r.value) : sendJson(res, 409, { error: r.error });
+}
+
+/** Read the computed-style tokens (colors/fonts/sizes/radii/shadows) of the live probe page. */
+export async function handleSharinganComputedStyles(res: ServerResponse, id: string, dataDir: string): Promise<void> {
+  const r = await withProbe(id, dataDir, "styles", "Agent reading styles", (s) => s.styleTokens());
+  r.ok ? sendJson(res, 200, r.value) : sendJson(res, 409, { error: r.error });
+}
+
+/** List same-origin links discovered on the live probe page. */
+export async function handleSharinganLinks(res: ServerResponse, id: string, dataDir: string): Promise<void> {
+  const r = await withProbe(id, dataDir, "links", "Agent listing links", (s) => s.discoverLinks());
+  r.ok ? sendJson(res, 200, r.value) : sendJson(res, 409, { error: r.error });
+}
+
+/** Click a selector on the live probe page. */
+export async function handleSharinganClick(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
+  const body = (await readJsonBody(req)) as { selector?: string };
+  const selector = typeof body.selector === "string" ? body.selector : "";
+  if (!selector) { sendJson(res, 400, { error: "selector required" }); return; }
+  const r = await withProbe(id, dataDir, "navigate", `Agent clicking ${selector}`, (s) => s.click(selector));
+  r.ok ? sendJson(res, 200, { ok: true }) : sendJson(res, 409, { error: r.error });
+}
+
+/** Scroll the live probe page to a Y offset. */
+export async function handleSharinganScroll(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
+  const body = (await readJsonBody(req)) as { y?: number };
+  const y = typeof body.y === "number" ? body.y : 0;
+  const r = await withProbe(id, dataDir, "navigate", `Agent scrolling to ${y}`, (s) => s.scroll(y));
+  r.ok ? sendJson(res, 200, { ok: true }) : sendJson(res, 409, { error: r.error });
+}
+
 export function handleSharinganStatus(res: ServerResponse, id: string): void {
   const c = get(id);
   sendJson(res, 200, { phase: c.phase, steps: c.steps.length, pages: c.pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots })), error: c.error });
