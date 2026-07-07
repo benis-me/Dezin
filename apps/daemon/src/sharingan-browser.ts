@@ -13,6 +13,52 @@ export interface StyleTokens { colors: string[]; fontFamilies: string[]; fontSiz
 type Browser = Awaited<ReturnType<typeof puppeteer.launch>>;
 type Page = Awaited<ReturnType<Browser["newPage"]>>;
 
+/** Chrome launch options with the automation tells removed: no `--enable-automation`, and the
+ *  AutomationControlled blink feature disabled. Pure so the flags can be asserted without launching. */
+export function sharinganLaunchOptions(
+  executablePath: string,
+  opts: { userDataDir?: string; headless?: boolean },
+): {
+  executablePath: string;
+  headless: boolean;
+  userDataDir?: string;
+  ignoreDefaultArgs: string[];
+  args: string[];
+  defaultViewport: { width: number; height: number };
+} {
+  return {
+    executablePath,
+    headless: opts.headless ?? false,
+    userDataDir: opts.userDataDir,
+    // Puppeteer adds --enable-automation by default; that flag (and the navigator.webdriver it sets)
+    // is exactly what Google/Cloudflare fingerprint. Drop it and disable the matching blink feature.
+    ignoreDefaultArgs: ["--enable-automation"],
+    args: ["--no-sandbox", "--hide-scrollbars", "--disable-blink-features=AutomationControlled"],
+    defaultViewport: { width: 1440, height: 900 },
+  };
+}
+
+/** The structural slice of a puppeteer Page that applyStealth drives (so it can be faked in tests). */
+export interface StealthPage {
+  setUserAgent(ua: string): Promise<void>;
+  evaluateOnNewDocument(fn: (...args: any[]) => unknown): Promise<unknown>;
+}
+
+/** Apply the runtime stealth hooks to a freshly-opened page: set a normal (non-Headless) UA and make
+ *  navigator.webdriver read as undefined on every document. Does NOT bypass auth — it only stops the
+ *  window from being flagged as a bot so the USER can complete Google/Cloudflare sign-in themselves. */
+export async function applyStealth(page: StealthPage, userAgent: string): Promise<void> {
+  await page.setUserAgent(userAgent);
+  await page.evaluateOnNewDocument(() => {
+    const nav = (globalThis as any).navigator;
+    try {
+      Object.defineProperty(nav, "webdriver", { get: () => undefined });
+    } catch {
+      /* navigator is frozen on some pages — best-effort */
+    }
+  });
+}
+
 export class SharinganSession {
   private browser: Browser;
   private page: Page;
@@ -27,14 +73,12 @@ export class SharinganSession {
   static async open(url: string, opts: { userDataDir?: string; headless?: boolean } = {}): Promise<SharinganSession> {
     const executablePath = findChrome();
     if (!executablePath) throw new Error("Chrome not found (required for Sharingan capture)");
-    const browser = await puppeteer.launch({
-      executablePath,
-      headless: opts.headless ?? false,
-      userDataDir: opts.userDataDir,
-      args: ["--no-sandbox", "--hide-scrollbars"],
-      defaultViewport: { width: 1440, height: 900 },
-    });
+    const browser = await puppeteer.launch(sharinganLaunchOptions(executablePath, opts));
     const page = await browser.newPage();
+    // Strip "HeadlessChrome" from the UA the automated browser advertises (headful already says
+    // "Chrome"; this covers the headless test/CI path and is belt-and-suspenders in production).
+    const userAgent = (await browser.userAgent()).replace(/Headless/g, "");
+    await applyStealth(page, userAgent);
     const origin = new URL(url).origin;
     const session = new SharinganSession(browser, page, origin);
     await session.navigate(url);
