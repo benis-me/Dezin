@@ -52,6 +52,7 @@ export {
   readReport,
   listAssets,
   listDirections,
+  directionsExist,
   writeChosenDirection,
   readChosenDirection,
   buildResearchContext,

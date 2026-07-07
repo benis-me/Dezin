@@ -5,7 +5,7 @@
  */
 
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
   ASSETS_DIRNAME,
@@ -157,16 +157,17 @@ export async function buildResearchContext(projectDir: string, chosenDirectionSl
   const visualReport = await readVisualReport(projectDir);
   if (!report && !visualReport) return null;
   const assets = await listAssets(projectDir);
+  const researchRel = basename(researchDir(projectDir)); // ".research" — the REAL on-disk dir (not "research")
   // The opening line asserts a *product* report exists — only true when one was actually
   // produced. A visual-only project (no product `report`) gets a visual-appropriate line
   // instead, so the build phase isn't told a product report exists when it doesn't.
   const parts = [
     report
-      ? `A research report has been produced in \`${basename(researchDir(projectDir))}/\`. It is authoritative — build on it, do not re-research.`
-      : `Visual research has been produced in \`${basename(researchDir(projectDir))}/${VISUAL_DIRNAME}/\`. It is authoritative for visual direction — build on it, do not re-research.`,
+      ? `A research report has been produced in \`${researchRel}/\`. It is authoritative — build on it, do not re-research.`
+      : `Visual research has been produced in \`${researchRel}/${VISUAL_DIRNAME}/\`. It is authoritative for visual direction — build on it, do not re-research.`,
   ];
   if (assets.length) {
-    parts.push(`Reference imagery is available locally: ${assets.map((a) => `\`${join("research", a)}\``).join(", ")}.`);
+    parts.push(`Reference imagery is available locally: ${assets.map((a) => `\`${join(researchRel, a)}\``).join(", ")}.`);
   }
   if (chosenDirectionSlug) {
     const chosen = await readText(directionPath(projectDir, chosenDirectionSlug));
@@ -176,9 +177,20 @@ export async function buildResearchContext(projectDir: string, chosenDirectionSl
   if (visualReport) parts.push(`## Visual research (design-site inspiration)\n\n${visualReport.trim()}`);
   const visualAssets = await listVisualAssets(projectDir);
   if (visualAssets.length) {
-    parts.push(`Visual reference imagery is available locally: ${visualAssets.map((a) => `\`${join("research", a)}\``).join(", ")}. Study these real screenshots as source material.`);
+    parts.push(
+      `Reference screenshots are on disk: ${visualAssets.map((a) => `\`${join(researchRel, a)}\``).join(", ")}. Before you design, OPEN and study EACH of them with your file tools — they are PRIMARY visual evidence for the look, not decoration. Do not design from the text alone.`,
+    );
   }
   return parts.join("\n\n");
+}
+
+/** True when at least one candidate direction dir exists on disk. */
+export function directionsExist(projectDir: string): boolean {
+  try {
+    return readdirSync(directionsDir(projectDir), { withFileTypes: true }).some((e) => e.isDirectory());
+  } catch {
+    return false;
+  }
 }
 
 async function readText(path: string): Promise<string | null> {

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import {
   visualDir, visualReportPath, visualAssetsDir, visualMoodboardPointerPath, visualSourcesPath,
   visualResearchExists, readVisualReport, listVisualAssets, readVisualSources,
-  readVisualMoodboardId, writeVisualMoodboardId, buildResearchContext,
+  readVisualMoodboardId, writeVisualMoodboardId, buildResearchContext, directionsExist,
 } from "../src/index.ts";
 
 function proj(): string {
@@ -51,6 +51,32 @@ test("readVisualSources tolerates a title-less visual source (identified by url/
   assert.equal(sources[0]!.designer, "Ana");
   assert.equal(sources[0]!.platform, "behance");
   assert.deepEqual(sources[0]!.assets, ["assets/x.png"]);
+});
+
+test("buildResearchContext gives the agent the REAL .research image paths (not research/) and forces opening them", async () => {
+  const p = proj();
+  mkdirSync(join(p, ".research", "assets"), { recursive: true });
+  mkdirSync(visualAssetsDir(p), { recursive: true });
+  writeFileSync(join(p, ".research", "research.md"), "# Product\n\nUsers skim.");
+  writeFileSync(visualReportPath(p), "# Visual\n\nMono.");
+  writeFileSync(join(p, ".research", "assets", "ref.png"), "x");
+  writeFileSync(join(visualAssetsDir(p), "hero.png"), "x");
+  const ctx = (await buildResearchContext(p))!;
+  // Paths must carry the leading dot (RESEARCH_DIRNAME = ".research").
+  assert.match(ctx, /\.research\/visual\/assets\/hero\.png/);
+  assert.match(ctx, /\.research\/assets\/ref\.png/);
+  // And must NOT hand the agent the broken dot-less path (a backtick directly before "research/").
+  assert.doesNotMatch(ctx, /`research\//);
+  // Force-open instruction (not the passive "study these").
+  assert.match(ctx, /open .*(each|every).*(image|screenshot|reference)|open and study/i);
+  assert.match(ctx, /primary visual evidence/i);
+});
+
+test("directionsExist reflects whether any candidate direction is on disk", () => {
+  const p = proj();
+  assert.equal(directionsExist(p), false);
+  mkdirSync(join(p, ".research", "directions", "bold"), { recursive: true });
+  assert.equal(directionsExist(p), true);
 });
 
 test("buildResearchContext folds in BOTH the product report and the visual report + assets", async () => {
