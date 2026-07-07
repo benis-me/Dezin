@@ -5,7 +5,7 @@ import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { detectLoginWall, capturePage } from "../src/sharingan-capture.ts";
+import { detectLoginWall, capturePage, captureCurrentPage } from "../src/sharingan-capture.ts";
 import { SharinganSession } from "../src/sharingan-browser.ts";
 import { findChrome } from "../src/capture-cover.ts";
 
@@ -37,5 +37,22 @@ test("capturePage writes screenshots + dom + styles into .sharingan and reports 
   } finally {
     await s.close();
     await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+test("captureCurrentPage captures the current page without navigating + records links", { skip: !findChrome() && "no Chrome" }, async () => {
+  const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end('<!doctype html><title>T</title><h1>Acme</h1><p>' + "w ".repeat(40) + '</p><a href="/pricing">Pricing</a>'); });
+  await new Promise<void>((r) => fixture.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`;
+  const dir = mkdtempSync(join(tmpdir(), "shar-cur-"));
+  const session = await SharinganSession.open(url, { userDataDir: mkdtempSync(join(tmpdir(), "shar-cur-prof-")), headless: true });
+  try {
+    const page = await captureCurrentPage(session, dir, url, () => {});
+    assert.ok(page.screenshots.desktop, "wrote a desktop screenshot path");
+    assert.ok(page.links.some((l) => l.endsWith("/pricing")), "recorded the same-origin link");
+    assert.ok(existsSync(join(dir, page.screenshots.desktop)), "the screenshot file exists");
+  } finally {
+    await session.close();
+    await new Promise<void>((r) => fixture.close(() => r()));
   }
 });

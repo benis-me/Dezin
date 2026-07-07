@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { SharinganSession, VIEWPORTS } from "./sharingan-browser.ts";
 
 export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "login-required" | "done"; text: string }
-export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string }
+export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; links: string[] }
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth|account)(\/|\?|$)/i;
 
@@ -22,26 +22,13 @@ function pageDir(url: string): string {
   return slug;
 }
 
-export async function capturePage(
+export async function captureCurrentPage(
   session: SharinganSession,
   projectDir: string,
   url: string,
   onStep: (s: CaptureStep) => void,
-): Promise<{ page: CapturedPage | null; loginRequired: boolean }> {
+): Promise<CapturedPage> {
   const step = (kind: CaptureStep["kind"], text: string) => onStep({ at: Date.now(), kind, text });
-
-  step("navigate", `Navigating to ${url}`);
-  const nav = await session.navigate(url);
-
-  const dom = await session.readDom(400);
-  const hasPasswordField = await session.hasPasswordField();
-  const textLength = dom.reduce((a, n) => a + n.text.length, 0);
-
-  if (detectLoginWall({ status: nav.status, finalUrl: nav.finalUrl, hasPasswordField, textLength })) {
-    step("login-required", `This page needs a login (${nav.finalUrl}). Sign in, then continue.`);
-    return { page: null, loginRequired: true };
-  }
-
   const rel = join(".sharingan", pageDir(url));
   mkdirSync(join(projectDir, rel), { recursive: true });
 
@@ -56,6 +43,7 @@ export async function capturePage(
   }
 
   step("dom", "Reading DOM structure");
+  const dom = await session.readDom(400);
   const domRel = join(rel, "dom.json");
   writeFileSync(join(projectDir, domRel), JSON.stringify(dom, null, 0));
 
@@ -64,9 +52,35 @@ export async function capturePage(
   writeFileSync(join(projectDir, styleRel), JSON.stringify(await session.styleTokens(), null, 0));
 
   step("links", "Discovering same-origin links");
-  await session.discoverLinks();
+  const links = await session.discoverLinks();
 
   const title = (dom.find((n) => n.tag === "h1")?.text || url).slice(0, 80);
   step("done", "Capture complete");
-  return { page: { url, title, screenshots, dom: domRel, styles: styleRel }, loginRequired: false };
+  return { url, title, screenshots, dom: domRel, styles: styleRel, links };
+}
+
+export async function capturePage(
+  session: SharinganSession,
+  projectDir: string,
+  url: string,
+  onStep: (s: CaptureStep) => void,
+): Promise<{ page: CapturedPage | null; loginRequired: boolean }> {
+  const step = (kind: CaptureStep["kind"], text: string) => onStep({ at: Date.now(), kind, text });
+  step("navigate", `Navigating to ${url}`);
+  const nav = await session.navigate(url);
+  const dom = await session.readDom(400);
+  const hasPasswordField = await session.hasPasswordField();
+  const textLength = dom.reduce((a, n) => a + n.text.length, 0);
+  if (detectLoginWall({ status: nav.status, finalUrl: nav.finalUrl, hasPasswordField, textLength })) {
+    step("login-required", `This page needs a login (${nav.finalUrl}). Sign in, then continue.`);
+    return { page: null, loginRequired: true };
+  }
+  const page = await captureCurrentPage(session, projectDir, url, onStep);
+  return { page, loginRequired: false };
+}
+
+export function writePagesManifest(projectDir: string, sourceUrl: string, pages: CapturedPage[]): void {
+  mkdirSync(join(projectDir, ".sharingan"), { recursive: true });
+  const manifest = { sourceUrl, pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots, dom: p.dom, styles: p.styles, links: p.links })) };
+  writeFileSync(join(projectDir, ".sharingan", "pages.json"), JSON.stringify(manifest, null, 2));
 }
