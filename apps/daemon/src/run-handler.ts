@@ -56,6 +56,9 @@ import {
 } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
+import { ensureCaptured, capturedPageCount } from "./sharingan-handler.ts";
+import { buildSharinganContext } from "./sharingan-context.ts";
+import { SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
 import type { AppDeps } from "./app.ts";
 
 // Skills are scanned once and cached for the daemon process.
@@ -494,7 +497,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const runModel = body.model || settings.model || undefined;
   // The generating model family — enables provider-fingerprint quality rules (GPT/Gemini tells).
   const runProviderFamily = providerFamily(getProvider(runAgentCommand)?.id, runModel);
-  const agentEnv = buildAgentEnv(settings, runAgentCommand);
+  const agentEnv = buildAgentEnv(settings, runAgentCommand, deps.security?.token);
   const imageRuntime = providerRuntimeConfig(settings, settings.aiProviderId);
   const imageBaseUrl = imageRuntime.baseUrl || settings.imageApiBaseUrl;
   const imageApiKey = imageRuntime.apiKey || settings.imageApiKey;
@@ -654,9 +657,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // turn on an already-researched project must not auto-re-enter it: research would only flash
   // "Researching" (the phase early-returns since the report/directions already exist), then
   // re-surface the old direction gate and cancel the run. An explicit body.research === true still
-  // forces it.
+  // forces it. Sharingan projects skip Research entirely — the URL brief is not a research topic.
   const autoResearch = (settings.researchEnabled || process.env.DEZIN_RESEARCH === "1") && !researchOnDisk;
-  if (!alreadyResearched && body.research !== false && (body.research === true || autoResearch)) {
+  if (!alreadyResearched && body.research !== false && (body.research === true || autoResearch) && !project.sharingan) {
     sse({ type: "research-start", runId: run.id });
     // Persist the research card from the START (not just its done-summary), updated per activity, so
     // its live Product/Visual lanes survive navigating away and back — history restore rehydrates them.
@@ -733,6 +736,28 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     if (chosenDirection) chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
     const researchContext = await buildResearchContext(dir, chosenDirection);
     if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
+  }
+
+  // Sharingan: capture the entry page (idempotent — a no-op once already "captured") before the
+  // build turn, then hand the agent the reconstruct-from-capture context (the .sharingan/ bundle
+  // location + the live browser-control probe endpoints). Runs once per build, not per repair
+  // round — this sits before turnMessage is first derived from agentBrief, so the FIRST build
+  // turn already sees it.
+  if (project.sharingan && project.sourceUrl) {
+    // Best-effort: never fail the build on a capture hiccup — the agent can still probe live.
+    await ensureCaptured(project.id, deps.dataDir, project.sourceUrl).catch(() => {});
+    agentBrief = [
+      agentBrief,
+      buildSharinganContext({
+        projectId: project.id,
+        sourceUrl: project.sourceUrl,
+        origin: origin ?? "",
+        budget: SHARINGAN_PAGE_BUDGET,
+        capturedCount: capturedPageCount(project.id),
+      }).promptBlock,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
 
   // Exemplar retrieval: reference the user's previously-kept (👍) designs so the build

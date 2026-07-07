@@ -22,6 +22,10 @@ export interface Project {
   runStatus?: "pending" | "running" | null;
   /** Absolute on-disk project folder, when served by the local daemon. */
   projectPath?: string;
+  /** Whether this project was created by cloning a website via Sharingan. */
+  sharingan?: boolean;
+  /** The source URL Sharingan cloned this project from, when sharingan is true. */
+  sourceUrl?: string;
 }
 
 export type SetupPhase = "scaffolding" | "installing" | "ready" | "error";
@@ -66,6 +70,8 @@ export interface CreateProjectInput {
   skillId?: string | null;
   designSystemId?: string | null;
   mode?: ProjectMode;
+  sharingan?: boolean;
+  sourceUrl?: string;
 }
 
 export type MoodboardNodeType = "image" | "image-generator" | "note" | "section" | "video";
@@ -346,6 +352,7 @@ export interface Settings {
   aiProviderProfiles: string;
   visualQaEnabled: boolean;
   autoFixLiveRuntimeErrors: boolean;
+  sharinganAffirmed: boolean;
   researchEnabled: boolean;
   researchAgentCommand: string;
   researchModel: string;
@@ -458,6 +465,62 @@ export function parseSseBlock(block: string): RunEvent | null {
     return JSON.parse(dataLines.join("\n")) as RunEvent;
   } catch {
     return null;
+  }
+}
+
+/** One step emitted while Sharingan captures a site (navigate, screenshot, login-required, etc.). */
+export interface SharinganStep {
+  at: number;
+  kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "login-required" | "done";
+  text: string;
+}
+
+/** A single captured page: its URL, title, and screenshots keyed by viewport/label. */
+export interface SharinganPage {
+  url: string;
+  title: string;
+  screenshots: Record<string, string>;
+}
+
+/** Overall capture status for a Sharingan clone job. */
+export interface SharinganStatus {
+  phase: string;
+  steps: number;
+  pages: SharinganPage[];
+  error?: string;
+}
+
+/** Generic SSE consumer for JSON-shaped events that aren't a RunEvent (e.g. SharinganStep). */
+export async function* consumeSseJson<T>(res: Response): AsyncGenerator<T> {
+  if (!res.ok) throw new ApiError(res.status, await safeText(res));
+  if (!res.body) {
+    // Environments without a streaming body: parse the whole text.
+    for (const block of (await res.text()).split("\n\n")) {
+      const parsed = parseSseBlock(block) as T | null;
+      if (parsed) yield parsed;
+    }
+    return;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      const parsed = parseSseBlock(block) as T | null;
+      if (parsed) yield parsed;
+    }
+  }
+  buffer += decoder.decode();
+  const tail = buffer.trim();
+  if (tail) {
+    const parsed = parseSseBlock(tail) as T | null;
+    if (parsed) yield parsed;
   }
 }
 
@@ -611,6 +674,18 @@ export interface ApiClient {
   cancelRun(runId: string): Promise<{ cancelled: boolean }>;
   setRunFeedback(runId: string, feedback: RunFeedback | null): Promise<{ run: RunSummary }>;
   suggestPreferences(): Promise<{ suggestion: string; signals: number }>;
+  /** Start a Sharingan clone capture for the given source URL. */
+  startSharingan(id: string, url: string): Promise<void>;
+  /** Current capture status: phase, step count, and pages captured so far. */
+  sharinganStatus(id: string): Promise<SharinganStatus>;
+  /** Resume a capture that's paused (e.g. waiting after a login-required step). */
+  continueSharingan(id: string): Promise<void>;
+  /** Bring the capture's browser window to the foreground (e.g. for manual login). */
+  focusSharingan(id: string): Promise<void>;
+  /** Stream capture steps live (SSE) as Sharingan navigates and screenshots the site. */
+  streamSharinganEvents(id: string, signal?: AbortSignal): AsyncGenerator<SharinganStep>;
+  /** URL serving a captured screenshot, given its relative path within the capture. */
+  sharinganShotUrl(id: string, relPath: string): string;
 }
 
 export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
@@ -862,5 +937,13 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     cancelRun: (runId) => json<{ cancelled: boolean }>(`/api/runs/${enc(runId)}/cancel`, { method: "POST" }),
     setRunFeedback: (runId, feedback) => json<{ run: RunSummary }>(`/api/runs/${enc(runId)}/feedback`, jsonInit("POST", feedback ?? { clear: true })),
     suggestPreferences: () => json<{ suggestion: string; signals: number }>("/api/preferences/suggest", { method: "POST" }),
+    startSharingan: (id, url) => json<void>(`/api/sharingan/${enc(id)}/start`, jsonInit("POST", { url })),
+    sharinganStatus: (id) => json<SharinganStatus>(`/api/sharingan/${enc(id)}/status`),
+    continueSharingan: (id) => json<void>(`/api/sharingan/${enc(id)}/continue`, jsonInit("POST")),
+    focusSharingan: (id) => json<void>(`/api/sharingan/${enc(id)}/focus`, jsonInit("POST")),
+    streamSharinganEvents: async function* (id, signal) {
+      yield* consumeSseJson<SharinganStep>(await f(baseUrl + `/api/sharingan/${enc(id)}/events`, initWithDaemonToken({ signal })));
+    },
+    sharinganShotUrl: (id, relPath) => `${baseUrl}/api/sharingan/${enc(id)}/shot?path=${encodeURIComponent(relPath)}`,
   };
 }

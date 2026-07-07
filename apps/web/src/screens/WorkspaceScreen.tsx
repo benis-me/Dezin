@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MoreHorizontal, MousePointerClick, PanelsTopLeft, Paperclip, Pencil, RotateCw, Search, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
+import { Aperture, ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Copy, CornerUpLeft, Download, Eye, FileCode2, Folder, GitFork, GripVertical, History, Maximize2, Monitor, MoreHorizontal, MousePointerClick, PanelsTopLeft, Paperclip, Pencil, RotateCw, Search, Settings, ShieldCheck, Smartphone, Sparkles, Square, Tablet, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Button,
@@ -45,6 +45,7 @@ import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
 import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { ResearchCard, ResearchPanel, type ResearchCardData } from "./ResearchViews.tsx";
+import { SharinganTab } from "./SharinganTab.tsx";
 import { highlightToReact } from "../lib/highlight-lite.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
@@ -62,7 +63,7 @@ import { PreviewRuntimeErrorOverlay } from "../components/PreviewRuntimeErrorOve
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
 
-const TABS = ["Preview", "Research", "Files", "Quality"] as const;
+const TABS = ["Preview", "Sharingan", "Research", "Files", "Quality"] as const;
 type Tab = (typeof TABS)[number];
 
 type Device = "desktop" | "tablet" | "mobile";
@@ -3556,6 +3557,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           setProjectMode(proj.mode);
           setProjectName(proj.name);
           setDsId(proj.designSystemId ?? "");
+          if (proj.sharingan) setTab("Sharingan");
           if (proj.mode === "standard") void loadDevPreview();
         }
         void api.listDesignSystems().then((d) => alive && setSystems(d)).catch(() => {});
@@ -4223,11 +4225,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const TAB_ICON: Record<Tab, ReactNode> = {
     Preview: <Eye size={13} strokeWidth={1.75} />,
+    Sharingan: <Aperture size={13} strokeWidth={1.75} />,
     Research: <Search size={13} strokeWidth={1.75} />,
     Files: <Folder size={13} strokeWidth={1.75} />,
     Quality: <ShieldCheck size={13} strokeWidth={1.75} />,
   };
-  const tabItems: TabItem[] = TABS.filter((t) => t !== "Research" || research?.exists).map((t) => ({
+  const tabItems: TabItem[] = TABS.filter((t) => (t !== "Research" || research?.exists) && (t !== "Sharingan" || project?.sharingan)).map((t) => ({
     value: t,
     label: (
       <>
@@ -4986,6 +4989,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             ) : (
               emptyPane(running ? "Generating…" : "Your preview will appear here")
             )
+          ) : tab === "Sharingan" ? (
+            <SharinganTab projectId={projectId} sourceUrl={project?.sourceUrl ?? ""} />
           ) : tab === "Research" ? (
             <ResearchPanel research={research} assetUrl={(p) => api.researchAssetUrl(projectId, p)} visualAssetUrl={(p) => api.researchVisualAssetUrl(projectId, p)} />
           ) : tab === "Files" ? (

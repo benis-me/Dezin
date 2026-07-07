@@ -23,6 +23,10 @@ export interface Project {
   designSystemId: string | null;
   /** Build mode — prototype (single HTML) or standard (real project). */
   mode: ProjectMode;
+  /** Whether this project was created by cloning a website via Sharingan. */
+  sharingan: boolean;
+  /** The source URL Sharingan cloned this project from, when sharingan is true. */
+  sourceUrl?: string;
   createdAt: number;
   updatedAt: number;
   /** When archived (soft-deleted); null when active. */
@@ -257,6 +261,8 @@ export interface CreateProjectInput {
   skillId?: string | null;
   designSystemId?: string | null;
   mode?: ProjectMode;
+  sharingan?: boolean;
+  sourceUrl?: string;
 }
 
 /** Single-row app settings (BYOK provider config + defaults). Local-first. */
@@ -311,6 +317,8 @@ export interface Settings {
   visualQaEnabled: boolean;
   /** When enabled, a repair run is auto-dispatched when a FATAL live-preview error is sensed while idle. */
   autoFixLiveRuntimeErrors: boolean;
+  /** True once the user has affirmed they're authorized to reproduce a site with Sharingan (asked once, not per run). */
+  sharinganAffirmed: boolean;
   /** Optional reviewer Agent override; empty means inherit the current project run Agent. */
   visualQaAgentCommand: string;
   /** Optional reviewer model override; empty means inherit the current project run model. */

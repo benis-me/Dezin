@@ -37,6 +37,7 @@ import {
 import { handleGetVersion, handleGetVersionPreviewUrl, handleGetVersionDiff, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
 import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } from "./project-runtime.ts";
+import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture } from "./sharingan-handler.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleCreateEffect, handleGetEffect, handleListEffects, handleUpdateEffect } from "./effects-handler.ts";
@@ -129,6 +130,13 @@ interface Route {
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
+}
+
+function isHttpUrl(v: unknown): v is string {
+  if (typeof v !== "string") return false;
+  const s = v.trim();
+  if (!/^https?:\/\//i.test(s)) return false;
+  try { new URL(s); return true; } catch { return false; }
 }
 
 /** A one-shot hand-off from the browser extension: captured reference images + a note. */
@@ -376,12 +384,17 @@ const routes: Route[] = [
       const { store, dataDir } = deps;
       const body = (await readJsonBody(req)) as Partial<CreateProjectInput>;
       if (!isNonEmptyString(body.name)) return sendError(res, 400, "name is required");
-      const mode = body.mode === "standard" ? "standard" : "prototype";
+      const sharingan = body.sharingan === true;
+      if (sharingan && !isHttpUrl(body.sourceUrl)) return sendError(res, 400, "sharingan requires a valid http(s) sourceUrl");
+      // Sharingan always reconstructs into a Standard project.
+      const mode = sharingan || body.mode === "standard" ? "standard" : "prototype";
       const project = store.createProject({
         name: body.name,
         skillId: body.skillId ?? null,
         designSystemId: body.designSystemId ?? null,
         mode,
+        sharingan,
+        sourceUrl: sharingan ? body.sourceUrl : undefined,
       });
       // Standard projects scaffold a real Vite project + install deps in the background.
       if (mode === "standard") void (deps.standardProjectSetup ?? setupStandardProject)(project.id, projectDir(dataDir, project.id));
@@ -860,6 +873,73 @@ const routes: Route[] = [
       if (!existsSync(f)) return sendError(res, 404, "no cover");
       send(res, 200, readFileSync(f), "image/png");
     },
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/start",
+    handler: (req, res, p, deps) => handleSharinganStart(req, res, p.id!, deps.dataDir),
+  },
+  {
+    method: "GET",
+    pattern: "/api/sharingan/:id/status",
+    handler: (_req, res, p) => handleSharinganStatus(res, p.id!),
+  },
+  {
+    // Serve a captured-page screenshot (publicRead so <img src> works — it cannot send the daemon token header).
+    method: "GET",
+    pattern: "/api/sharingan/:id/shot",
+    publicRead: true,
+    handler: (req, res, p, deps) => handleSharinganShot(res, p.id!, new URL(req.url ?? "", "http://x").searchParams.get("path") ?? "", deps.dataDir),
+  },
+  {
+    method: "GET",
+    pattern: "/api/sharingan/:id/events",
+    handler: (_req, res, p) => handleSharinganEvents(res, p.id!),
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/continue",
+    handler: (_req, res, p, deps) => handleSharinganContinue(res, p.id!, deps.dataDir),
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/focus",
+    handler: (_req, res, p) => handleSharinganFocus(res, p.id!),
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/navigate",
+    handler: (req, res, p, deps) => handleSharinganNavigate(req, res, p.id!, deps.dataDir),
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/capture",
+    handler: (req, res, p, deps) => handleSharinganCapture(req, res, p.id!, deps.dataDir),
+  },
+  {
+    method: "GET",
+    pattern: "/api/sharingan/:id/read-dom",
+    handler: (_req, res, p, deps) => handleSharinganReadDom(res, p.id!, deps.dataDir),
+  },
+  {
+    method: "GET",
+    pattern: "/api/sharingan/:id/computed-styles",
+    handler: (_req, res, p, deps) => handleSharinganComputedStyles(res, p.id!, deps.dataDir),
+  },
+  {
+    method: "GET",
+    pattern: "/api/sharingan/:id/links",
+    handler: (_req, res, p, deps) => handleSharinganLinks(res, p.id!, deps.dataDir),
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/click",
+    handler: (req, res, p, deps) => handleSharinganClick(req, res, p.id!, deps.dataDir),
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/scroll",
+    handler: (req, res, p, deps) => handleSharinganScroll(req, res, p.id!, deps.dataDir),
   },
 ];
 

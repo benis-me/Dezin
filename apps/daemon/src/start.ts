@@ -14,6 +14,7 @@ import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDir } from "../../../packages/design/src/index.ts";
 import { stopAllDevServers } from "./project-runtime.ts";
+import { closeAllSharinganSessions } from "./sharingan-handler.ts";
 import { createApp } from "./app.ts";
 
 const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
@@ -124,10 +125,18 @@ function main(): void {
     } catch {
       // ignore
     }
-    server.close(() => {
-      store.close();
-      process.exit(0);
-    });
+    // Close any live Sharingan sessions (entry capture + probe) before exiting, so a
+    // shutdown/crash can't orphan a headful Chrome holding the persistent-profile lock
+    // (which would block the next clone). Best-effort: closeAllSharinganSessions never
+    // throws, but guard anyway so a shutdown signal always reaches process.exit.
+    closeAllSharinganSessions()
+      .catch(() => {})
+      .then(() => {
+        server.close(() => {
+          store.close();
+          process.exit(0);
+        });
+      });
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

@@ -1078,6 +1078,7 @@ test("/projects/new preserves the selected agent and model for the first run", a
     aiProviderProfiles: "",
     visualQaEnabled: false,
     autoFixLiveRuntimeErrors: false,
+    sharinganAffirmed: false,
     researchEnabled: false, researchAgentCommand: "", researchModel: "",    visualQaAgentCommand: "",
     visualQaModel: "",
     autoImproveEnabled: true,
@@ -2853,4 +2854,54 @@ test("auto-fix stops dispatching once the per-conversation cap is reached", asyn
 
   expect(streamRun.mock.calls.length).toBeLessThanOrEqual(AUTO_FIX_MAX_PER_CONVERSATION);
   expect(streamRun).toHaveBeenCalledTimes(AUTO_FIX_MAX_PER_CONVERSATION);
+});
+
+test("shows an auto-selected Sharingan tab for a sharingan project", async () => {
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Cloned Site",
+          skillId: null,
+          designSystemId: "modern-minimal",
+          mode: "standard",
+          createdAt: 1,
+          updatedAt: 1,
+          sharingan: true,
+          sourceUrl: "https://example.com",
+        }),
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const tab = await screen.findByRole("tab", { name: /Sharingan/i });
+  expect(tab).toBeInTheDocument();
+  expect(tab).toHaveAttribute("aria-selected", "true");
+});
+
+test("shows no Sharingan tab for a normal project", async () => {
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Regular",
+          skillId: null,
+          designSystemId: "modern-minimal",
+          mode: "prototype",
+          createdAt: 1,
+          updatedAt: 1,
+          sharingan: false,
+        }),
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByLabelText("Message");
+  expect(screen.queryByRole("tab", { name: /Sharingan/i })).not.toBeInTheDocument();
 });

@@ -284,6 +284,18 @@ test("autoFixLiveRuntimeErrors round-trips through settings", () => {
   s.close();
 });
 
+test("settings persist the sharinganAffirmed flag (default false)", () => {
+  const store = new Store(":memory:");
+  try {
+    assert.equal(store.getSettings().sharinganAffirmed, false);
+    const updated = store.updateSettings({ sharinganAffirmed: true });
+    assert.equal(updated.sharinganAffirmed, true);
+    assert.equal(store.getSettings().sharinganAffirmed, true);
+  } finally {
+    store.close();
+  }
+});
+
 test("moodboards persist nodes, assets, and messages", () => {
   const s = freshStore();
   const board = s.createMoodboard({ name: "Launch references" });
@@ -397,6 +409,17 @@ test("updateRun throws on unknown id", () => {
   const s = freshStore();
   assert.throws(() => s.updateRun("nope", { status: "failed" }), /run not found/);
   s.close();
+});
+
+test("a project persists the sharingan flag and sourceUrl", () => {
+  const store = new Store(":memory:");
+  const p = store.createProject({ name: "clone", mode: "standard", sharingan: true, sourceUrl: "https://example.com" });
+  const read = store.getProject(p.id);
+  assert.equal(read?.sharingan, true);
+  assert.equal(read?.sourceUrl, "https://example.com");
+  const plain = store.createProject({ name: "normal" });
+  assert.equal(store.getProject(plain.id)?.sharingan, false);
+  store.close();
 });
 
 test("quality ignores: add, list, and remove persist per project", () => {

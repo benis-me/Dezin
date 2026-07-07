@@ -6,7 +6,7 @@ function setIfPresent(env: NodeJS.ProcessEnv, key: string, value: string | undef
   if (trimmed) env[key] = trimmed;
 }
 
-export function buildAgentEnv(settings: Settings, command: string): NodeJS.ProcessEnv {
+export function buildAgentEnv(settings: Settings, command: string, daemonToken?: string): NodeJS.ProcessEnv {
   const providerId = getProvider(command)?.id;
   const env: NodeJS.ProcessEnv = {};
 
@@ -21,6 +21,10 @@ export function buildAgentEnv(settings: Settings, command: string): NodeJS.Proce
     setIfPresent(env, "GEMINI_API_KEY", settings.apiKey);
     setIfPresent(env, "GOOGLE_API_KEY", settings.apiKey);
   }
+
+  // Lets the coding Agent authenticate to token-gated daemon endpoints (e.g. the
+  // Sharingan browser-control probe routes) via the x-dezin-daemon-token header.
+  setIfPresent(env, "DEZIN_DAEMON_TOKEN", daemonToken);
 
   return env;
 }
