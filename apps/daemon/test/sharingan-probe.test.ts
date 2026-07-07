@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
+import { ensureProbeSession, startCapture } from "../src/sharingan-handler.ts";
 
 test("POST /navigate lazily opens a probe session and returns status", { skip: !findChrome() && "no Chrome" }, async () => {
   const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><title>T</title><h1>Acme</h1>"); });
@@ -36,4 +37,20 @@ test("POST /navigate lazily opens a probe session and returns status", { skip: !
     fixture.closeAllConnections();
     await new Promise<void>((r) => fixture.close(() => r()));
   }
+});
+
+test("POST /start is refused while a probe session is live (no orphaned session)", async () => {
+  const id = "probe-guard";
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-guard-"));
+  let opens = 0;
+  const fake = { close: async () => {} } as unknown as import("../src/sharingan-browser.ts").SharinganSession;
+  const open = async () => { opens += 1; return fake; };
+
+  // Open a probe session (phase -> "probing", c.session live).
+  await ensureProbeSession(id, dataDir, open);
+  assert.equal(opens, 1);
+
+  // A concurrent capture start must be refused, NOT open a second browser.
+  await startCapture(id, "http://x.test/", dataDir, "/tmp/unused", open);
+  assert.equal(opens, 1, "startCapture must not open a second session while probing (would orphan the probe browser)");
 });

@@ -90,9 +90,11 @@ export async function startCapture(
 ): Promise<void> {
   const c = get(id);
   // Refuse re-entry whenever a session is live: "capturing" (guards concurrent starts,
-  // including the open() await window) and "login-required" (a headful browser is paused
-  // open for user sign-in — re-opening would orphan it and its persistent-profile lock).
-  if (c.phase === "capturing" || c.phase === "login-required") return;
+  // including the open() await window), "login-required" (a headful browser is paused
+  // open for user sign-in), and "probing" (a lazily-opened probe session is live) —
+  // re-opening in any of these would orphan the existing session and its
+  // persistent-profile lock.
+  if (c.phase === "capturing" || c.phase === "login-required" || c.phase === "probing") return;
   c.phase = "capturing"; c.steps = []; c.pages = []; c.error = undefined;
   try {
     const session = await open(url, { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
