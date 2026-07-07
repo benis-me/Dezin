@@ -59,3 +59,13 @@ test("buildAgentEnv maps BYOK settings for Codex and Gemini CLIs", () => {
 test("buildAgentEnv does not guess env names for unknown CLIs", () => {
   assert.deepEqual(buildAgentEnv(SETTINGS, "custom-agent"), {});
 });
+
+test("buildAgentEnv includes the daemon token so the agent can call gated endpoints", () => {
+  const env = buildAgentEnv(SETTINGS, "claude", "tok-123");
+  assert.equal(env.DEZIN_DAEMON_TOKEN, "tok-123");
+});
+
+test("buildAgentEnv omits the daemon token when none is supplied", () => {
+  const env = buildAgentEnv(SETTINGS, "claude");
+  assert.equal(env.DEZIN_DAEMON_TOKEN, undefined);
+});

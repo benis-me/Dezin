@@ -485,7 +485,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const runModel = body.model || settings.model || undefined;
   // The generating model family — enables provider-fingerprint quality rules (GPT/Gemini tells).
   const runProviderFamily = providerFamily(getProvider(runAgentCommand)?.id, runModel);
-  const agentEnv = buildAgentEnv(settings, runAgentCommand);
+  const agentEnv = buildAgentEnv(settings, runAgentCommand, deps.security?.token);
   const imageRuntime = providerRuntimeConfig(settings, settings.aiProviderId);
   const imageBaseUrl = imageRuntime.baseUrl || settings.imageApiBaseUrl;
   const imageApiKey = imageRuntime.apiKey || settings.imageApiKey;
