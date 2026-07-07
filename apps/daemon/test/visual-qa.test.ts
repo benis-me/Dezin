@@ -206,6 +206,26 @@ test("agentReviewPrompt gates defects to provable pixel breakage and rejects inf
   assert.match(prompt, /scrolled out of view/i);
 });
 
+test("agentReviewPrompt adds a source-fidelity section when a Sharingan reference is present", () => {
+  const input = {
+    htmlPath: "/proj/index.html",
+    projectRoot: "/proj",
+    brief: "Rebuild the site",
+    sharinganReference: { screenshotPath: "/proj/.sharingan/home-abcd1234/shot-desktop.png", assetsSummary: "6 images: hero (1200x400), logo (120x40)" },
+  } as unknown as VisualQaInput;
+  const prompt = agentReviewPrompt(input, "/proj/.visual-qa/shot.png");
+  assert.match(prompt, /\.sharingan\/home-abcd1234\/shot-desktop\.png/); // the source screenshot, path relative to projectRoot
+  assert.match(prompt, /source/i);
+  assert.match(prompt, /reconstruc/i); // "reconstructing" / "reconstruction"
+  assert.match(prompt, /6 images: hero/);
+});
+
+test("agentReviewPrompt has no source-fidelity section for a normal (non-Sharingan) build", () => {
+  const input = { htmlPath: "/proj/index.html", projectRoot: "/proj", brief: "A chat UI" } as unknown as VisualQaInput;
+  const prompt = agentReviewPrompt(input, "/proj/.visual-qa/shot.png");
+  assert.ok(!/Source screenshot/i.test(prompt), "no fidelity section without a reference");
+});
+
 test("reviewWithRetry retries once when a pass produced no review at all, and keeps the reviewed pass", async () => {
   const reviewed = parseVisualReview(JSON.stringify({ findings: [] }));
   let calls = 0;

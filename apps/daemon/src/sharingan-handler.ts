@@ -23,10 +23,11 @@ interface Capture {
   url?: string;
   error?: string;
   probeTimer?: ReturnType<typeof setTimeout>;
+  keepForProbe?: boolean;
 }
 
-/** Idle-release window for a lazily-opened probe session (mirrors the dev-server lifecycle). */
-const SHARINGAN_PROBE_IDLE_MS = 120_000;
+/** Idle-release window for a lazily-opened (or build-reused) probe session. */
+export const SHARINGAN_PROBE_IDLE_MS = 300_000;
 
 const captures = new Map<string, Capture>();
 
@@ -81,6 +82,21 @@ export async function ensureProbeSession(
   return c.session;
 }
 
+/** Finalize a successful capture: persist the manifest, then either KEEP the session open for the
+ *  build Agent to reuse as a probe (phase "probing", idle-released) or close it (phase "captured").
+ *  Keeping it open avoids reopening Chrome mid-build and preserves the just-authenticated session. */
+async function finishCapturedSession(id: string, dataDir: string, c: Capture, page: CapturedPage | null): Promise<void> {
+  if (page) { c.pages.push(page); writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages); }
+  if (c.keepForProbe && c.session) {
+    c.phase = "probing";
+    armProbeIdle(id);
+  } else {
+    await c.session?.close();
+    c.session = undefined;
+    c.phase = "captured";
+  }
+}
+
 export async function startCapture(
   id: string,
   url: string,
@@ -102,12 +118,7 @@ export async function startCapture(
     c.url = url;
     const { page, loginRequired } = await capturePage(session, projectDir(dataDir, id), url, (s) => emit(c, s));
     if (loginRequired) { c.phase = "login-required"; return; }
-    if (page) { c.pages.push(page); writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages); }
-    // Set the terminal phase only after the browser is down, so "captured" implies the
-    // persistent-profile lock has been released.
-    await session.close();
-    c.session = undefined;
-    c.phase = "captured";
+    await finishCapturedSession(id, dataDir, c, page);
   } catch (err) {
     // Capture threw after open() launched a browser holding the persistent-profile lock.
     // Close it so it cannot leak (and free the lock), then mark the terminal phase.
@@ -133,11 +144,12 @@ export async function ensureCaptured(
   id: string,
   dataDir: string,
   url: string,
-  opts: { maxWaitMs?: number; pollMs?: number; open?: (url: string, o: { userDataDir?: string; headless?: boolean }) => Promise<SharinganSession> } = {},
+  opts: { maxWaitMs?: number; pollMs?: number; keepSessionForProbe?: boolean; open?: (url: string, o: { userDataDir?: string; headless?: boolean }) => Promise<SharinganSession> } = {},
 ): Promise<Phase> {
   const maxWaitMs = opts.maxWaitMs ?? 300_000;
   const pollMs = opts.pollMs ?? 500;
   const c = get(id);
+  if (opts.keepSessionForProbe) c.keepForProbe = true;
   if (c.phase === "captured") return c.phase;
   // Kick the entry capture if nothing is in flight (idle, or retry after a prior error).
   if (c.phase === "idle" || c.phase === "error") {
@@ -149,7 +161,9 @@ export async function ensureCaptured(
   const deadline = Date.now() + maxWaitMs;
   for (;;) {
     const phase = get(id).phase;
-    if (phase === "captured" || phase === "error") return phase;
+    // "probing" is a terminal SUCCESS here: the entry capture finished and its session was kept open
+    // for the Agent to reuse (keepSessionForProbe). The build can proceed.
+    if (phase === "captured" || phase === "error" || phase === "probing") return phase;
     if (Date.now() >= deadline) return phase;
     await new Promise((r) => setTimeout(r, pollMs));
   }
@@ -177,10 +191,7 @@ export async function continueCapture(id: string, dataDir: string): Promise<void
   try {
     const { page, loginRequired } = await capturePage(c.session, projectDir(dataDir, id), c.url, (s) => emit(c, s));
     if (loginRequired) { c.phase = "login-required"; return; }
-    if (page) { c.pages.push(page); writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages); }
-    await c.session.close();
-    c.session = undefined;
-    c.phase = "captured";
+    await finishCapturedSession(id, dataDir, c, page);
   } catch (err) {
     if (c.session) { await c.session.close().catch(() => {}); c.session = undefined; }
     c.error = err instanceof Error ? err.message : "capture failed";

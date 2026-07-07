@@ -1,17 +1,35 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { SharinganSession, VIEWPORTS } from "./sharingan-browser.ts";
+import { SharinganSession, VIEWPORTS, type DomNode } from "./sharingan-browser.ts";
 
-export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "login-required" | "done"; text: string }
-export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; links: string[] }
+export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "assets" | "login-required" | "done"; text: string }
+export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; assets: string; links: string[] }
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth|account)(\/|\?|$)/i;
 
-export function detectLoginWall(input: { status: number; finalUrl: string; hasPasswordField: boolean; textLength: number }): boolean {
+const OAUTH_BTN = /(continue|sign ?in|log ?in|signup|sign ?up) with (google|apple|github|facebook|microsoft|x|twitter)|使用\s*[^ ]{0,8}(继续|登录)|以\s*[^ ]{0,8}(继续|登录)/i;
+
+/** A page that IS a login/OAuth screen (little else on it), not a content page that merely links to
+ *  login. Anchored on an OAuth/social provider BUTTON ("continue with Google", "使用微信登录") — the one
+ *  unambiguous signal a plain nav "Log in" link never produces — and gated by a node cap so a large
+ *  content page that just embeds a social sign-in in its header is not mistaken for a login wall.
+ *  Password-form login walls are handled separately by detectLoginWall's password-field heuristic;
+ *  a bare keyword page (a landing/waitlist page repeating "Sign up"/"Log in") is deliberately NOT
+ *  flagged, to avoid false positives on that common clone target. */
+export function looksLikeLoginWall(dom: DomNode[]): boolean {
+  if (!dom.length) return false;
+  const hasOauthBtn = dom.some((n) => OAUTH_BTN.test(n.text));
+  // <= 200 nodes keeps a busy-but-real login wall (footer nav, cookie banner, ToS) in scope while
+  // excluding full content pages (hundreds+ of nodes) that merely offer a social sign-in.
+  return hasOauthBtn && dom.length <= 200;
+}
+
+export function detectLoginWall(input: { status: number; finalUrl: string; hasPasswordField: boolean; textLength: number; dom?: DomNode[] }): boolean {
   if (input.status === 401 || input.status === 403) return true;
   if (LOGIN_URL_RE.test(input.finalUrl)) return true;
   if (input.hasPasswordField && input.textLength < 80) return true;
+  if (input.dom && looksLikeLoginWall(input.dom)) return true;
   return false;
 }
 
@@ -46,7 +64,7 @@ export async function captureCurrentPage(
   }
 
   step("dom", "Reading DOM structure");
-  const dom = await session.readDom(400);
+  const dom = await session.readDom();
   const domRel = join(rel, "dom.json");
   writeFileSync(join(projectDir, domRel), JSON.stringify(dom, null, 0));
 
@@ -54,12 +72,16 @@ export async function captureCurrentPage(
   const styleRel = join(rel, "styles.json");
   writeFileSync(join(projectDir, styleRel), JSON.stringify(await session.styleTokens(), null, 0));
 
+  step("assets", "Inventorying image assets");
+  const assetRel = join(rel, "assets.json");
+  writeFileSync(join(projectDir, assetRel), JSON.stringify(await session.assets(), null, 0));
+
   step("links", "Discovering same-origin links");
   const links = await session.discoverLinks();
 
   const title = (dom.find((n) => n.tag === "h1")?.text || url).slice(0, 80);
   step("done", "Capture complete");
-  return { url, title, screenshots, dom: domRel, styles: styleRel, links };
+  return { url, title, screenshots, dom: domRel, styles: styleRel, assets: assetRel, links };
 }
 
 export async function capturePage(
@@ -74,7 +96,7 @@ export async function capturePage(
   const dom = await session.readDom(400);
   const hasPasswordField = await session.hasPasswordField();
   const textLength = dom.reduce((a, n) => a + n.text.length, 0);
-  if (detectLoginWall({ status: nav.status, finalUrl: nav.finalUrl, hasPasswordField, textLength })) {
+  if (detectLoginWall({ status: nav.status, finalUrl: nav.finalUrl, hasPasswordField, textLength, dom })) {
     step("login-required", `This page needs a login (${nav.finalUrl}). Sign in, then continue.`);
     return { page: null, loginRequired: true };
   }
@@ -84,6 +106,32 @@ export async function capturePage(
 
 export function writePagesManifest(projectDir: string, sourceUrl: string, pages: CapturedPage[]): void {
   mkdirSync(join(projectDir, ".sharingan"), { recursive: true });
-  const manifest = { sourceUrl, pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots, dom: p.dom, styles: p.styles, links: p.links })) };
+  const manifest = { sourceUrl, pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots, dom: p.dom, styles: p.styles, assets: p.assets, links: p.links })) };
   writeFileSync(join(projectDir, ".sharingan", "pages.json"), JSON.stringify(manifest, null, 2));
+}
+
+/** Locate the Sharingan review reference for a project: the entry page's desktop screenshot (absolute
+ *  path, so the critic can read it) + a one-line summary of the source's image inventory. Returns
+ *  undefined when there is no captured bundle yet. Reads the on-disk `.sharingan/pages.json`. */
+export function sharinganReviewReference(projectDir: string): { screenshotPath: string; assetsSummary?: string } | undefined {
+  const manifestPath = join(projectDir, ".sharingan", "pages.json");
+  if (!existsSync(manifestPath)) return undefined;
+  let manifest: { pages?: Array<{ screenshots?: Record<string, string>; assets?: string }> };
+  try { manifest = JSON.parse(readFileSync(manifestPath, "utf8")); } catch { return undefined; }
+  if (!manifest || typeof manifest !== "object") return undefined;
+  const entry = manifest.pages?.[0];
+  const shotRel = entry?.screenshots?.desktop;
+  if (!shotRel) return undefined;
+  const screenshotPath = join(projectDir, shotRel);
+  if (!existsSync(screenshotPath)) return undefined;
+  let assetsSummary: string | undefined;
+  if (entry?.assets && existsSync(join(projectDir, entry.assets))) {
+    try {
+      const assets = JSON.parse(readFileSync(join(projectDir, entry.assets), "utf8")) as Array<{ kind: string; alt?: string; w?: number; h?: number }>;
+      const imgs = assets.filter((a) => a.kind === "img" || a.kind === "background");
+      const sample = imgs.slice(0, 4).map((a) => `${a.alt || a.kind}${a.w && a.h ? ` (${a.w}x${a.h})` : ""}`).join(", ");
+      if (imgs.length) assetsSummary = `${imgs.length} image slot${imgs.length === 1 ? "" : "s"}: ${sample}`;
+    } catch { /* ignore a malformed assets.json */ }
+  }
+  return { screenshotPath, assetsSummary };
 }

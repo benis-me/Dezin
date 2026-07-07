@@ -30,6 +30,7 @@ function makeFake(over: Partial<Record<string, unknown>> = {}): { session: Shari
     setViewport: async () => {},
     screenshot: async () => Buffer.from("x"),
     styleTokens: async () => ({ colors: [], fontFamilies: [], fontSizes: [], radii: [], shadows: [] }),
+    assets: async () => [],
     discoverLinks: async () => [],
     bringToFront: async () => { calls.push("bringToFront"); },
     close: async () => { calls.push("close"); },
