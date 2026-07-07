@@ -16,9 +16,11 @@ import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts
 import {
   buildResearchPrompt,
   buildVisualResearchPrompt,
+  buildSynthesisPrompt,
   ensureResearchScaffold,
   researchExists,
   visualResearchExists,
+  directionsExist,
   visualAssetsDir,
   parseResearchActivity,
   type ResearchActivity,
@@ -84,7 +86,7 @@ export async function runResearchPhase(
 ): Promise<ResearchPhaseResult> {
   const productDone = researchExists(input.dir);
   const visualDone = visualResearchExists(input.dir);
-  if (productDone && visualDone) return { ran: false, produced: true, visualProduced: true };
+  if (productDone && visualDone && directionsExist(input.dir)) return { ran: false, produced: true, visualProduced: true };
   await ensureResearchScaffold(input.dir);
   await mkdir(visualAssetsDir(input.dir), { recursive: true });
 
@@ -95,6 +97,7 @@ export async function runResearchPhase(
     const base = provider ? provider.oneShotArgs(input.model, prompt) : ["-p", prompt];
     return [...base, "--output-format", "stream-json", "--verbose"];
   };
+  const MAX_ATTEMPTS = 2; // shared by the tracks and the synthesis step
 
   // Research is non-deterministic: some turns the agent detaches the work to background
   // sub-agents and returns before they write anything, leaving the tree empty. Retry once if a
@@ -106,7 +109,6 @@ export async function runResearchPhase(
   ): Promise<{ produced: boolean; reason?: string }> => {
     const exists = (): boolean => (track === "product" ? researchExists(input.dir) : visualResearchExists(input.dir));
     if (alreadyDone) return { produced: true };
-    const MAX_ATTEMPTS = 2;
     // Last-seen failure reason, so a track that never produces still explains why (thrown error
     // message, or a non-zero exit's reason) instead of surfacing silence.
     let lastReason: string | undefined;
@@ -148,6 +150,33 @@ export async function runResearchPhase(
     ),
     runTrack("visual", buildVisualResearchPrompt({ brief: input.brief, designSystemName: input.designSystemName }), visualDone),
   ]);
+
+  // Synthesis: read BOTH reports + the brief and produce the candidate directions from the
+  // comprehensive understanding. Sequential (needs both tracks). Does not re-open the images.
+  if (!directionsExist(input.dir) && (product.produced || visual.produced) && !input.signal?.aborted) {
+    const synthArgs = argsFor(
+      buildSynthesisPrompt({
+        brief: input.brief,
+        skill: input.skill,
+        designSystemName: input.designSystemName,
+      }),
+    );
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (input.signal?.aborted) break;
+      try {
+        await spawner(input.agentCommand, synthArgs, input.dir, {
+          env: input.env ?? {},
+          signal: input.signal,
+          timeoutMs: input.timeoutMs,
+        });
+      } catch (err) {
+        if (directionsExist(input.dir)) break;
+        if (err instanceof Error && /aborted/i.test(err.message)) break;
+      }
+      if (directionsExist(input.dir)) break;
+    }
+  }
+
   // A project can now be visual-only (or product-only): report a per-track reason so a failed
   // track always explains why, even when the other track succeeded.
   const reasons = [

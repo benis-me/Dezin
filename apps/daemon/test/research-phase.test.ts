@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runResearchPhase } from "../src/research-phase.ts";
-import { reportPath, visualReportPath, visualAssetsDir } from "../../../packages/research/src/index.ts";
+import { reportPath, visualReportPath, visualAssetsDir, directionsExist } from "../../../packages/research/src/index.ts";
 
 function deferred() {
   let resolve!: () => void;
@@ -114,4 +114,33 @@ test("runResearchPhase reports a per-track reason (with prefixes) when BOTH trac
   assert.match(result.error!, /product:.*claude exited with code 1/);
   assert.match(result.error!, /visual:.*claude exited with code 1/);
   assert.match(result.error!, /no api key configured/);
+});
+
+test("runResearchPhase runs a synthesis step after both tracks and produces directions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-rp-synth-"));
+  const calls: string[] = [];
+  const spawn = async (_cmd: string, args: string[], cwd: string, _opts: any) => {
+    const joined = args.join(" ");
+    if (joined.includes("Phase: Synthesis")) {
+      calls.push("synthesis");
+      mkdirSync(join(cwd, ".research", "directions", "bold"), { recursive: true });
+      writeFileSync(join(cwd, ".research", "directions", "bold", "direction.md"), "# Bold");
+    } else if (joined.includes("Visual Research")) {
+      calls.push("visual");
+      mkdirSync(visualAssetsDir(cwd), { recursive: true });
+      writeFileSync(visualReportPath(cwd), "# Visual");
+    } else {
+      calls.push("product");
+      writeFileSync(reportPath(cwd), "# Product");
+    }
+    return { code: 0, stderr: "" };
+  };
+  const result = await runResearchPhase({ dir, brief: "a hero", agentCommand: "claude" }, spawn);
+  assert.equal(result.produced, true);
+  assert.equal(result.visualProduced, true);
+  assert.ok(directionsExist(dir), "synthesis step should have produced directions");
+  assert.ok(calls.includes("synthesis"), "synthesis spawn should run");
+  // Synthesis runs AFTER both tracks.
+  assert.ok(calls.indexOf("synthesis") > calls.indexOf("product"));
+  assert.ok(calls.indexOf("synthesis") > calls.indexOf("visual"));
 });
