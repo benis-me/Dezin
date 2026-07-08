@@ -261,12 +261,17 @@ test("gitDiscardChanges reverts the working tree to HEAD but preserves .research
     writeFileSync(join(dir, "src", "New.jsx"), "leftover");
     mkdirSync(join(dir, ".research"), { recursive: true });
     writeFileSync(join(dir, ".research", "research.md"), "keep me");
+    // A Sharingan capture bundle (untracked) must also survive a failed build's discard, so a retry
+    // can reuse it instead of re-capturing.
+    mkdirSync(join(dir, ".sharingan"), { recursive: true });
+    writeFileSync(join(dir, ".sharingan", "pages.json"), "{}");
 
     await gitDiscardChanges(dir);
 
     assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "v1", "tracked edit reverted to HEAD");
     assert.equal(existsSync(join(dir, "src", "New.jsx")), false, "untracked leftover removed");
     assert.equal(readFileSync(join(dir, ".research", "research.md"), "utf8"), "keep me", ".research preserved");
+    assert.equal(existsSync(join(dir, ".sharingan", "pages.json")), true, ".sharingan capture preserved");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

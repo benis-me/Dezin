@@ -39,6 +39,34 @@ function print(result) {
 
 // Condense a captured nested dom.json into a compact indented tree, so the Agent reads THIS instead
 // of loading + regexing the raw (often hundreds-of-KB) dom.json.
+function shortColor(c) {
+  return String(c || "").replace(/\s+/g, ""); // "rgb(0, 0, 0)" -> "rgb(0,0,0)"
+}
+
+// Compact per-node style summary so `outline` is a SUFFICIENT blueprint — the agent shouldn't need to
+// open the raw dom.json. Defaults/inherited values are skipped to keep each line terse.
+function styleSummary(s) {
+  if (!s) return "";
+  const p = [];
+  if (s.display === "flex") p.push(s.flexDirection === "column" ? "flex-col" : "flex-row");
+  else if (s.display === "grid") p.push("grid");
+  else if (s.display === "none") p.push("hidden");
+  if (s.display === "flex" || s.display === "grid") {
+    if (s.gap && s.gap !== "normal" && s.gap !== "0px") p.push("gap:" + s.gap);
+    if (s.justifyContent && s.justifyContent !== "normal") p.push("jc:" + s.justifyContent);
+    if (s.alignItems && s.alignItems !== "normal") p.push("ai:" + s.alignItems);
+  }
+  if (s.backgroundColor && !/rgba\(0,\s*0,\s*0,\s*0\)|transparent/.test(s.backgroundColor)) p.push("bg:" + shortColor(s.backgroundColor));
+  if (s.backgroundImage && s.backgroundImage !== "none") p.push("bg-img");
+  if (s.color) p.push("fg:" + shortColor(s.color));
+  if (s.fontSize && s.fontSize !== "16px") p.push("fs:" + s.fontSize + (s.fontWeight && s.fontWeight !== "400" ? "/" + s.fontWeight : ""));
+  else if (s.fontWeight && s.fontWeight !== "400") p.push("fw:" + s.fontWeight);
+  if (s.padding && s.padding !== "0px") p.push("p:" + s.padding);
+  if (s.border && !/^0px/.test(s.border) && !/rgba\(0,\s*0,\s*0,\s*0\)/.test(s.border)) p.push("bd:" + shortColor(s.border));
+  if (s.textAlign && s.textAlign !== "start" && s.textAlign !== "left") p.push("ta:" + s.textAlign);
+  return p.length ? " {" + p.join(" ") + "}" : "";
+}
+
 function outline(domPathArg) {
   let domPath = domPathArg;
   if (!domPath) {
@@ -55,7 +83,7 @@ function outline(domPathArg) {
     const cls = node.classes ? "." + String(node.classes).trim().split(/\s+/).slice(0, 2).join(".") : "";
     const box = node.box ? ` [${Math.round(node.box.w)}x${Math.round(node.box.h)}]` : "";
     const txt = node.text ? ` "${String(node.text).replace(/\s+/g, " ").trim().slice(0, 48)}"` : "";
-    lines.push("  ".repeat(depth) + (node.tag || "?") + cls + box + txt);
+    lines.push("  ".repeat(depth) + (node.tag || "?") + cls + box + styleSummary(node.style) + txt);
     for (const child of node.children || []) walk(child, depth + 1);
   };
   for (const r of roots) walk(r, 0);
