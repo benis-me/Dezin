@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, existsSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
@@ -166,4 +166,25 @@ test("POST /start is refused while a probe session is live (no orphaned session)
   // A concurrent capture start must be refused, NOT open a second browser.
   await startCapture(id, "http://x.test/", dataDir, "/tmp/unused", open);
   assert.equal(opens, 1, "startCapture must not open a second session while probing (would orphan the probe browser)");
+});
+
+test("status reports 'captured' from an on-disk bundle (post-restart) so the tab won't auto-re-capture", async () => {
+  const store = new Store(":memory:");
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-status-"));
+  const project = store.createProject({ name: "clone", mode: "standard", sharingan: true, sourceUrl: "https://x.com" });
+  // A prior capture persisted to disk, but the in-memory session map is empty (like after a daemon restart).
+  const sdir = join(projectDir(dataDir, project.id), ".sharingan");
+  mkdirSync(sdir, { recursive: true });
+  writeFileSync(join(sdir, "pages.json"), JSON.stringify({ sourceUrl: "https://x.com", pages: [{ url: "https://x.com", title: "X", screenshots: { desktop: ".sharingan/x/shot.png" }, dom: "", styles: "", assets: "", links: [] }] }));
+  const app = createApp({ store, dataDir });
+  await new Promise<void>((r) => app.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+  try {
+    const status = (await (await fetch(`${base}/api/sharingan/${project.id}/status`)).json()) as { phase: string; pages: unknown[] };
+    assert.equal(status.phase, "captured", "an on-disk bundle is reported captured, not idle → no auto re-capture on open");
+    assert.equal(status.pages.length, 1);
+  } finally {
+    await new Promise<void>((r) => app.close(() => r()));
+    store.close();
+  }
 });

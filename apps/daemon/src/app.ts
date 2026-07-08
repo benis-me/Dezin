@@ -882,7 +882,7 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/sharingan/:id/status",
-    handler: (_req, res, p) => handleSharinganStatus(res, p.id!),
+    handler: (_req, res, p, deps) => handleSharinganStatus(res, p.id!, deps.dataDir),
   },
   {
     // Serve a captured-page screenshot (publicRead so <img src> works — it cannot send the daemon token header).

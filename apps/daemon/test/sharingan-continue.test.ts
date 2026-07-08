@@ -47,7 +47,7 @@ test("continueCapture resumes only from a login pause; focus raises the browser"
   const { session, calls } = makeFake();
 
   await startCapture(id, "http://x.test/", dataDir, "/tmp/unused", async () => session);
-  const s1 = await callHandler((res) => handleSharinganStatus(res, id));
+  const s1 = await callHandler((res) => handleSharinganStatus(res, id, dataDir));
   assert.equal(s1.json.phase, "login-required", "first capture hits the 401 login wall");
 
   // Focus raises the browser without changing phase.
@@ -56,6 +56,6 @@ test("continueCapture resumes only from a login pause; focus raises the browser"
   assert.ok(calls.includes("bringToFront"), "focus called bringToFront on the session");
 
   await continueCapture(id, dataDir);
-  const s2 = await callHandler((res) => handleSharinganStatus(res, id));
+  const s2 = await callHandler((res) => handleSharinganStatus(res, id, dataDir));
   assert.equal(s2.json.phase, "captured", "continue re-runs the capture on the authenticated session");
 });
