@@ -22,10 +22,13 @@ test("upsertPage dedups by normalized URL — re-capturing a page updates it, ne
   assert.equal(pages.length, 2);
 });
 
-test("captureUrlKey strips fragment + trailing slash", () => {
+test("captureUrlKey strips a plain anchor + trailing slash, but keeps hash-ROUTES distinct", () => {
   assert.equal(captureUrlKey("https://x.com/a/"), captureUrlKey("https://x.com/a"));
-  assert.equal(captureUrlKey("https://x.com/a#b"), captureUrlKey("https://x.com/a"));
+  assert.equal(captureUrlKey("https://x.com/a#b"), captureUrlKey("https://x.com/a")); // plain anchor stripped
   assert.notEqual(captureUrlKey("https://x.com/a"), captureUrlKey("https://x.com/b"));
+  // hash-routed SPA pages must NOT collapse — they're distinct views, not on-page anchors.
+  assert.notEqual(captureUrlKey("https://x.com/#/products"), captureUrlKey("https://x.com/#/about"));
+  assert.notEqual(captureUrlKey("https://x.com/#!/x"), captureUrlKey("https://x.com/#!/y"));
 });
 
 test("readCapturedPages round-trips the manifest written by writePagesManifest", () => {
@@ -270,8 +273,8 @@ test("captureCurrentPage emits one desktop full-page screenshot step carrying it
     await captureCurrentPage(session, dir, url, (s) => steps.push(s));
     const shots = steps.filter((s) => s.kind === "screenshot" && s.shot);
     assert.equal(shots.length, 1, "one desktop screenshot step (mobile is not captured by default)");
-    assert.ok(shots[0]!.shot!.endsWith("shot-desktop.png"), "desktop shot path present");
-    assert.ok(!shots.some((s) => s.shot!.endsWith("shot-mobile.png")), "no mobile shot by default");
+    assert.match(shots[0]!.shot!, /shot-desktop-[a-z0-9]+\.png$/, "desktop shot path present (unique per-capture filename)");
+    assert.ok(!shots.some((s) => /shot-mobile/.test(s.shot!)), "no mobile shot by default");
   } finally {
     await session.close();
     await new Promise<void>((r) => fixture.close(() => r()));

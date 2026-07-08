@@ -147,14 +147,16 @@ export function writePagesManifest(projectDir: string, sourceUrl: string, pages:
   writeFileSync(join(projectDir, ".sharingan", "pages.json"), JSON.stringify(manifest, null, 2));
 }
 
-/** Normalize a URL for capture-dedup: drop the fragment and a trailing slash. */
+/** Normalize a URL for capture-dedup: drop a trailing slash and a PLAIN on-page anchor (`#section`),
+ *  but KEEP a hash-route fragment (`#/products`, `#!/x`) — those are distinct SPA pages, not anchors. */
 export function captureUrlKey(url: string): string {
+  const isRouteHash = (hash: string) => /^#[!/]/.test(hash);
   try {
     const u = new URL(url);
-    u.hash = "";
+    if (!isRouteHash(u.hash)) u.hash = "";
     return u.toString().replace(/\/$/, "");
   } catch {
-    return url.replace(/#.*$/, "").replace(/\/$/, "");
+    return url.replace(/#(?![!/]).*$/, "").replace(/\/$/, "");
   }
 }
 

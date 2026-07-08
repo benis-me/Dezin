@@ -9,7 +9,7 @@ import { join, sep } from "node:path";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { SharinganSession, SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
-import { capturePage, captureCurrentPage, writePagesManifest, upsertPage, readCapturedPages, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
+import { capturePage, captureCurrentPage, writePagesManifest, upsertPage, readCapturedPages, captureUrlKey, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
 import { projectDir, safeJoin } from "./serve-static.ts";
 import { sendJson, readJsonBody } from "./http-util.ts";
 
@@ -114,7 +114,10 @@ export async function startCapture(
   // re-opening in any of these would orphan the existing session and its
   // persistent-profile lock.
   if (c.phase === "capturing" || c.phase === "login-required" || c.phase === "probing") return;
-  c.phase = "capturing"; c.steps = []; c.pages = []; c.error = undefined;
+  // Seed from the on-disk manifest (not []): after a daemon restart the in-memory map is empty, so
+  // re-running the entry capture would otherwise clobber pages.json + discard prior probe captures.
+  // The entry capture then upserts into this, preserving them.
+  c.phase = "capturing"; c.steps = []; c.pages = readCapturedPages(projectDir(dataDir, id)); c.error = undefined;
   try {
     const session = await open(url, { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
     c.session = session;
@@ -238,8 +241,14 @@ export async function handleSharinganNavigate(req: IncomingMessage, res: ServerR
  */
 export async function handleSharinganCapture(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
   const c = get(id);
-  if (c.pages.length >= SHARINGAN_PAGE_BUDGET) { sendJson(res, 200, { skipped: "budget", budget: SHARINGAN_PAGE_BUDGET }); return; }
   const body = (await readJsonBody(req)) as { url?: string };
+  if (c.pages.length >= SHARINGAN_PAGE_BUDGET) {
+    // At budget — but re-capturing an ALREADY-captured URL just UPDATES it (upsert), so don't refuse
+    // that; only refuse a capture that would grow the bundle past the budget.
+    const target = typeof body.url === "string" && /^https?:\/\//i.test(body.url) ? body.url : undefined;
+    const isKnown = target ? c.pages.some((p) => captureUrlKey(p.url) === captureUrlKey(target)) : false;
+    if (!isKnown) { sendJson(res, 200, { skipped: "budget", budget: SHARINGAN_PAGE_BUDGET }); return; }
+  }
   try {
     const session = await ensureProbeSession(id, dataDir);
     if (typeof body.url === "string" && /^https?:\/\//i.test(body.url)) {

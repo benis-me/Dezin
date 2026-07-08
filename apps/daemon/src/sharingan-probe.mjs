@@ -99,10 +99,14 @@ async function main() {
       if (!args[0]) fail("usage: click <selector>");
       print(await api("POST", "/click", { selector: args[0] }));
       break;
-    case "scroll":
-      print(await api("POST", "/scroll", { y: Number(args[0] || 0) }));
+    case "scroll": {
+      const y = Number(args[0]);
+      if (!Number.isFinite(y)) fail("usage: scroll <y-offset-number>");
+      print(await api("POST", "/scroll", { y }));
       break;
+    }
     case "capture":
+      if (args[0] && !/^https?:\/\//i.test(args[0])) fail("capture: url must start with http(s):// (or omit it to capture the current page)");
       print(await api("POST", "/capture", args[0] ? { url: args[0] } : undefined));
       break;
     default:
