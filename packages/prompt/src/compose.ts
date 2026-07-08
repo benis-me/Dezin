@@ -105,7 +105,9 @@ You may request real generated images. Where a photo/illustration genuinely help
 emit \`<img src="" data-gen-prompt="a precise description of the image" alt="...">\`
 (include width/height or CSS sizing). Dezin generates each one and rewrites the src
 after you finish. Use sparingly and purposefully — never decorative filler, never
-more than the layout needs. For icons/logos prefer inline SVG, not generated images.`;
+more than the layout needs. For icons, use a real icon set (see the library routing) — never a
+generated image, and NEVER hand-author icon SVG/path geometry. Inline SVG only for a logo you're
+given or a trivial primitive (a dot, chevron, arrow).`;
 
 const ASSET_SOURCING = `## Material sourcing
 
@@ -175,6 +177,11 @@ may need only CSS/\`motion\`; an effects-heavy piece may layer several — insta
   React compositions. Do not use Remotion for an ordinary interactive landing page.
 - WebGL / Three / OGL: only when a shader or real 3D scene is the centerpiece, not as
   background decoration.
+- Icons: ${
+    standard
+      ? "`lucide-react` is pre-installed — import named icons (`import { Search } from \"lucide-react\"`). Need a different icon language? install another vetted set (`@phosphor-icons/react`, `heroicons`, `@tabler/icons-react`, `react-icons`, or any other)."
+      : "single-file mode has no bundler — inline an icon copied VERBATIM from a real set (Lucide/Heroicons/Tabler source), or an icon-font via a CDN the skill allows."
+  } NEVER hand-author an icon's \`<svg>\`/\`<path>\` geometry (inventing icon paths is an instant AI tell); inline SVG only for a given logo or a trivial primitive.
 
 Always respect \`prefers-reduced-motion\`, keep the no-motion state fully readable, and
 make load/reveal animations fail-safe so content cannot remain hidden if JS or a library fails.`;

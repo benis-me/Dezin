@@ -30,7 +30,10 @@ choice. Avoid all of them:
    system's --accent. Indigo is the #1 AI tell.
 2. Two-stop "trust" gradients (purple→blue, blue→cyan, indigo→pink). A flat surface
    plus intentional type beats this every time.
-3. Emoji as feature/heading icons (${emoji} …). Use a 1.6–1.8px monoline SVG with currentColor.
+3. Emoji as feature/heading icons (${emoji} …), or hand-drawn/invented icon SVG. Use icons from a
+   real set (e.g. \`lucide-react\`) with currentColor — never emoji, and NEVER hand-author an icon's
+   \`<svg>\`/\`<path>\` geometry (single-file mode has no bundler: inline a VERBATIM copy from a real
+   set instead of inventing paths).
 4. Overused fonts hardcoded on display text (Inter, Roboto, Arial, system-ui). Use
    var(--font-display).
 5. A rounded card with a colored left-border accent — the canonical "AI dashboard tile".
