@@ -211,7 +211,7 @@ export function HomeScreen({
   onOpenProject,
 }: {
   projects?: Project[];
-  onNewProject?: (brief: string, skillId: string, designSystemId: string, mode: ProjectMode, sharingan?: { sourceUrl: string }) => void;
+  onNewProject?: (brief: string, skillId: string, designSystemId: string, mode: ProjectMode, sharingan?: { sourceUrl: string }) => void | Promise<void>;
   onOpenProject?: (id: string) => void;
 }) {
   const api = useApi();
@@ -493,6 +493,25 @@ export function HomeScreen({
     }
   };
 
+  const creatingRef = useRef(false);
+  const [creating, setCreating] = useState(false);
+  // Guard against a double-click creating two projects (one empty orphan): the ref blocks a same-tick
+  // second click synchronously; `creating` disables the button and is reset when the create settles.
+  const startCreate = async (text: string, projectMode: ProjectMode, sharinganArg?: { sourceUrl: string }) => {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
+    try {
+      // Keep the standard call at 4 args (don't append an undefined 5th) — the sharingan arg is only
+      // passed when cloning, preserving onNewProject's existing call shape.
+      if (sharinganArg) await onNewProject?.(text, skillId, designSystemId, projectMode, sharinganArg);
+      else await onNewProject?.(text, skillId, designSystemId, projectMode);
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
+    }
+  };
+
   const submit = () => {
     const text =
       brief.trim() ||
@@ -506,14 +525,14 @@ export function HomeScreen({
         setAffirmPending({ url: text });
         return;
       }
-      onNewProject?.(text, skillId, designSystemId, "standard", { sourceUrl: text });
+      void startCreate(text, "standard", { sourceUrl: text });
       return;
     }
     if (!text) return;
     if (images.length) setPendingImages(images.map((i) => ({ name: i.name, base64: i.base64 })));
     if (refs.length) setPendingRefs(refs.map((r) => ({ name: r.name, base64: r.base64 })));
     if (homeAgent) setPendingAgent(homeAgent, homeModel || undefined);
-    onNewProject?.(text, skillId, designSystemId, mode);
+    void startCreate(text, mode);
   };
 
   // Confirms the one-time authorized-use affirmation for Sharingan, persists it so it never
@@ -527,8 +546,8 @@ export function HomeScreen({
       .updateSettings({ sharinganAffirmed: true })
       .then((s) => publishSettingsUpdated(s))
       .catch(() => {});
-    onNewProject?.(pending.url, skillId, designSystemId, "standard", { sourceUrl: pending.url });
-  }, [affirmPending, api, onNewProject, skillId, designSystemId]);
+    void startCreate(pending.url, "standard", { sourceUrl: pending.url }); // same double-submit guard as the Build button
+  }, [affirmPending, api, startCreate]);
 
   const updateBrief = (value: string): void => {
     setBrief(value);
@@ -894,7 +913,7 @@ export function HomeScreen({
                   <Button
                     size="lg"
                     onClick={submit}
-                    disabled={optimizingPrompt || (brief.trim().length === 0 && images.length === 0)}
+                    disabled={creating || optimizingPrompt || (brief.trim().length === 0 && images.length === 0)}
                     aria-label="Design"
                     className="px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
                   >

@@ -29,7 +29,8 @@ import { lintArtifact, lintScore, renderFindingsForAgent, applyIgnores } from ".
 import { generateImages } from "./image-gen.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
-import { ensureDevServer, gitCommit, gitDiscardChanges, workingTreeFingerprint } from "./project-runtime.ts";
+import { ensureDevServer, gitCommit, gitDiscardChanges, gitRestoreTree, workingTreeFingerprint } from "./project-runtime.ts";
+import { bestVersion } from "./best-version.ts";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
@@ -869,6 +870,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       // score (marginal-gain), and the bounded design-improvement (ceiling) phase.
       const convergenceTrees = new Set<string>();
       let bestFloorScore = 0;
+      // Every committed round's score — so the loop can RETURN the best-scoring version, not the last
+      // (a repair round can regress the score and the give-up/stall guard leaves the tree on it).
+      const versions: { score: number; commitHash: string; findings: QualityFinding[]; passed: boolean }[] = [];
       let floorStalled = 0;
       let improvementRounds = 0;
       const improvementHistory = new Map<string, number>(); // suggestion key → times fed back (verify-applied)
@@ -1009,6 +1013,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         findings = [...staticFindings, ...visualFindings];
         score = floorScore(findings);
         passed = !findings.some((f) => f.severity === "P0");
+        if (commitHash) versions.push({ score, commitHash, findings, passed });
         store.updateRun(run.id, {
           commitHash,
           repairRounds,
@@ -1081,6 +1086,20 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         if (visualReviewRecords.length) persistTranscript(finalAssistantText);
         round = nextRound;
         turnMessage = repairPrompt;
+      }
+
+      // Return the BEST-scoring version, not just the last round. If an earlier round scored higher,
+      // restore its files (history-preserving) so the live preview + the returned run reflect it.
+      const best = bestVersion(versions);
+      if (best && best.commitHash !== commitHash) {
+        const restored = await gitRestoreTree(dir, best.commitHash, `Best-scoring version (${best.score}/100)`).catch(() => ({ committed: false, commitHash: null as string | null }));
+        if (restored.committed && restored.commitHash) {
+          commitHash = restored.commitHash;
+          score = best.score;
+          passed = best.passed;
+          findings = best.findings;
+          await emitStandardPreviewUpdate(round);
+        }
       }
 
       const assistantMessageId = persistTranscript(finalAssistantText);

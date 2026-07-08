@@ -50,17 +50,17 @@ export function ModelProviderDetail({
     setDraft(emptyDraft());
   }, [selected.id]);
 
-  const setProviderField = (key: ProviderConfigFieldKey, value: string) => {
+  const setProviderField = (key: ProviderConfigFieldKey, value: string, save: boolean) => {
     if (key === "apiKey") {
       const configured = value.length > 0;
-      onPatchModelSettings({ apiKey: value, apiKeyConfigured: configured }, true);
+      onPatchModelSettings({ apiKey: value, apiKeyConfigured: configured }, save);
       return;
     }
     if (key === "baseUrl") {
-      onPatchModelSettings({ apiBaseUrl: value, imageApiBaseUrl: value, videoApiBaseUrl: value }, true);
+      onPatchModelSettings({ apiBaseUrl: value, imageApiBaseUrl: value, videoApiBaseUrl: value }, save);
       return;
     }
-    onPatchModelSettings({ aiProviderOrganization: value }, true);
+    onPatchModelSettings({ aiProviderOrganization: value }, save);
   };
 
   const saveEntries = (next: ModelProviderEntry[]) => {
@@ -139,7 +139,8 @@ export function ModelProviderDetail({
                       field.key === "apiKey" &&
                       Boolean(apiKey || settings.apiKeyConfigured)
                     }
-                    onChange={(value) => setProviderField(field.key, value)}
+                    onChange={(value) => setProviderField(field.key, value, false)}
+                    onCommit={(value) => setProviderField(field.key, value, true)}
                   />
                   {field.help ? <p className="mt-1 text-xs text-muted-foreground">{field.help}</p> : null}
                 </Field>
@@ -297,11 +298,13 @@ function ProviderFieldInput({
   value,
   configured,
   onChange,
+  onCommit,
 }: {
   field: ProviderPreset["fields"][number];
   value: string;
   configured: boolean;
   onChange: (value: string) => void;
+  onCommit: (value: string) => void;
 }) {
   const [secretFocused, setSecretFocused] = useState(false);
   const [secretDraft, setSecretDraft] = useState("");
@@ -314,6 +317,7 @@ function ProviderFieldInput({
     setSecretDraft("");
   };
   const stopSecretEdit = () => {
+    if (secretDraft) onCommit(secretDraft);
     setSecretFocused(false);
     setSecretDraft("");
   };
@@ -347,7 +351,16 @@ function ProviderFieldInput({
   }, [isSecret, secretFocused]);
 
   if (!isSecret) {
-    return <Input type="text" value={value} placeholder={field.placeholder} aria-label={field.label} onChange={(event) => onChange(event.target.value)} />;
+    return (
+      <Input
+        type="text"
+        value={value}
+        placeholder={field.placeholder}
+        aria-label={field.label}
+        onChange={(event) => onChange(event.target.value)}
+        onBlur={(event) => onCommit(event.target.value)}
+      />
+    );
   }
 
   return (
@@ -361,9 +374,7 @@ function ProviderFieldInput({
       onFocus={startSecretEdit}
       onBlur={stopSecretEdit}
       onChange={(event) => {
-        const next = event.target.value;
-        setSecretDraft(next);
-        if (next) onChange(next);
+        setSecretDraft(event.target.value);
       }}
     />
   );

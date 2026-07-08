@@ -4,6 +4,6 @@
   "summary": "Editorial corporate brand; ivory paper, serif display over grotesque body, squared corners, one book-cloth clay accent.",
   "craft": {
     "applies": ["typography", "typography-hierarchy", "color", "anti-ai-slop"],
-    "suggested": ["typography-hierarchy-editorial"]
+    "suggested": []
   }
 }

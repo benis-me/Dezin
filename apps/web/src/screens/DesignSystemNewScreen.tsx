@@ -149,7 +149,12 @@ export function DesignSystemNewScreen() {
 
   const addAssets = (files: File[]): void => {
     const names = files.map((file) => file.name).filter(Boolean);
-    if (names.length) setAssets((current) => [...current, ...names]);
+    if (!names.length) return;
+    setAssets((current) => [...current, ...names]);
+    // Asset file UPLOAD isn't wired up yet (importBrand takes no asset content). Record the names so
+    // the choice isn't silently lost, but tell the user the files themselves aren't sent — don't
+    // pretend they were attached.
+    toast("Fonts/logos aren't uploaded yet — noted as reference. Describe them in the brief for now.");
   };
 
   const onFolderDrop = (event: ReactDragEvent<HTMLButtonElement>): void => {

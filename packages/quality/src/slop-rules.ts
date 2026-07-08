@@ -94,5 +94,8 @@ export const ALL_CAPS_TRACKING_FLOOR_EM = 0.06;
 /** Visible body uses of var(--accent) allowed before it reads as overused. */
 export const ACCENT_OVERUSE_CAP = 3;
 
+/** Raw #rrggbb hex values outside :root allowed before design tokens are considered dishonoured. */
+export const RAW_HEX_CAP = 12;
+
 /** Maximum non-pill border radius before corners read oversized for Dezin defaults. */
 export const MAX_RADIUS_PX = 28;

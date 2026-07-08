@@ -5,6 +5,8 @@
  * color, which is what produces taste.
  */
 
+import { slopRules } from "../../quality/src/index.ts";
+
 export interface DirectionPalette {
   bg: string;
   surface: string;
@@ -42,7 +44,7 @@ export const DESIGN_DIRECTIONS: Direction[] = [
     posture: [
       "Hairline borders only; no shadows except dropdowns/modals",
       "Tight display tracking (-0.02em); tabular numerics",
-      "One cobalt accent, used at most twice per screen",
+      `One cobalt accent, used at most ${slopRules.ACCENT_OVERUSE_CAP} times per screen`,
     ],
   },
   {

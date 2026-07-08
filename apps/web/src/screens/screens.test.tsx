@@ -1024,6 +1024,7 @@ test("SettingsScreen keeps model API key drafts after redacted settings saves", 
 
   const apiKey = await screen.findByLabelText("API Key");
   await user.type(apiKey, "sk-live-test");
+  fireEvent.blur(apiKey);
 
   await waitFor(() => expect(updateSettings).toHaveBeenCalled());
   expect(apiKey).toHaveValue("sk-live-test");
@@ -1248,6 +1249,7 @@ test("SettingsScreen keeps a cleared provider endpoint empty instead of restorin
 
   const baseUrl = await screen.findByLabelText("Base URL");
   await user.clear(baseUrl);
+  fireEvent.blur(baseUrl);
 
   expect(baseUrl).toHaveValue("");
   await waitFor(() =>

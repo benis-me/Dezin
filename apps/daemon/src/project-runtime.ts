@@ -354,6 +354,33 @@ export async function gitDiscardChanges(projectDir: string): Promise<void> {
   await run("git", ["clean", "-fd", "-e", ".research", "-e", ".versions", "-e", ".refs"], projectDir);
 }
 
+/**
+ * Restore the project files to a PAST commit's content and commit that as a NEW HEAD — history is
+ * preserved (the intermediate commits stay reachable, so the version snapshots that point at them keep
+ * working). Used to return the best-scoring repair round instead of a worse last round. Internal dirs
+ * like .research are written once before the build (not per repair round), so restoring an earlier
+ * round leaves them effectively unchanged. Returns { committed:false } (tree left as-is) if the target
+ * commit can't be checked out.
+ */
+export async function gitRestoreTree(projectDir: string, commitHash: string, message: string): Promise<{ committed: boolean; commitHash: string | null }> {
+  if (!existsSync(join(projectDir, ".git"))) return { committed: false, commitHash: null };
+  // Restore every tracked file under . to the target commit's content (does NOT move HEAD).
+  const code = await run("git", ["checkout", commitHash, "--", "."], projectDir);
+  if (code !== 0) return { committed: false, commitHash: null };
+  // `checkout -- .` restores/adds paths present in the target but does NOT delete files that were
+  // ADDED after it — remove those so the restored tree matches the target exactly. --no-renames is
+  // load-bearing: without it git classifies a later rename as R (not A), so --diff-filter=A would miss
+  // the renamed-in file and leave it as a stray orphan in the "best" tree.
+  const added = await capture("git", ["diff", "--no-renames", "--name-only", "--diff-filter=A", commitHash, "HEAD"], projectDir);
+  if (added.code === 0) {
+    for (const f of added.out.split("\n").map((s) => s.trim()).filter(Boolean)) {
+      await run("git", ["rm", "-f", "--", f], projectDir);
+    }
+  }
+  const res = await gitCommit(projectDir, message);
+  return { committed: res.committed, commitHash: res.commitHash };
+}
+
 /** Stop all dev servers (called on daemon shutdown). */
 export function stopAllDevServers(): void {
   for (const rt of runtimes.values()) {

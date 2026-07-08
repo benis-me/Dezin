@@ -2447,6 +2447,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const activeRunIdRef = useRef<string | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
   const turnStartedAtRef = useRef<number | null>(null);
+  // On unmount (project switch via the key= in App.tsx, or navigating away), abort the in-flight run
+  // stream so its SSE generator stops feeding handleEvent — otherwise it leaks into a dead instance.
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
   const selectionModeRef = useRef<"markup" | "inspect" | null>(null);
   const versionPreviewRequestRef = useRef(0);
   const inspectedTargetRef = useRef<MarkupTarget | null>(null);
