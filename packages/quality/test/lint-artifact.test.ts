@@ -274,3 +274,28 @@ test("left-accent-card catches sub-1 border-radius (0.5rem / .5rem), not just >=
   const zeroDecimal = `<style>.card{border-left:3px solid var(--accent);border-radius:0.0rem}</style>`;
   assert.ok(!has(lintArtifact(zeroDecimal), "left-accent-card"), "0.0rem (decimal zero) is not a rounded card");
 });
+
+test("hand-drawn-icon flags inline <svg> icon literals in Standard source (should import an icon set)", () => {
+  const icon = `<button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><path d="M12 5v14"/></svg> Add</button>`;
+  // Standard: an inline <svg> icon literal means the installed icon set wasn't used → flagged.
+  assert.ok(has(lintArtifact(icon, { mode: "standard" }), "hand-drawn-icon"), "standard-mode inline svg icon is flagged");
+  // Prototype (single HTML, no bundler): inline svg is the only vector path → not flagged.
+  assert.ok(!has(lintArtifact(icon, { mode: "prototype" }), "hand-drawn-icon"), "prototype inline svg icon is not flagged");
+  // A lucide-react component is not an <svg> literal → not flagged.
+  const lib = `import { Plus } from "lucide-react";\nexport default function A(){return <button><Plus /> Add</button>;}`;
+  assert.ok(!has(lintArtifact(lib, { mode: "standard" }), "hand-drawn-icon"), "library icon component is not flagged");
+  // A brand logo (non-icon-grid viewBox + logo hint) is not flagged.
+  const logo = `<svg class="logo" viewBox="0 0 200 48"><path d="M2 2h40v40"/></svg>`;
+  assert.ok(!has(lintArtifact(logo, { mode: "standard" }), "hand-drawn-icon"), "a brand logo is not flagged");
+  // Broadened coverage: no-viewBox small width/height, and a 512 FontAwesome/Material canvas.
+  const noViewBox = `<button><svg width="24" height="24" fill="none" stroke="currentColor"><path d="M5 12h14"/></svg></button>`;
+  assert.ok(has(lintArtifact(noViewBox, { mode: "standard" }), "hand-drawn-icon"), "no-viewBox small svg icon is flagged");
+  const fa = `<svg viewBox="0 0 512 512"><path d="M256 8C119 8 8 119 8 256"/></svg>`;
+  assert.ok(has(lintArtifact(fa, { mode: "standard" }), "hand-drawn-icon"), "a 512 icon canvas is flagged");
+  // A large square illustration (>512) is left alone.
+  const illo = `<svg viewBox="0 0 1200 1200"><path d="M2 2h40v40"/></svg>`;
+  assert.ok(!has(lintArtifact(illo, { mode: "standard" }), "hand-drawn-icon"), "a large square illustration is not flagged");
+  // FP fix: a literal > inside an attribute must not hide a later class="logo".
+  const logoWithGt = `<svg viewBox="0 0 24 24" aria-label="a>b" class="logo"><path d="M2 2h20"/></svg>`;
+  assert.ok(!has(lintArtifact(logoWithGt, { mode: "standard" }), "hand-drawn-icon"), "logo hint after an attribute > is still seen");
+});

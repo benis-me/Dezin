@@ -127,6 +127,8 @@ test("Standard mode always surfaces library routing (motion + gsap pre-installed
   assert.match(p, /motion/, "motion is offered");
   assert.match(p, /GSAP/, "gsap is offered");
   assert.match(p, /combine tools that serve DIFFERENT jobs/i, "combining different-job tools is blessed, not forbidden");
+  assert.match(p, /lucide-react/, "the pre-installed icon set is named");
+  assert.match(p, /NEVER hand-author an icon/i, "hand-authoring icon geometry is forbidden");
 });
 
 test("empty skills and instructions are omitted (no empty sections)", () => {

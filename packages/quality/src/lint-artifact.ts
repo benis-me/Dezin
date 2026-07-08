@@ -277,12 +277,61 @@ function checkEmojiIcons(html: string): Finding[] {
         severity: "P0",
         id: "emoji-icon",
         message: `Emoji "${emoji}" used as a feature/heading icon.`,
-        fix: "Use a 1.6–1.8px-stroke monoline SVG (e.g. Lucide) with currentColor.",
+        fix: "Import a monoline icon from a real set (e.g. lucide-react) with currentColor — don't hand-author the SVG.",
         snippet: emoji,
       }];
     }
   }
   return [];
+}
+
+const SVG_BLOCK_RE = /<svg\b[^>]*>[\s\S]*?<\/svg>/gi;
+// Quote-aware open-tag isolation: consume quoted attribute values whole, so a literal `>` inside an
+// attribute (e.g. aria-label="a>b") doesn't truncate the tag and hide a later class="logo".
+const SVG_OPEN_TAG_RE = /^<svg\b(?:"[^"]*"|'[^']*'|[^"'>])*>/i;
+// A square viewBox="0 0 N N" (lucide/heroicons 24, mini 20, 16/32/48, phosphor 256, FA/Material 512).
+const ICON_SQUARE_VIEWBOX_RE = /viewBox=["']0 0 (\d{1,4}) \1["']/i;
+const SVG_WIDTH_RE = /\bwidth=["']?(\d{1,3})(?:px)?["']?/i;
+const SVG_HEIGHT_RE = /\bheight=["']?(\d{1,3})(?:px)?["']?/i;
+const SVG_DRAW_PRIM_RE = /<(?:path|polyline|polygon|line|circle|rect|ellipse)\b/i;
+const ICON_LIBRARY_HINT_RE = /\b(?:lucide|tabler|heroicons?|phosphor|iconify|feather|bootstrap-icons?|ionicons?)\b/i;
+const LOGO_HINT_RE = /\b(?:logo|brand|wordmark)\b/i;
+
+/** An <svg> open tag whose canvas is icon-sized: a square viewBox ≤ 512, or (no viewBox) small w&h. */
+function isIconCanvas(openTag: string): boolean {
+  const vb = openTag.match(ICON_SQUARE_VIEWBOX_RE);
+  if (vb) return Number(vb[1]) <= 512; // square grid up to 512; larger square = illustration, skip
+  const w = openTag.match(SVG_WIDTH_RE);
+  const h = openTag.match(SVG_HEIGHT_RE);
+  if (w && h) return Number(w[1]) <= 40 && Number(h[1]) <= 40; // no viewBox: small width & height
+  return false;
+}
+
+/**
+ * hand-drawn-icon (Standard mode only) — an inline <svg> icon LITERAL in the source. Standard
+ * projects ship a real icon set (lucide-react), so an icon should be a component import (<Search/>),
+ * not inline <svg> — hand-placing icon geometry (invented OR pasted) is a recognizable AI tell. Only
+ * icon-sized <svg> counts; brand logos / illustrations (large/wide canvas or a logo hint) are left
+ * alone. Prototype mode (single HTML, no bundler) legitimately inlines SVG, so the caller gates this
+ * to Standard mode.
+ */
+function checkHandDrawnIcon(html: string): Finding[] {
+  let count = 0;
+  for (const block of html.match(SVG_BLOCK_RE) ?? []) {
+    const openTag = block.match(SVG_OPEN_TAG_RE)?.[0] ?? block.slice(0, block.indexOf(">") + 1);
+    if (!isIconCanvas(openTag)) continue; // icon-sized canvas only
+    if (LOGO_HINT_RE.test(openTag)) continue; // a brand logo/wordmark, not an icon
+    if (ICON_LIBRARY_HINT_RE.test(block)) continue; // already carries an icon-set signature
+    if (!SVG_DRAW_PRIM_RE.test(block)) continue; // must have drawn geometry
+    count += 1;
+  }
+  if (count === 0) return [];
+  return [{
+    severity: "P1",
+    id: "hand-drawn-icon",
+    message: `${count} inline SVG icon${count > 1 ? "s" : ""} hand-placed in the source — in Standard mode icons should be a component import from an icon set, not inline <svg>.`,
+    fix: "Import icons from the installed set (`lucide-react`), or install another vetted set (@phosphor-icons/react, heroicons, @tabler/icons-react). Don't inline or hand-author icon <path> geometry; inline SVG only for a given logo or a trivial primitive.",
+  }];
 }
 
 function checkLeftAccentCard(html: string): Finding[] {
@@ -758,6 +807,7 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
     ...checkPurpleGradient(html),
     ...checkTrustGradient(html),
     ...checkEmojiIcons(html),
+    ...(prototypeOnly ? [] : checkHandDrawnIcon(html)),
     ...checkLeftAccentCard(html),
     ...checkSansDisplay(html),
     ...checkRegexList(html, INVENTED_METRIC_PATTERNS, {
