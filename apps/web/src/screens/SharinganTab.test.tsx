@@ -48,4 +48,15 @@ describe("SharinganTab", () => {
     const img = await screen.findByAltText(/Home/i);
     expect(img.getAttribute("src")).toContain("home/shot-desktop.png");
   });
+
+  it("renders a screenshot thumbnail inline in the work-log for steps that carry a shot", async () => {
+    renderTab({
+      sharinganStatus: async () => ({ phase: "capturing", steps: 1, pages: [] }),
+      streamSharinganEvents: async function* () {
+        yield { at: 1, kind: "screenshot", text: "Captured desktop (1440px)", shot: "home/shot-desktop.png" };
+      },
+    });
+    const img = await screen.findByAltText(/Captured desktop/i);
+    expect(img.getAttribute("src")).toContain("home/shot-desktop.png");
+  });
 });

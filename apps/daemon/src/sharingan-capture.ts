@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { SharinganSession, VIEWPORTS, type DomNode, type DomTreeNode } from "./sharingan-browser.ts";
 
-export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "assets" | "login-required" | "done"; text: string }
+export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "assets" | "login-required" | "done"; text: string; shot?: string }
 export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; assets: string; links: string[] }
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth|account)(\/|\?|$)/i;
@@ -66,18 +66,20 @@ export async function captureCurrentPage(
   url: string,
   onStep: (s: CaptureStep) => void,
 ): Promise<CapturedPage> {
-  const step = (kind: CaptureStep["kind"], text: string) => onStep({ at: Date.now(), kind, text });
+  const step = (kind: CaptureStep["kind"], text: string, shot?: string) => onStep({ at: Date.now(), kind, text, shot });
   const rel = join(".sharingan", pageDir(url));
   mkdirSync(join(projectDir, rel), { recursive: true });
 
   const screenshots: Record<string, string> = {};
-  for (const v of VIEWPORTS) {
+  // Desktop full-page only by default — mobile shots aren't worth the extra capture + settle time.
+  for (const v of VIEWPORTS.filter((vp) => vp.label === "desktop")) {
     await session.setViewport(v);
-    step("screenshot", `Capturing ${v.label} (${v.width}px)`);
+    await session.settle(1500); // let the viewport reflow + any responsive images settle before the shot
     const shot = await session.screenshot({ fullPage: true });
     const shotRel = join(rel, `shot-${v.label}.png`);
     writeFileSync(join(projectDir, shotRel), shot);
     screenshots[v.label] = shotRel;
+    step("screenshot", `Captured ${v.label} (${v.width}px)`, shotRel);
   }
 
   step("dom", "Reading DOM structure");
