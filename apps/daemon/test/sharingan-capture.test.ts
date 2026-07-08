@@ -5,9 +5,42 @@ import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { detectLoginWall, looksLikeLoginWall, capturePage, captureCurrentPage, writePagesManifest, sharinganReviewReference, type CaptureStep } from "../src/sharingan-capture.ts";
+import { detectLoginWall, looksLikeLoginWall, capturePage, captureCurrentPage, writePagesManifest, sharinganReviewReference, upsertPage, captureUrlKey, readCapturedPages, type CaptureStep, type CapturedPage } from "../src/sharingan-capture.ts";
 import { SharinganSession, type DomNode } from "../src/sharingan-browser.ts";
 import { findChrome } from "../src/capture-cover.ts";
+
+test("upsertPage dedups by normalized URL — re-capturing a page updates it, never duplicates", () => {
+  const mk = (url: string, title: string): CapturedPage => ({ url, title, screenshots: {}, dom: "", styles: "", assets: "", links: [] });
+  const pages: CapturedPage[] = [];
+  upsertPage(pages, mk("https://x.com/home", "A"));
+  upsertPage(pages, mk("https://x.com/home", "B")); // same url → replace
+  upsertPage(pages, mk("https://x.com/home/", "C")); // trailing slash → same key
+  upsertPage(pages, mk("https://x.com/home#frag", "D")); // fragment → same key
+  assert.equal(pages.length, 1, "the same URL collapses to a single entry");
+  assert.equal(pages[0]!.title, "D", "the latest capture wins");
+  upsertPage(pages, mk("https://x.com/about", "E")); // different path → new entry
+  assert.equal(pages.length, 2);
+});
+
+test("captureUrlKey strips a plain anchor + trailing slash, but keeps hash-ROUTES distinct", () => {
+  assert.equal(captureUrlKey("https://x.com/a/"), captureUrlKey("https://x.com/a"));
+  assert.equal(captureUrlKey("https://x.com/a#b"), captureUrlKey("https://x.com/a")); // plain anchor stripped
+  assert.notEqual(captureUrlKey("https://x.com/a"), captureUrlKey("https://x.com/b"));
+  // hash-routed SPA pages must NOT collapse — they're distinct views, not on-page anchors.
+  assert.notEqual(captureUrlKey("https://x.com/#/products"), captureUrlKey("https://x.com/#/about"));
+  assert.notEqual(captureUrlKey("https://x.com/#!/x"), captureUrlKey("https://x.com/#!/y"));
+});
+
+test("readCapturedPages round-trips the manifest written by writePagesManifest", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sgpg-"));
+  const pages: CapturedPage[] = [{ url: "https://x.com/home", title: "H", screenshots: { desktop: ".sharingan/x/shot.png" }, dom: ".sharingan/x/dom.json", styles: ".sharingan/x/styles.json", assets: ".sharingan/x/assets.json", links: ["https://x.com/a"] }];
+  writePagesManifest(dir, "https://x.com/home", pages);
+  const back = readCapturedPages(dir);
+  assert.equal(back.length, 1);
+  assert.equal(back[0]!.url, "https://x.com/home");
+  assert.deepEqual(back[0]!.links, ["https://x.com/a"]);
+  assert.deepEqual(readCapturedPages(mkdtempSync(join(tmpdir(), "empty-"))), [], "no manifest → empty");
+});
 
 test("detectLoginWall flags 401, auth redirects, and password-only shells", () => {
   assert.equal(detectLoginWall({ status: 401, finalUrl: "https://x/y", hasPasswordField: false, textLength: 500 }), true);
@@ -240,8 +273,8 @@ test("captureCurrentPage emits one desktop full-page screenshot step carrying it
     await captureCurrentPage(session, dir, url, (s) => steps.push(s));
     const shots = steps.filter((s) => s.kind === "screenshot" && s.shot);
     assert.equal(shots.length, 1, "one desktop screenshot step (mobile is not captured by default)");
-    assert.ok(shots[0]!.shot!.endsWith("shot-desktop.png"), "desktop shot path present");
-    assert.ok(!shots.some((s) => s.shot!.endsWith("shot-mobile.png")), "no mobile shot by default");
+    assert.match(shots[0]!.shot!, /shot-desktop-[a-z0-9]+\.png$/, "desktop shot path present (unique per-capture filename)");
+    assert.ok(!shots.some((s) => /shot-mobile/.test(s.shot!)), "no mobile shot by default");
   } finally {
     await session.close();
     await new Promise<void>((r) => fixture.close(() => r()));

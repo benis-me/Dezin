@@ -50,7 +50,7 @@ function assetExt(url: string, contentType: string): string {
   return m ? m[1]!.toLowerCase().replace("jpeg", "jpg") : "png";
 }
 
-function pageDir(url: string): string {
+export function pageDir(url: string): string {
   // NOTE (Phase 4): collision-safe — a short sha1 hash of the FULL url is appended to the
   // human-readable slug, so two distinct URLs that collapse to the same slug (after stripping
   // non-alphanumerics and truncating) still land in distinct dirs. Needed now that /capture
@@ -69,14 +69,18 @@ export async function captureCurrentPage(
   const step = (kind: CaptureStep["kind"], text: string, shot?: string) => onStep({ at: Date.now(), kind, text, shot });
   const rel = join(".sharingan", pageDir(url));
   mkdirSync(join(projectDir, rel), { recursive: true });
+  // Unique per-capture token so re-capturing the SAME url writes a NEW screenshot file instead of
+  // overwriting the previous one — otherwise every earlier work-log record (which stores the shot
+  // PATH, served live) would retroactively flip to show the latest shot.
+  const token = `${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
 
   const screenshots: Record<string, string> = {};
   // Desktop full-page only by default — mobile shots aren't worth the extra capture + settle time.
   for (const v of VIEWPORTS.filter((vp) => vp.label === "desktop")) {
     await session.setViewport(v);
-    await session.settle(1500); // let the viewport reflow + any responsive images settle before the shot
+    await session.settle(); // let the viewport reflow + async content settle (network-idle + DOM-stable) before the shot
     const shot = await session.screenshot({ fullPage: true });
-    const shotRel = join(rel, `shot-${v.label}.png`);
+    const shotRel = join(rel, `shot-${v.label}-${token}.png`);
     writeFileSync(join(projectDir, shotRel), shot);
     screenshots[v.label] = shotRel;
     step("screenshot", `Captured ${v.label} (${v.width}px)`, shotRel);
@@ -141,6 +145,42 @@ export function writePagesManifest(projectDir: string, sourceUrl: string, pages:
   mkdirSync(join(projectDir, ".sharingan"), { recursive: true });
   const manifest = { sourceUrl, pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots, dom: p.dom, styles: p.styles, assets: p.assets, links: p.links })) };
   writeFileSync(join(projectDir, ".sharingan", "pages.json"), JSON.stringify(manifest, null, 2));
+}
+
+/** Normalize a URL for capture-dedup: drop a trailing slash and a PLAIN on-page anchor (`#section`),
+ *  but KEEP a hash-route fragment (`#/products`, `#!/x`) — those are distinct SPA pages, not anchors. */
+export function captureUrlKey(url: string): string {
+  const isRouteHash = (hash: string) => /^#[!/]/.test(hash);
+  try {
+    const u = new URL(url);
+    if (!isRouteHash(u.hash)) u.hash = "";
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return url.replace(/#(?![!/]).*$/, "").replace(/\/$/, "");
+  }
+}
+
+/** Upsert a captured page into the list by normalized URL — replace an existing same-URL entry
+ *  (re-capturing a page updates it) instead of appending a duplicate. Mutates + returns `pages`. */
+export function upsertPage(pages: CapturedPage[], page: CapturedPage): CapturedPage[] {
+  const key = captureUrlKey(page.url);
+  const i = pages.findIndex((p) => captureUrlKey(p.url) === key);
+  if (i >= 0) pages[i] = page;
+  else pages.push(page);
+  return pages;
+}
+
+/** Read the on-disk capture manifest back into CapturedPage[] (empty if none) — used to seed the
+ *  probe session's page list after a daemon restart so re-captures dedup against what's on disk. */
+export function readCapturedPages(projectDir: string): CapturedPage[] {
+  const manifestPath = join(projectDir, ".sharingan", "pages.json");
+  if (!existsSync(manifestPath)) return [];
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { pages?: CapturedPage[] };
+    return Array.isArray(manifest.pages) ? manifest.pages : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Locate the Sharingan review reference for a project: the entry page's desktop screenshot (absolute

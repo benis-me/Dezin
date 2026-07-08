@@ -93,6 +93,9 @@ export class SharinganSession {
     // "Chrome"; this covers the headless test/CI path and is belt-and-suspenders in production).
     const userAgent = (await browser.userAgent()).replace(/Headless/g, "");
     await applyStealth(page, userAgent);
+    // Auto-dismiss alert/confirm/prompt — a blocking dialog freezes the page's JS thread, which would
+    // hang settle()'s in-page waits (their timers never fire) and wedge the whole capture.
+    page.on("dialog", (d) => void d.dismiss().catch(() => {}));
     const origin = new URL(url).origin;
     const session = new SharinganSession(browser, page, origin);
     await session.navigate(url);
@@ -123,11 +126,25 @@ export class SharinganSession {
     return { status: res?.status() ?? 0, finalUrl };
   }
 
-  /** Wait for the page to settle before a screenshot: window `load` (readyState complete) plus every
-   *  current <img> finishing (load OR error), bounded by `timeoutMs` so a never-idle SPA can't hang
-   *  the capture. Runs in the page context (browser timers, not the daemon's). */
-  async settle(timeoutMs = 6000): Promise<void> {
-    await this.page.evaluate(async (timeout: number) => {
+  /** Wait for the page to settle before a screenshot, so async SPA content isn't shot as a skeleton:
+   *  (1) window `load` + every current <img> finishing, (2) a NETWORK-IDLE window (out-waits fetch/XHR
+   *  that replaces skeletons with real data), (3) a DOM-STABILITY window (mutations quiet down after
+   *  the render). All bounded by `timeoutMs` so a never-idle SPA can't hang the capture. */
+  /** Race a page.evaluate against a Node-side timer, so a page that freezes its own JS thread (a
+   *  blocking dialog, a synchronous infinite loop) can't hang settle — the in-page timer never fires
+   *  in that case, so the in-page timeout alone is not a backstop. */
+  private evalBounded(fn: (arg: number) => Promise<void>, ms: number): Promise<void> {
+    if (ms <= 0) return Promise.resolve();
+    return Promise.race([
+      this.page.evaluate(fn, ms).then(() => undefined, () => undefined),
+      new Promise<void>((r) => setTimeout(r, ms + 300)),
+    ]);
+  }
+
+  async settle(timeoutMs = 8000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    // 1. window load + current images (in the page context).
+    await this.evalBounded(async (timeout: number) => {
       const win = globalThis as any;
       const doc = win.document;
       const ready = new Promise<void>((r) => {
@@ -142,7 +159,27 @@ export class SharinganSession {
         })),
       );
       await Promise.race([Promise.all([ready, loaded]), new Promise<void>((r) => win.setTimeout(r, timeout))]);
-    }, timeoutMs).catch(() => {});
+    }, Math.max(0, deadline - Date.now()));
+    // 2. Network idle — out-wait in-flight fetch/XHR. (timeout must stay > 0: puppeteer treats 0 as
+    //    "no timeout" = wait forever, so skip once the budget is spent.)
+    const netBudget = deadline - Date.now();
+    if (netBudget > 100) await this.page.waitForNetworkIdle({ idleTime: 600, timeout: netBudget }).catch(() => {});
+    // 3. DOM stability — wait until mutations quiet down (the skeleton→content render), bounded.
+    const domBudget = deadline - Date.now();
+    if (domBudget > 100) await this.evalBounded(async (budget: number) => {
+      const win = globalThis as any;
+      const target = win.document.body || win.document.documentElement;
+      if (!target || typeof win.MutationObserver !== "function") return;
+      await new Promise<void>((resolve) => {
+        let quiet: any;
+        const finish = () => { try { obs.disconnect(); } catch { /* noop */ } win.clearTimeout(quiet); win.clearTimeout(cap); resolve(); };
+        const bump = () => { win.clearTimeout(quiet); quiet = win.setTimeout(finish, 400); };
+        const obs = new win.MutationObserver(bump);
+        obs.observe(target, { childList: true, subtree: true, attributes: true, characterData: true });
+        const cap = win.setTimeout(finish, budget); // hard cap on the whole DOM-stability wait
+        bump();
+      });
+    }, domBudget);
   }
 
   async setViewport(v: Viewport): Promise<void> { await this.page.setViewport({ width: v.width, height: v.height, deviceScaleFactor: 1 }); }
