@@ -30,7 +30,7 @@ test("injectRuntimeProbe falls back to prepend when there is no <head>/<html>", 
 test("prototype and standard probe strings stay identical", async () => {
   const staticSrc = await readFile(join(import.meta.dirname, "../src/serve-static.ts"), "utf8");
   const viteSrc = await readFile(
-    join(import.meta.dirname, "../../../content/templates/react-vite-gsap/vite.config.js"),
+    join(import.meta.dirname, "../../../content/templates/react-vite/vite.config.js"),
     "utf8",
   );
   const grab = (s: string) => s.slice(s.indexOf("<script data-dezin-runtime-probe>"), s.indexOf("</script>", s.indexOf("data-dezin-runtime-probe")) + 9);

@@ -82,15 +82,17 @@ markup tools can target the artifact precisely.`;
 
 const STANDARD_BUILD = `## Output — a real Vite + React project
 
-You are working inside a scaffolded Vite + React + GSAP project (not a single HTML
+You are working inside a scaffolded Vite + React project (not a single HTML
 file). Build it the way a production frontend is built:
 - Edit \`src/App.jsx\` and compose the design from focused components in
   \`src/components/\`. Keep components small and named for what they are.
 - Put the design system's :root tokens in \`src/index.css\` and reference them with
   var() everywhere. Global resets/base styles live there too.
-- Add dependencies as the design needs them — run \`npm install <pkg>\` yourself
-  (GSAP is already present; add e.g. \`@fontsource-variable/...\`, \`lenis\`, \`ogl\`,
-  \`three\` when they genuinely earn their place). Keep the dependency set lean.
+- Add dependencies as the design needs them — run \`npm install <pkg>\` yourself.
+  \`motion\` (React component/UI motion, from \`motion/react\`) and \`gsap\` (scroll/
+  timeline choreography) are pre-installed; add e.g. \`@fontsource-variable/...\`,
+  \`lenis\`, \`ogl\`, \`three\` when they genuinely earn their place. Use the right tool
+  per job, and combine tools that serve DIFFERENT jobs; keep the dependency set lean.
 - Do NOT create an \`index.html\` artifact in the root for the design — the project's
   index.html + main.jsx already bootstrap React. Don't eject from the toolchain.
 - The dev server (\`npm run dev\`) renders your work live; write code that runs.
@@ -155,17 +157,20 @@ function renderLibraryRouting(libraries: string[], mode: ComposeInput["mode"]): 
   return `## Implementation library routing
 
 These libraries are available when the brief genuinely needs them: ${available.join(", ")}.
-Choose the smallest tool that fits the job; do not stack libraries for the same motion.
+Choose the smallest tool that fits each job. Don't stack two libraries for the SAME effect,
+but DO combine tools that serve DIFFERENT jobs (e.g. \`motion\` for component transitions +
+\`gsap\` ScrollTrigger for scroll choreography). Match the tooling to the project: a calm UI
+may need only CSS/\`motion\`; an effects-heavy piece may layer several — install what it needs.
 
 - CSS transitions / Web Animations API: simple hover states, opacity/transform reveals,
   one-off loops, and low-risk prototype motion.
 - Motion for React (\`motion\`, import from \`motion/react\`): React component transitions,
   layout animations, presence/exit states, gestures, and viewport entry motion.${
-    standard ? " Install it only when those React-specific primitives are useful." : " In single-file prototype mode, prefer CSS/WAAPI unless the skill explicitly provides a CDN-safe path."
+    standard ? " Pre-installed in Standard mode — reach for it for UI/component motion." : " In single-file prototype mode, prefer CSS/WAAPI unless the skill explicitly provides a CDN-safe path."
   }
 - GSAP: sequenced timelines, ScrollTrigger, pinned/scrubbed scroll sections, SVG/path
-  choreography, magnetic interactions, and complex orchestration. In Standard mode GSAP
-  is already available in the scaffold.
+  choreography, magnetic interactions, and complex orchestration. Pre-installed in Standard
+  mode alongside \`motion\` — they cover different jobs, so use each where it's strongest.
 - Remotion: only for a video/timeline deliverable that should render frames or MP4s from
   React compositions. Do not use Remotion for an ordinary interactive landing page.
 - WebGL / Three / OGL: only when a shader or real 3D scene is the centerpiece, not as
@@ -252,7 +257,10 @@ export function composeSystemPrompt(input: ComposeInput = {}): string {
     parts.push(`## Custom instructions\n\n${input.userInstructions.trim()}`);
   }
 
-  const allLibraries = (input.skills ?? []).flatMap((s) => s.libraries ?? []);
+  const skillLibraries = (input.skills ?? []).flatMap((s) => s.libraries ?? []);
+  // Standard mode ships `motion` + `gsap` pre-installed, so the routing always applies — surface it
+  // even when no skill declares libraries, so every project gets best-practice tool selection.
+  const allLibraries = input.mode === "standard" ? ["motion", "gsap", ...skillLibraries] : skillLibraries;
   const libraryRouting = renderLibraryRouting(allLibraries, input.mode);
   if (libraryRouting) parts.push(libraryRouting);
 

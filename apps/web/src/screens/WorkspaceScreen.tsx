@@ -4983,7 +4983,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   <Spinner size={18} />
                   <p className="text-sm">
                     {setupPhase === "scaffolding"
-                      ? "Scaffolding the Vite + React + GSAP project…"
+                      ? "Scaffolding the Vite + React project…"
                       : setupPhase === "installing"
                         ? "Installing dependencies (first run only)…"
                         : "Project setup failed."}
