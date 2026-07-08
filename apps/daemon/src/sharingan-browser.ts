@@ -117,9 +117,32 @@ export class SharinganSession {
           }),
       )
       .catch(() => {});
+    await this.settle();
     const finalUrl = this.page.url();
     try { this.origin = new URL(finalUrl).origin; } catch { /* keep the prior origin on an unparseable url */ }
     return { status: res?.status() ?? 0, finalUrl };
+  }
+
+  /** Wait for the page to settle before a screenshot: window `load` (readyState complete) plus every
+   *  current <img> finishing (load OR error), bounded by `timeoutMs` so a never-idle SPA can't hang
+   *  the capture. Runs in the page context (browser timers, not the daemon's). */
+  async settle(timeoutMs = 6000): Promise<void> {
+    await this.page.evaluate(async (timeout: number) => {
+      const win = globalThis as any;
+      const doc = win.document;
+      const ready = new Promise<void>((r) => {
+        if (doc.readyState === "complete") r();
+        else win.addEventListener("load", () => r(), { once: true });
+      });
+      const imgs = Array.from(doc.images || []).filter((i: any) => i.src && !i.complete);
+      const loaded = Promise.all(
+        imgs.map((i: any) => new Promise<void>((r) => {
+          i.addEventListener("load", () => r(), { once: true });
+          i.addEventListener("error", () => r(), { once: true });
+        })),
+      );
+      await Promise.race([Promise.all([ready, loaded]), new Promise<void>((r) => win.setTimeout(r, timeout))]);
+    }, timeoutMs).catch(() => {});
   }
 
   async setViewport(v: Viewport): Promise<void> { await this.page.setViewport({ width: v.width, height: v.height, deviceScaleFactor: 1 }); }

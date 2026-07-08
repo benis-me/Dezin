@@ -5,7 +5,7 @@ import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { detectLoginWall, looksLikeLoginWall, capturePage, captureCurrentPage, writePagesManifest, sharinganReviewReference } from "../src/sharingan-capture.ts";
+import { detectLoginWall, looksLikeLoginWall, capturePage, captureCurrentPage, writePagesManifest, sharinganReviewReference, type CaptureStep } from "../src/sharingan-capture.ts";
 import { SharinganSession, type DomNode } from "../src/sharingan-browser.ts";
 import { findChrome } from "../src/capture-cover.ts";
 
@@ -90,7 +90,7 @@ test("capturePage writes screenshots + dom + styles into .sharingan and reports 
     assert.equal(loginRequired, false);
     assert.ok(page, "captured a page");
     assert.ok(existsSync(join(projectDir, ".sharingan")), ".sharingan dir created");
-    assert.ok(Object.keys(page!.screenshots).length >= 2, "screenshot per viewport");
+    assert.ok(page!.screenshots.desktop && !page!.screenshots.mobile, "captures the desktop full-page shot only (mobile dropped)");
     const styles = JSON.parse(readFileSync(join(projectDir, page!.styles), "utf8"));
     assert.ok(Array.isArray(styles.colors));
     assert.ok(steps.includes("screenshot") && steps.includes("styles") && steps.includes("done"));
@@ -227,4 +227,23 @@ test("sharinganReviewReference returns undefined for a malformed (null) manifest
   mkdirSync(join(dir, ".sharingan"), { recursive: true });
   writeFileSync(join(dir, ".sharingan", "pages.json"), "null");
   assert.equal(sharinganReviewReference(dir), undefined);
+});
+
+test("captureCurrentPage emits one desktop full-page screenshot step carrying its shot path (mobile dropped)", { skip: !findChrome() && "no Chrome" }, async () => {
+  const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end('<!doctype html><html><body><h1>Acme</h1><p>' + "w ".repeat(40) + '</p></body></html>'); });
+  await new Promise<void>((r) => fixture.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`;
+  const dir = mkdtempSync(join(tmpdir(), "shar-shot-"));
+  const session = await SharinganSession.open(url, { userDataDir: mkdtempSync(join(tmpdir(), "shar-shot-prof-")), headless: true });
+  const steps: CaptureStep[] = [];
+  try {
+    await captureCurrentPage(session, dir, url, (s) => steps.push(s));
+    const shots = steps.filter((s) => s.kind === "screenshot" && s.shot);
+    assert.equal(shots.length, 1, "one desktop screenshot step (mobile is not captured by default)");
+    assert.ok(shots[0]!.shot!.endsWith("shot-desktop.png"), "desktop shot path present");
+    assert.ok(!shots.some((s) => s.shot!.endsWith("shot-mobile.png")), "no mobile shot by default");
+  } finally {
+    await session.close();
+    await new Promise<void>((r) => fixture.close(() => r()));
+  }
 });

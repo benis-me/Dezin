@@ -79,3 +79,23 @@ test("a stealth session reports no webdriver flag and no Headless UA to page scr
     await fx.close();
   }
 });
+
+test("navigate settles until images finish loading before returning", { skip: !findChrome() && "no Chrome" }, async () => {
+  const png = Buffer.from("89504e470d0a1a0a", "hex");
+  const server = createServer((req, res) => {
+    if (req.url === "/slow.png") { setTimeout(() => { res.writeHead(200, { "content-type": "image/png" }); res.end(png); }, 1200); return; }
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end('<!doctype html><html><body><h1 id="h">WAIT</h1><img src="/slow.png" onload="m()" onerror="m()"><script>function m(){document.getElementById("h").textContent="READY"}</script></body></html>');
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  const s = await SharinganSession.open(url, { userDataDir: mkdtempSync(join(tmpdir(), "shar-settle-")), headless: true });
+  try {
+    const dom = await s.readDom(50);
+    const h1 = dom.find((n) => n.tag === "h1")?.text ?? "";
+    assert.equal(h1, "READY", "navigate waited for the slow image to load/settle before returning");
+  } finally {
+    await s.close();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});

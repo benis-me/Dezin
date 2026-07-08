@@ -26,8 +26,10 @@ function makeFake(over: Partial<Record<string, unknown>> = {}): { session: Shari
   const session = {
     navigate: async () => { calls.push("navigate"); return { status: nav++ === 0 ? 401 : 200, finalUrl: "http://x.test/" }; },
     readDom: async () => [{ tag: "h1", classes: "", text: "Home", box: { x: 0, y: 0, w: 10, h: 10 } }],
+    readDomTree: async () => [{ tag: "h1", classes: "", text: "Home", box: { x: 0, y: 0, w: 10, h: 10 }, style: {}, children: [] }],
     hasPasswordField: async () => false,
     setViewport: async () => {},
+    settle: async () => {},
     screenshot: async () => Buffer.from("x"),
     styleTokens: async () => ({ colors: [], fontFamilies: [], fontSizes: [], radii: [], shadows: [] }),
     assets: async () => [],

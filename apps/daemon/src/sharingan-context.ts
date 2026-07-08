@@ -31,7 +31,7 @@ export function buildSharinganContext(input: SharinganContextInput): SharinganCo
     "- `dom.json` — the captured DOM as a NESTED TREE (parent/child hierarchy) with per-node computed styles (display/flex/grid/size/padding/margin/font/color/border/etc.). MIRROR this structure and these styles — it is your blueprint. Do not invent a different layout.",
     "- `styles.json` — the source's exact design tokens (colors, fonts, radii, shadows). Use THESE colors and fonts verbatim. Do NOT substitute default AI colors (no indigo/violet/purple unless the source actually uses them).",
     "- `assets.json` — the image inventory. Each entry has a `local` path (e.g. `/_assets/ab12cd34ef56.png`) — the REAL source image already downloaded into this project's `public/` folder. Reference every image by its `local` path (they resolve at the web root). Fill EVERY image slot the source has; an entry without a `local` path failed to download — use a neutral sized placeholder box for just those.",
-    "- the desktop/mobile screenshots — the visual source of truth; your result should look like them.",
+    "- the desktop screenshot — the visual source of truth; your result should look like it.",
     "",
     "You may drive the live browser to explore + capture additional key pages via these local endpoints (send `x-dezin-daemon-token: $DEZIN_DAEMON_TOKEN`):",
     `- Navigate: POST ${base}/navigate  {"url":"..."}`,

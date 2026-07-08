@@ -471,8 +471,10 @@ export function parseSseBlock(block: string): RunEvent | null {
 /** One step emitted while Sharingan captures a site (navigate, screenshot, login-required, etc.). */
 export interface SharinganStep {
   at: number;
-  kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "login-required" | "done";
+  kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "assets" | "login-required" | "done";
   text: string;
+  /** For a "screenshot" step: the project-dir-relative path of the shot it produced (feed to sharinganShotUrl). */
+  shot?: string;
 }
 
 /** A single captured page: its URL, title, and screenshots keyed by viewport/label. */
