@@ -1245,13 +1245,17 @@ function ImageFileView({ name, url }: { name: string; url: string }) {
   );
 }
 
-function CodeView({ name, text }: { name: string; text: string }) {
+const HIGHLIGHT_MAX_CHARS = 100_000;
+
+export function CodeView({ name, text }: { name: string; text: string }) {
   const lines = text.length ? text.split("\n") : [""];
+  const highlight = text.length <= HIGHLIGHT_MAX_CHARS;
   return (
     <div className="flex h-full flex-col bg-card">
       <PanelBar className="font-mono">
         <FileCode2 size={13} strokeWidth={1.75} />
         {name}
+        {!highlight && <span className="ml-2 text-muted-foreground/60">· large file, highlighting off</span>}
         <span className="tnum ml-auto">{lines.length} lines</span>
       </PanelBar>
       <div className="flex-1 overflow-auto">
@@ -1265,7 +1269,7 @@ function CodeView({ name, text }: { name: string; text: string }) {
             ))}
           </div>
           <pre className="flex-1 py-3 pl-4 pr-6 text-foreground-2">
-            <code>{highlightToReact(text)}</code>
+            <code>{highlight ? highlightToReact(text) : text}</code>
           </pre>
         </div>
       </div>

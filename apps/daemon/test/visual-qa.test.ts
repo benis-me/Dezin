@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
+import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, shouldRunComputedDetector, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
 import type { QualityFinding } from "../../../packages/core/src/index.ts";
 
 function geomEl(overrides: Partial<GeometryElement> = {}): GeometryElement {
@@ -68,6 +68,12 @@ test("boundComputedFindings dedupes by id+selector and caps per rule so the repa
 test("boundComputedFindings enforces the overall total cap", () => {
   const raw: QualityFinding[] = Array.from({ length: 30 }, (_, i) => ({ severity: "P2", id: `r${i}`, message: "m", fix: "f", selector: `s${i}` }));
   assert.equal(boundComputedFindings(raw, 3, 20).length, 20);
+});
+
+test("computed anti-slop detector is skipped for Sharingan clones", () => {
+  assert.equal(shouldRunComputedDetector({ isSharingan: true } as any), false);
+  assert.equal(shouldRunComputedDetector({ isSharingan: false } as any), true);
+  assert.equal(shouldRunComputedDetector({} as any), true);
 });
 
 test("findingsFromGeometry reports horizontal overflow, offscreen fixed controls, and clipped text", () => {

@@ -680,11 +680,13 @@ export function HomeScreen({
           {/* Compact tool header — feature toggles ride the far right of the sub-line. */}
           <div className="flex items-end justify-between gap-4">
             <div className="max-w-2xl">
-              <h1 className="text-2xl font-semibold tracking-tight text-foreground" onDoubleClick={toggleSharingan}>
-                Start a design
+              <h1 className={cn("text-2xl font-semibold tracking-tight", sharingan ? "text-red-500" : "text-foreground")} onDoubleClick={toggleSharingan}>
+                {sharingan ? "Sharingan" : "Start a design"}
               </h1>
               <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
-                Describe what you want. Dezin builds a real, tasteful artifact, then lints it against its own anti-slop rules.
+                {sharingan
+                  ? "Paste a URL — Dezin clones its structure, styling, and imagery into an editable project. Double-click the title to exit."
+                  : "Describe what you want. Dezin builds a real, tasteful artifact, then lints it against its own anti-slop rules."}
               </p>
             </div>
             <TooltipProvider>
@@ -709,9 +711,11 @@ export function HomeScreen({
 
           <div
             aria-label="Design prompt dropzone"
+            data-sharingan={sharingan}
             className={cn(
               "mt-5 w-full rounded-2xl border p-2.5 transition-[color,border-color,background-color,box-shadow] duration-150 hover:border-border-strong focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring",
               optimizingPrompt ? "border-border-strong bg-surface-2/80 shadow-inner" : "border-input bg-card/80",
+              sharingan && "sharingan-active border-red-500/60 [animation:sharingan-glow_2.4s_ease-in-out_infinite]",
             )}
             onDragEnter={handlePromptDragOver}
             onDragOver={handlePromptDragOver}
@@ -856,19 +860,7 @@ export function HomeScreen({
                   />
                   <FieldSelect label="Template" value={skillId} options={skillOptions} onChange={setSkillId} />
                   <DesignSystemSelect systems={systems} value={designSystemId} onChange={setDesignSystemId} defaultId={DEFAULT_DS} />
-                  {sharingan ? (
-                    <div className="flex items-center gap-2 text-sm">
-                      <span className="rounded-md border border-border px-2 py-1 text-muted-foreground opacity-70">Standard</span>
-                      <button
-                        type="button"
-                        onClick={toggleSharingan}
-                        aria-label="Exit Sharingan mode"
-                        className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-muted-foreground transition-colors hover:border-border-strong hover:text-foreground"
-                      >
-                        Sharingan <span aria-hidden>✕</span>
-                      </button>
-                    </div>
-                  ) : (
+                  {!sharingan && (
                     <FieldSelect
                       label="Mode"
                       value={mode}
@@ -1147,8 +1139,8 @@ export function HomeScreen({
         <div className="p-5">
           <h2 className="text-base font-semibold tracking-tight">Confirm authorized use</h2>
           <p className="mt-3 text-sm text-muted-foreground">
-            Sharingan reconstructs a site's structure and design as a new, editable project — it doesn't copy brand assets or content
-            verbatim. Only clone sites you own or are authorized to reproduce.
+            Sharingan reproduces a site — its structure, design, and imagery — as a new, editable project, including the source's
+            real images and content. Only clone sites you own or are authorized to reproduce.
           </p>
           <div className="mt-5 flex justify-end gap-2">
             <Button type="button" variant="ghost" onClick={() => setAffirmPending(null)}>

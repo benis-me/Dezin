@@ -739,6 +739,18 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
   const banned = options.bannedAccentHexes ?? [];
   const prototypeOnly = (options.mode ?? "prototype") !== "standard";
 
+  if (options.isSharingan) {
+    // Clone mode: trust the source. Skip the entire anti-slop / taste / accessibility family —
+    // faithfully reproducing a source's colors, fonts, contrast, and markers is 1:1, not a defect.
+    // Keep only lorem/filler, which signals the agent failed to reproduce the real copy.
+    return checkRegexList(html, FILLER_PATTERNS, {
+      severity: "P0",
+      id: "filler-copy",
+      message: "Filler/placeholder copy (lorem ipsum, 'feature one/two/three').",
+      fix: "Reproduce the real copy from the captured source instead of filler.",
+    }).sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9));
+  }
+
   const findings: Finding[] = [
     ...(prototypeOnly ? checkEmptyArtifact(html) : []),
     ...checkIndigo(html, banned),
