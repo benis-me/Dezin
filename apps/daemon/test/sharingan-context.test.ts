@@ -37,3 +37,11 @@ test("the prompt steers away from drowning in dom.json — outline is the bluepr
   assert.match(promptBlock, /do NOT cat \/ load \/ parse it with node\/python\/jq/i); // forbid wholesale dom.json parsing
   assert.match(promptBlock, /START WRITING/i); // push to build, not analyze
 });
+
+test("buildSharinganContext makes render-map.json the measured source for 1:1 layout", () => {
+  const { promptBlock } = buildSharinganContext({ sourceUrl: "https://example.com", budget: 6, capturedCount: 1 });
+  assert.match(promptBlock, /render-map\.json/);
+  assert.match(promptBlock, /bounding boxes|browser-measured|measured/i);
+  assert.match(promptBlock, /screenshot diff|visual regression|source-vs-result/i);
+  assert.match(promptBlock, /local patches|do not redesign|do not re-layout the whole page/i);
+});

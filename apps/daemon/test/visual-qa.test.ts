@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, shouldRunComputedDetector, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
+import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, shouldRunComputedDetector, sourceFidelityFindings, sourceViewportFromRenderMap, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
 import type { QualityFinding } from "../../../packages/core/src/index.ts";
 
 function geomEl(overrides: Partial<GeometryElement> = {}): GeometryElement {
@@ -74,6 +74,12 @@ test("computed anti-slop detector is skipped for Sharingan clones", () => {
   assert.equal(shouldRunComputedDetector({ isSharingan: true } as any), false);
   assert.equal(shouldRunComputedDetector({ isSharingan: false } as any), true);
   assert.equal(shouldRunComputedDetector({} as any), true);
+});
+
+test("sourceViewportFromRenderMap uses the source capture viewport for Sharingan QA", () => {
+  assert.deepEqual(sourceViewportFromRenderMap({ viewport: { width: 1440, height: 900 } }), { width: 1440, height: 900 });
+  assert.equal(sourceViewportFromRenderMap({ viewport: { width: 0, height: 900 } }), undefined);
+  assert.equal(sourceViewportFromRenderMap({ viewport: { width: 4000, height: 900 } }), undefined);
 });
 
 test("findingsFromGeometry reports horizontal overflow, offscreen fixed controls, and clipped text", () => {
@@ -224,6 +230,85 @@ test("agentReviewPrompt adds a source-fidelity section when a Sharingan referenc
   assert.match(prompt, /source/i);
   assert.match(prompt, /reconstruc/i); // "reconstructing" / "reconstruction"
   assert.match(prompt, /6 images: hero/);
+});
+
+test("agentReviewPrompt includes the source render map when a Sharingan reference has one", () => {
+  const input = {
+    htmlPath: "/proj/index.html",
+    projectRoot: "/proj",
+    brief: "Rebuild the site",
+    sharinganReference: {
+      screenshotPath: "/proj/.sharingan/home-abcd1234/shot-desktop.png",
+      renderMapPath: "/proj/.sharingan/home-abcd1234/render-map.json",
+    },
+  } as unknown as VisualQaInput;
+  const prompt = agentReviewPrompt(input, "/proj/.visual-qa/shot.png");
+  assert.match(prompt, /Source render map/i);
+  assert.match(prompt, /\.sharingan\/home-abcd1234\/render-map\.json/);
+  assert.match(prompt, /browser-measured|bounding boxes|source-vs-result/i);
+});
+
+test("sourceFidelityFindings reports missing source text and image-slot count drift", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 1600 },
+    elements: [
+      { selector: "h1.hero", tag: "h1", text: "Launch faster", box: { x: 80, y: 120, w: 520, h: 72 }, style: { fontSize: "64px", fontWeight: "700" } },
+      { selector: "img.logo", tag: "img", text: "", box: { x: 80, y: 32, w: 120, h: 40 }, style: {} },
+      { selector: ".hero-bg", tag: "div", text: "", box: { x: 0, y: 0, w: 1440, h: 420 }, style: { backgroundImage: "url(hero.png)" } },
+    ],
+  };
+  const generated = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "h1", tag: "h1", text: "Welcome", box: { x: 80, y: 120, w: 520, h: 72 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 520, scrollHeight: 72, clientWidth: 520, clientHeight: 72 },
+    ],
+  } as any;
+  const findings = sourceFidelityFindings(source as any, generated);
+  assert.ok(findings.some((f) => f.id === "visual-source-text-missing" && /Launch faster/.test(f.message)));
+  assert.ok(findings.some((f) => f.id === "visual-source-image-count"));
+});
+
+test("sourceFidelityFindings reports large measured box deltas for matched source text", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "h1.hero", tag: "h1", text: "Launch faster", box: { x: 80, y: 120, w: 520, h: 72 }, style: { fontSize: "64px", fontWeight: "700" } },
+    ],
+  };
+  const generated = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "h1", tag: "h1", text: "Launch faster", rect: { left: 240, top: 300, right: 720, bottom: 350, width: 480, height: 50 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 480, scrollHeight: 50, clientWidth: 480, clientHeight: 50 },
+    ],
+  } as any;
+  const findings = sourceFidelityFindings(source as any, generated);
+  const box = findings.find((f) => f.id === "visual-source-box-delta");
+  assert.ok(box, "large position/size drift becomes a measured source-fidelity finding");
+  assert.match(box!.fix, /x:80|y:120|520x72/);
+});
+
+test("sourceFidelityFindings matches text to the specific generated element, not the root wrapper", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "h1.hero", tag: "h1", text: "Launch faster", box: { x: 80, y: 120, w: 520, h: 72 }, style: { fontSize: "64px", fontWeight: "700" } },
+    ],
+  };
+  const generated = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "#root", tag: "div", text: "Launch faster", rect: { left: 0, top: 0, right: 1440, bottom: 900, width: 1440, height: 900 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 1440, scrollHeight: 900, clientWidth: 1440, clientHeight: 900 },
+      { selector: "h1", tag: "h1", text: "Launch faster", rect: { left: 80, top: 120, right: 600, bottom: 192, width: 520, height: 72 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 520, scrollHeight: 72, clientWidth: 520, clientHeight: 72 },
+    ],
+  } as any;
+  const findings = sourceFidelityFindings(source as any, generated);
+  assert.ok(!findings.some((f) => f.id === "visual-source-box-delta"), "root wrapper must not cause a false measured delta");
 });
 
 test("agentReviewPrompt has no source-fidelity section for a normal (non-Sharingan) build", () => {

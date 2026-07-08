@@ -23,6 +23,35 @@ export interface DomTreeNode {
 }
 export interface Asset { url: string; kind: "img" | "background" | "video"; alt?: string; w?: number; h?: number; local?: string }
 export interface StyleTokens { colors: string[]; fontFamilies: string[]; fontSizes: string[]; radii: string[]; shadows: string[] }
+export interface RenderMapElement {
+  selector: string;
+  tag: string;
+  text: string;
+  box: { x: number; y: number; w: number; h: number };
+  style: {
+    display: string;
+    position: string;
+    zIndex: string;
+    fontSize: string;
+    fontWeight: string;
+    lineHeight: string;
+    letterSpacing: string;
+    color: string;
+    backgroundColor: string;
+    backgroundImage: string;
+    objectFit: string;
+    opacity: string;
+    borderRadius: string;
+    boxShadow: string;
+    padding: string;
+    margin: string;
+  };
+}
+export interface RenderMap {
+  viewport: { width: number; height: number };
+  document: { width: number; height: number };
+  elements: RenderMapElement[];
+}
 
 type Browser = Awaited<ReturnType<typeof puppeteer.launch>>;
 type Page = Awaited<ReturnType<Browser["newPage"]>>;
@@ -257,6 +286,73 @@ export class SharinganSession {
       };
       const root = doc.body ? build(doc.body) : null;
       return root ? [root] : [];
+    }, maxNodes);
+  }
+
+  /** Capture the browser's final rendered geometry. This is the render-first source of truth for
+   *  1:1 reconstruction: real viewport/document dimensions, element bounding boxes, and the computed
+   *  styles that drive visual similarity. */
+  async readRenderMap(maxNodes = 700): Promise<RenderMap> {
+    return this.page.evaluate((max: number) => {
+      const win = globalThis as any;
+      const doc = win.document;
+      const escapeCss = (value: string): string => {
+        const css = win.CSS as { escape?: (input: string) => string } | undefined;
+        return css?.escape ? css.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+      };
+      const selectorFor = (el: any): string => {
+        const id = el.getAttribute("id");
+        if (id) return `#${escapeCss(id)}`;
+        const dezinId = el.getAttribute("data-dezin-id");
+        if (dezinId) return `[data-dezin-id="${String(dezinId).replace(/"/g, '\\"')}"]`;
+        const testId = el.getAttribute("data-testid");
+        if (testId) return `[data-testid="${String(testId).replace(/"/g, '\\"')}"]`;
+        const cls = Array.from<string>(el.classList || []).slice(0, 2);
+        const suffix = cls.length ? `.${cls.map(escapeCss).join(".")}` : "";
+        return `${el.tagName.toLowerCase()}${suffix}`;
+      };
+      const root = doc.documentElement;
+      const body = doc.body;
+      const elements: any[] = Array.from<any>(body ? [body, ...Array.from(body.querySelectorAll("*"))] : [])
+        .map((el: any) => {
+          const s = win.getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          if (s.display === "none" || s.visibility === "hidden" || r.width <= 0 || r.height <= 0) return null;
+          return {
+            selector: selectorFor(el),
+            tag: el.tagName.toLowerCase(),
+            text: (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120),
+            box: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+            style: {
+              display: s.display,
+              position: s.position,
+              zIndex: s.zIndex,
+              fontSize: s.fontSize,
+              fontWeight: s.fontWeight,
+              lineHeight: s.lineHeight,
+              letterSpacing: s.letterSpacing,
+              color: s.color,
+              backgroundColor: s.backgroundColor,
+              backgroundImage: s.backgroundImage,
+              objectFit: s.objectFit,
+              opacity: s.opacity,
+              borderRadius: s.borderRadius,
+              boxShadow: s.boxShadow,
+              padding: s.padding,
+              margin: s.margin,
+            },
+          };
+        })
+        .filter((el: any) => el !== null)
+        .slice(0, max);
+      return {
+        viewport: { width: win.innerWidth, height: win.innerHeight },
+        document: {
+          width: Math.max(root.scrollWidth, body?.scrollWidth || 0),
+          height: Math.max(root.scrollHeight, body?.scrollHeight || 0),
+        },
+        elements,
+      };
     }, maxNodes);
   }
 

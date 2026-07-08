@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
-import { ensureProbeSession, startCapture } from "../src/sharingan-handler.ts";
+import { closeAllSharinganSessions, ensureProbeSession, startCapture } from "../src/sharingan-handler.ts";
 import { projectDir } from "../src/serve-static.ts";
 import { SHARINGAN_PAGE_BUDGET } from "../src/sharingan-browser.ts";
 import { pageDir } from "../src/sharingan-capture.ts";
@@ -30,6 +30,7 @@ test("POST /navigate lazily opens a probe session and returns status", { skip: !
     assert.equal(body.status, 200);
     assert.ok(body.finalUrl.startsWith("http://127.0.0.1"));
   } finally {
+    await closeAllSharinganSessions();
     await new Promise<void>((r) => app.close(() => r()));
     store.close();
     // The probe session is left open by design (Task 2: idle-released, not request-scoped) and
@@ -94,6 +95,7 @@ test("probe read + interact endpoints operate on the live session", { skip: !fin
   } finally {
     // Same rationale as the /navigate test above: the probe session is left open by design
     // (idle-released, not request-scoped) and holds a live keep-alive socket to `fixture`.
+    await closeAllSharinganSessions();
     await new Promise<void>((r) => app.close(() => r()));
     store.close();
     fixture.closeAllConnections();
@@ -145,6 +147,7 @@ test("POST /capture writes the page into the bundle + pages.json, and refuses be
     const finalStatus = (await (await fetch(`${base}/api/sharingan/${id}/status`)).json()) as { pages: unknown[] };
     assert.equal(finalStatus.pages.length, SHARINGAN_PAGE_BUDGET, "budget caps pages.length, does not exceed it");
   } finally {
+    await closeAllSharinganSessions();
     await new Promise<void>((r) => app.close(() => r()));
     store.close();
     fixture.closeAllConnections();
@@ -184,6 +187,7 @@ test("status reports 'captured' from an on-disk bundle (post-restart) so the tab
     assert.equal(status.phase, "captured", "an on-disk bundle is reported captured, not idle → no auto re-capture on open");
     assert.equal(status.pages.length, 1);
   } finally {
+    await closeAllSharinganSessions();
     await new Promise<void>((r) => app.close(() => r()));
     store.close();
   }

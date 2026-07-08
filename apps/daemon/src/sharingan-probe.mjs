@@ -91,6 +91,38 @@ function outline(domPathArg) {
   if (lines.length >= MAX) console.log(`… truncated at ${MAX} nodes — read ${domPath} for the full tree`);
 }
 
+function renderMap(mapPathArg) {
+  let mapPath = mapPathArg;
+  if (!mapPath) {
+    const manifest = JSON.parse(readFileSync(join(".sharingan", "pages.json"), "utf8"));
+    mapPath = manifest.pages && manifest.pages[0] && manifest.pages[0].renderMap;
+    if (!mapPath) fail("no render-map.json in .sharingan/pages.json");
+  }
+  const map = JSON.parse(readFileSync(mapPath, "utf8"));
+  const viewport = map.viewport || {};
+  const doc = map.document || {};
+  const lines = [
+    `viewport ${Math.round(viewport.width || 0)}x${Math.round(viewport.height || 0)} document ${Math.round(doc.width || 0)}x${Math.round(doc.height || 0)}`,
+  ];
+  const MAX = 220;
+  for (const el of (Array.isArray(map.elements) ? map.elements : []).slice(0, MAX)) {
+    const b = el.box || {};
+    const s = el.style || {};
+    const parts = [];
+    if (s.fontSize && s.fontSize !== "16px") parts.push("fs:" + s.fontSize + (s.fontWeight && s.fontWeight !== "400" ? "/" + s.fontWeight : ""));
+    else if (s.fontWeight && s.fontWeight !== "400") parts.push("fw:" + s.fontWeight);
+    if (s.color) parts.push("fg:" + shortColor(s.color));
+    if (s.backgroundColor && !/rgba\(0,\s*0,\s*0,\s*0\)|transparent/.test(s.backgroundColor)) parts.push("bg:" + shortColor(s.backgroundColor));
+    if (s.backgroundImage && s.backgroundImage !== "none") parts.push("bg-img");
+    if (s.objectFit && s.objectFit !== "fill") parts.push("fit:" + s.objectFit);
+    const txt = el.text ? ` "${String(el.text).replace(/\s+/g, " ").trim().slice(0, 48)}"` : "";
+    const style = parts.length ? " " + parts.join(" ") : "";
+    lines.push(`${el.selector || el.tag || "?"} ${el.tag || "?"} [${Math.round(b.x || 0)},${Math.round(b.y || 0)} ${Math.round(b.w || 0)}x${Math.round(b.h || 0)}]${style}${txt}`);
+  }
+  console.log(lines.join("\n"));
+  if ((map.elements || []).length > MAX) console.log(`… truncated at ${MAX} elements — read ${mapPath} for the full render map`);
+}
+
 const HELP = `dezin-probe — drive the Sharingan capture browser + read the capture (no curl/python needed).
 Usage: node .sharingan/probe.mjs <command> [args]
 
@@ -101,11 +133,13 @@ Usage: node .sharingan/probe.mjs <command> [args]
   click <selector>      click an element
   scroll <y>            scroll to a Y offset (px)
   capture [url]         capture the current (or given) page into .sharingan/
-  outline [dom.json]    condensed indented tree of a captured page — READ THIS instead of parsing dom.json`;
+  outline [dom.json]    condensed indented tree of a captured page — READ THIS instead of parsing dom.json
+  render-map [render-map.json] browser-measured layout rows from a captured page`;
 
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   if (cmd === "outline") return outline(args[0]);
+  if (cmd === "render-map") return renderMap(args[0]);
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return void console.log(HELP);
   if (!BASE || BASE === "__BASE__" || !TOKEN) fail("dezin-probe: not in a Sharingan run (base/token missing).");
   switch (cmd) {

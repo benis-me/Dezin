@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { SharinganSession, VIEWPORTS, type DomNode, type DomTreeNode } from "./sharingan-browser.ts";
 
-export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "dom" | "styles" | "links" | "assets" | "login-required" | "done"; text: string; shot?: string }
-export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; assets: string; links: string[] }
+export interface CaptureStep { at: number; kind: "navigate" | "screenshot" | "render-map" | "dom" | "styles" | "links" | "assets" | "login-required" | "done"; text: string; shot?: string }
+export interface CapturedPage { url: string; title: string; screenshots: Record<string, string>; dom: string; styles: string; assets: string; links: string[]; renderMap?: string }
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth|account)(\/|\?|$)/i;
 
@@ -86,6 +86,10 @@ export async function captureCurrentPage(
     step("screenshot", `Captured ${v.label} (${v.width}px)`, shotRel);
   }
 
+  step("render-map", "Reading browser-measured render map");
+  const renderMapRel = join(rel, "render-map.json");
+  writeFileSync(join(projectDir, renderMapRel), JSON.stringify(await session.readRenderMap(), null, 0));
+
   step("dom", "Reading DOM structure");
   const dom = await session.readDomTree();
   const domRel = join(rel, "dom.json");
@@ -118,7 +122,7 @@ export async function captureCurrentPage(
 
   const title = (firstText(dom, "h1") || url).slice(0, 80);
   step("done", "Capture complete");
-  return { url, title, screenshots, dom: domRel, styles: styleRel, assets: assetRel, links };
+  return { url, title, screenshots, dom: domRel, styles: styleRel, assets: assetRel, renderMap: renderMapRel, links };
 }
 
 export async function capturePage(
@@ -143,7 +147,7 @@ export async function capturePage(
 
 export function writePagesManifest(projectDir: string, sourceUrl: string, pages: CapturedPage[]): void {
   mkdirSync(join(projectDir, ".sharingan"), { recursive: true });
-  const manifest = { sourceUrl, pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots, dom: p.dom, styles: p.styles, assets: p.assets, links: p.links })) };
+  const manifest = { sourceUrl, pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots, dom: p.dom, styles: p.styles, assets: p.assets, renderMap: p.renderMap, links: p.links })) };
   writeFileSync(join(projectDir, ".sharingan", "pages.json"), JSON.stringify(manifest, null, 2));
 }
 
@@ -186,10 +190,10 @@ export function readCapturedPages(projectDir: string): CapturedPage[] {
 /** Locate the Sharingan review reference for a project: the entry page's desktop screenshot (absolute
  *  path, so the critic can read it) + a one-line summary of the source's image inventory. Returns
  *  undefined when there is no captured bundle yet. Reads the on-disk `.sharingan/pages.json`. */
-export function sharinganReviewReference(projectDir: string): { screenshotPath: string; assetsSummary?: string } | undefined {
+export function sharinganReviewReference(projectDir: string): { screenshotPath: string; assetsSummary?: string; renderMapPath?: string } | undefined {
   const manifestPath = join(projectDir, ".sharingan", "pages.json");
   if (!existsSync(manifestPath)) return undefined;
-  let manifest: { pages?: Array<{ screenshots?: Record<string, string>; assets?: string }> };
+  let manifest: { pages?: Array<{ screenshots?: Record<string, string>; assets?: string; renderMap?: string }> };
   try { manifest = JSON.parse(readFileSync(manifestPath, "utf8")); } catch { return undefined; }
   if (!manifest || typeof manifest !== "object") return undefined;
   const entry = manifest.pages?.[0];
@@ -197,6 +201,7 @@ export function sharinganReviewReference(projectDir: string): { screenshotPath: 
   if (!shotRel) return undefined;
   const screenshotPath = join(projectDir, shotRel);
   if (!existsSync(screenshotPath)) return undefined;
+  const renderMapPath = entry?.renderMap && existsSync(join(projectDir, entry.renderMap)) ? join(projectDir, entry.renderMap) : undefined;
   let assetsSummary: string | undefined;
   if (entry?.assets && existsSync(join(projectDir, entry.assets))) {
     try {
@@ -206,5 +211,5 @@ export function sharinganReviewReference(projectDir: string): { screenshotPath: 
       if (imgs.length) assetsSummary = `${imgs.length} image slot${imgs.length === 1 ? "" : "s"}: ${sample}`;
     } catch { /* ignore a malformed assets.json */ }
   }
-  return { screenshotPath, assetsSummary };
+  return { screenshotPath, assetsSummary, renderMapPath };
 }

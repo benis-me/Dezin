@@ -300,17 +300,25 @@ function visualQaStartPayload(
   };
 }
 
-function standardRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {
+function hasSourceFidelityFindings(findings: QualityFinding[]): boolean {
+  return findings.some((finding) => finding.id.startsWith("visual-source-"));
+}
+
+export function standardRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {
   const lintBlock = renderFindingsForAgent(findings);
   if (!lintBlock) return null;
+  const sourceFidelityGuard = hasSourceFidelityFindings(findings)
+    ? "Source-fidelity repair mode: visual-source-* findings are source-vs-result measurements. Apply measured local patches to the named element/region only. Do not redesign or re-layout the whole page to chase one delta; preserve the captured source hierarchy, text, assets, and palette."
+    : "";
   return [
     `Automatic quality repair round ${round}/${maxRounds}.`,
     "You are editing the existing Standard-mode Vite project in this directory. Apply the findings below — defects are bugs to fix; improvements are concrete design upgrades to make.",
     intent ? `Stay true to the original request and the chosen direction — do not drift:\n${intent}` : "Preserve the user's concept and the current visual direction.",
     "Do NOT undo or oscillate on earlier fixes; if a finding is ambiguous, make the choice a senior designer would and keep it. Do not ask a follow-up question. Edit the actual project files, then stop.",
+    sourceFidelityGuard,
     `Current quality score: ${score}/100.`,
     lintBlock,
-  ].join("\n\n");
+  ].filter(Boolean).join("\n\n");
 }
 
 function prototypeRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {

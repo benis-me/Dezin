@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,7 +25,7 @@ export interface VisualQaInput {
   directionSpec?: string;
   /** When this build is a Sharingan clone: the captured SOURCE screenshot (absolute path) + a short
    *  asset summary, so the critic can judge fidelity to the source, not just generic quality. */
-  sharinganReference?: { screenshotPath: string; assetsSummary?: string };
+  sharinganReference?: { screenshotPath: string; assetsSummary?: string; renderMapPath?: string };
   /** True for a Sharingan clone — skips the computed anti-slop detector (taste/contrast/type rules)
    *  so faithful reproduction isn't penalized; structural geometry checks + the critic still run. */
   isSharingan?: boolean;
@@ -160,10 +160,32 @@ interface GeometrySnapshot {
   designTokens?: { fonts: string[]; colors: Array<{ r: number; g: number; b: number }>; radii?: number[] };
 }
 
-const VIEWPORTS = [
+interface SourceRenderMapElement {
+  selector: string;
+  tag: string;
+  text?: string;
+  box?: { x: number; y: number; w: number; h: number };
+  style?: { backgroundImage?: string; fontSize?: string; fontWeight?: string; color?: string };
+}
+
+interface SourceRenderMap {
+  viewport?: { width: number; height: number };
+  document?: { width: number; height: number };
+  elements?: SourceRenderMapElement[];
+}
+
+const DEFAULT_VIEWPORTS = [
   { label: "desktop", width: 1280, height: 800 },
   { label: "mobile", width: 390, height: 844 },
 ] as const;
+
+export function sourceViewportFromRenderMap(source: { viewport?: { width?: number; height?: number } } | null | undefined): { width: number; height: number } | undefined {
+  const width = source?.viewport?.width;
+  const height = source?.viewport?.height;
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return undefined;
+  if (width! < 320 || height! < 320 || width! > 3000 || height! > 3000) return undefined;
+  return { width: Math.round(width!), height: Math.round(height!) };
+}
 
 function toRel(root: string, file: string): string {
   return relative(root, file).split(sep).join("/");
@@ -184,6 +206,7 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
   const screenshotRel = toRel(projectDir, screenshotPath);
   const ref = input.sharinganReference;
   const sourceRel = ref ? toRel(projectDir, ref.screenshotPath) : "";
+  const sourceRenderMapRel = ref?.renderMapPath ? toRel(projectDir, ref.renderMapPath) : "";
   const brief = input.brief?.trim();
   const directionSpec = input.directionSpec?.trim();
   const history = (input.conversationHistory ?? [])
@@ -205,6 +228,7 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
     `Rendered screenshot (the page as the browser first painted it): ${screenshotRel}`,
     `Final artifact: ${artifactRel}`,
     ref ? `Source screenshot (the ORIGINAL site you are RECONSTRUCTING — the build should match its layout, hierarchy, image slots, type scale, and palette): ${sourceRel}` : "",
+    sourceRenderMapRel ? `Source render map (browser-measured bounding boxes and computed styles for source-vs-result fidelity): ${sourceRenderMapRel}` : "",
     ref?.assetsSummary ? `Source image inventory: ${ref.assetsSummary}` : "",
     input.renderUrl ? `Rendered URL: ${input.renderUrl}` : "",
     consoleMessages ? `Browser console / runtime signals:\n${consoleMessages}` : "",
@@ -305,6 +329,125 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string):
   }
 
   return findings;
+}
+
+function normalizeText(value: string | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function isImageSlot(el: SourceRenderMapElement | GeometryElement): boolean {
+  const tag = (el as { tag?: string }).tag;
+  const style = (el as { style?: { backgroundImage?: string } }).style;
+  return tag === "img" || tag === "picture" || tag === "video" || Boolean(style?.backgroundImage && style.backgroundImage !== "none");
+}
+
+function sourceBox(el: SourceRenderMapElement): { x: number; y: number; w: number; h: number } | null {
+  const b = el.box;
+  if (!b || ![b.x, b.y, b.w, b.h].every(Number.isFinite)) return null;
+  return b;
+}
+
+function generatedBox(el: GeometryElement): { x: number; y: number; w: number; h: number } {
+  return { x: el.rect.left, y: el.rect.top, w: el.rect.width, h: el.rect.height };
+}
+
+const SOURCE_TEXT_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "p", "a", "button", "span", "li", "label"]);
+
+function isSourceTextSignal(el: SourceRenderMapElement): boolean {
+  const text = normalizeText(el.text);
+  if (text.length < 4 || text.length > 80) return false;
+  if (SOURCE_TEXT_TAGS.has(el.tag)) return true;
+  return text.length <= 48 && !["body", "main", "section", "article", "header", "footer", "nav"].includes(el.tag);
+}
+
+function findGeneratedTextMatch(src: SourceRenderMapElement, generatedElements: GeometryElement[]): GeometryElement | undefined {
+  const text = normalizeText(src.text);
+  const srcBox = sourceBox(src);
+  const srcArea = srcBox ? Math.max(1, srcBox.w * srcBox.h) : 1;
+  let best: { el: GeometryElement; score: number } | undefined;
+  for (const el of generatedElements) {
+    const candidate = normalizeText(el.text);
+    if (candidate.length < 4) continue;
+    if (candidate !== text && !candidate.includes(text) && !text.includes(candidate)) continue;
+    if (candidate !== text && candidate.length > Math.max(text.length * 2, text.length + 40)) continue;
+    const genArea = Math.max(1, el.rect.width * el.rect.height);
+    const areaPenalty = Math.min(100, Math.abs(Math.log2(genArea / srcArea)) * 20);
+    const score =
+      (el.tag === src.tag ? 0 : 30) +
+      (candidate === text ? 0 : 20) +
+      Math.abs(candidate.length - text.length) +
+      areaPenalty;
+    if (!best || score < best.score) best = { el, score };
+  }
+  return best?.el;
+}
+
+export function sourceFidelityFindings(source: SourceRenderMap, generated: GeometrySnapshot): QualityFinding[] {
+  const sourceElements = (source.elements ?? []).filter((el) => sourceBox(el));
+  const generatedElements = generated.elements ?? [];
+  const findings: QualityFinding[] = [];
+
+  const sourceImages = sourceElements.filter(isImageSlot).length;
+  const generatedImages = generatedElements.filter(isImageSlot).length;
+  if (sourceImages > 0 && generatedImages < Math.max(1, Math.floor(sourceImages * 0.7))) {
+    findings.push({
+      severity: "P2",
+      id: "visual-source-image-count",
+      message: `Sharingan source has ${sourceImages} visible image/background slot${sourceImages === 1 ? "" : "s"}, but the generated render exposes ${generatedImages}.`,
+      fix: "Add the missing source image/background slots using the captured /_assets paths, preserving their measured sizes and crops from render-map.json.",
+    });
+  }
+
+  const generatedText = normalizeText(generatedElements.map((el) => el.text).join(" "));
+  const sourceText = sourceElements
+    .filter(isSourceTextSignal)
+    .map((el) => ({ raw: (el.text ?? "").replace(/\s+/g, " ").trim(), normalized: normalizeText(el.text) }))
+    .filter((text) => text.normalized.length >= 4);
+  const missingText = sourceText.find((text) => !generatedText.includes(text.normalized));
+  if (missingText) {
+    findings.push({
+      severity: "P2",
+      id: "visual-source-text-missing",
+      message: `Sharingan source text is missing from the generated render: "${missingText.raw.slice(0, 80)}".`,
+      fix: "Restore this exact source text in the matching region; do not replace it with generic marketing copy.",
+    });
+  }
+
+  for (const src of sourceElements) {
+    const text = normalizeText(src.text);
+    if (text.length < 4 || !isSourceTextSignal(src)) continue;
+    const gen = findGeneratedTextMatch(src, generatedElements);
+    if (!gen) continue;
+    const a = sourceBox(src)!;
+    const b = generatedBox(gen);
+    const dx = Math.abs(a.x - b.x);
+    const dy = Math.abs(a.y - b.y);
+    const dw = Math.abs(a.w - b.w);
+    const dh = Math.abs(a.h - b.h);
+    if (dx > 48 || dy > 48 || dw > 96 || dh > 48) {
+      findings.push({
+        severity: "P2",
+        id: "visual-source-box-delta",
+        selector: gen.selector,
+        message: `Sharingan source element "${src.text?.slice(0, 60) ?? src.selector}" is measured at ${a.x},${a.y} ${a.w}x${a.h}, but the generated match is at ${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.w)}x${Math.round(b.h)}.`,
+        fix: `Patch this element toward the source measurement from render-map.json: x:${a.x}, y:${a.y}, size:${a.w}x${a.h}. Keep the patch local; do not redesign the whole page.`,
+        snippet: `source ${src.selector} -> generated ${gen.selector}`,
+      });
+      break;
+    }
+  }
+
+  return findings.slice(0, 4);
+}
+
+function readSourceRenderMap(path?: string): SourceRenderMap | null {
+  if (!path || !existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as SourceRenderMap;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function pushConsoleMessage(messages: VisualQaConsoleMessage[], message: VisualQaConsoleMessage): void {
@@ -414,7 +557,8 @@ async function collectGeometry(
   renderUrl?: string,
   computedCtx: ComputedContext = {},
   runComputed = true,
-): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[]; elements: CriticElement[] }> {
+  sourceDesktopViewport?: { width: number; height: number },
+): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[]; elements: CriticElement[]; desktopSnapshot?: GeometrySnapshot }> {
   const consoleMessages: VisualQaConsoleMessage[] = [];
   const executablePath = findChrome();
   if (!executablePath) {
@@ -429,6 +573,7 @@ async function collectGeometry(
       ],
       consoleMessages,
       elements: [],
+      desktopSnapshot: undefined,
     };
   }
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
@@ -437,7 +582,11 @@ async function collectGeometry(
   try {
     browser = await puppeteer.launch({ executablePath, headless: true, args: ["--no-sandbox", "--hide-scrollbars"] });
     const all: QualityFinding[] = [];
-    for (const viewport of VIEWPORTS) {
+    let desktopSnapshot: GeometrySnapshot | undefined;
+    const viewports = sourceDesktopViewport
+      ? [{ label: "desktop", ...sourceDesktopViewport }, DEFAULT_VIEWPORTS[1]]
+      : DEFAULT_VIEWPORTS;
+    for (const viewport of viewports) {
       const page = await browser.newPage();
       page.on("console", (msg) => {
         const location = msg.location();
@@ -657,7 +806,8 @@ async function collectGeometry(
       }));
       all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label));
       if (viewport.label === "desktop") {
-        const desktopElements = (snapshot as GeometrySnapshot).elements ?? [];
+        desktopSnapshot = snapshot as GeometrySnapshot;
+        const desktopElements = desktopSnapshot.elements ?? [];
         elements = toCriticElements(desktopElements);
         // Deterministic computed-style findings — contrast, type, spacing, component tells — run
         // on the desktop render only (viewport-independent) and are bounded so they can't flood repair.
@@ -694,6 +844,7 @@ async function collectGeometry(
       ],
       consoleMessages,
       elements,
+      desktopSnapshot,
     };
   } catch {
     return {
@@ -707,6 +858,7 @@ async function collectGeometry(
       ],
       consoleMessages,
       elements,
+      desktopSnapshot: undefined,
     };
   } finally {
     await browser?.close().catch(() => {});
@@ -821,10 +973,19 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
   }
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
-  const geometry = await collectGeometry(input.htmlPath, screenshotPath, input.renderUrl, { provider: input.provider }, shouldRunComputedDetector(input));
+  const sourceMap = input.isSharingan ? readSourceRenderMap(input.sharinganReference?.renderMapPath) : null;
+  const geometry = await collectGeometry(
+    input.htmlPath,
+    screenshotPath,
+    input.renderUrl,
+    { provider: input.provider },
+    shouldRunComputedDetector(input),
+    sourceViewportFromRenderMap(sourceMap),
+  );
+  const sourceFindings = sourceMap && geometry.desktopSnapshot ? sourceFidelityFindings(sourceMap, geometry.desktopSnapshot) : [];
   // Blind dual-assessment: the agent critic never sees the deterministic findings; we cross-check
   // AFTER, tagging elements both lanes independently flagged as corroborated (higher confidence).
   const ai = await reviewScreenshotWithAgent({ ...input, consoleMessages: geometry.consoleMessages, criticElements: geometry.elements }, screenshotPath);
   const synthesized = markCorroboration(geometry.findings, ai);
-  return [...synthesized.deterministic, ...synthesized.agent];
+  return [...sourceFindings, ...synthesized.deterministic, ...synthesized.agent];
 }
