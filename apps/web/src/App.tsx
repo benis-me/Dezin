@@ -31,7 +31,9 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
   const { toast } = useToast();
   switch (route.name) {
     case "project":
-      return <WorkspaceScreen projectId={route.id} onOpenSettings={onOpenSettings} />;
+      // key by projectId: switching projects must give a FRESH instance (full state reset), not reuse
+      // one component whose refs (activeConv, abortRef, running/queue) leak from the previous project.
+      return <WorkspaceScreen key={route.id} projectId={route.id} onOpenSettings={onOpenSettings} />;
     case "moodboards":
       return <MoodboardsScreen onOpenBoard={(id) => navigate(`/moodboards/${id}`)} />;
     case "moodboard":

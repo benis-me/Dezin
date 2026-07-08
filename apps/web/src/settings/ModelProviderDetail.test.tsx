@@ -38,7 +38,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
   };
 }
 
-test("ModelProviderDetail autosaves connection edits without a Save configuration button", () => {
+test("ModelProviderDetail autosaves connection edits on blur, not per keystroke, without a Save configuration button", () => {
   const onPatchModelSettings = vi.fn();
   const selected = MODEL_PROVIDERS[0]!;
   render(
@@ -58,7 +58,11 @@ test("ModelProviderDetail autosaves connection edits without a Save configuratio
 
   expect(screen.queryByRole("button", { name: "Save configuration" })).toBeNull();
 
-  fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "sk-test" } });
+  const apiKey = screen.getByLabelText("API Key");
+  fireEvent.change(apiKey, { target: { value: "sk-test" } });
+  expect(onPatchModelSettings).not.toHaveBeenCalled();
+
+  fireEvent.blur(apiKey);
   expect(onPatchModelSettings).toHaveBeenLastCalledWith(
     {
       apiKey: "sk-test",
@@ -97,7 +101,7 @@ test("ModelProviderDetail masks a configured API key, clears on focus, and resto
   expect(onPatchModelSettings).not.toHaveBeenCalled();
 });
 
-test("ModelProviderDetail saves a replacement API key after clearing the configured mask", () => {
+test("ModelProviderDetail saves a replacement API key on blur after clearing the configured mask", () => {
   const onPatchModelSettings = vi.fn();
   const selected = MODEL_PROVIDERS[0]!;
   render(
@@ -118,6 +122,10 @@ test("ModelProviderDetail saves a replacement API key after clearing the configu
   const apiKey = screen.getByLabelText("API Key");
   fireEvent.focus(apiKey);
   fireEvent.change(apiKey, { target: { value: "sk-replacement" } });
+
+  expect(onPatchModelSettings).not.toHaveBeenCalled();
+
+  fireEvent.blur(apiKey);
 
   expect(onPatchModelSettings).toHaveBeenLastCalledWith(
     {

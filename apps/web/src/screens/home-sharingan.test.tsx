@@ -45,3 +45,18 @@ describe("HomeScreen Sharingan red entry theme", () => {
     expect(queryByText("Start a design")).toBeInTheDocument();
   });
 });
+
+describe("HomeScreen Build double-click guard", () => {
+  it("a rapid double-click creates only ONE project (no empty orphan)", () => {
+    let resolve = () => {};
+    const onNewProject = vi.fn(() => new Promise<void>((r) => { resolve = r; })); // stays in-flight
+    const { getByRole, container } = renderHome(onNewProject);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "A pricing page with three plans" } });
+    const build = getByRole("button", { name: "Design" });
+    fireEvent.click(build);
+    fireEvent.click(build); // second click must be blocked (creatingRef guard + disabled button)
+    expect(onNewProject).toHaveBeenCalledTimes(1);
+    resolve();
+  });
+});
