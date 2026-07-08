@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
@@ -11,6 +11,7 @@ import { findChrome } from "../src/capture-cover.ts";
 import { ensureProbeSession, startCapture } from "../src/sharingan-handler.ts";
 import { projectDir } from "../src/serve-static.ts";
 import { SHARINGAN_PAGE_BUDGET } from "../src/sharingan-browser.ts";
+import { pageDir } from "../src/sharingan-capture.ts";
 
 test("POST /navigate lazily opens a probe session and returns status", { skip: !findChrome() && "no Chrome" }, async () => {
   const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><title>T</title><h1>Acme</h1>"); });
@@ -126,6 +127,10 @@ test("POST /capture writes the page into the bundle + pages.json, and refuses be
     await fetch(`${base}/api/sharingan/${id}/capture`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
     const afterDup = (await (await fetch(`${base}/api/sharingan/${id}/status`)).json()) as { pages: unknown[] };
     assert.equal(afterDup.pages.length, 1, "re-capturing the same URL updates in place, never duplicates");
+    // But each capture keeps its OWN screenshot file (unique name) — re-capturing must not overwrite
+    // the earlier shot, or every earlier work-log record's thumbnail would flip to the latest.
+    const targetShots = readdirSync(join(projectDir(dataDir, id), ".sharingan", pageDir(target))).filter((f) => f.startsWith("shot-desktop-"));
+    assert.equal(targetShots.length, 2, "two captures of the same URL wrote two distinct screenshot files");
 
     // Capture DISTINCT urls up to the budget, then assert the next one is skipped rather than erroring.
     for (let i = afterDup.pages.length; i < SHARINGAN_PAGE_BUDGET; i++) {

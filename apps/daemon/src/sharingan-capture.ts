@@ -50,7 +50,7 @@ function assetExt(url: string, contentType: string): string {
   return m ? m[1]!.toLowerCase().replace("jpeg", "jpg") : "png";
 }
 
-function pageDir(url: string): string {
+export function pageDir(url: string): string {
   // NOTE (Phase 4): collision-safe — a short sha1 hash of the FULL url is appended to the
   // human-readable slug, so two distinct URLs that collapse to the same slug (after stripping
   // non-alphanumerics and truncating) still land in distinct dirs. Needed now that /capture
@@ -69,6 +69,10 @@ export async function captureCurrentPage(
   const step = (kind: CaptureStep["kind"], text: string, shot?: string) => onStep({ at: Date.now(), kind, text, shot });
   const rel = join(".sharingan", pageDir(url));
   mkdirSync(join(projectDir, rel), { recursive: true });
+  // Unique per-capture token so re-capturing the SAME url writes a NEW screenshot file instead of
+  // overwriting the previous one — otherwise every earlier work-log record (which stores the shot
+  // PATH, served live) would retroactively flip to show the latest shot.
+  const token = `${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
 
   const screenshots: Record<string, string> = {};
   // Desktop full-page only by default — mobile shots aren't worth the extra capture + settle time.
@@ -76,7 +80,7 @@ export async function captureCurrentPage(
     await session.setViewport(v);
     await session.settle(); // let the viewport reflow + async content settle (network-idle + DOM-stable) before the shot
     const shot = await session.screenshot({ fullPage: true });
-    const shotRel = join(rel, `shot-${v.label}.png`);
+    const shotRel = join(rel, `shot-${v.label}-${token}.png`);
     writeFileSync(join(projectDir, shotRel), shot);
     screenshots[v.label] = shotRel;
     step("screenshot", `Captured ${v.label} (${v.width}px)`, shotRel);
