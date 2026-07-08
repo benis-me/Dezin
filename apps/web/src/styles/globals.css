@@ -453,27 +453,53 @@
 
 /* Sharingan (clone-from-URL) entry theme: a red ring that breathes like an eye
    waking up — quick tighten-in, slower ember-like hold. */
-@keyframes sharingan-glow {
+/* Sharingan (clone-from-URL) accent — an animated crimson gradient shared by the title and the eye
+   mark, evoking a 写轮眼. The eye PNG is used as a mask so it takes the same shifting gradient. */
+@keyframes sharingan-gradient {
   0%,
   100% {
-    box-shadow:
-      0 0 0 1px rgba(220, 38, 38, 0.5),
-      0 0 22px -6px rgba(220, 38, 38, 0.55);
+    background-position: 0% 50%;
   }
-  35% {
-    box-shadow:
-      0 0 0 1.5px rgba(248, 113, 113, 0.95),
-      0 0 34px -4px rgba(220, 38, 38, 0.85);
-  }
-  70% {
-    box-shadow:
-      0 0 0 1px rgba(220, 38, 38, 0.9),
-      0 0 34px -4px rgba(220, 38, 38, 0.8);
+  50% {
+    background-position: 100% 50%;
   }
 }
+@keyframes sharingan-eye-in {
+  from {
+    opacity: 0;
+    transform: scale(0.5) rotate(-160deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.sharingan-title,
+.sharingan-eye {
+  background-image: linear-gradient(110deg, #dc2626 0%, #fb7185 28%, #b91c1c 52%, #ef4444 76%, #dc2626 100%);
+  background-size: 220% auto;
+  animation: sharingan-gradient 4s ease-in-out infinite;
+}
+.sharingan-title {
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.sharingan-eye {
+  display: inline-block;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  animation:
+    sharingan-gradient 4s ease-in-out infinite,
+    sharingan-eye-in 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
 @media (prefers-reduced-motion: reduce) {
-  .sharingan-active {
-    animation: none !important;
-    box-shadow: 0 0 0 1px rgba(220, 38, 38, 0.7) !important;
+  .sharingan-title,
+  .sharingan-eye {
+    animation: none;
   }
 }

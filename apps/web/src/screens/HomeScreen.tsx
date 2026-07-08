@@ -47,6 +47,7 @@ import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { isCloneUrl } from "../lib/clone-url.ts";
+import sharinganEyeUrl from "../assets/sharingan-eye.png";
 import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
 import { native } from "../lib/native.ts";
 import { takePendingComposer } from "../lib/pending-composer.ts";
@@ -699,12 +700,25 @@ export function HomeScreen({
           {/* Compact tool header — feature toggles ride the far right of the sub-line. */}
           <div className="flex items-end justify-between gap-4">
             <div className="max-w-2xl">
-              <h1 className={cn("text-2xl font-semibold tracking-tight", sharingan ? "text-red-500" : "text-foreground")} onDoubleClick={toggleSharingan}>
-                {sharingan ? "Sharingan" : "Start a design"}
-              </h1>
+              <div className="flex items-center gap-2.5">
+                {sharingan && (
+                  <span
+                    aria-hidden
+                    className="sharingan-eye h-7 w-7 shrink-0"
+                    style={{ WebkitMaskImage: `url(${sharinganEyeUrl})`, maskImage: `url(${sharinganEyeUrl})` }}
+                  />
+                )}
+                <h1
+                  className={cn("text-2xl font-semibold tracking-tight transition-colors duration-300", sharingan ? "sharingan-title" : "text-foreground")}
+                  title={sharingan ? "Double-click to exit Sharingan" : "Double-click for Sharingan — clone from a URL"}
+                  onDoubleClick={toggleSharingan}
+                >
+                  {sharingan ? "Sharingan" : "Start a design"}
+                </h1>
+              </div>
               <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
                 {sharingan
-                  ? "Paste a URL — Dezin clones its structure, styling, and imagery into an editable project. Double-click the title to exit."
+                  ? "Paste a URL to clone it into an editable project."
                   : "Describe what you want. Dezin builds a real, tasteful artifact, then lints it against its own anti-slop rules."}
               </p>
             </div>
@@ -734,7 +748,6 @@ export function HomeScreen({
             className={cn(
               "mt-5 w-full rounded-2xl border p-2.5 transition-[color,border-color,background-color,box-shadow] duration-150 hover:border-border-strong focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 focus-within:hover:border-ring",
               optimizingPrompt ? "border-border-strong bg-surface-2/80 shadow-inner" : "border-input bg-card/80",
-              sharingan && "sharingan-active border-red-500/60 [animation:sharingan-glow_2.4s_ease-in-out_infinite]",
             )}
             onDragEnter={handlePromptDragOver}
             onDragOver={handlePromptDragOver}
