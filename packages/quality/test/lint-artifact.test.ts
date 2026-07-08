@@ -258,3 +258,17 @@ test("lintArtifact in Sharingan mode skips the anti-slop/taste family but still 
   const lorem = `<p>Lorem ipsum dolor sit amet consectetur.</p>`;
   assert.ok(lintArtifact(lorem, { isSharingan: true }).some((f) => f.id === "filler-copy"), "clone mode STILL flags lorem filler");
 });
+
+test("accent-overuse counts the bare --accent token, not --accent-fg / --accent-2", () => {
+  const fg = `<body><div style="color:var(--accent-fg)">a</div><div style="border-color:var(--accent-fg)">b</div><div style="background:var(--accent-fg)">c</div><div style="outline-color:var(--accent-fg)">d</div></body>`;
+  assert.ok(!has(lintArtifact(fg), "accent-overuse"), "4x var(--accent-fg) is not accent-overuse");
+  const bare = `<body><div style="color:var(--accent)">a</div><div style="border-color:var(--accent)">b</div><div style="background:var(--accent)">c</div><div style="outline-color:var(--accent)">d</div></body>`;
+  assert.ok(has(lintArtifact(bare), "accent-overuse"), "4x bare var(--accent) > cap 3 is accent-overuse");
+});
+
+test("left-accent-card catches sub-1 border-radius (0.5rem / .5rem), not just >=1", () => {
+  const half = `<style>.card{border-left:3px solid var(--accent);border-radius:0.5rem;padding:1rem}</style>`;
+  assert.ok(has(lintArtifact(half), "left-accent-card"), "0.5rem rounded left-accent card is flagged");
+  const zero = `<style>.card{border-left:3px solid var(--accent);border-radius:0}</style>`;
+  assert.ok(!has(lintArtifact(zero), "left-accent-card"), "0 radius is not a rounded card");
+});

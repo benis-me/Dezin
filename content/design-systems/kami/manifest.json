@@ -2,5 +2,5 @@
   "name": "Kami",
   "category": "Editorial & Print",
   "summary": "Paper-first print-grade; warm cream, serif reading face, one ink-blue accent.",
-  "craft": { "applies": ["typography", "typography-hierarchy", "typography-hierarchy-editorial", "color", "anti-ai-slop"] }
+  "craft": { "applies": ["typography", "typography-hierarchy", "color", "anti-ai-slop"] }
 }

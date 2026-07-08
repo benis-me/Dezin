@@ -2,7 +2,7 @@
 name: Document
 description: A long-form reading document (report, guide, spec) with editorial hierarchy.
 mode: document
-craft: [typography, typography-hierarchy, typography-hierarchy-editorial, color, anti-ai-slop]
+craft: [typography, typography-hierarchy, color, anti-ai-slop]
 triggers: [document, report, guide, spec, write-up, essay, whitepaper]
 designSystem: true
 ---

@@ -23,6 +23,7 @@ import {
   DISPLAY_SANS_RE,
   ALL_CAPS_TRACKING_FLOOR_EM,
   ACCENT_OVERUSE_CAP,
+  RAW_HEX_CAP,
   MAX_RADIUS_PX,
   GLOBAL_THEME_SELECTOR_RE,
 } from "./slop-rules.ts";
@@ -288,7 +289,7 @@ function checkLeftAccentCard(html: string): Finding[] {
   for (const rule of iterateRules(extractStyleBlocks(html))) {
     const borderLeft = readProp(rule.body, "border-left");
     const radius = readProp(rule.body, "border-radius");
-    if (borderLeft && /\b\d+px\b[^;]*\bsolid\b/i.test(borderLeft) && radius && /^[1-9]/.test(radius.trim())) {
+    if (borderLeft && /\b\d+px\b[^;]*\bsolid\b/i.test(borderLeft) && radius && /^(0?\.\d|[1-9])/.test(radius.trim())) {
       return [{
         severity: "P0",
         id: "left-accent-card",
@@ -388,7 +389,7 @@ function checkRawHex(html: string): Finding[] {
   // Remove :root{...} blocks; count raw hex elsewhere in the first style surface.
   const withoutRoot = css.replace(/:root[^{]*\{[^}]*\}/gi, "");
   const hexes = withoutRoot.match(/#[0-9a-f]{6}\b/gi) ?? [];
-  if (hexes.length > 12) {
+  if (hexes.length > RAW_HEX_CAP) {
     return [{
       severity: "P1",
       id: "raw-hex",
@@ -403,7 +404,7 @@ function checkAccentOveruse(html: string, cap: number): Finding[] {
   // Count accent uses in the rendered body only (outside <style>), matching the
   // craft rule's "visible uses per screen" intent.
   const body = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
-  const count = (body.match(/var\(\s*--accent\b/gi) ?? []).length;
+  const count = (body.match(/var\(\s*--accent(?![\w-])/gi) ?? []).length;
   if (count > cap) {
     return [{
       severity: "P1",
