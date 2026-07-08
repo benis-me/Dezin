@@ -346,12 +346,14 @@ export async function gitCommit(projectDir: string, message: string): Promise<{ 
  * Discard the working tree's uncommitted changes back to HEAD. Called when a run is cancelled or
  * fails mid-turn so its half-written edits aren't silently bundled into the NEXT run's `git add -A`
  * commit (and don't corrupt the workingTreeFingerprint "changed?" check). Preserves Dezin's internal
- * dirs (.research/.versions/.refs) and .gitignore'd files (node_modules, dist).
+ * dirs (.research/.versions/.refs/.sharingan) and .gitignore'd files (node_modules, dist). Keeping
+ * .sharingan means a failed Sharingan build doesn't discard the (expensive) capture bundle, so a retry
+ * can reuse it instead of re-capturing.
  */
 export async function gitDiscardChanges(projectDir: string): Promise<void> {
   if (!existsSync(join(projectDir, ".git"))) return;
   await run("git", ["reset", "--hard", "HEAD"], projectDir);
-  await run("git", ["clean", "-fd", "-e", ".research", "-e", ".versions", "-e", ".refs"], projectDir);
+  await run("git", ["clean", "-fd", "-e", ".research", "-e", ".versions", "-e", ".refs", "-e", ".sharingan"], projectDir);
 }
 
 /**

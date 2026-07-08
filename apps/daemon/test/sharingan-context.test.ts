@@ -29,3 +29,11 @@ test("buildSharinganContext directs a faithful 1:1 reproduction using the nested
   assert.ok(!/NOT a byte-for-byte copy/i.test(promptBlock), "the old reconstruct-not-copy framing is gone");
   assert.ok(!/placeholder/i.test(promptBlock) || /_assets/.test(promptBlock), "no longer instructs placeholder-only images");
 });
+
+test("the prompt steers away from drowning in dom.json — outline is the blueprint, build fast", () => {
+  const { promptBlock } = buildSharinganContext({ sourceUrl: "https://example.com", budget: 6, capturedCount: 1 });
+  assert.match(promptBlock, /outline/i);
+  assert.match(promptBlock, /BLUEPRINT/i); // outline is the blueprint, not the raw dom.json
+  assert.match(promptBlock, /do NOT cat \/ load \/ parse it with node\/python\/jq/i); // forbid wholesale dom.json parsing
+  assert.match(promptBlock, /START WRITING/i); // push to build, not analyze
+});

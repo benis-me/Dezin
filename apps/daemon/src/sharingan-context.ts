@@ -24,8 +24,8 @@ export function buildSharinganContext(input: SharinganContextInput): SharinganCo
     "## Sharingan — Reproduce from Capture (1:1)",
     `You are reproducing the website ${sourceUrl} as a high-fidelity Standard (Vite + React) project. The goal is a FAITHFUL 1:1 reproduction of the ORIGINAL — match its structure, layout, spacing, typography, and colors as closely as you can. This is authorized cloning; do not redesign it in your own taste.`,
     "",
-    "The entry page is already captured under `.sharingan/` and indexed in `.sharingan/pages.json`. Read these directly:",
-    "- `dom.json` — the captured DOM as a NESTED TREE (parent/child hierarchy) with per-node computed styles (display/flex/grid/size/padding/margin/font/color/border/etc.). MIRROR this structure and these styles — it is your blueprint. Do not invent a different layout. It can be large, so run `node .sharingan/probe.mjs outline` for a compact indented overview first, then open `dom.json` for a specific node's exact styles.",
+    "The entry page is already captured under `.sharingan/` (indexed in `.sharingan/pages.json`). Read the capture like this:",
+    "- **`node .sharingan/probe.mjs outline`** — RUN THIS FIRST. It prints the captured DOM as a compact indented tree WITH each node's key styles (layout/flex/grid, colors, font size/weight, spacing, borders). This is your BLUEPRINT — mirror its structure and styles; do not invent a different layout. The raw `dom.json` behind it is LARGE — do NOT cat / load / parse it with node/python/jq. Open `dom.json` only to check ONE specific node's exact style when the outline isn't enough; never read the whole file, and never loop over it.",
     "- `styles.json` — the source's exact design tokens (colors, fonts, radii, shadows). Use THESE colors and fonts verbatim. Do NOT substitute default AI colors (no indigo/violet/purple unless the source actually uses them).",
     "- `assets.json` — the image inventory. Each entry has a `local` path (e.g. `/_assets/ab12cd34ef56.png`) — the REAL source image already downloaded into this project's `public/` folder. Reference every image by its `local` path (they resolve at the web root). Fill EVERY image slot the source has; an entry without a `local` path failed to download — use a neutral sized placeholder box for just those.",
     "- the desktop screenshot — the visual source of truth; your result should look like it.",
@@ -39,7 +39,7 @@ export function buildSharinganContext(input: SharinganContextInput): SharinganCo
     "",
     `Page budget: capture at most ${budget} pages total (captured so far: ${capturedCount}). Pick the highest-value pages; stay same-origin. A capture returning {"skipped":"budget"} means stop. Capturing the same URL again just UPDATES it, so don't re-capture a page you already have.`,
     "",
-    "Then build the project to match the capture as closely as possible: mirror the `dom.json` tree, apply the `styles.json` palette exactly, and use the cached `/_assets/` images. Reproduce the real text content from the capture (do not fall back to lorem/filler).",
+    "Then BUILD — that is the goal, not analyzing the capture. After a brief look at the `outline` + `styles.json`, START WRITING `src/App.jsx` and its components right away; do not loop re-inspecting `dom.json`. Mirror the outline's tree, apply the `styles.json` palette exactly, use the cached `/_assets/` images, and reproduce the real text content (no lorem/filler).",
   ].join("\n");
   return { promptBlock };
 }
