@@ -9,7 +9,7 @@ export type RunStatus = "pending" | "running" | "succeeded" | "failed" | "cancel
 
 /**
  * Build mode. "prototype" = a single self-contained index.html (fast). "standard"
- * = a real frontend project (Vite + React + GSAP) scaffolded from a template,
+ * = a real frontend project (Vite + React) scaffolded from a template,
  * built the way production frontends are, previewed via a dev server.
  */
 export type ProjectMode = "prototype" | "standard";

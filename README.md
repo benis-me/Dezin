@@ -39,7 +39,7 @@ The default brand (`modern-minimal`) is a Linear/Vercel neutral grayscale that d
 
 - **Bring your own agent.** Dezin scans your PATH for installed CLIs and lets you pick per-run, with the agent's real version. Models the agent exposes are selectable too.
 - **Configurable quality automation.** Visual Review can run on the project agent/model or a separate reviewer agent/model, and auto-improve defaults to 8 repair rounds.
-- **Two build modes.** *Prototype* — one self-contained HTML file, fastest to iterate. *Standard* — a real Vite + React + GSAP project with components and routing.
+- **Two build modes.** *Prototype* — one self-contained HTML file, fastest to iterate. *Standard* — a real Vite + React project (with `motion` + `gsap` on tap) with components and routing.
 - **33 built-in design systems.** Brand visual languages modelled on Airbnb, Apple, Linear, Stripe, Vercel, Notion, Figma, and more (each a 9-section `DESIGN.md` + tokens), plus neutral house styles. Import your own from a code folder or a `.fig` file.
 - **Effects library.** 20 built-in `@Paper` visual effects — image filters (paper texture, fluted glass, halftone, dithering) and generative shaders (mesh/radial gradients, god rays, smoke, metaballs) — rendered via Paper Shaders, each with presets and a live parameter panel. Author your own WebGL2/GLSL effects and let the Agent revise them while the preview stays live.
 - **Variant branches.** Fork a design into parallel branches, iterate each differently, then compare them side by side with a draggable before/after slider.

@@ -1,5 +1,5 @@
 /**
- * Standard-mode project runtime. A standard project is a real Vite + React + GSAP
+ * Standard-mode project runtime. A standard project is a real Vite + React
  * app scaffolded from a template: copy the template, `git init`, `npm install`, and
  * (on demand) run a Vite dev server we can preview. This module owns that lifecycle.
  */
@@ -12,7 +12,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSpawnEnv } from "../../../packages/agent/src/index.ts";
 
-export function templateDir(name = "react-vite-gsap"): string {
+export function templateDir(name = "react-vite"): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "content", "templates", name);
 }
 
@@ -140,7 +140,7 @@ export async function setupStandardProject(projectId: string, projectDir: string
     await mkdir(projectDir, { recursive: true });
     await cp(templateDir(), projectDir, { recursive: true });
     await run("git", ["init", "-q"], projectDir, rt, "git init");
-    await gitCommit(projectDir, "Dezin: scaffold Vite + React + GSAP");
+    await gitCommit(projectDir, "Dezin: scaffold Vite + React");
 
     rt.phase = "installing";
     appendLog(rt, "Installing dependencies");

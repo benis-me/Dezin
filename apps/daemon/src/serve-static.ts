@@ -62,7 +62,7 @@ export function injectSelectBridge(html: string): string {
  * first-paint heartbeat once the page has visible content. Kept as a separate
  * <script> (not merged into SELECT_BRIDGE) so it can't regress the picker; this
  * string must stay byte-identical to the one in
- * content/templates/react-vite-gsap/vite.config.js.
+ * content/templates/react-vite/vite.config.js.
  */
 const RUNTIME_PROBE = `<script data-dezin-runtime-probe>(function(){
 if(window.__dezinRuntimeProbe)return;window.__dezinRuntimeProbe=1;

@@ -26,9 +26,39 @@
 html {
   scroll-behavior: smooth;
 }
+
+/* Neutral entrance for [data-reveal] — pure CSS so the starter isn't tied to one motion
+   library. Reach for motion/react or gsap for richer choreography as the design needs.
+   Fail-safe: content sits at its natural (visible) state; the keyframe only reveals it. */
+@keyframes dz-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+[data-reveal] {
+  animation: dz-reveal 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* Stagger by position among [data-reveal] siblings (not by tag) — `:nth-of-type` would count
+   per tag name, so mixed tags like <h1>+<p> never stagger. Unsupported browsers just reveal
+   together (still visible), so it stays fail-safe. */
+[data-reveal]:nth-child(2 of [data-reveal]) {
+  animation-delay: 0.08s;
+}
+[data-reveal]:nth-child(3 of [data-reveal]) {
+  animation-delay: 0.16s;
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
+  }
+  [data-reveal] {
+    animation: none;
   }
 }
 

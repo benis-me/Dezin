@@ -121,6 +121,14 @@ test("library routing is the union across catalogued skills, omitted when none d
   assert.ok(!plain.includes("Implementation library routing"));
 });
 
+test("Standard mode always surfaces library routing (motion + gsap pre-installed) even with no skill libraries", () => {
+  const p = composeSystemPrompt({ mode: "standard", skills: [{ id: "x", name: "X", description: "d" }] });
+  assert.match(p, /Implementation library routing/, "routing is present in standard mode without library-declaring skills");
+  assert.match(p, /motion/, "motion is offered");
+  assert.match(p, /GSAP/, "gsap is offered");
+  assert.match(p, /combine tools that serve DIFFERENT jobs/i, "combining different-job tools is blessed, not forbidden");
+});
+
 test("empty skills and instructions are omitted (no empty sections)", () => {
   const p = composeSystemPrompt({ skills: [], userInstructions: "  " });
   assert.ok(!p.includes("Available skills"));
