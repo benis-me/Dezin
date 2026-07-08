@@ -321,8 +321,15 @@ export async function handleSharinganScroll(req: IncomingMessage, res: ServerRes
   r.ok ? sendJson(res, 200, { ok: true }) : sendJson(res, 409, { error: r.error });
 }
 
-export function handleSharinganStatus(res: ServerResponse, id: string): void {
+export function handleSharinganStatus(res: ServerResponse, id: string, dataDir: string): void {
   const c = get(id);
+  // After a daemon restart (or an idle-released session) the in-memory map is empty, so c.phase is a
+  // fresh "idle" even though a capture bundle may already be on disk. Recognize the on-disk capture so
+  // the tab doesn't auto-re-capture (re-open Chrome for) an already-captured project.
+  if (c.phase === "idle" && !c.session) {
+    const persisted = readCapturedPages(projectDir(dataDir, id));
+    if (persisted.length) { c.pages = persisted; c.phase = "captured"; }
+  }
   sendJson(res, 200, { phase: c.phase, steps: c.steps.length, pages: c.pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots })), error: c.error });
 }
 

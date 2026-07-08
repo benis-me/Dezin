@@ -42,9 +42,9 @@ test("POST /start begins a capture and GET /status reports progress", { skip: !f
 });
 
 /** Minimal raw HTTP server that proxies a single id's status via handleSharinganStatus. */
-function statusServer(id: string): Promise<{ base: string; close: () => Promise<void> }> {
+function statusServer(id: string, dataDir = mkdtempSync(join(tmpdir(), "shar-status-"))): Promise<{ base: string; close: () => Promise<void> }> {
   return new Promise((resolve) => {
-    const server = createServer((_req, res) => handleSharinganStatus(res, id));
+    const server = createServer((_req, res) => handleSharinganStatus(res, id, dataDir));
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       resolve({ base: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(() => r())) });
