@@ -289,7 +289,7 @@ function checkLeftAccentCard(html: string): Finding[] {
   for (const rule of iterateRules(extractStyleBlocks(html))) {
     const borderLeft = readProp(rule.body, "border-left");
     const radius = readProp(rule.body, "border-radius");
-    if (borderLeft && /\b\d+px\b[^;]*\bsolid\b/i.test(borderLeft) && radius && /^(0?\.\d|[1-9])/.test(radius.trim())) {
+    if (borderLeft && /\b\d+px\b[^;]*\bsolid\b/i.test(borderLeft) && radius && /^(0?\.0*[1-9]|[1-9])/.test(radius.trim())) {
       return [{
         severity: "P0",
         id: "left-accent-card",

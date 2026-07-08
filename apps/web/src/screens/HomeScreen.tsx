@@ -546,8 +546,8 @@ export function HomeScreen({
       .updateSettings({ sharinganAffirmed: true })
       .then((s) => publishSettingsUpdated(s))
       .catch(() => {});
-    onNewProject?.(pending.url, skillId, designSystemId, "standard", { sourceUrl: pending.url });
-  }, [affirmPending, api, onNewProject, skillId, designSystemId]);
+    void startCreate(pending.url, "standard", { sourceUrl: pending.url }); // same double-submit guard as the Build button
+  }, [affirmPending, api, startCreate]);
 
   const updateBrief = (value: string): void => {
     setBrief(value);

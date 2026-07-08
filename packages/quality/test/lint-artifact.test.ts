@@ -271,4 +271,6 @@ test("left-accent-card catches sub-1 border-radius (0.5rem / .5rem), not just >=
   assert.ok(has(lintArtifact(half), "left-accent-card"), "0.5rem rounded left-accent card is flagged");
   const zero = `<style>.card{border-left:3px solid var(--accent);border-radius:0}</style>`;
   assert.ok(!has(lintArtifact(zero), "left-accent-card"), "0 radius is not a rounded card");
+  const zeroDecimal = `<style>.card{border-left:3px solid var(--accent);border-radius:0.0rem}</style>`;
+  assert.ok(!has(lintArtifact(zeroDecimal), "left-accent-card"), "0.0rem (decimal zero) is not a rounded card");
 });

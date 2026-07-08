@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { ensureDevServer, ensureProjectPickerBridge, gitDiscardChanges, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
+import { ensureDevServer, ensureProjectPickerBridge, gitDiscardChanges, gitRestoreTree, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
 
 async function waitForPortDown(url: string): Promise<void> {
   for (let i = 0; i < 20; i++) {
@@ -267,6 +267,36 @@ test("gitDiscardChanges reverts the working tree to HEAD but preserves .research
     assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "v1", "tracked edit reverted to HEAD");
     assert.equal(existsSync(join(dir, "src", "New.jsx")), false, "untracked leftover removed");
     assert.equal(readFileSync(join(dir, ".research", "research.md"), "utf8"), "keep me", ".research preserved");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("gitRestoreTree restores a tree exactly, including removing a file renamed-in after the target", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "grt-"));
+  const git = (args: string[]) => execFileSync("git", args, { cwd: dir });
+  try {
+    git(["init", "-q"]);
+    git(["config", "user.email", "t@t"]);
+    git(["config", "user.name", "t"]);
+    git(["config", "diff.renames", "true"]); // git's default in many envs — the bug only bites when rename detection is ON
+    writeFileSync(join(dir, "Hero.tsx"), "export const Hero = 1;\n");
+    git(["add", "-A"]);
+    git(["commit", "-qm", "round0"]);
+    const round0 = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString().trim();
+    // Round 1 (the worse, last round): pure rename Hero.tsx -> HeroSection.tsx (identical content →
+    // git detects R100, which --diff-filter=A misses unless --no-renames is passed).
+    rmSync(join(dir, "Hero.tsx"));
+    writeFileSync(join(dir, "HeroSection.tsx"), "export const Hero = 1;\n");
+    git(["add", "-A"]);
+    git(["commit", "-qm", "round1"]);
+    // Restore the best-scoring round (round0). The rename must not leave HeroSection.tsx behind.
+    const res = await gitRestoreTree(dir, round0, "Best-scoring version");
+    assert.ok(res.committed, "committed a restore");
+    assert.ok(existsSync(join(dir, "Hero.tsx")), "Hero.tsx restored");
+    assert.ok(!existsSync(join(dir, "HeroSection.tsx")), "the renamed-in file was removed");
+    const diff = execFileSync("git", ["diff", "--name-only", round0, "HEAD"], { cwd: dir }).toString().trim();
+    assert.equal(diff, "", "restored tree byte-matches the target commit");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
