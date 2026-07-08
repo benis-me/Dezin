@@ -9,7 +9,7 @@ import { join, sep } from "node:path";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { SharinganSession, SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
-import { capturePage, captureCurrentPage, writePagesManifest, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
+import { capturePage, captureCurrentPage, writePagesManifest, upsertPage, readCapturedPages, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
 import { projectDir, safeJoin } from "./serve-static.ts";
 import { sendJson, readJsonBody } from "./http-util.ts";
 
@@ -73,6 +73,9 @@ export async function ensureProbeSession(
 ): Promise<SharinganSession> {
   const c = get(id);
   if (c.phase === "capturing" || c.phase === "login-required") throw new Error("capture in progress");
+  // Seed from the on-disk manifest so re-captures dedup against what's already there (e.g. after a
+  // daemon restart, when the in-memory page list is empty but the entry page is on disk).
+  if (!c.pages.length) c.pages = readCapturedPages(projectDir(dataDir, id));
   if (!c.session) {
     const profileDir = join(dataDir, ".sharingan-profile");
     c.session = await open(c.url ?? "about:blank", { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
@@ -86,7 +89,7 @@ export async function ensureProbeSession(
  *  build Agent to reuse as a probe (phase "probing", idle-released) or close it (phase "captured").
  *  Keeping it open avoids reopening Chrome mid-build and preserves the just-authenticated session. */
 async function finishCapturedSession(id: string, dataDir: string, c: Capture, page: CapturedPage | null): Promise<void> {
-  if (page) { c.pages.push(page); writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages); }
+  if (page) { upsertPage(c.pages, page); writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages); }
   if (c.keepForProbe && c.session) {
     c.phase = "probing";
     armProbeIdle(id);
@@ -244,7 +247,7 @@ export async function handleSharinganCapture(req: IncomingMessage, res: ServerRe
       await session.navigate(body.url.trim());
     }
     const page = await captureCurrentPage(session, projectDir(dataDir, id), session.currentUrl(), (s) => emit(c, s));
-    c.pages.push(page);
+    upsertPage(c.pages, page); // dedup by URL — re-capturing the same page updates it, never appends a dup
     writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages);
     armProbeIdle(id);
     sendJson(res, 200, page);

@@ -99,3 +99,22 @@ test("navigate settles until images finish loading before returning", { skip: !f
     await new Promise<void>((r) => server.close(() => r()));
   }
 });
+
+test("settle waits for async (fetch-driven) content to replace a skeleton before returning", { skip: !findChrome() && "no Chrome" }, async () => {
+  const server = createServer((req, res) => {
+    if (req.url === "/data") { setTimeout(() => { res.writeHead(200, { "content-type": "text/plain" }); res.end("REALCONTENT"); }, 800); return; }
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end('<!doctype html><html><body><div id="c">LOADING</div><script>fetch("/data").then(r=>r.text()).then(t=>{document.getElementById("c").textContent=t})</script></body></html>');
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  const s = await SharinganSession.open(url, { userDataDir: mkdtempSync(join(tmpdir(), "shar-async-")), headless: true });
+  try {
+    const dom = await s.readDom(50);
+    const c = dom.find((n) => n.tag === "div")?.text ?? "";
+    assert.equal(c, "REALCONTENT", "settle waited for the fetch-driven content swap, not the skeleton");
+  } finally {
+    await s.close();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});

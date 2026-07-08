@@ -122,13 +122,17 @@ test("POST /capture writes the page into the bundle + pages.json, and refuses be
     const status = (await (await fetch(`${base}/api/sharingan/${id}/status`)).json()) as { pages: unknown[] };
     assert.equal(status.pages.length, 1);
 
-    // Drive captures (same page, re-captured — pageDir is now hash-suffixed so this is fine)
-    // up to the budget, then assert the next one is skipped rather than erroring.
-    for (let i = status.pages.length; i < SHARINGAN_PAGE_BUDGET; i++) {
-      const r = await fetch(`${base}/api/sharingan/${id}/capture`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+    // Re-capturing the SAME url dedups — pages stays at 1 (the fix for duplicate manifest entries).
+    await fetch(`${base}/api/sharingan/${id}/capture`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+    const afterDup = (await (await fetch(`${base}/api/sharingan/${id}/status`)).json()) as { pages: unknown[] };
+    assert.equal(afterDup.pages.length, 1, "re-capturing the same URL updates in place, never duplicates");
+
+    // Capture DISTINCT urls up to the budget, then assert the next one is skipped rather than erroring.
+    for (let i = afterDup.pages.length; i < SHARINGAN_PAGE_BUDGET; i++) {
+      const r = await fetch(`${base}/api/sharingan/${id}/capture`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: `${target}p${i}` }) });
       assert.equal(r.status, 200);
     }
-    const overBudget = await fetch(`${base}/api/sharingan/${id}/capture`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+    const overBudget = await fetch(`${base}/api/sharingan/${id}/capture`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: `${target}pX` }) });
     assert.equal(overBudget.status, 200);
     const skipped = (await overBudget.json()) as { skipped?: string; budget?: number };
     assert.equal(skipped.skipped, "budget", "refuses to capture beyond the page budget");

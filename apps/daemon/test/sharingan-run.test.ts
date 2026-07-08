@@ -90,7 +90,7 @@ test("a sharingan run captures the site, injects the context, and skips research
     );
     assert.match(
       runner.lastMessage,
-      /RECONSTRUCT|\/api\/sharingan\/[^/]*\/capture/i,
+      /Reproduce from Capture|probe\.mjs/i,
       "the sharingan context block was injected into the agent brief",
     );
     assert.ok(

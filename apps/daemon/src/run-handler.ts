@@ -59,6 +59,7 @@ import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import { ensureCaptured, capturedPageCount } from "./sharingan-handler.ts";
 import { buildSharinganContext } from "./sharingan-context.ts";
+import { writeProbeCli } from "./sharingan-probe-cli.ts";
 import { sharinganReviewReference } from "./sharingan-capture.ts";
 import { SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
 import type { AppDeps } from "./app.ts";
@@ -748,12 +749,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   if (project.sharingan && project.sourceUrl) {
     // Best-effort: never fail the build on a capture hiccup — the agent can still probe live.
     await ensureCaptured(project.id, deps.dataDir, project.sourceUrl, { keepSessionForProbe: true }).catch(() => {});
+    // Write the dezin-probe CLI into .sharingan/ so the agent drives capture with a real tool, not curl.
+    const probeBase = `${(origin ?? "").replace(/\/+$/, "")}/api/sharingan/${project.id}`;
+    try { writeProbeCli(projectDir(deps.dataDir, project.id), probeBase); } catch { /* best-effort */ }
     agentBrief = [
       agentBrief,
       buildSharinganContext({
-        projectId: project.id,
         sourceUrl: project.sourceUrl,
-        origin: origin ?? "",
         budget: SHARINGAN_PAGE_BUDGET,
         capturedCount: capturedPageCount(project.id),
       }).promptBlock,
