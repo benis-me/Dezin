@@ -174,9 +174,8 @@ interface RunBody {
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
 
 const DEFAULT_AUTO_IMPROVE_MAX_ROUNDS = 8;
-// Only real defects/slop (P0/P1) drive a repair round. Cosmetic P2 anti-slop nits alone must
-// NOT keep the loop grinding — that was the main cause of 8 rounds of no-op churn. Design
-// IMPROVEMENTS (also P2, id "visual-improve-*") drive a separate, bounded ceiling phase (below).
+// Normal Standard/Prototype runs only auto-repair real defects/slop. Sharingan overrides this:
+// every source-fidelity finding is required because reconstruction quality is the product.
 const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"]);
 
 /** Max bounded design-improvement (ceiling) rounds once the floor (defects/slop) is clean. */
@@ -219,22 +218,20 @@ const SHARINGAN_LAYOUT_DEFECT_IDS = new Set([
 ]);
 
 function isSharinganBlockingFinding(finding: QualityFinding): boolean {
-  if (finding.severity === "P0") return true;
-  if (finding.severity !== "P1") return false;
-  return finding.id.startsWith("visual-source-") || SHARINGAN_LAYOUT_DEFECT_IDS.has(finding.id);
+  return finding.id !== "visual-reviewed";
 }
 
 export function standardRunPassed(findings: QualityFinding[], isSharingan: boolean | undefined): boolean {
+  if (isSharingan) return !findings.some(isSharinganBlockingFinding);
   if (findings.some((f) => f.severity === "P0")) return false;
-  if (!isSharingan) return true;
-  return !findings.some(isSharinganBlockingFinding);
+  return true;
 }
 
 export function standardRepairableDefects(findings: QualityFinding[], isSharingan: boolean | undefined): QualityFinding[] {
+  if (isSharingan) return findings.filter(isSharinganBlockingFinding);
   return findings.filter((f) => {
     if (!AUTO_REPAIR_SEVERITIES.has(f.severity) || f.id.startsWith("visual-improve") || f.id === "visual-reviewed") return false;
-    if (!isSharingan) return true;
-    return isSharinganBlockingFinding(f);
+    return true;
   });
 }
 
@@ -341,8 +338,15 @@ function hasMeasuredLayoutFindings(findings: QualityFinding[]): boolean {
   return findings.some((finding) => SHARINGAN_LAYOUT_DEFECT_IDS.has(finding.id));
 }
 
-export function standardRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {
-  const lintBlock = renderFindingsForAgent(findings);
+export function standardRepairPrompt(
+  findings: QualityFinding[],
+  round: number,
+  maxRounds: number,
+  score: number,
+  intent?: string,
+  options: { isSharingan?: boolean } = {},
+): string | null {
+  const lintBlock = renderFindingsForAgent(findings, { unranked: options.isSharingan });
   if (!lintBlock) return null;
   const sourceFidelityGuard = hasSourceFidelityFindings(findings)
     ? "Source-fidelity repair mode: visual-source-* findings are source-vs-result measurements. Apply measured local patches to the named element/region only. Do not redesign or re-layout the whole page to chase one delta; preserve the captured source hierarchy, text, assets, and palette."
@@ -350,9 +354,12 @@ export function standardRepairPrompt(findings: QualityFinding[], round: number, 
   const measuredLayoutGuard = hasMeasuredLayoutFindings(findings)
     ? "Measured layout repair mode: fix only the named overflow, clipping, or offscreen layout defects. Do not add new content, infer missing sections, or reinterpret the page structure."
     : "";
+  const taskLine = options.isSharingan
+    ? "You are editing the existing Standard-mode Vite project in this directory. Sharingan reconstruction mode: fix every finding below as a required source-fidelity issue. Complete the full list before stopping."
+    : "You are editing the existing Standard-mode Vite project in this directory. Apply the findings below — defects are bugs to fix; improvements are concrete design upgrades to make.";
   return [
     `Automatic quality repair round ${round}/${maxRounds}.`,
-    "You are editing the existing Standard-mode Vite project in this directory. Apply the findings below — defects are bugs to fix; improvements are concrete design upgrades to make.",
+    taskLine,
     intent ? `Stay true to the original request and the chosen direction — do not drift:\n${intent}` : "Preserve the user's concept and the current visual direction.",
     "Do NOT undo or oscillate on earlier fixes; if a finding is ambiguous, make the choice a senior designer would and keep it. Do not ask a follow-up question. Edit the actual project files, then stop.",
     sourceFidelityGuard,
@@ -1080,16 +1087,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         await emitStandardPreviewUpdate(round);
 
         // Converge, don't grind. Oscillation guard: if the working tree returns to a state we
-        // already produced, we're cycling (the ellipsis↔wrap flip-flop) — stop. Then repair floor
-        // DEFECTS first (P0/P1); once the floor is clean, allow a bounded design-IMPROVEMENT
-        // (ceiling) phase while the critic's design score keeps rising. P2 anti-slop nits alone
-        // never trigger a round (AUTO_REPAIR_SEVERITIES).
+        // already produced, we're cycling (the ellipsis↔wrap flip-flop) — stop. Normal Standard
+        // runs repair floor defects first, then optional design-improvement ceiling rounds.
+        // Sharingan treats all non-marker findings as required reconstruction issues.
         if (afterTree && convergenceTrees.has(afterTree)) break;
         if (afterTree) convergenceTrees.add(afterTree);
         if (!repairPolicy.enabled || repairRounds >= maxRepairRounds) break;
 
         const defects = standardRepairableDefects(findings, project.sharingan);
-        const improvements = findings.filter((f) => f.id.startsWith("visual-improve"));
+        const improvements = project.sharingan ? [] : findings.filter((f) => f.id.startsWith("visual-improve"));
         // Give-up guard: a defect the critic keeps re-raising unchanged is one the model can't fix
         // — record it as stuck (surfaced to the user) and stop retrying it so the loop doesn't spin.
         for (const d of defects) if ((defectHistory.get(recurKey(d)) ?? 0) >= DEFECT_RECUR_LIMIT) stuckDefectKeys.add(recurKey(d));
@@ -1106,8 +1112,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           } else {
             floorStalled += 1;
           }
-          if (floorStalled < 2) repairFindings = liveDefects.concat(freshImps.slice(0, 3));
-        } else if (freshImps.length > 0 && improvementRounds < CEILING_MAX_ROUNDS) {
+          if (floorStalled < 2) repairFindings = project.sharingan ? liveDefects : liveDefects.concat(freshImps.slice(0, 3));
+        } else if (!project.sharingan && freshImps.length > 0 && improvementRounds < CEILING_MAX_ROUNDS) {
           // Ceiling phase — ADVISORY design suggestions, verify-applied. Converges when nothing
           // FRESH remains (or the cap / oscillation guard trips). No design SCORE.
           improvementRounds += 1;
@@ -1116,7 +1122,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         if (!repairFindings || !repairFindings.length) break;
 
         const nextRound = repairRounds + 1;
-        const repairPrompt = standardRepairPrompt(repairFindings, nextRound, maxRepairRounds, score, visibleBrief);
+        const repairPrompt = standardRepairPrompt(repairFindings, nextRound, maxRepairRounds, score, visibleBrief, { isSharingan: project.sharingan });
         if (!repairPrompt) break;
         if (commitHash && !repairSnapshotCommits.has(commitHash)) {
           repairSnapshotCommits.add(commitHash);

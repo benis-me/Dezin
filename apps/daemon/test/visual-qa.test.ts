@@ -318,6 +318,22 @@ test("parseVisualReview splits objective defects from advisory improvements and 
   assert.ok(!findings.some((f) => /\/100/.test(f.message)), "no design score");
 });
 
+test("parseVisualReview treats Sharingan review output as required reconstruction findings", () => {
+  const findings = parseVisualReview(
+    JSON.stringify({
+      findings: [
+        { kind: "improvement", message: "The source active nav pill is missing.", fix: "Recreate the pill." },
+        { kind: "improvement", message: "The composer icon and label are misaligned.", fix: "Align them to the source baseline." },
+      ],
+    }),
+    { isSharingan: true },
+  );
+
+  assert.deepEqual(findings.map((f) => f.id), ["visual-ai-review-1", "visual-ai-review-2", "visual-reviewed"]);
+  assert.equal(findings[0]?.severity, "P1");
+  assert.ok(!findings.some((f) => f.id.startsWith("visual-improve")), "Sharingan must not create advisory visual-improve items");
+});
+
 test("parseVisualReview marks a clean review even with no findings", () => {
   const findings = parseVisualReview(JSON.stringify({ findings: [] }));
   assert.deepEqual(findings.map((f) => f.id), ["visual-reviewed"]);
@@ -391,6 +407,8 @@ test("agentReviewPrompt adds a source-fidelity section when a Sharingan referenc
   assert.match(prompt, /source/i);
   assert.match(prompt, /reconstruc/i); // "reconstructing" / "reconstruction"
   assert.match(prompt, /6 images: hero/);
+  assert.match(prompt, /required reconstruction/i);
+  assert.doesNotMatch(prompt, /Sharingan reconstruction.*advisory improvement/i);
 });
 
 test("agentReviewPrompt includes the source render map when a Sharingan reference has one", () => {

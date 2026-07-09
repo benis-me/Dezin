@@ -250,6 +250,24 @@ test("project analysis prompt includes the project folder path and review checkl
   expect(prompt).toContain("next test round");
 });
 
+test("project analysis prompt avoids priority tiers for Sharingan projects", () => {
+  const prompt = buildProjectAnalysisPrompt({
+    id: "p1",
+    name: "TapNow clone",
+    skillId: null,
+    designSystemId: null,
+    mode: "standard",
+    sharingan: true,
+    sourceUrl: "https://app.tapnow.ai/home",
+    createdAt: 1,
+    updatedAt: 2,
+    projectPath: "/Users/ben/.dezin/data/projects/p1",
+  });
+
+  expect(prompt).toContain("required source-fidelity gap");
+  expect(prompt).not.toMatch(/\bP[012]\b/);
+});
+
 test("workspace project actions menu exposes project management and analysis actions", async () => {
   const user = userEvent.setup();
 
@@ -2266,6 +2284,49 @@ test("the Quality tab shows final run-done findings even when no repair lint eve
   expect(await screen.findByText(/raw hex values/)).toBeInTheDocument();
   expect(screen.getByText(/Large rounded card radius/)).toBeInTheDocument();
   expect(screen.queryByText(/No quality issues\. Clean/)).toBeNull();
+});
+
+test("the Quality tab renders Sharingan findings as required instead of priority tiers", async () => {
+  const fake = makeFakeApi({
+    getProject: async () => ({
+      id: "p1",
+      name: "TapNow clone",
+      skillId: null,
+      designSystemId: null,
+      mode: "standard",
+      sharingan: true,
+      sourceUrl: "https://app.tapnow.ai/home",
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    listRuns: async (): Promise<RunSummary[]> => [
+      {
+        id: "r-sharingan",
+        conversationId: "c1",
+        variantId: "main",
+        status: "succeeded",
+        score: 92,
+        repairRounds: 0,
+        lintPassed: false,
+        findings: [
+          { severity: "P2", id: "visual-improve-1", message: "The active nav pill is missing.", fix: "Recreate the source nav pill." },
+        ],
+        createdAt: 1,
+        finishedAt: 2,
+      },
+    ],
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  await screen.findByText("TapNow clone");
+  fireEvent.click(await screen.findByRole("tab", { name: /Quality/ }));
+
+  expect(await screen.findByText("Required")).toBeInTheDocument();
+  expect(screen.queryByText("P2")).toBeNull();
+  expect(screen.getByText(/active nav pill/)).toBeInTheDocument();
 });
 
 test("the Quality tab separates static, geometry, and agent visual lanes", async () => {

@@ -226,6 +226,22 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
   const elementList = (input.criticElements ?? [])
     .map((e) => `- ${e.selector} — ${e.tag}${e.text ? ` "${e.text}"` : ""} ${e.w}x${e.h} at ${e.x},${e.y}`)
     .join("\n");
+  const findingInstructions = ref
+    ? [
+        "Sharingan mode: report every visible source mismatch as a required reconstruction finding. Missing source details, wrong hierarchy, wrong type scale, palette drift, broken alignment, overflow, clipping, wrapping, missing image slots, and incorrect controls all matter when they differ from the source.",
+        "Do not split findings into suggestions or ranked priorities. If the generated page visibly diverges from the source screenshot or render map, report it as a finding with a concrete patch target.",
+        "For EVERY finding, set \"selector\" to the ONE element it is about, copied EXACTLY from the ON-PAGE ELEMENTS list above — this lets the fix target that element precisely. Omit selector only for a genuinely page-wide finding. Make each fix a concrete, verifiable change to that element.",
+        "Report as many findings as genuinely matter — several, or none. Do NOT invent findings to hit a count.",
+        'Return JSON only, exactly: {"findings":[{"kind":"defect","selector":"exact selector or omit","message":"...","fix":"..."}]}.',
+      ]
+    : [
+        "Report findings in two clearly separated kinds — do not conflate them:",
+        '- kind "defect" (severity P0/P1): an OBJECTIVE breakage you can PROVE from the pixels themselves. It must be one of: (1) overlap that makes something illegible or unusable; (2) text or a control sliced through its glyphs or bounds by a container edge; (3) an element the layout clearly means to show in the initial view (the primary action, the latest message, the composer) pushed off-screen or unreachable; (4) content wider than the viewport (horizontal overflow); (5) text unreadable from contrast or size; (6) a runtime/console error, broken image, or leaked placeholder (undefined, lorem, "no artifact"); (7) a copy bug in the text itself (duplicated, concatenated, or template tokens). Before filing a defect, apply this test: could a correct, deliberate implementation produce this exact screenshot? If yes, it is NOT a defect — at most an advisory improvement. Describe the visible breakage, never a cause you are inferring — do NOT file scroll position, mount behaviour, or "should be pinned to bottom": you cannot verify runtime scroll state from one static frame. Do NOT file taste, palette, or aesthetic preferences as defects — colour and style are the user\'s call, not a bug.',
+        '- kind "improvement" (severity P2): concrete, actionable design SUGGESTIONS — hierarchy, spacing/rhythm, composition, type scale, restraint, and how well the result matches the brief and chosen direction (e.g. if the direction implies near-monochrome and the build leans on a saturated accent, suggest the change). Positioning and scroll polish, affordance discoverability, and "feels unpolished or crowded" all belong here too — as suggestions, not defects. These are ADVISORY — the user decides whether to take them. Be specific, never vague taste talk.',
+        "For EVERY finding, set \"selector\" to the ONE element it is about, copied EXACTLY from the ON-PAGE ELEMENTS list above — this lets the fix target that element precisely. Omit selector only for a genuinely page-wide finding. Make each fix a concrete, verifiable change to that element.",
+        "Report as many of each as genuinely matter — several, or none. Do NOT invent findings to hit a count; if nothing is objectively broken and nothing would clearly improve it, return an empty findings list.",
+        'Return JSON only, exactly: {"findings":[{"kind":"defect|improvement","severity":"P0|P1|P2","selector":"exact selector or omit","message":"...","fix":"..."}]}.',
+      ];
   return [
     "You are a senior product designer reviewing the latest rendered result for the current Dezin conversation.",
     `Rendered screenshot (the page as the browser first painted it): ${screenshotRel}`,
@@ -242,12 +258,7 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
       ? `ON-PAGE ELEMENTS you can target — use these EXACT selector strings (tag "text" WxH at x,y):\n${elementList}`
       : "",
     "Use the screenshot as primary evidence. It is the page as first painted: for a plain document that is the whole page top-to-bottom, but for an app-shell layout (a fixed header/footer with a scrolling region between them) it is the initial viewport, and that scrolling region may hold more content above or below what you can see. Content that is merely scrolled out of view — e.g. an earlier message clipped at the top edge of a thread that is pinned to its latest turn — is NORMAL, not missing or broken. You may read the artifact and assets for context, but do not create, edit, or write files.",
-    "Report findings in two clearly separated kinds — do not conflate them:",
-    '- kind "defect" (severity P0/P1): an OBJECTIVE breakage you can PROVE from the pixels themselves. It must be one of: (1) overlap that makes something illegible or unusable; (2) text or a control sliced through its glyphs or bounds by a container edge; (3) an element the layout clearly means to show in the initial view (the primary action, the latest message, the composer) pushed off-screen or unreachable; (4) content wider than the viewport (horizontal overflow); (5) text unreadable from contrast or size; (6) a runtime/console error, broken image, or leaked placeholder (undefined, lorem, "no artifact"); (7) a copy bug in the text itself (duplicated, concatenated, or template tokens). Before filing a defect, apply this test: could a correct, deliberate implementation produce this exact screenshot? If yes, it is NOT a defect — at most an advisory improvement. Describe the visible breakage, never a cause you are inferring — do NOT file scroll position, mount behaviour, or "should be pinned to bottom": you cannot verify runtime scroll state from one static frame. Do NOT file taste, palette, or aesthetic preferences as defects — colour and style are the user\'s call, not a bug.',
-    `- kind "improvement" (severity P2): concrete, actionable design SUGGESTIONS — hierarchy, spacing/rhythm, composition, type scale, restraint, and how well the result matches the brief and chosen direction (e.g. if the direction implies near-monochrome and the build leans on a saturated accent, suggest the change). Positioning and scroll polish, affordance discoverability, and "feels unpolished or crowded" all belong here too — as suggestions, not defects. These are ADVISORY — the user decides whether to take them. Be specific, never vague taste talk.${ref ? " For a Sharingan reconstruction, a divergence from the SOURCE screenshot (different layout structure, missing/empty image slot the source fills, wrong component hierarchy, off type scale or palette) is exactly this kind of advisory improvement — cite the specific gap from the source." : ""}`,
-    "For EVERY finding, set \"selector\" to the ONE element it is about, copied EXACTLY from the ON-PAGE ELEMENTS list above — this lets the fix target that element precisely. Omit selector only for a genuinely page-wide finding. Make each fix a concrete, verifiable change to that element.",
-    "Report as many of each as genuinely matter — several, or none. Do NOT invent findings to hit a count; if nothing is objectively broken and nothing would clearly improve it, return an empty findings list.",
-    'Return JSON only, exactly: {"findings":[{"kind":"defect|improvement","severity":"P0|P1|P2","selector":"exact selector or omit","message":"...","fix":"..."}]}.',
+    ...findingInstructions,
   ]
     .filter(Boolean)
     .join("\n");
@@ -717,7 +728,7 @@ function withScreenshotReviewMetadata(
   }));
 }
 
-export function parseVisualReview(text: string): QualityFinding[] {
+export function parseVisualReview(text: string, options: { isSharingan?: boolean } = {}): QualityFinding[] {
   let parsed: unknown;
   try {
     parsed = parseJsonObject(text);
@@ -732,11 +743,12 @@ export function parseVisualReview(text: string): QualityFinding[] {
   let improveN = 0;
   for (const item of findingsRaw) {
     const f = item as { severity?: unknown; message?: unknown; fix?: unknown; snippet?: unknown; kind?: unknown; selector?: unknown };
-    if (!isSeverity(f.severity) || typeof f.message !== "string") continue;
+    const severity: QualityFinding["severity"] | null = isSeverity(f.severity) ? f.severity : options.isSharingan ? "P1" : null;
+    if (!severity || typeof f.message !== "string") continue;
     const selector = typeof f.selector === "string" && f.selector.trim() ? f.selector.trim().slice(0, 200) : undefined;
     // "A few" of each — however many genuinely matter (or none). Sane caps guard against a
     // runaway response, but there is no forced count. Defects (P0/P1) vs design improvements (P2).
-    const isImprovement = f.kind === "improvement" || (f.kind !== "defect" && f.severity === "P2");
+    const isImprovement = options.isSharingan ? false : f.kind === "improvement" || (f.kind !== "defect" && severity === "P2");
     if (isImprovement) {
       if (improveN >= 8) continue;
       improveN += 1;
@@ -752,7 +764,7 @@ export function parseVisualReview(text: string): QualityFinding[] {
       if (defectN >= 6) continue;
       defectN += 1;
       normalized.push({
-        severity: f.severity,
+        severity: options.isSharingan && severity === "P2" ? "P1" : severity,
         id: `visual-ai-review-${defectN}`,
         message: f.message,
         fix: typeof f.fix === "string" && f.fix ? f.fix : "Adjust the layout and visual hierarchy in the screenshot.",
@@ -1173,7 +1185,7 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
   const args = provider ? provider.oneShotArgs(model, prompt) : ["-p", prompt];
   try {
     const findings = await reviewWithRetry(async () =>
-      parseVisualReview(await spawnAgentText(command, args, projectDir, 120_000, buildAgentEnv(input.settings, command))),
+      parseVisualReview(await spawnAgentText(command, args, projectDir, 120_000, buildAgentEnv(input.settings, command)), { isSharingan: input.isSharingan }),
     );
     return withScreenshotReviewMetadata(findings, input, screenshotPath);
   } catch (err) {
