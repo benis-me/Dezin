@@ -1456,6 +1456,71 @@ console.log("updated src/App.jsx");
   );
 });
 
+test("Sharingan standard run reviews an existing scaffold even when the first agent turn makes no changes", async () => {
+  const calls: Array<{ message: string; isRepair?: boolean }> = [];
+  const runner: AgentRunner = {
+    id: "sharingan-existing-scaffold",
+    async runTurn(input) {
+      calls.push({ message: input.message, isRepair: input.isRepair });
+      if (input.isRepair) {
+        writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>Fixed from QA</main> }`);
+      }
+      return { text: input.isRepair ? "fixed from QA" : "scaffold already present", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  const visualQaCalls: string[] = [];
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: true });
+      const project = store.createProject({ name: "Clone", mode: "standard", sharingan: true });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(join(dir, "src"), { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+      writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>SOURCE scaffold</main> }`);
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "continue the Sharingan clone" }),
+      });
+      const events = parseSse(await res.text());
+      assert.ok(!events.some((e) => e.type === "run-error"), `unexpected run-error: ${JSON.stringify(events)}`);
+      const done = events.find((e) => e.type === "run-done")!;
+      assert.equal(done.mode, "standard");
+      assert.equal(done.passed, true);
+      assert.equal(done.rounds, 1);
+      assert.equal(calls.length, 2);
+      assert.equal(calls[0]?.isRepair, false);
+      assert.equal(calls[1]?.isRepair, true);
+      assert.match(calls[1]?.message ?? "", /visual-ai-review-1/);
+      assert.equal(visualQaCalls.length, 2);
+      assert.match(readFileSync(join(dir, "src", "App.jsx"), "utf8"), /Fixed from QA/);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => {
+        visualQaCalls.push(`call-${visualQaCalls.length + 1}`);
+        return visualQaCalls.length === 1
+          ? [
+              {
+                severity: "P1",
+                id: "visual-ai-review-1",
+                message: "The scaffold is only a SOURCE shell.",
+                fix: "Replace the SOURCE shell with the measured final clone.",
+              },
+            ]
+          : [];
+      },
+    },
+  );
+});
+
 test("standard run auto-improves visual QA findings without a manual button", async () => {
   let turn = 0;
   const calls: Array<{ message: string; isRepair?: boolean }> = [];

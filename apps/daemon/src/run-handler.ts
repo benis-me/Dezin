@@ -1023,18 +1023,21 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         if (isRepair) repairRounds = Math.max(repairRounds, round);
 
         const afterTree = await workingTreeFingerprint(dir);
-        if (afterTree === beforeTree) {
+        const unchangedInitialSharinganTurn = project.sharingan && !isRepair && afterTree === beforeTree;
+        if (afterTree === beforeTree && !unchangedInitialSharinganTurn) {
           if (!isRepair) throw new Error("The selected Agent finished without changing project files.");
           break;
         }
-        const commit = await gitCommit(dir, isRepair ? `Auto-improve round ${round}: ${visibleBrief}` : visibleBrief);
-        if (!commit.changed) {
-          if (!isRepair) throw new Error("The selected Agent did not leave any project changes to save.");
-          break;
+        if (!unchangedInitialSharinganTurn) {
+          const commit = await gitCommit(dir, isRepair ? `Auto-improve round ${round}: ${visibleBrief}` : visibleBrief);
+          if (!commit.changed) {
+            if (!isRepair) throw new Error("The selected Agent did not leave any project changes to save.");
+            break;
+          }
+          if (!commit.committed) throw new Error("Project files changed, but Dezin could not commit a version snapshot.");
+          commitHash = commit.commitHash;
+          store.updateRun(run.id, { commitHash, repairRounds });
         }
-        if (!commit.committed) throw new Error("Project files changed, but Dezin could not commit a version snapshot.");
-        commitHash = commit.commitHash;
-        store.updateRun(run.id, { commitHash, repairRounds });
         await emitStandardPreviewUpdate(round);
 
         const staticSurface = await collectStandardLintSurface(dir);
