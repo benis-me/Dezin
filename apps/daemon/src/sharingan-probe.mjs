@@ -401,6 +401,146 @@ function centerInside(inner, outer) {
   return cx >= outer.x && cx <= outer.x + outer.w && cy >= outer.y && cy <= outer.y + outer.h;
 }
 
+function unionBox(a, b) {
+  if (!a) return { ...b };
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const right = Math.max(a.x + a.w, b.x + b.w);
+  const bottom = Math.max(a.y + a.h, b.y + b.h);
+  return { x, y, w: right - x, h: bottom - y };
+}
+
+function uniqueShort(items, max = 12) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const text = String(item || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text.length > 120 ? `${text.slice(0, 117)}...` : text);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function sourceRegionPlan(page, manifest, data) {
+  const bandHeight = 200;
+  const groups = new Map();
+  const newGroup = (band) => ({
+    band,
+    bbox: null,
+    counts: { boxes: 0, images: 0, vectors: 0, texts: 0 },
+    texts: [],
+    textRuns: [],
+    assets: [],
+    media: [],
+    paintBoxes: [],
+    vectors: [],
+    refs: [],
+    styleTokens: { colors: [], fontSizes: [], fontWeights: [], lineHeights: [], letterSpacings: [], textAligns: [], radii: [], shadows: [], objectFits: [] },
+  });
+  const token = (group, key, value, max = 16) => {
+    const text = String(value || "").trim();
+    if (!text || text === "none" || text === "normal" || text === "transparent") return;
+    const list = group.styleTokens[key];
+    if (Array.isArray(list) && !list.includes(text) && list.length < max) list.push(text);
+  };
+  const add = (kind, item, index) => {
+    const box = item.box;
+    if (!box || box.w <= 0 || box.h <= 0) return;
+    const band = Math.max(0, Math.floor((box.y + box.h / 2) / bandHeight));
+    const group = groups.get(band) || newGroup(band);
+    group.bbox = unionBox(group.bbox, box);
+    group.refs.push({ kind, index, box });
+    if (kind === "box") {
+      group.counts.boxes += 1;
+      group.paintBoxes.push({
+        box,
+        backgroundColor: item.backgroundColor,
+        backgroundImage: item.backgroundImage,
+        borderRadius: item.borderRadius,
+        boxShadow: item.boxShadow,
+        opacity: item.opacity,
+      });
+      token(group, "colors", item.backgroundColor);
+      token(group, "radii", item.borderRadius);
+      token(group, "shadows", item.boxShadow);
+    }
+    if (kind === "image") {
+      group.counts.images += 1;
+      if (item.src) group.assets.push(item.src);
+      group.media.push({
+        box,
+        src: item.src || "",
+        alt: item.alt || "",
+        objectFit: item.objectFit,
+        borderRadius: item.borderRadius,
+        opacity: item.opacity,
+      });
+      token(group, "radii", item.borderRadius);
+      token(group, "objectFits", item.objectFit);
+    }
+    if (kind === "vector") {
+      group.counts.vectors += 1;
+      group.vectors.push({ box, html: item.html || "", opacity: item.opacity });
+    }
+    if (kind === "text") {
+      group.counts.texts += 1;
+      if (item.text) group.texts.push(item.text);
+      group.textRuns.push({
+        box,
+        text: item.text || "",
+        lines: item.lines,
+        color: item.color,
+        fontSize: item.fontSize,
+        fontWeight: item.fontWeight,
+        lineHeight: item.lineHeight,
+        letterSpacing: item.letterSpacing,
+        textAlign: item.textAlign,
+      });
+      token(group, "colors", item.color);
+      token(group, "fontSizes", item.fontSize);
+      token(group, "fontWeights", item.fontWeight);
+      token(group, "lineHeights", item.lineHeight);
+      token(group, "letterSpacings", item.letterSpacing);
+      token(group, "textAligns", item.textAlign);
+    }
+    groups.set(band, group);
+  };
+  data.boxes.forEach((item, index) => add("box", item, index));
+  data.images.forEach((item, index) => add("image", item, index));
+  data.vectors.forEach((item, index) => add("vector", item, index));
+  data.texts.forEach((item, index) => add("text", item, index));
+  const regions = Array.from(groups.values())
+    .filter((group) => group.bbox)
+    .sort((a, b) => a.band - b.band || a.bbox.y - b.bbox.y || a.bbox.x - b.bbox.x)
+    .slice(0, 12)
+    .map((group, index) => {
+      const texts = uniqueShort(group.texts, 14);
+      return {
+        id: `region-${index + 1}`,
+        label: index === 0 && group.bbox.y < 140 ? "Header / top viewport" : texts[0] ? `Region: ${texts[0].slice(0, 42)}` : `Region ${index + 1}`,
+        bbox: group.bbox,
+        counts: group.counts,
+        texts,
+        assets: uniqueShort(group.assets, 10),
+        textRuns: group.textRuns.slice(0, 24),
+        media: group.media.slice(0, 18),
+        paintBoxes: group.paintBoxes.slice(0, 18),
+        vectors: group.vectors.slice(0, 18),
+        styleTokens: group.styleTokens,
+        refs: group.refs.slice(0, 24),
+      };
+    });
+  return {
+    version: 1,
+    sourceUrl: data.pageUrl || page.url || manifest.entryUrl || "",
+    viewport: data.viewport,
+    document: data.document,
+    regions,
+  };
+}
+
 function sourceScaffold() {
   const manifest = readJson(join(".sharingan", "pages.json"), null);
   const page = manifest && manifest.pages && manifest.pages[0];
@@ -518,6 +658,7 @@ function sourceScaffold() {
 
   const scaffoldDir = join(".sharingan", "source-scaffold");
   mkdirSync(scaffoldDir, { recursive: true });
+  writeFileSync(join(".sharingan", "region-plan.json"), JSON.stringify(sourceRegionPlan(page, manifest, data), null, 2));
   writeFileSync(
     join(scaffoldDir, "App.jsx"),
     `// SHARINGAN SOURCE SCAFFOLD - REFERENCE ONLY.
@@ -707,14 +848,14 @@ body {
 }
 `,
   );
-  console.log(`SOURCE SCAFFOLD wrote .sharingan/source-scaffold/App.jsx and .sharingan/source-scaffold/index.css from ${boxes.length} boxes, ${images.length} images, ${vectorSlots.length} vectors, ${adjustedTextSlots.length} text nodes.`);
+  console.log(`SOURCE SCAFFOLD wrote .sharingan/source-scaffold/App.jsx and .sharingan/source-scaffold/index.css from ${boxes.length} boxes, ${images.length} images, ${vectorSlots.length} vectors, ${adjustedTextSlots.length} text nodes, plus .sharingan/region-plan.json.`);
 }
 
 const HELP = `dezin-probe — drive the Sharingan capture browser + read the capture (no curl/python needed).
 Usage: node .sharingan/probe.mjs <command> [args]
 
   source-summary        one bounded source digest: component inventory + tokens + key text + assets
-  source-scaffold       write measured first-pass src/App.jsx + src/index.css from render-map/assets
+  source-scaffold       write measured reference scaffold + region-plan.json from render-map/assets
   navigate <url>        open a URL in the live capture browser
   read-dom              visible DOM nodes (tag/role/text/box) as JSON
   styles                computed style tokens (colors / fonts / radii / shadows)

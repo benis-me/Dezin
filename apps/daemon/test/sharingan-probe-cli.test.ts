@@ -133,6 +133,16 @@ test("probe source-scaffold writes a measured reference without replacing the St
   assert.equal(existsSync(join(dir, "src", "App.jsx")), false, "source-scaffold must not replace the Standard app entrypoint");
   const app = readFileSync(join(dir, ".sharingan", "source-scaffold", "App.jsx"), "utf8");
   const css = readFileSync(join(dir, ".sharingan", "source-scaffold", "index.css"), "utf8");
+  const regionPlan = JSON.parse(readFileSync(join(dir, ".sharingan", "region-plan.json"), "utf8"));
+  assert.equal(regionPlan.version, 1);
+  assert.equal(regionPlan.sourceUrl, "https://example.com");
+  assert.ok(Array.isArray(regionPlan.regions));
+  assert.ok(regionPlan.regions.length >= 2, "source-scaffold writes fine-grained regions for subagents");
+  assert.ok(regionPlan.regions.some((region: { id: string; texts?: string[] }) => region.id === "region-1" && region.texts?.includes("Home")), "region plan includes first visible text region");
+  assert.ok(regionPlan.regions.some((region: { assets?: string[] }) => region.assets?.includes("/_assets/card.webp")), "region plan maps local assets into owning regions");
+  assert.ok(regionPlan.regions.some((region: { textRuns?: Array<{ text?: string; fontSize?: string }> }) => region.textRuns?.some((run) => run.text === "Home" && run.fontSize === "16px")), "region plan preserves measured text styles");
+  assert.ok(regionPlan.regions.some((region: { media?: Array<{ src?: string; box?: { w?: number } }> }) => region.media?.some((item) => item.src === "/_assets/card.webp" && item.box?.w === 220)), "region plan preserves measured media boxes");
+  assert.ok(regionPlan.regions.some((region: { vectors?: Array<{ html?: string }> }) => region.vectors?.some((item) => item.html?.includes("<svg") && item.html.includes("sgv-1-grad"))), "region plan preserves scoped SVG vectors for icon fidelity");
   assert.match(app, /SHARINGAN SOURCE SCAFFOLD - REFERENCE ONLY/);
   assert.match(app, /const SOURCE =/);
   assert.match(app, /Do not submit this replay unchanged as the final Standard app/);

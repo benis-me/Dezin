@@ -582,6 +582,62 @@ test("completed runs collapse the interleaved process above the final summary", 
   expect(screen.getAllByText("Drafted the hero. Tightened the layout.")).toHaveLength(1);
 });
 
+test("Sharingan region events are shown as live process steps", async () => {
+  const user = userEvent.setup();
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-region", conversationId: "c1" };
+      yield { type: "sharingan-region-start", runId: "r-region", regionId: "region-1", label: "Header", index: 0, total: 2 };
+      yield { type: "sharingan-region-retry", runId: "r-region", regionId: "region-1", label: "Header", index: 0, total: 2, error: "missing region file", nextAttempt: 2 };
+      yield { type: "sharingan-region-done", runId: "r-region", regionId: "region-1", label: "Header", index: 0, total: 2 };
+      yield { type: "turn-start", round: 0, isRepair: false };
+      yield { type: "turn-end", round: 0, text: "Integrated source regions.", summaryBoundary: true };
+      yield { type: "run-done", runId: "r-region", passed: true, rounds: 0, score: 100, previewUrl: "/projects/p1/preview/", findings: [] };
+    },
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "clone this" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  expect(await screen.findByText("Integrated source regions.")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: /Processed/ }));
+  expect(await screen.findByText("Building source region 1/2: Header")).toBeInTheDocument();
+  expect(screen.getByText("Retrying source region: Header - missing region file")).toBeInTheDocument();
+  expect(screen.getByText("Built source region: Header")).toBeInTheDocument();
+});
+
+test("Sharingan failed region events are kept in the processed card", async () => {
+  const user = userEvent.setup();
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-region-fail", conversationId: "c1" };
+      yield { type: "sharingan-region-start", runId: "r-region-fail", regionId: "region-1", label: "Header", index: 0, total: 1 };
+      yield { type: "sharingan-region-failed", runId: "r-region-fail", regionId: "region-1", label: "Header", index: 0, total: 1, error: "missing src/sharingan-regions/region-1.jsx" };
+      yield { type: "run-error", runId: "r-region-fail", message: "Sharingan region subagents failed" };
+    },
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "clone this" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  expect(await screen.findByText("The run failed: Sharingan region subagents failed")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: /Processed/ }));
+  expect(await screen.findByText("Building source region 1/1: Header")).toBeInTheDocument();
+  expect(screen.getByText("Source region failed: Header - missing src/sharingan-regions/region-1.jsx")).toBeInTheDocument();
+});
+
 test("summary-boundary runs keep process text folded and final summary outside", async () => {
   const user = userEvent.setup();
   const fake = makeFakeApi({

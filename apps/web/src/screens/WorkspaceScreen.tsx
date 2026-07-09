@@ -3010,6 +3010,59 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         stickBottom.current = true;
         setLiveStatus("Starting…");
         break;
+      case "sharingan-region-start": {
+        const label = typeof ev.label === "string" && ev.label.trim() ? ev.label.trim() : typeof ev.regionId === "string" ? ev.regionId : "source region";
+        const index = typeof ev.index === "number" ? ev.index + 1 : null;
+        const total = typeof ev.total === "number" ? ev.total : null;
+        const prefix = index !== null && total !== null ? `Building source region ${index}/${total}` : "Building source region";
+        const summary = `${prefix}: ${label}`;
+        const arr = liveItemsRef.current;
+        const last = arr[arr.length - 1];
+        if (!(last?.type === "tool" && last.summary === summary)) {
+          liveItemsRef.current = [...arr, { type: "tool", summary }];
+          setLiveItems(liveItemsRef.current);
+        }
+        setLiveStatus("Building source regions…");
+        break;
+      }
+      case "sharingan-region-done": {
+        const label = typeof ev.label === "string" && ev.label.trim() ? ev.label.trim() : typeof ev.regionId === "string" ? ev.regionId : "source region";
+        const summary = `Built source region: ${label}`;
+        const arr = liveItemsRef.current;
+        const last = arr[arr.length - 1];
+        if (!(last?.type === "tool" && last.summary === summary)) {
+          liveItemsRef.current = [...arr, { type: "tool", summary }];
+          setLiveItems(liveItemsRef.current);
+        }
+        setLiveStatus("Integrating source regions…");
+        break;
+      }
+      case "sharingan-region-retry": {
+        const label = typeof ev.label === "string" && ev.label.trim() ? ev.label.trim() : typeof ev.regionId === "string" ? ev.regionId : "source region";
+        const error = typeof ev.error === "string" && ev.error.trim() ? ` - ${ev.error.trim()}` : "";
+        const summary = `Retrying source region: ${label}${error}`;
+        const arr = liveItemsRef.current;
+        const last = arr[arr.length - 1];
+        if (!(last?.type === "tool" && last.summary === summary)) {
+          liveItemsRef.current = [...arr, { type: "tool", summary }];
+          setLiveItems(liveItemsRef.current);
+        }
+        setLiveStatus("Retrying source region…");
+        break;
+      }
+      case "sharingan-region-failed": {
+        const label = typeof ev.label === "string" && ev.label.trim() ? ev.label.trim() : typeof ev.regionId === "string" ? ev.regionId : "source region";
+        const error = typeof ev.error === "string" && ev.error.trim() ? ` - ${ev.error.trim()}` : "";
+        const summary = `Source region failed: ${label}${error}`;
+        const arr = liveItemsRef.current;
+        const last = arr[arr.length - 1];
+        if (!(last?.type === "tool" && last.summary === summary)) {
+          liveItemsRef.current = [...arr, { type: "tool", summary }];
+          setLiveItems(liveItemsRef.current);
+        }
+        setLiveStatus("Source region failed.");
+        break;
+      }
       case "turn-start":
         turnStartedAtRef.current = Date.now();
         gotTurnText.current = false;

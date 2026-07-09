@@ -69,6 +69,7 @@ test("buildSharinganContext caps source analysis before writing source-derived c
   assert.match(promptBlock, /at most 3/i);
   assert.match(promptBlock, /inspection command/i);
   assert.match(promptBlock, /must use the generated reference scaffold/i);
+  assert.match(promptBlock, /region-plan\.json/i);
   assert.match(promptBlock, /Source Component Inventory/i);
   assert.match(promptBlock, /measured reference scaffold/i);
   assert.match(promptBlock, /generate normal Standard React source/i);
@@ -89,6 +90,8 @@ test("buildSharinganSystemPrompt bypasses normal Standard design generation beha
   assert.match(prompt, /Sharingan Capture Replayer/i);
   assert.match(prompt, /not a design-generation task/i);
   assert.match(prompt, /reference scaffold/i);
+  assert.match(prompt, /region-plan\.json/i);
+  assert.match(prompt, /src\/sharingan-regions/i);
   assert.match(prompt, /real Standard project/i);
   assert.match(prompt, /scaffold is not the final artifact/i);
   assert.match(prompt, /Ignore any generic Standard\/design-system\/craft instruction/i);

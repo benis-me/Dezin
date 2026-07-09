@@ -75,6 +75,20 @@ function commitAll(dir: string, message: string): string {
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+function createSharinganRegionFixture(dataDir: string, store: Store, regions: unknown[]): { project: ReturnType<Store["createProject"]>; dir: string } {
+  const project = store.createProject({ name: "Clone", mode: "standard", sharingan: true });
+  const dir = join(dataDir, "projects", project.id);
+  mkdirSync(join(dir, "src"), { recursive: true });
+  mkdirSync(join(dir, ".sharingan"), { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+  writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+  writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>Before</main> }`);
+  writeFileSync(join(dir, ".sharingan", "region-plan.json"), JSON.stringify({ version: 1, sourceUrl: "https://example.com", regions }));
+  commitAll(dir, "base");
+  return { project, dir };
+}
+
 async function createProject(base: string, body: object = { name: "P" }, daemonToken = ""): Promise<{ id: string }> {
   const res = await fetch(`${base}/api/projects`, {
     method: "POST",
@@ -1517,6 +1531,446 @@ test("Sharingan standard run reviews an existing scaffold even when the first ag
             ]
           : [];
       },
+    },
+  );
+});
+
+test("Sharingan standard run delegates source regions to isolated subagents before main integration", async () => {
+  const calls: Array<{ phase: "region" | "main"; message: string; historyLength: number }> = [];
+  const runner: AgentRunner = {
+    id: "sharingan-region-subagents",
+    async runTurn(input) {
+      mkdirSync(join(input.projectDir, "src", "sharingan-regions"), { recursive: true });
+      const regionMatch = input.message.match(/Region ID:\s*(region-\d+)/);
+      if (regionMatch) {
+        const id = regionMatch[1]!;
+        calls.push({ phase: "region", message: input.message, historyLength: input.history?.length ?? 0 });
+        writeFileSync(join(input.projectDir, "src", "sharingan-regions", `${id}.jsx`), `export default function ${id.replace("-", "_")}(){ return <section>${id}</section>; }\n`);
+        return { text: `built ${id}`, artifactHtml: "", artifactPath: "index.html" };
+      }
+      calls.push({ phase: "main", message: input.message, historyLength: input.history?.length ?? 0 });
+      writeFileSync(
+        join(input.projectDir, "src", "App.jsx"),
+        `import Region1 from "./sharingan-regions/region-1.jsx";\nimport Region2 from "./sharingan-regions/region-2.jsx";\nexport default function App(){ return <main><Region1/><Region2/></main>; }\n`,
+      );
+      return { text: "integrated regions", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const project = store.createProject({ name: "Clone", mode: "standard", sharingan: true });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(join(dir, "src"), { recursive: true });
+      mkdirSync(join(dir, ".sharingan"), { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+      writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>Before</main> }`);
+      writeFileSync(
+        join(dir, ".sharingan", "region-plan.json"),
+        JSON.stringify({
+          version: 1,
+          sourceUrl: "https://example.com",
+          regions: [
+            {
+              id: "region-1",
+              label: "Header",
+              bbox: { x: 0, y: 0, w: 1200, h: 80 },
+              texts: ["Home"],
+              assets: [],
+              textRuns: [{ text: "Home", box: { x: 20, y: 24, w: 64, h: 20 }, fontSize: "14px", color: "rgb(255,255,255)" }],
+              styleTokens: { colors: ["rgb(255,255,255)"], fontSizes: ["14px"] },
+            },
+            {
+              id: "region-2",
+              label: "Hero",
+              bbox: { x: 0, y: 100, w: 1200, h: 500 },
+              texts: ["Create"],
+              assets: ["/_assets/hero.png"],
+              media: [{ src: "/_assets/hero.png", box: { x: 80, y: 140, w: 320, h: 180 }, objectFit: "cover" }],
+            },
+          ],
+        }),
+      );
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "rebuild the Sharingan page" }),
+      });
+      const events = parseSse(await res.text());
+      assert.ok(!events.some((e) => e.type === "run-error"), `unexpected run-error: ${JSON.stringify(events)}`);
+      assert.deepEqual(calls.map((c) => c.phase), ["region", "region", "main"]);
+      assert.equal(calls[0]?.historyLength, 0, "region subagents run with isolated context");
+      assert.equal(calls[1]?.historyLength, 0, "each region subagent gets isolated context");
+      assert.match(calls[0]?.message ?? "", /Header/);
+      assert.match(calls[0]?.message ?? "", /textRuns/);
+      assert.match(calls[0]?.message ?? "", /rgb\(255,255,255\)/);
+      assert.match(calls[1]?.message ?? "", /Hero/);
+      assert.match(calls[1]?.message ?? "", /media/);
+      assert.match(calls[1]?.message ?? "", /\/_assets\/hero\.png/);
+      assert.match(calls[2]?.message ?? "", /SHARINGAN MAIN INTEGRATION/);
+      assert.match(calls[2]?.message ?? "", /src\/sharingan-regions\/region-1\.jsx/);
+      assert.equal(events.filter((e) => e.type === "sharingan-region-start").length, 2);
+      assert.equal(events.filter((e) => e.type === "sharingan-region-done").length, 2);
+      assert.match(readFileSync(join(dir, "src", "App.jsx"), "utf8"), /Region1/);
+      assert.equal(existsSync(join(dir, ".sharingan", "region-build.json")), true);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("Sharingan region subagents run in parallel and the main agent waits for all outputs", async () => {
+  let activeRegions = 0;
+  let maxActiveRegions = 0;
+  const calls: Array<{ phase: "region" | "main"; id?: string }> = [];
+  const runner: AgentRunner = {
+    id: "sharingan-parallel-regions",
+    async runTurn(input) {
+      const regionMatch = input.message.match(/Region ID:\s*(region-\d+)/);
+      if (regionMatch) {
+        const id = regionMatch[1]!;
+        calls.push({ phase: "region", id });
+        activeRegions += 1;
+        maxActiveRegions = Math.max(maxActiveRegions, activeRegions);
+        await delay(80);
+        mkdirSync(join(input.projectDir, "src", "sharingan-regions"), { recursive: true });
+        writeFileSync(join(input.projectDir, "src", "sharingan-regions", `${id}.jsx`), `export default function ${id.replace("-", "_")}(){ return <section>${id}</section>; }\n`);
+        activeRegions -= 1;
+        return { text: `built ${id}`, artifactHtml: "", artifactPath: "index.html" };
+      }
+      calls.push({ phase: "main" });
+      assert.equal(activeRegions, 0, "main integration starts only after region agents finish");
+      writeFileSync(
+        join(input.projectDir, "src", "App.jsx"),
+        `import Region1 from "./sharingan-regions/region-1.jsx";\nimport Region2 from "./sharingan-regions/region-2.jsx";\nexport default function App(){ return <main><Region1/><Region2/></main>; }\n`,
+      );
+      return { text: "integrated regions", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const { project } = createSharinganRegionFixture(dataDir, store, [
+        { id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: [] },
+        { id: "region-2", label: "Hero", bbox: { x: 0, y: 100, w: 1200, h: 500 }, texts: ["Create"], assets: [] },
+      ]);
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "rebuild the Sharingan page" }),
+      });
+      const events = parseSse(await res.text());
+      assert.ok(!events.some((e) => e.type === "run-error"), `unexpected run-error: ${JSON.stringify(events)}`);
+      assert.equal(maxActiveRegions, 2, "region subagents should overlap instead of running serially");
+      assert.deepEqual(calls.map((c) => c.phase).sort(), ["main", "region", "region"].sort());
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("Sharingan region subagents validate outputs and retry missing files before main integration", async () => {
+  const attempts = new Map<string, number>();
+  let mainCalls = 0;
+  const runner: AgentRunner = {
+    id: "sharingan-region-validation-retry",
+    async runTurn(input) {
+      const regionMatch = input.message.match(/Region ID:\s*(region-\d+)/);
+      if (regionMatch) {
+        const id = regionMatch[1]!;
+        const attempt = (attempts.get(id) ?? 0) + 1;
+        attempts.set(id, attempt);
+        if (id === "region-2" && attempt === 1) return { text: "forgot to write the file", artifactHtml: "", artifactPath: "index.html" };
+        mkdirSync(join(input.projectDir, "src", "sharingan-regions"), { recursive: true });
+        writeFileSync(join(input.projectDir, "src", "sharingan-regions", `${id}.jsx`), `export default function ${id.replace("-", "_")}(){ return <section>${id}</section>; }\n`);
+        return { text: `built ${id} on attempt ${attempt}`, artifactHtml: "", artifactPath: "index.html" };
+      }
+      mainCalls += 1;
+      writeFileSync(
+        join(input.projectDir, "src", "App.jsx"),
+        `import Region1 from "./sharingan-regions/region-1.jsx";\nimport Region2 from "./sharingan-regions/region-2.jsx";\nexport default function App(){ return <main><Region1/><Region2/></main>; }\n`,
+      );
+      return { text: "integrated regions", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const { project, dir } = createSharinganRegionFixture(dataDir, store, [
+        { id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: [] },
+        { id: "region-2", label: "Hero", bbox: { x: 0, y: 100, w: 1200, h: 500 }, texts: ["Create"], assets: [] },
+      ]);
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "rebuild the Sharingan page" }),
+      });
+      const events = parseSse(await res.text());
+      assert.ok(!events.some((e) => e.type === "run-error"), `unexpected run-error: ${JSON.stringify(events)}`);
+      assert.equal(attempts.get("region-2"), 2, "missing region output is retried before integration");
+      assert.equal(mainCalls, 1, "main integrates once after validated region outputs");
+      assert.equal(events.filter((e) => e.type === "sharingan-region-retry").length, 1);
+      const manifest = JSON.parse(readFileSync(join(dir, ".sharingan", "region-build.json"), "utf8"));
+      assert.equal(manifest.regions.find((region: { id?: string; attempts?: number }) => region.id === "region-2")?.attempts, 2);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("Sharingan region subagent failures block main integration after bounded retries", async () => {
+  let mainCalls = 0;
+  const runner: AgentRunner = {
+    id: "sharingan-region-failure",
+    async runTurn(input) {
+      const regionMatch = input.message.match(/Region ID:\s*(region-\d+)/);
+      if (regionMatch) return { text: "did not produce a component", artifactHtml: "", artifactPath: "index.html" };
+      mainCalls += 1;
+      return { text: "should not integrate", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const { project } = createSharinganRegionFixture(dataDir, store, [
+        { id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: [] },
+      ]);
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "rebuild the Sharingan page" }),
+      });
+      const events = parseSse(await res.text());
+      assert.equal(mainCalls, 0, "main integration must not run with a failed region");
+      assert.equal(events.filter((e) => e.type === "sharingan-region-failed").length, 1);
+      assert.ok(events.some((e) => e.type === "run-error" && String(e.message).includes("Sharingan region subagents failed")), `expected region run-error: ${JSON.stringify(events)}`);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("Sharingan region validation ignores stale region files copied from the project root", async () => {
+  let mainCalls = 0;
+  const runner: AgentRunner = {
+    id: "sharingan-stale-region-validation",
+    async runTurn(input) {
+      const regionMatch = input.message.match(/Region ID:\s*(region-\d+)/);
+      if (regionMatch) return { text: "no new region output", artifactHtml: "", artifactPath: "index.html" };
+      mainCalls += 1;
+      return { text: "should not integrate", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const { project, dir } = createSharinganRegionFixture(dataDir, store, [{ id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: [] }]);
+      mkdirSync(join(dir, "src", "sharingan-regions"), { recursive: true });
+      writeFileSync(join(dir, "src", "sharingan-regions", "region-1.jsx"), `export default function stale_region(){ return <section>stale</section>; }\n`);
+      commitAll(dir, "stale region output");
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "rebuild the Sharingan page" }),
+      });
+      const events = parseSse(await res.text());
+      assert.equal(mainCalls, 0, "main integration must not use a stale region component copied into the sandbox");
+      assert.equal(events.filter((e) => e.type === "sharingan-region-failed").length, 1);
+      assert.ok(events.some((e) => e.type === "run-error" && String(e.message).includes("Sharingan region subagents failed")), `expected stale output to fail validation: ${JSON.stringify(events)}`);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("Sharingan region outputs do not mask a no-op main integration turn", async () => {
+  const runner: AgentRunner = {
+    id: "sharingan-main-noop-after-regions",
+    async runTurn(input) {
+      const regionMatch = input.message.match(/Region ID:\s*(region-\d+)/);
+      if (regionMatch) {
+        const id = regionMatch[1]!;
+        mkdirSync(join(input.projectDir, "src", "sharingan-regions"), { recursive: true });
+        writeFileSync(join(input.projectDir, "src", "sharingan-regions", `${id}.jsx`), `export default function ${id.replace("-", "_")}(){ return <section>${id}</section>; }\n`);
+        return { text: `built ${id}`, artifactHtml: "", artifactPath: "index.html" };
+      }
+      return { text: "main integration skipped", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const { project } = createSharinganRegionFixture(dataDir, store, [{ id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: [] }]);
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "rebuild the Sharingan page" }),
+      });
+      const events = parseSse(await res.text());
+      assert.ok(events.some((e) => e.type === "sharingan-region-done"), "region subagent should finish first");
+      assert.ok(events.some((e) => e.type === "run-error" && String(e.message).includes("without changing project files")), `expected main no-op failure: ${JSON.stringify(events)}`);
+      assert.ok(!events.some((e) => e.type === "run-done"), "main no-op must not be accepted just because regions changed files");
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("Sharingan main integration no-op is retried once before visual QA", async () => {
+  let mainCalls = 0;
+  const runner: AgentRunner = {
+    id: "sharingan-main-noop-retry",
+    async runTurn(input) {
+      const regionMatch = input.message.match(/Region ID:\s*(region-\d+)/);
+      if (regionMatch) {
+        const id = regionMatch[1]!;
+        mkdirSync(join(input.projectDir, "src", "sharingan-regions"), { recursive: true });
+        writeFileSync(join(input.projectDir, "src", "sharingan-regions", `${id}.jsx`), `export default function ${id.replace("-", "_")}(){ return <section>${id}</section>; }\n`);
+        return { text: `built ${id}`, artifactHtml: "", artifactPath: "index.html" };
+      }
+      mainCalls += 1;
+      if (mainCalls === 1) return { text: "main integration skipped", artifactHtml: "", artifactPath: "index.html" };
+      assert.match(input.message, /SHARINGAN MAIN INTEGRATION RETRY/);
+      writeFileSync(
+        join(input.projectDir, "src", "App.jsx"),
+        `import Region1 from "./sharingan-regions/region-1.jsx";\nexport default function App(){ return <main><Region1 /></main>; }\n`,
+      );
+      return { text: "integrated after retry", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const { project, dir } = createSharinganRegionFixture(dataDir, store, [{ id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: [] }]);
+
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "rebuild the Sharingan page" }),
+      });
+      const events = parseSse(await res.text());
+      assert.ok(!events.some((e) => e.type === "run-error"), `unexpected run-error: ${JSON.stringify(events)}`);
+      assert.equal(mainCalls, 2, "main integration should get one automatic retry");
+      assert.ok(events.some((e) => e.type === "turn-start" && e.round === 1 && e.isRepair === true));
+      assert.ok(events.some((e) => e.type === "run-done"));
+      assert.match(readFileSync(join(dir, "src", "App.jsx"), "utf8"), /Region1/);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("Sharingan variant runs sync the root capture bundle before region subagents", async () => {
+  let regionCalls = 0;
+  const runner: AgentRunner = {
+    id: "sharingan-variant-capture-sync",
+    async runTurn(input) {
+      const regionMatch = input.message.match(/Region ID:\s*(region-\d+)/);
+      if (regionMatch) {
+        regionCalls += 1;
+        assert.equal(existsSync(join(input.projectDir, "public", "_assets", "hero.png")), true, "variant workspace receives captured assets");
+        const id = regionMatch[1]!;
+        mkdirSync(join(input.projectDir, "src", "sharingan-regions"), { recursive: true });
+        writeFileSync(join(input.projectDir, "src", "sharingan-regions", `${id}.jsx`), `export default function ${id.replace("-", "_")}(){ return <section>${id}</section>; }\n`);
+        return { text: `built ${id}`, artifactHtml: "", artifactPath: "index.html" };
+      }
+      writeFileSync(
+        join(input.projectDir, "src", "App.jsx"),
+        `import Region1 from "./sharingan-regions/region-1.jsx";\nexport default function App(){ return <main><Region1 /></main>; }\n`,
+      );
+      return { text: "integrated variant regions", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const project = store.createProject({ name: "Clone", mode: "standard", sharingan: true });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(join(dir, "src"), { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+      writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>Before</main> }`);
+      commitAll(dir, "base without capture");
+
+      mkdirSync(join(dir, ".sharingan"), { recursive: true });
+      mkdirSync(join(dir, ".sharingan", "region-work", "stale"), { recursive: true });
+      mkdirSync(join(dir, "public", "_assets"), { recursive: true });
+      writeFileSync(join(dir, ".sharingan", "region-work", "stale", "old.txt"), "old");
+      writeFileSync(join(dir, ".sharingan", "region-build.json"), JSON.stringify({ version: 1, regions: [{ id: "stale" }], failures: [] }));
+      writeFileSync(join(dir, "public", "_assets", "hero.png"), "PNGDATA");
+      writeFileSync(
+        join(dir, ".sharingan", "region-plan.json"),
+        JSON.stringify({ version: 1, sourceUrl: "https://example.com", regions: [{ id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: ["/_assets/hero.png"] }] }),
+      );
+
+      store.ensureMainVariant(project.id);
+      const variant = store.createVariant(project.id, "Variant");
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, variantId: variant.id, brief: "rebuild the Sharingan page" }),
+      });
+      const events = parseSse(await res.text());
+      assert.ok(!events.some((e) => e.type === "run-error"), `unexpected run-error: ${JSON.stringify(events)}`);
+      assert.equal(regionCalls, 1, "variant run should still delegate captured source regions");
+      assert.ok(events.some((e) => e.type === "sharingan-region-done"));
+      const variantDir = join(dataDir, "worktrees", project.id, variant.id);
+      assert.equal(existsSync(join(variantDir, ".sharingan", "region-plan.json")), true);
+      assert.equal(existsSync(join(variantDir, ".sharingan", "region-build.json")), true);
+      assert.equal(existsSync(join(variantDir, ".sharingan", "region-work", "stale")), false);
+      assert.equal(existsSync(join(variantDir, "public", "_assets", "hero.png")), true);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
     },
   );
 });
