@@ -195,6 +195,100 @@ test("findingsFromGeometry upgrades clipped text to a Sharingan-blocking defect 
   assert.equal(clippedText?.severity, "P1");
 });
 
+test("findingsFromGeometry ignores clipped aggregate containers without direct text", () => {
+  const findings = findingsFromGeometry(
+    {
+      viewport: { width: 1440, height: 900 },
+      document: { scrollWidth: 1440, scrollHeight: 900 },
+      elements: [
+        geomEl({
+          selector: "div.sharingan-stage",
+          tag: "div",
+          text: "TapNow Home Workspace Create",
+          overflowX: "hidden",
+          overflowY: "hidden",
+          scrollWidth: 1440,
+          scrollHeight: 980,
+          clientWidth: 1440,
+          clientHeight: 900,
+          directTextLength: 0,
+          childElementCount: 8,
+        } as any),
+      ],
+    },
+    "desktop",
+    { strictTextLayout: true },
+  );
+
+  assert.ok(!findings.some((f) => f.id === "visual-text-clipped"), "aggregate stage text should not be treated as clipped direct text");
+});
+
+test("findingsFromGeometry ignores text clipping that matches the captured Sharingan source box", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "span.max-w-20.truncate", tag: "span", text: "Ben Lee's Team", box: { x: 1277, y: 22, w: 80, h: 20 }, style: { fontSize: "14px", lineHeight: "20px" } },
+    ],
+  };
+  const snapshot = {
+    viewport: { width: 1440, height: 900 },
+    document: { scrollWidth: 1440, scrollHeight: 900 },
+    elements: [
+      geomEl({
+        selector: "div.source-text",
+        tag: "div",
+        text: "Ben Lee's Team",
+        rect: { left: 1277, top: 22, right: 1357, bottom: 42, width: 80, height: 20 },
+        overflowX: "hidden",
+        overflowY: "hidden",
+        scrollWidth: 102,
+        scrollHeight: 20,
+        clientWidth: 80,
+        clientHeight: 20,
+        directTextLength: "Ben Lee's Team".length,
+        childElementCount: 0,
+      }),
+    ],
+  };
+
+  const findings = findingsFromGeometry(snapshot, "desktop", { strictTextLayout: true, sharinganSource: source } as any);
+  assert.ok(!findings.some((f) => f.id === "visual-text-clipped"), "source-equivalent truncation should not block Sharingan repair");
+});
+
+test("findingsFromGeometry still flags clipped text when the generated box is smaller than the source", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "span.team", tag: "span", text: "Ben Lee's Team", box: { x: 1277, y: 22, w: 120, h: 20 }, style: { fontSize: "14px", lineHeight: "20px" } },
+    ],
+  };
+  const snapshot = {
+    viewport: { width: 1440, height: 900 },
+    document: { scrollWidth: 1440, scrollHeight: 900 },
+    elements: [
+      geomEl({
+        selector: "div.source-text",
+        tag: "div",
+        text: "Ben Lee's Team",
+        rect: { left: 1277, top: 22, right: 1357, bottom: 42, width: 80, height: 20 },
+        overflowX: "hidden",
+        overflowY: "hidden",
+        scrollWidth: 102,
+        scrollHeight: 20,
+        clientWidth: 80,
+        clientHeight: 20,
+        directTextLength: "Ben Lee's Team".length,
+        childElementCount: 0,
+      }),
+    ],
+  };
+
+  const findings = findingsFromGeometry(snapshot, "desktop", { strictTextLayout: true, sharinganSource: source } as any);
+  assert.equal(findings.find((f) => f.id === "visual-text-clipped")?.severity, "P1");
+});
+
 test("findingsFromGeometry flags a thin below-the-fold strip (orphaned element), not a long scrolling page", () => {
   const base = { elements: [] as never[], bodyTextLength: 500 };
   // A ~56px strip hanging below a 100svh app shell → orphaned-element bug.
@@ -337,6 +431,70 @@ test("sourceFidelityFindings reports missing source text and image-slot count dr
   assert.ok(findings.some((f) => f.id === "visual-source-text-missing" && /Launch faster/.test(f.message)));
   assert.ok(findings.some((f) => f.id === "visual-source-image-count" && /source has 2 visible/.test(f.message)));
   assert.ok(findings.every((f) => f.severity === "P1"), "source fidelity drift must gate Sharingan repair");
+});
+
+test("sourceFidelityFindings ignores CSS-only backgrounds and tiny carousel edge slivers", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: ".grid-bg", tag: "div", text: "", box: { x: 0, y: 0, w: 1440, h: 900 }, style: { backgroundImage: "linear-gradient(rgba(0,0,0,.08) 1px, transparent 1px)" } },
+      { selector: ".edge-card", tag: "img", text: "", box: { x: -430, y: 617, w: 456, h: 256 }, style: {}, src: "edge-card.png" },
+      { selector: ".edge-title", tag: "span", text: "TapTV Arena全球AI动画黑客松·杭州站 正式启动", box: { x: -421, y: 869, w: 432, h: 20 }, style: {} },
+    ],
+  };
+  const generated = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [],
+  } as any;
+
+  const findings = sourceFidelityFindings(source as any, generated);
+  assert.ok(!findings.some((f) => f.id === "visual-source-image-count"), "pure gradients and tiny edge sliver media are not source image slots");
+  assert.ok(!findings.some((f) => f.id === "visual-source-text-missing"), "tiny edge sliver text should not be required as visible content");
+  assert.ok(!findings.some((f) => f.id === "visual-source-box-delta"), "tiny edge sliver text should not be geometry matched");
+});
+
+test("sourceFidelityFindings counts overlapping video and image fallbacks as one media slot", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "video.card", tag: "video", text: "", box: { x: 80, y: 120, w: 456, h: 256 }, style: {} },
+      { selector: "img.card-fallback", tag: "img", text: "", box: { x: 80, y: 120, w: 456, h: 256 }, style: {} },
+      { selector: "video.card-2", tag: "video", text: "", box: { x: 560, y: 120, w: 456, h: 256 }, style: {} },
+      { selector: "img.card-2-fallback", tag: "img", text: "", box: { x: 560, y: 120, w: 456, h: 256 }, style: {} },
+      { selector: "video.card-3", tag: "video", text: "", box: { x: 80, y: 420, w: 456, h: 256 }, style: {} },
+      { selector: "img.card-3-fallback", tag: "img", text: "", box: { x: 80, y: 420, w: 456, h: 256 }, style: {} },
+    ],
+  };
+  const generated = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      geomEl({
+        selector: "img.card",
+        tag: "img",
+        text: "",
+        rect: { left: 80, top: 120, right: 536, bottom: 376, width: 456, height: 256 },
+      }),
+      geomEl({
+        selector: "img.card-2",
+        tag: "img",
+        text: "",
+        rect: { left: 560, top: 120, right: 1016, bottom: 376, width: 456, height: 256 },
+      }),
+      geomEl({
+        selector: "img.card-3",
+        tag: "img",
+        text: "",
+        rect: { left: 80, top: 420, right: 536, bottom: 676, width: 456, height: 256 },
+      }),
+    ],
+  } as any;
+
+  const findings = sourceFidelityFindings(source as any, generated);
+  assert.ok(!findings.some((f) => f.id === "visual-source-image-count"), "fallback media at the same visual box is one slot");
 });
 
 test("sourceFidelityFindings reports large measured box deltas for matched source text", () => {
@@ -575,6 +733,42 @@ test("auditVisualArtifact is disabled by settings", async () => {
     },
   });
   assert.deepEqual(findings, []);
+});
+
+test("auditVisualArtifact limits Sharingan geometry QA to the captured source viewport", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-sharingan-source-viewport-"));
+  const htmlPath = join(root, "index.html");
+  const renderMapPath = join(root, "render-map.json");
+  writeFileSync(
+    htmlPath,
+    [
+      "<html><head><style>",
+      "html,body{margin:0;width:100%;height:900px;overflow:hidden;background:#111;color:#fff;font:16px/24px system-ui;}",
+      "main{height:900px;display:flex;align-items:center;justify-content:center;}",
+      "</style></head><body><main>Clone page content for Sharingan viewport QA.</main></body></html>",
+    ].join(""),
+  );
+  writeFileSync(
+    renderMapPath,
+    JSON.stringify({
+      viewport: { width: 1440, height: 900 },
+      document: { width: 1440, height: 900 },
+      elements: [
+        { selector: "main", tag: "main", text: "Clone page content for Sharingan viewport QA.", box: { x: 0, y: 0, w: 1440, h: 900 }, style: {} },
+      ],
+    }),
+  );
+
+  const findings = await auditVisualArtifact({
+    htmlPath,
+    projectRoot: root,
+    settings: { visualQaEnabled: true, agentCommand: "/usr/bin/true" } as any,
+    agentCommand: "/usr/bin/true",
+    isSharingan: true,
+    sharinganReference: { screenshotPath: join(root, "missing-source.png"), renderMapPath },
+  });
+
+  assert.ok(!findings.some((f) => f.id === "visual-below-fold-strip" && /mobile/i.test(f.message)), "desktop-only source capture should not trigger synthetic mobile repairs");
 });
 
 test("reviewScreenshotWithAgent reports when screenshot capture never happened", async () => {

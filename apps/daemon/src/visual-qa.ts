@@ -108,6 +108,8 @@ export interface GeometryElement {
   scrollHeight: number;
   clientWidth: number;
   clientHeight: number;
+  directTextLength?: number;
+  childElementCount?: number;
   /** Computed-style subset (color/type/spacing) read in the browser eval, for the computed-style detector. */
   style?: ComputedStyle;
 }
@@ -260,7 +262,7 @@ function rectSnippet(el: GeometryElement): string {
   return `${el.selector} (${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)})`;
 }
 
-export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string, options: { strictTextLayout?: boolean } = {}): QualityFinding[] {
+export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string, options: { strictTextLayout?: boolean; sharinganSource?: SourceRenderMap | null } = {}): QualityFinding[] {
   const findings: QualityFinding[] = [];
   const viewport = snapshot.viewport;
   const doc = snapshot.document;
@@ -316,6 +318,8 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string, 
 
   const clippedText = snapshot.elements.find((el) => {
     if (!el.text.trim()) return false;
+    if ((el.directTextLength ?? el.text.trim().length) < 2 && (el.childElementCount ?? 0) > 0) return false;
+    if (isSourceEquivalentTextClip(el, snapshot, options.sharinganSource)) return false;
     const clipsX = (el.overflowX === "hidden" || el.overflowX === "clip") && el.scrollWidth > el.clientWidth + 2;
     const clipsY = (el.overflowY === "hidden" || el.overflowY === "clip") && el.scrollHeight > el.clientHeight + 2;
     return clipsX || clipsY;
@@ -333,14 +337,35 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string, 
   return findings;
 }
 
+function isSourceEquivalentTextClip(el: GeometryElement, snapshot: GeometrySnapshot, source: SourceRenderMap | null | undefined): boolean {
+  if (!source) return false;
+  const sourceViewport = sourceViewportFromRenderMap(source);
+  if (!sourceViewport || Math.abs(sourceViewport.width - snapshot.viewport.width) > 8 || Math.abs(sourceViewport.height - snapshot.viewport.height) > 8) return false;
+  const text = normalizeText(el.text);
+  if (text.length < 4) return false;
+  const generated = generatedBox(el);
+  const sourceElements = (source.elements ?? []).filter((candidate) => sourceVisibleBox(candidate, source));
+  return sourceElements.some((src) => {
+    if (!isSourceTextSignal(src) || isAggregateSourceText(src, sourceElements)) return false;
+    if (normalizeText(src.text) !== text) return false;
+    const box = sourceBox(src);
+    if (!box) return false;
+    return Math.abs(box.x - generated.x) <= 8 && Math.abs(box.y - generated.y) <= 8 && Math.abs(box.w - generated.w) <= 16 && Math.abs(box.h - generated.h) <= 8;
+  });
+}
+
 function normalizeText(value: string | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").replace(/(?:\s*[_|▍█]){1,3}$/g, "").trim().toLowerCase();
+}
+
+function hasCssUrl(value: string | undefined): boolean {
+  return /url\(\s*['"]?[^'")]+['"]?\s*\)/i.test(value ?? "");
 }
 
 function isImageSlot(el: SourceRenderMapElement | GeometryElement): boolean {
   const tag = (el as { tag?: string }).tag;
   const style = (el as { style?: { backgroundImage?: string } }).style;
-  return tag === "img" || tag === "picture" || tag === "video" || Boolean(style?.backgroundImage && style.backgroundImage !== "none");
+  return tag === "img" || tag === "picture" || tag === "video" || hasCssUrl(style?.backgroundImage);
 }
 
 function sourceBox(el: SourceRenderMapElement): { x: number; y: number; w: number; h: number } | null {
@@ -355,11 +380,36 @@ function sourceVisibleBox(el: SourceRenderMapElement, source: SourceRenderMap): 
   const vw = source.viewport?.width ?? source.document?.width ?? 1440;
   const vh = source.viewport?.height ?? source.document?.height ?? 900;
   if (b.x + b.w <= 0 || b.x >= vw || b.y + b.h <= 0 || b.y >= vh) return null;
+  const visibleW = Math.max(0, Math.min(b.x + b.w, vw) - Math.max(b.x, 0));
+  const visibleH = Math.max(0, Math.min(b.y + b.h, vh) - Math.max(b.y, 0));
+  const visibleRatio = (visibleW * visibleH) / Math.max(1, b.w * b.h);
+  if ((b.x < 0 || b.x + b.w > vw) && b.w * b.h >= 4000 && visibleRatio < 0.18) return null;
   return b;
 }
 
 function generatedBox(el: GeometryElement): { x: number; y: number; w: number; h: number } {
   return { x: el.rect.left, y: el.rect.top, w: el.rect.width, h: el.rect.height };
+}
+
+function generatedVisibleBox(el: GeometryElement): { x: number; y: number; w: number; h: number } | null {
+  const box = generatedBox(el);
+  if (box.w <= 1 || box.h <= 1 || ![box.x, box.y, box.w, box.h].every(Number.isFinite)) return null;
+  return box;
+}
+
+function mediaSlotKey(box: { x: number; y: number; w: number; h: number }): string {
+  return [box.x, box.y, box.w, box.h].map((value) => String(Math.round(value))).join(":");
+}
+
+function countImageSlots<T>(elements: T[], boxFor: (el: T) => { x: number; y: number; w: number; h: number } | null): number {
+  const slots = new Set<string>();
+  for (const el of elements) {
+    if (!isImageSlot(el as SourceRenderMapElement | GeometryElement)) continue;
+    const box = boxFor(el);
+    if (!box) continue;
+    slots.add(mediaSlotKey(box));
+  }
+  return slots.size;
 }
 
 const SOURCE_TEXT_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "p", "a", "button", "span", "li", "label"]);
@@ -427,8 +477,8 @@ export function sourceFidelityFindings(source: SourceRenderMap, generated: Geome
   const generatedElements = generated.elements ?? [];
   const findings: QualityFinding[] = [];
 
-  const sourceImages = sourceElements.filter(isImageSlot).length;
-  const generatedImages = generatedElements.filter(isImageSlot).length;
+  const sourceImages = countImageSlots(sourceElements, (el) => sourceVisibleBox(el, source));
+  const generatedImages = countImageSlots(generatedElements, generatedVisibleBox);
   if (sourceImages > 0 && generatedImages < Math.max(1, Math.floor(sourceImages * 0.7))) {
     findings.push({
       severity: "P1",
@@ -733,6 +783,7 @@ async function collectGeometry(
   runComputed = true,
   sourceDesktopViewport?: { width: number; height: number },
   strictTextLayout = false,
+  sharinganSource?: SourceRenderMap | null,
 ): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[]; elements: CriticElement[]; desktopSnapshot?: GeometrySnapshot }> {
   const consoleMessages: VisualQaConsoleMessage[] = [];
   const executablePath = findChrome();
@@ -759,7 +810,7 @@ async function collectGeometry(
     const all: QualityFinding[] = [];
     let desktopSnapshot: GeometrySnapshot | undefined;
     const viewports = sourceDesktopViewport
-      ? [{ label: "desktop", ...sourceDesktopViewport }, DEFAULT_VIEWPORTS[1]]
+      ? [{ label: "desktop", ...sourceDesktopViewport }]
       : DEFAULT_VIEWPORTS;
     for (const viewport of viewports) {
       const page = await browser.newPage();
@@ -870,6 +921,12 @@ async function collectGeometry(
               parseFloat(styles.borderBottomWidth) || 0,
               parseFloat(styles.borderLeftWidth) || 0,
             );
+            const directText = Array.from<any>(el.childNodes)
+              .filter((node: any) => node.nodeType === 3)
+              .map((node: any) => node.textContent ?? "")
+              .join(" ")
+              .replace(/\s+/g, " ")
+              .trim();
             return {
               selector: selectorFor(el),
               tag: el.tagName.toLowerCase(),
@@ -889,6 +946,8 @@ async function collectGeometry(
               scrollHeight: el.scrollHeight,
               clientWidth: el.clientWidth,
               clientHeight: el.clientHeight,
+              directTextLength: directText.length,
+              childElementCount: el.childElementCount,
               // Computed-style subset for the pure detector (colors normalized to rgb by the browser;
               // lengths resolved to px). Optional fields JSON-drop when absent.
               style: {
@@ -979,7 +1038,7 @@ async function collectGeometry(
           elements,
         };
       }));
-      all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label, { strictTextLayout }));
+      all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label, { strictTextLayout, sharinganSource }));
       if (viewport.label === "desktop") {
         desktopSnapshot = snapshot as GeometrySnapshot;
         const desktopElements = desktopSnapshot.elements ?? [];
@@ -1157,6 +1216,7 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
     shouldRunComputedDetector(input),
     sourceViewportFromRenderMap(sourceMap),
     Boolean(input.isSharingan),
+    sourceMap,
   );
   const sourceFindings = sourceMap && geometry.desktopSnapshot ? sourceFidelityFindings(sourceMap, geometry.desktopSnapshot) : [];
   const screenshotFindings = input.isSharingan
