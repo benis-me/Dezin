@@ -516,12 +516,13 @@ function sourceScaffold() {
     })),
   };
 
-  mkdirSync("src", { recursive: true });
+  const scaffoldDir = join(".sharingan", "source-scaffold");
+  mkdirSync(scaffoldDir, { recursive: true });
   writeFileSync(
-    join("src", "App.jsx"),
-    `// SHARINGAN SOURCE SCAFFOLD - CANONICAL REPLAY DATA.
-// Do not replace this with hand-authored semantic components during the first build pass.
-// Keep SOURCE.boxes, SOURCE.images, SOURCE.vectors, and SOURCE.texts rendering one-for-one unless visual QA names a local patch.
+    join(scaffoldDir, "App.jsx"),
+    `// SHARINGAN SOURCE SCAFFOLD - REFERENCE ONLY.
+// This measured replay is source material for rebuilding the real Standard app in src/.
+// Do not submit this replay unchanged as the final Standard app.
 const SOURCE = ${JSON.stringify(data, null, 2)};
 
 function boxStyle(item) {
@@ -613,7 +614,7 @@ export default function App() {
 `,
   );
   writeFileSync(
-    join("src", "index.css"),
+    join(scaffoldDir, "index.css"),
     `:root {
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: rgb(245, 245, 245);
@@ -706,7 +707,7 @@ body {
 }
 `,
   );
-  console.log(`SOURCE SCAFFOLD wrote src/App.jsx and src/index.css from ${boxes.length} boxes, ${images.length} images, ${vectorSlots.length} vectors, ${adjustedTextSlots.length} text nodes.`);
+  console.log(`SOURCE SCAFFOLD wrote .sharingan/source-scaffold/App.jsx and .sharingan/source-scaffold/index.css from ${boxes.length} boxes, ${images.length} images, ${vectorSlots.length} vectors, ${adjustedTextSlots.length} text nodes.`);
 }
 
 const HELP = `dezin-probe — drive the Sharingan capture browser + read the capture (no curl/python needed).

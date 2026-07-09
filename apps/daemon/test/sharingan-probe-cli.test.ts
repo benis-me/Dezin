@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -92,7 +92,7 @@ test("probe source-summary prints component inventory, tokens, text, and assets 
   assert.match(out, /\/_assets\/card\.png/);
 });
 
-test("probe source-scaffold writes a measured React starter from render-map and assets", () => {
+test("probe source-scaffold writes a measured reference without replacing the Standard app", () => {
   const dir = mkdtempSync(join(tmpdir(), "probe-source-scaffold-"));
   const rel = writeProbeCli(dir, "http://127.0.0.1:9999/api/sharingan/x");
   assert.equal(rel, ".sharingan/probe.mjs");
@@ -129,12 +129,13 @@ test("probe source-scaffold writes a measured React starter from render-map and 
   }));
 
   const out = execFileSync("node", [probe, "source-scaffold"], { cwd: dir, encoding: "utf8" });
-  assert.match(out, /SOURCE SCAFFOLD wrote src\/App\.jsx and src\/index\.css/);
-  const app = readFileSync(join(dir, "src", "App.jsx"), "utf8");
-  const css = readFileSync(join(dir, "src", "index.css"), "utf8");
-  assert.match(app, /SHARINGAN SOURCE SCAFFOLD - CANONICAL REPLAY DATA/);
+  assert.match(out, /SOURCE SCAFFOLD wrote \.sharingan\/source-scaffold\/App\.jsx and \.sharingan\/source-scaffold\/index\.css/);
+  assert.equal(existsSync(join(dir, "src", "App.jsx")), false, "source-scaffold must not replace the Standard app entrypoint");
+  const app = readFileSync(join(dir, ".sharingan", "source-scaffold", "App.jsx"), "utf8");
+  const css = readFileSync(join(dir, ".sharingan", "source-scaffold", "index.css"), "utf8");
+  assert.match(app, /SHARINGAN SOURCE SCAFFOLD - REFERENCE ONLY/);
   assert.match(app, /const SOURCE =/);
-  assert.match(app, /Keep SOURCE\.boxes, SOURCE\.images, SOURCE\.vectors, and SOURCE\.texts rendering one-for-one/);
+  assert.match(app, /Do not submit this replay unchanged as the final Standard app/);
   assert.match(app, /SOURCE\.vectors/);
   assert.match(app, /Hello Source/);
   assert.match(app, /\/_assets\/logo\.svg/);
