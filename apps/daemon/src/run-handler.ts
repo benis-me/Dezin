@@ -916,6 +916,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     try {
       const ensureStandardDevServer = deps.ensureDevServer ?? ensureDevServer;
       const repairPolicy = standardRepairPolicy(settings, project.sharingan, body.maxRounds);
+      const visualQaEnabledForRun = settings.visualQaEnabled || project.sharingan;
+      const visualQaSettings = visualQaEnabledForRun === settings.visualQaEnabled ? settings : { ...settings, visualQaEnabled: true };
       const maxRepairRounds = repairPolicy.maxRounds;
       const turnHistory: Array<{ role: "user" | "assistant"; content: string }> = [...history];
       let round = 0;
@@ -1044,9 +1046,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         const staticFindings = suppress((staticSurface.trim() ? lintArtifact(staticSurface, { mode: "standard", provider: runProviderFamily, isSharingan: project.sharingan }) : []) as QualityFinding[]);
         if (staticFindings.length) sse({ type: "static-quality", round, findings: staticFindings });
         let visualFindings: QualityFinding[] = [];
-        if (settings.visualQaEnabled) {
+        if (visualQaEnabledForRun) {
           const screenshotUrl = `/api/projects/${project.id}/variants/${targetVariantId}/preview/.visual-qa/screenshot.png`;
-          sse({ ...visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl), runId: run.id });
+          sse({ ...visualQaStartPayload(round, visualQaSettings, runAgentCommand, runModel, screenshotUrl), runId: run.id });
           let renderUrl: string | undefined;
           if (!deps.visualQa) {
             try {
@@ -1063,7 +1065,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             }
           }
           if (!visualFindings.length) {
-            visualFindings = await runVisualQa(deps, join(dir, "index.html"), settings, runAgentCommand, runModel, visibleBrief, turnHistory, {
+            visualFindings = await runVisualQa(deps, join(dir, "index.html"), visualQaSettings, runAgentCommand, runModel, visibleBrief, turnHistory, {
               projectRoot: dir,
               renderUrl,
               directionSpec: chosenDirectionSpec,
@@ -1073,8 +1075,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           }
           visualFindings = suppress(markVisualReviewRound(withVisualScreenshotUrl(visualFindings, screenshotUrl), round));
           visualReviewHistory = [...visualReviewHistory, ...visualFindings];
-          sse({ type: "visual-qa", runId: run.id, round, enabled: settings.visualQaEnabled, findings: visualFindings });
-          queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
+          sse({ type: "visual-qa", runId: run.id, round, enabled: visualQaEnabledForRun, findings: visualFindings });
+          queueVisualReviewRecord(round, visualQaEnabledForRun, visualFindings, screenshotUrl);
         }
         findings = [...staticFindings, ...visualFindings];
         score = floorScore(findings);
@@ -1169,7 +1171,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       // Design review was ON but never actually judged (headless render/screenshot failed every
       // round) — don't let the run read as a clean "reviewed" pass; the floor (anti-slop) passed,
       // the ceiling simply didn't run, and the user must know.
-      const designReviewSkipped = settings.visualQaEnabled && !producedDesignReview(visualReviewHistory);
+      const designReviewSkipped = visualQaEnabledForRun && !producedDesignReview(visualReviewHistory);
       const quality = `, quality ${score}/100`;
       const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
       const reviewNote = designReviewSkipped

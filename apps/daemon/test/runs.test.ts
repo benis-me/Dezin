@@ -1456,7 +1456,7 @@ console.log("updated src/App.jsx");
   );
 });
 
-test("Sharingan standard run reviews an existing scaffold even when the first agent turn makes no changes", async () => {
+test("Sharingan standard run reviews an existing scaffold even when the first agent turn makes no changes and visual QA is globally disabled", async () => {
   const calls: Array<{ message: string; isRepair?: boolean }> = [];
   const runner: AgentRunner = {
     id: "sharingan-existing-scaffold",
@@ -1472,7 +1472,7 @@ test("Sharingan standard run reviews an existing scaffold even when the first ag
   await withRunServer(
     runner,
     async ({ base, dataDir, store }) => {
-      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: true });
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
       const project = store.createProject({ name: "Clone", mode: "standard", sharingan: true });
       const dir = join(dataDir, "projects", project.id);
       mkdirSync(join(dir, "src"), { recursive: true });
