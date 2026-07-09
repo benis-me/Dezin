@@ -777,6 +777,25 @@ function checkCopyAudit(html: string): Finding[] {
   return out;
 }
 
+function stripSharinganReferenceScaffoldSections(html: string): string {
+  return html.replace(/\/\*\s*file:\s*\.sharingan\/source-scaffold\/(?:App\.jsx|index\.css)\s*\*\/[\s\S]*?(?=\n\s*\/\*\s*file:|$)/g, "\n");
+}
+
+function checkSharinganSourceReplayFinal(html: string): Finding[] {
+  const surface = stripSharinganReferenceScaffoldSections(html);
+  const hasSourceObject = /\bconst\s+SOURCE\s*=/.test(surface) && /\bSOURCE\.(?:boxes|images|vectors|texts)\b/.test(surface);
+  const hasReplayClasses = /sharingan-(?:root|stage)\b/.test(surface) || /\bsource-(?:box|image|vector|text)\b/.test(surface);
+  const hasReplayMaps = /\bSOURCE\.(?:boxes|images|vectors|texts)\.map\s*\(/.test(surface);
+  if (!hasSourceObject || (!hasReplayClasses && !hasReplayMaps)) return [];
+  return [{
+    severity: "P0",
+    id: "sharingan-source-replay-final",
+    message: "Sharingan SOURCE scaffold replay is being used as the final Standard app.",
+    fix: "Use .sharingan/source-scaffold only as reference, then implement the real Standard React source in src/.",
+    snippet: "const SOURCE",
+  }];
+}
+
 const SEVERITY_ORDER: Record<string, number> = { P0: 0, P1: 1, P2: 2 };
 
 /**
@@ -792,13 +811,18 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
   if (options.isSharingan) {
     // Clone mode: trust the source. Skip the entire anti-slop / taste / accessibility family —
     // faithfully reproducing a source's colors, fonts, contrast, and markers is 1:1, not a defect.
-    // Keep only lorem/filler, which signals the agent failed to reproduce the real copy.
-    return checkRegexList(html, FILLER_PATTERNS, {
-      severity: "P0",
-      id: "filler-copy",
-      message: "Filler/placeholder copy (lorem ipsum, 'feature one/two/three').",
-      fix: "Reproduce the real copy from the captured source instead of filler.",
-    }).sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9));
+    // Keep only hard reconstruction failures: filler copy and submitting the measured SOURCE
+    // reference replay unchanged instead of rebuilding the Standard project.
+    const findings: Finding[] = [
+      ...checkSharinganSourceReplayFinal(html),
+      ...checkRegexList(html, FILLER_PATTERNS, {
+        severity: "P0",
+        id: "filler-copy",
+        message: "Filler/placeholder copy (lorem ipsum, 'feature one/two/three').",
+        fix: "Reproduce the real copy from the captured source instead of filler.",
+      }),
+    ];
+    return findings.sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9));
   }
 
   const findings: Finding[] = [

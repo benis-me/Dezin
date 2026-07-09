@@ -125,7 +125,7 @@ function startPreviewPoller(file: string, onChange: (mtimeMs: number) => void): 
 }
 
 const STANDARD_LINT_EXTENSIONS = new Set([".css", ".html", ".js", ".jsx", ".ts", ".tsx"]);
-const STANDARD_LINT_SKIP_DIRS = new Set([".git", "dist", "node_modules", "version-worktrees"]);
+const STANDARD_LINT_SKIP_DIRS = new Set([".git", ".sharingan", "dist", "node_modules", "version-worktrees"]);
 
 async function collectStandardLintSurface(root: string, maxBytes = 2_000_000): Promise<string> {
   const chunks: string[] = [];

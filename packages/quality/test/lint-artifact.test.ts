@@ -259,6 +259,38 @@ test("lintArtifact in Sharingan mode skips the anti-slop/taste family but still 
   assert.ok(lintArtifact(lorem, { isSharingan: true }).some((f) => f.id === "filler-copy"), "clone mode STILL flags lorem filler");
 });
 
+test("lintArtifact in Sharingan mode rejects SOURCE scaffold replay as the final Standard app", () => {
+  const replay = `
+    // SHARINGAN SOURCE SCAFFOLD - REFERENCE ONLY.
+    const SOURCE = { boxes: [], images: [], vectors: [], texts: [] };
+    export default function App() {
+      return <main className="sharingan-root"><div className="sharingan-stage">{SOURCE.texts.map((item) => item.text)}</div></main>;
+    }
+  `;
+  const findings = lintArtifact(replay, { mode: "standard", isSharingan: true });
+  assert.ok(has(findings, "sharingan-source-replay-final"), "SOURCE replay scaffold cannot be accepted as final src");
+});
+
+test("lintArtifact in Sharingan mode allows SOURCE replay only inside the reference scaffold file", () => {
+  const referenceOnly = `
+    /* file: .sharingan/source-scaffold/App.jsx */
+    const SOURCE = { boxes: [], images: [], vectors: [], texts: [] };
+    export default function App() {
+      return <main className="sharingan-root"><div className="sharingan-stage">{SOURCE.texts.map((item) => item.text)}</div></main>;
+    }
+  `;
+  const copiedIntoSrc = `
+    ${referenceOnly}
+    /* file: src/App.jsx */
+    const SOURCE = { boxes: [], images: [], vectors: [], texts: [] };
+    export default function App() {
+      return <main className="sharingan-root"><div className="sharingan-stage">{SOURCE.texts.map((item) => item.text)}</div></main>;
+    }
+  `;
+  assert.ok(!has(lintArtifact(referenceOnly, { mode: "standard", isSharingan: true }), "sharingan-source-replay-final"));
+  assert.ok(has(lintArtifact(copiedIntoSrc, { mode: "standard", isSharingan: true }), "sharingan-source-replay-final"));
+});
+
 test("accent-overuse counts the bare --accent token, not --accent-fg / --accent-2", () => {
   const fg = `<body><div style="color:var(--accent-fg)">a</div><div style="border-color:var(--accent-fg)">b</div><div style="background:var(--accent-fg)">c</div><div style="outline-color:var(--accent-fg)">d</div></body>`;
   assert.ok(!has(lintArtifact(fg), "accent-overuse"), "4x var(--accent-fg) is not accent-overuse");
