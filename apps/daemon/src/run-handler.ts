@@ -58,7 +58,7 @@ import {
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import { ensureCaptured, capturedPageCount } from "./sharingan-handler.ts";
-import { buildSharinganContext } from "./sharingan-context.ts";
+import { buildSharinganContext, buildSharinganSystemPrompt } from "./sharingan-context.ts";
 import { writeProbeCli } from "./sharingan-probe-cli.ts";
 import { sharinganReviewReference } from "./sharingan-capture.ts";
 import { SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
@@ -211,6 +211,21 @@ function floorScore(findings: QualityFinding[]): number {
   return lintScore(findings.filter((f) => !f.id.startsWith("visual-improve") && f.id !== "visual-reviewed"));
 }
 
+export function standardRunPassed(findings: QualityFinding[], isSharingan: boolean | undefined): boolean {
+  if (findings.some((f) => f.severity === "P0")) return false;
+  if (!isSharingan) return true;
+  return !findings.some((f) => f.severity === "P1" && (f.id.startsWith("visual-source-") || f.id === "visual-source-screenshot-diff"));
+}
+
+export function standardRepairableDefects(findings: QualityFinding[], isSharingan: boolean | undefined): QualityFinding[] {
+  return findings.filter((f) => {
+    if (!AUTO_REPAIR_SEVERITIES.has(f.severity) || f.id.startsWith("visual-improve") || f.id === "visual-reviewed") return false;
+    if (!isSharingan) return true;
+    if (f.severity === "P0") return true;
+    return f.id.startsWith("visual-source-") || f.id === "visual-source-screenshot-diff";
+  });
+}
+
 /** Whether the critic actually ran and judged across the run (produced the visual-reviewed marker
  *  or any real finding) — as opposed to only render/capture failures. Lets us avoid reporting a
  *  clean "reviewed" pass when the ceiling never actually ran (e.g. headless render failed). */
@@ -225,6 +240,12 @@ function autoImproveMaxRounds(settings: Settings, override?: number): number {
   const raw = typeof override === "number" ? override : settings.autoImproveMaxRounds;
   const value = Number.isFinite(raw) ? Math.trunc(raw) : DEFAULT_AUTO_IMPROVE_MAX_ROUNDS;
   return Math.max(0, Math.min(20, value));
+}
+
+export function standardRepairPolicy(settings: Settings, isSharingan: boolean | undefined, override?: number): { enabled: boolean; maxRounds: number } {
+  const configuredMaxRounds = autoImproveMaxRounds(settings, override);
+  if (isSharingan) return { enabled: true, maxRounds: Math.max(3, configuredMaxRounds) };
+  return { enabled: settings.autoImproveEnabled, maxRounds: configuredMaxRounds };
 }
 
 function reviewerAgentCommand(settings: Settings, fallback: string): string {
@@ -569,27 +590,29 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const craftSlugs = Array.from(new Set([...(skill?.craft ?? []), ...(designSystem.craft?.applies ?? [])]));
   const craft = loadCraftSections(craftSlugs);
 
-  const systemPrompt = composeSystemPrompt({
-    designSystem,
-    // The whole catalog, for on-demand loading. A pinned project.skillId is
-    // surfaced first and flagged, but the agent still judges + reads on its own.
-    skills: skills().map((s) => ({
-      id: s.id,
-      name: s.name,
-      description: s.description,
-      triggers: s.triggers,
-      mode: s.mode,
-      libraries: s.libraries,
-      pinned: project.skillId ? s.id === project.skillId : false,
-    })),
-    skillsDir: defaultSkillsDir(),
-    userInstructions: settings.customInstructions || undefined,
-    craft: craft || undefined,
-    imageGen: Boolean(imageApiKey && imageBaseUrl),
-    mode: project.mode,
-    // Variance/motion/density inferred from the brief — bind the design to explicit targets.
-    dials: inferDials(body.brief.trim()),
-  });
+  const systemPrompt = project.sharingan
+    ? buildSharinganSystemPrompt()
+    : composeSystemPrompt({
+        designSystem,
+        // The whole catalog, for on-demand loading. A pinned project.skillId is
+        // surfaced first and flagged, but the agent still judges + reads on its own.
+        skills: skills().map((s) => ({
+          id: s.id,
+          name: s.name,
+          description: s.description,
+          triggers: s.triggers,
+          mode: s.mode,
+          libraries: s.libraries,
+          pinned: project.skillId ? s.id === project.skillId : false,
+        })),
+        skillsDir: defaultSkillsDir(),
+        userInstructions: settings.customInstructions || undefined,
+        craft: craft || undefined,
+        imageGen: Boolean(imageApiKey && imageBaseUrl),
+        mode: project.mode,
+        // Variance/motion/density inferred from the brief — bind the design to explicit targets.
+        dials: inferDials(body.brief.trim()),
+      });
 
   const brief = body.brief.trim();
   const moodboardRefs = normalizeProjectMoodboardRefs(body.moodboardRefs);
@@ -863,7 +886,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   if (project.mode === "standard") {
     try {
       const ensureStandardDevServer = deps.ensureDevServer ?? ensureDevServer;
-      const maxRepairRounds = autoImproveMaxRounds(settings, body.maxRounds);
+      const repairPolicy = standardRepairPolicy(settings, project.sharingan, body.maxRounds);
+      const maxRepairRounds = repairPolicy.maxRounds;
       const turnHistory: Array<{ role: "user" | "assistant"; content: string }> = [...history];
       let round = 0;
       let repairRounds = 0;
@@ -1022,7 +1046,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         }
         findings = [...staticFindings, ...visualFindings];
         score = floorScore(findings);
-        passed = !findings.some((f) => f.severity === "P0");
+        passed = standardRunPassed(findings, project.sharingan);
         if (commitHash) versions.push({ score, commitHash, findings, passed });
         store.updateRun(run.id, {
           commitHash,
@@ -1040,11 +1064,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         // never trigger a round (AUTO_REPAIR_SEVERITIES).
         if (afterTree && convergenceTrees.has(afterTree)) break;
         if (afterTree) convergenceTrees.add(afterTree);
-        if (!settings.autoImproveEnabled || repairRounds >= maxRepairRounds) break;
+        if (!repairPolicy.enabled || repairRounds >= maxRepairRounds) break;
 
-        const defects = findings.filter(
-          (f) => AUTO_REPAIR_SEVERITIES.has(f.severity) && !f.id.startsWith("visual-improve") && f.id !== "visual-reviewed",
-        );
+        const defects = standardRepairableDefects(findings, project.sharingan);
         const improvements = findings.filter((f) => f.id.startsWith("visual-improve"));
         // Give-up guard: a defect the critic keeps re-raising unchanged is one the model can't fix
         // — record it as stuck (surfaced to the user) and stop retrying it so the loop doesn't spin.

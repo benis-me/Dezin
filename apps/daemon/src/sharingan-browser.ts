@@ -26,6 +26,10 @@ export interface StyleTokens { colors: string[]; fontFamilies: string[]; fontSiz
 export interface RenderMapElement {
   selector: string;
   tag: string;
+  src?: string;
+  currentSrc?: string;
+  poster?: string;
+  svg?: string;
   text: string;
   box: { x: number; y: number; w: number; h: number };
   style: {
@@ -311,6 +315,31 @@ export class SharinganSession {
         const suffix = cls.length ? `.${cls.map(escapeCss).join(".")}` : "";
         return `${el.tagName.toLowerCase()}${suffix}`;
       };
+      const abs = (u: string): string | undefined => {
+        try {
+          return u ? new win.URL(u, win.location.href).href : undefined;
+        } catch {
+          return undefined;
+        }
+      };
+      const safeSvg = (el: any): string | undefined => {
+        try {
+          const clone = el.cloneNode(true) as any;
+          for (const node of Array.from(clone.querySelectorAll("script,foreignObject"))) (node as any).remove();
+          const all = [clone, ...Array.from(clone.querySelectorAll("*"))] as any[];
+          for (const node of all) {
+            for (const attr of Array.from(node.attributes || [])) {
+              const name = String((attr as any).name || "");
+              const value = String((attr as any).value || "");
+              if (/^on/i.test(name) || (/href$/i.test(name) && /^\s*javascript:/i.test(value))) node.removeAttribute(name);
+            }
+          }
+          const html = String(clone.outerHTML || "");
+          return html.length > 0 && html.length <= 80_000 ? html : undefined;
+        } catch {
+          return undefined;
+        }
+      };
       const root = doc.documentElement;
       const body = doc.body;
       const elements: any[] = Array.from<any>(body ? [body, ...Array.from(body.querySelectorAll("*"))] : [])
@@ -318,9 +347,10 @@ export class SharinganSession {
           const s = win.getComputedStyle(el);
           const r = el.getBoundingClientRect();
           if (s.display === "none" || s.visibility === "hidden" || r.width <= 0 || r.height <= 0) return null;
-          return {
+          const tag = el.tagName.toLowerCase();
+          const node: any = {
             selector: selectorFor(el),
-            tag: el.tagName.toLowerCase(),
+            tag,
             text: (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120),
             box: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
             style: {
@@ -342,6 +372,18 @@ export class SharinganSession {
               margin: s.margin,
             },
           };
+          if (tag === "img") {
+            node.src = abs(el.getAttribute("src") || "");
+            node.currentSrc = abs(el.currentSrc || el.src || "");
+          } else if (tag === "video") {
+            node.src = abs(el.currentSrc || el.src || "");
+            node.poster = abs(el.getAttribute("poster") || "");
+          } else if (tag === "source") {
+            node.src = abs(el.getAttribute("src") || "");
+          } else if (tag === "svg" && r.width <= 420 && r.height <= 320) {
+            node.svg = safeSvg(el);
+          }
+          return node;
         })
         .filter((el: any) => el !== null)
         .slice(0, max);

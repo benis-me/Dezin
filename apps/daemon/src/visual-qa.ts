@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { unzlibSync } from "fflate";
 import puppeteer from "puppeteer-core";
 import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
 import { detectComputedFindings, markCorroboration, type ComputedContext, type ComputedElement as QualityComputedElement, type ComputedStyle } from "../../../packages/quality/src/index.ts";
@@ -332,7 +333,7 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string):
 }
 
 function normalizeText(value: string | undefined): string {
-  return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  return (value ?? "").replace(/\s+/g, " ").replace(/(?:\s*[_|▍█]){1,3}$/g, "").trim().toLowerCase();
 }
 
 function isImageSlot(el: SourceRenderMapElement | GeometryElement): boolean {
@@ -344,6 +345,15 @@ function isImageSlot(el: SourceRenderMapElement | GeometryElement): boolean {
 function sourceBox(el: SourceRenderMapElement): { x: number; y: number; w: number; h: number } | null {
   const b = el.box;
   if (!b || ![b.x, b.y, b.w, b.h].every(Number.isFinite)) return null;
+  return b;
+}
+
+function sourceVisibleBox(el: SourceRenderMapElement, source: SourceRenderMap): { x: number; y: number; w: number; h: number } | null {
+  const b = sourceBox(el);
+  if (!b || b.w <= 1 || b.h <= 1) return null;
+  const vw = source.viewport?.width ?? source.document?.width ?? 1440;
+  const vh = source.viewport?.height ?? source.document?.height ?? 900;
+  if (b.x + b.w <= 0 || b.x >= vw || b.y + b.h <= 0 || b.y >= vh) return null;
   return b;
 }
 
@@ -360,6 +370,31 @@ function isSourceTextSignal(el: SourceRenderMapElement): boolean {
   return text.length <= 48 && !["body", "main", "section", "article", "header", "footer", "nav"].includes(el.tag);
 }
 
+function centerInsideBox(inner: { x: number; y: number; w: number; h: number }, outer: { x: number; y: number; w: number; h: number }): boolean {
+  const cx = inner.x + inner.w / 2;
+  const cy = inner.y + inner.h / 2;
+  return cx >= outer.x && cx <= outer.x + outer.w && cy >= outer.y && cy <= outer.y + outer.h;
+}
+
+function isAggregateSourceText(el: SourceRenderMapElement, sourceElements: SourceRenderMapElement[]): boolean {
+  const text = normalizeText(el.text);
+  const box = sourceBox(el);
+  if (!box) return false;
+  let contained = 0;
+  for (const candidate of sourceElements) {
+    if (candidate === el) continue;
+    const childText = normalizeText(candidate.text);
+    const childBox = sourceBox(candidate);
+    if (childText.length < 2 || !childBox || !text.includes(childText)) continue;
+    if (!centerInsideBox(childBox, box)) continue;
+    if (childBox.w * childBox.h > box.w * box.h * 0.75) continue;
+    if (childText === text) return true;
+    contained += 1;
+    if (contained >= 2) return true;
+  }
+  return false;
+}
+
 function findGeneratedTextMatch(src: SourceRenderMapElement, generatedElements: GeometryElement[]): GeometryElement | undefined {
   const text = normalizeText(src.text);
   const srcBox = sourceBox(src);
@@ -372,18 +407,22 @@ function findGeneratedTextMatch(src: SourceRenderMapElement, generatedElements: 
     if (candidate !== text && candidate.length > Math.max(text.length * 2, text.length + 40)) continue;
     const genArea = Math.max(1, el.rect.width * el.rect.height);
     const areaPenalty = Math.min(100, Math.abs(Math.log2(genArea / srcArea)) * 20);
+    const distancePenalty = srcBox
+      ? Math.min(200, (Math.abs(el.rect.left - srcBox.x) + Math.abs(el.rect.top - srcBox.y)) * 0.25)
+      : 0;
     const score =
       (el.tag === src.tag ? 0 : 30) +
       (candidate === text ? 0 : 20) +
       Math.abs(candidate.length - text.length) +
-      areaPenalty;
+      areaPenalty +
+      distancePenalty;
     if (!best || score < best.score) best = { el, score };
   }
   return best?.el;
 }
 
 export function sourceFidelityFindings(source: SourceRenderMap, generated: GeometrySnapshot): QualityFinding[] {
-  const sourceElements = (source.elements ?? []).filter((el) => sourceBox(el));
+  const sourceElements = (source.elements ?? []).filter((el) => sourceVisibleBox(el, source));
   const generatedElements = generated.elements ?? [];
   const findings: QualityFinding[] = [];
 
@@ -391,7 +430,7 @@ export function sourceFidelityFindings(source: SourceRenderMap, generated: Geome
   const generatedImages = generatedElements.filter(isImageSlot).length;
   if (sourceImages > 0 && generatedImages < Math.max(1, Math.floor(sourceImages * 0.7))) {
     findings.push({
-      severity: "P2",
+      severity: "P1",
       id: "visual-source-image-count",
       message: `Sharingan source has ${sourceImages} visible image/background slot${sourceImages === 1 ? "" : "s"}, but the generated render exposes ${generatedImages}.`,
       fix: "Add the missing source image/background slots using the captured /_assets paths, preserving their measured sizes and crops from render-map.json.",
@@ -399,23 +438,23 @@ export function sourceFidelityFindings(source: SourceRenderMap, generated: Geome
   }
 
   const generatedText = normalizeText(generatedElements.map((el) => el.text).join(" "));
-  const sourceText = sourceElements
-    .filter(isSourceTextSignal)
+  const sourceTextElements = sourceElements.filter((el) => isSourceTextSignal(el) && !isAggregateSourceText(el, sourceElements));
+  const sourceText = sourceTextElements
     .map((el) => ({ raw: (el.text ?? "").replace(/\s+/g, " ").trim(), normalized: normalizeText(el.text) }))
     .filter((text) => text.normalized.length >= 4);
   const missingText = sourceText.find((text) => !generatedText.includes(text.normalized));
   if (missingText) {
     findings.push({
-      severity: "P2",
+      severity: "P1",
       id: "visual-source-text-missing",
       message: `Sharingan source text is missing from the generated render: "${missingText.raw.slice(0, 80)}".`,
       fix: "Restore this exact source text in the matching region; do not replace it with generic marketing copy.",
     });
   }
 
-  for (const src of sourceElements) {
+  for (const src of sourceTextElements) {
     const text = normalizeText(src.text);
-    if (text.length < 4 || !isSourceTextSignal(src)) continue;
+    if (text.length < 4) continue;
     const gen = findGeneratedTextMatch(src, generatedElements);
     if (!gen) continue;
     const a = sourceBox(src)!;
@@ -426,7 +465,7 @@ export function sourceFidelityFindings(source: SourceRenderMap, generated: Geome
     const dh = Math.abs(a.h - b.h);
     if (dx > 48 || dy > 48 || dw > 96 || dh > 48) {
       findings.push({
-        severity: "P2",
+        severity: "P1",
         id: "visual-source-box-delta",
         selector: gen.selector,
         message: `Sharingan source element "${src.text?.slice(0, 60) ?? src.selector}" is measured at ${a.x},${a.y} ${a.w}x${a.h}, but the generated match is at ${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.w)}x${Math.round(b.h)}.`,
@@ -448,6 +487,140 @@ function readSourceRenderMap(path?: string): SourceRenderMap | null {
   } catch {
     return null;
   }
+}
+
+interface DecodedPng {
+  width: number;
+  height: number;
+  rgba: Uint8Array;
+}
+
+function paeth(left: number, up: number, upLeft: number): number {
+  const p = left + up - upLeft;
+  const pa = Math.abs(p - left);
+  const pb = Math.abs(p - up);
+  const pc = Math.abs(p - upLeft);
+  if (pa <= pb && pa <= pc) return left;
+  return pb <= pc ? up : upLeft;
+}
+
+function decodePng(path: string): DecodedPng | null {
+  if (!existsSync(path)) return null;
+  const data = readFileSync(path);
+  const signature = "89504e470d0a1a0a";
+  if (data.subarray(0, 8).toString("hex") !== signature) return null;
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  const idat: Buffer[] = [];
+  while (offset + 12 <= data.length) {
+    const length = data.readUInt32BE(offset);
+    const type = data.subarray(offset + 4, offset + 8).toString("ascii");
+    const chunk = data.subarray(offset + 8, offset + 8 + length);
+    offset += 12 + length;
+    if (type === "IHDR") {
+      width = chunk.readUInt32BE(0);
+      height = chunk.readUInt32BE(4);
+      bitDepth = chunk[8] ?? 0;
+      colorType = chunk[9] ?? 0;
+    } else if (type === "IDAT") {
+      idat.push(Buffer.from(chunk));
+    } else if (type === "IEND") {
+      break;
+    }
+  }
+  if (!width || !height || bitDepth !== 8 || (colorType !== 6 && colorType !== 2) || !idat.length) return null;
+  const bytesPerPixel = colorType === 6 ? 4 : 3;
+  const stride = width * bytesPerPixel;
+  const inflated = Buffer.from(unzlibSync(Buffer.concat(idat)));
+  const rgba = new Uint8Array(width * height * 4);
+  let srcOffset = 0;
+  const prev = Buffer.alloc(stride);
+  const row = Buffer.alloc(stride);
+  for (let y = 0; y < height; y++) {
+    const filter = inflated[srcOffset++];
+    const raw = inflated.subarray(srcOffset, srcOffset + stride);
+    srcOffset += stride;
+    for (let x = 0; x < stride; x++) {
+      const left = x >= bytesPerPixel ? row[x - bytesPerPixel]! : 0;
+      const up = prev[x] ?? 0;
+      const upLeft = x >= bytesPerPixel ? prev[x - bytesPerPixel]! : 0;
+      const value = raw[x] ?? 0;
+      if (filter === 0) row[x] = value;
+      else if (filter === 1) row[x] = (value + left) & 0xff;
+      else if (filter === 2) row[x] = (value + up) & 0xff;
+      else if (filter === 3) row[x] = (value + Math.floor((left + up) / 2)) & 0xff;
+      else if (filter === 4) row[x] = (value + paeth(left, up, upLeft)) & 0xff;
+      else return null;
+    }
+    for (let x = 0; x < width; x++) {
+      const src = x * bytesPerPixel;
+      const dst = (y * width + x) * 4;
+      rgba[dst] = row[src]!;
+      rgba[dst + 1] = row[src + 1]!;
+      rgba[dst + 2] = row[src + 2]!;
+      rgba[dst + 3] = colorType === 6 ? row[src + 3]! : 255;
+    }
+    row.copy(prev);
+  }
+  return { width, height, rgba };
+}
+
+export function sourceScreenshotDiffFindings(sourcePath?: string, generatedPath?: string): QualityFinding[] {
+  if (!sourcePath || !generatedPath) return [];
+  let source: DecodedPng | null;
+  let generated: DecodedPng | null;
+  try {
+    source = decodePng(sourcePath);
+    generated = decodePng(generatedPath);
+  } catch {
+    return [];
+  }
+  if (!source || !generated) return [];
+  const width = Math.min(source.width, generated.width);
+  const height = Math.min(source.height, generated.height);
+  if (width < 1 || height < 1) return [];
+  const targetSamples = 450_000;
+  const step = Math.max(1, Math.ceil(Math.sqrt((width * height) / targetSamples)));
+  let samples = 0;
+  let mean = 0;
+  let luma32 = 0;
+  let luma64 = 0;
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const si = (y * source.width + x) * 4;
+      const gi = (y * generated.width + x) * 4;
+      const sr = source.rgba[si] ?? 0;
+      const sg = source.rgba[si + 1] ?? 0;
+      const sb = source.rgba[si + 2] ?? 0;
+      const gr = generated.rgba[gi] ?? 0;
+      const gg = generated.rgba[gi + 1] ?? 0;
+      const gb = generated.rgba[gi + 2] ?? 0;
+      const diff = Math.abs(0.2126 * (sr - gr) + 0.7152 * (sg - gg) + 0.0722 * (sb - gb));
+      mean += diff;
+      if (diff >= 32) luma32 += 1;
+      if (diff >= 64) luma64 += 1;
+      samples += 1;
+    }
+  }
+  if (!samples) return [];
+  const meanDiff = mean / samples;
+  const pct32 = luma32 / samples;
+  const pct64 = luma64 / samples;
+  const sourceArea = source.width * source.height;
+  const generatedArea = generated.width * generated.height;
+  const sizeDrift = sourceArea > 0 ? Math.abs(sourceArea - generatedArea) / sourceArea : 0;
+  if (pct32 < 0.08 && pct64 < 0.03 && meanDiff < 18 && sizeDrift < 0.04) return [];
+  return [
+    {
+      severity: "P1",
+      id: "visual-source-screenshot-diff",
+      message: `Sharingan screenshot regression is too high: ${Math.round(pct32 * 1000) / 10}% of sampled pixels differ by >=32 luma, ${Math.round(pct64 * 1000) / 10}% differ by >=64, mean luma delta ${Math.round(meanDiff * 10) / 10}.`,
+      fix: "Run a source-vs-result visual regression repair pass against the source screenshot: correct global layout first (viewport, top offsets, major section sizes), then patch the largest local regions without adding new content.",
+    },
+  ];
 }
 
 function pushConsoleMessage(messages: VisualQaConsoleMessage[], message: VisualQaConsoleMessage): void {
@@ -983,9 +1156,12 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
     sourceViewportFromRenderMap(sourceMap),
   );
   const sourceFindings = sourceMap && geometry.desktopSnapshot ? sourceFidelityFindings(sourceMap, geometry.desktopSnapshot) : [];
+  const screenshotFindings = input.isSharingan
+    ? sourceScreenshotDiffFindings(input.sharinganReference?.screenshotPath, screenshotPath)
+    : [];
   // Blind dual-assessment: the agent critic never sees the deterministic findings; we cross-check
   // AFTER, tagging elements both lanes independently flagged as corroborated (higher confidence).
   const ai = await reviewScreenshotWithAgent({ ...input, consoleMessages: geometry.consoleMessages, criticElements: geometry.elements }, screenshotPath);
   const synthesized = markCorroboration(geometry.findings, ai);
-  return [...sourceFindings, ...synthesized.deterministic, ...synthesized.agent];
+  return [...sourceFindings, ...screenshotFindings, ...synthesized.deterministic, ...synthesized.agent];
 }

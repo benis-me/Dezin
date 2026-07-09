@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, shouldRunComputedDetector, sourceFidelityFindings, sourceViewportFromRenderMap, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
+import { zlibSync } from "fflate";
+import { agentReviewPrompt, auditVisualArtifact, boundComputedFindings, findingsFromGeometry, parseVisualReview, reviewScreenshotWithAgent, reviewWithRetry, shouldRunComputedDetector, sourceFidelityFindings, sourceScreenshotDiffFindings, sourceViewportFromRenderMap, toComputedElements, type GeometryElement, type VisualQaInput } from "../src/visual-qa.ts";
 import type { QualityFinding } from "../../../packages/core/src/index.ts";
 
 function geomEl(overrides: Partial<GeometryElement> = {}): GeometryElement {
@@ -21,6 +22,44 @@ function geomEl(overrides: Partial<GeometryElement> = {}): GeometryElement {
     clientHeight: 20,
     ...overrides,
   };
+}
+
+function crc32(buf: Buffer): number {
+  let c = 0xffffffff;
+  for (const b of buf) {
+    c ^= b;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBuf = Buffer.from(type, "ascii");
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
+  return Buffer.concat([len, typeBuf, data, crc]);
+}
+
+function rgbaPng(width: number, height: number, rgba: Buffer): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8; // bit depth
+  header[9] = 6; // rgba
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (width * 4 + 1);
+    raw[rowStart] = 0;
+    rgba.copy(raw, rowStart + 1, y * width * 4, (y + 1) * width * 4);
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", Buffer.from(zlibSync(raw))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
 }
 
 test("toComputedElements reshapes the geometry snapshot into pure computed-style elements", () => {
@@ -256,6 +295,7 @@ test("sourceFidelityFindings reports missing source text and image-slot count dr
       { selector: "h1.hero", tag: "h1", text: "Launch faster", box: { x: 80, y: 120, w: 520, h: 72 }, style: { fontSize: "64px", fontWeight: "700" } },
       { selector: "img.logo", tag: "img", text: "", box: { x: 80, y: 32, w: 120, h: 40 }, style: {} },
       { selector: ".hero-bg", tag: "div", text: "", box: { x: 0, y: 0, w: 1440, h: 420 }, style: { backgroundImage: "url(hero.png)" } },
+      { selector: ".offscreen-bg", tag: "div", text: "", box: { x: -2000, y: 0, w: 320, h: 180 }, style: { backgroundImage: "url(offscreen.png)" } },
     ],
   };
   const generated = {
@@ -267,7 +307,8 @@ test("sourceFidelityFindings reports missing source text and image-slot count dr
   } as any;
   const findings = sourceFidelityFindings(source as any, generated);
   assert.ok(findings.some((f) => f.id === "visual-source-text-missing" && /Launch faster/.test(f.message)));
-  assert.ok(findings.some((f) => f.id === "visual-source-image-count"));
+  assert.ok(findings.some((f) => f.id === "visual-source-image-count" && /source has 2 visible/.test(f.message)));
+  assert.ok(findings.every((f) => f.severity === "P1"), "source fidelity drift must gate Sharingan repair");
 });
 
 test("sourceFidelityFindings reports large measured box deltas for matched source text", () => {
@@ -288,7 +329,28 @@ test("sourceFidelityFindings reports large measured box deltas for matched sourc
   const findings = sourceFidelityFindings(source as any, generated);
   const box = findings.find((f) => f.id === "visual-source-box-delta");
   assert.ok(box, "large position/size drift becomes a measured source-fidelity finding");
+  assert.equal(box!.severity, "P1");
   assert.match(box!.fix, /x:80|y:120|520x72/);
+});
+
+test("sourceScreenshotDiffFindings reports large first-viewport pixel drift as a P1 Sharingan gate", () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-diff-"));
+  const sourcePath = join(root, "source.png");
+  const generatedPath = join(root, "generated.png");
+  const black = Buffer.alloc(4 * 4 * 4);
+  const white = Buffer.alloc(4 * 4 * 4);
+  for (let i = 0; i < black.length; i += 4) {
+    black[i] = 0; black[i + 1] = 0; black[i + 2] = 0; black[i + 3] = 255;
+    white[i] = 255; white[i + 1] = 255; white[i + 2] = 255; white[i + 3] = 255;
+  }
+  writeFileSync(sourcePath, rgbaPng(4, 4, black));
+  writeFileSync(generatedPath, rgbaPng(4, 4, white));
+
+  const findings = sourceScreenshotDiffFindings(sourcePath, generatedPath);
+  assert.equal(findings[0]?.id, "visual-source-screenshot-diff");
+  assert.equal(findings[0]?.severity, "P1");
+  assert.match(findings[0]?.message ?? "", /pixel|screenshot|source/i);
+  assert.match(findings[0]?.fix ?? "", /visual regression|source screenshot/i);
 });
 
 test("sourceFidelityFindings matches text to the specific generated element, not the root wrapper", () => {
@@ -309,6 +371,91 @@ test("sourceFidelityFindings matches text to the specific generated element, not
   } as any;
   const findings = sourceFidelityFindings(source as any, generated);
   assert.ok(!findings.some((f) => f.id === "visual-source-box-delta"), "root wrapper must not cause a false measured delta");
+});
+
+test("sourceFidelityFindings ignores aggregate container text when child text is present", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "header", tag: "div", text: "TapNow Home Workspace", box: { x: 0, y: 0, w: 1440, h: 64 }, style: {} },
+      { selector: "span.logo", tag: "span", text: "TapNow", box: { x: 80, y: 22, w: 64, h: 20 }, style: {} },
+      { selector: "a.home", tag: "a", text: "Home", box: { x: 600, y: 22, w: 48, h: 20 }, style: {} },
+      { selector: "a.workspace", tag: "a", text: "Workspace", box: { x: 670, y: 22, w: 96, h: 20 }, style: {} },
+    ],
+  };
+  const generated = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "span.logo", tag: "span", text: "TapNow", rect: { left: 80, top: 22, right: 144, bottom: 42, width: 64, height: 20 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 64, scrollHeight: 20, clientWidth: 64, clientHeight: 20 },
+      { selector: "a.home", tag: "a", text: "Home", rect: { left: 600, top: 22, right: 648, bottom: 42, width: 48, height: 20 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 48, scrollHeight: 20, clientWidth: 48, clientHeight: 20 },
+      { selector: "a.workspace", tag: "a", text: "Workspace", rect: { left: 670, top: 22, right: 766, bottom: 42, width: 96, height: 20 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 96, scrollHeight: 20, clientWidth: 96, clientHeight: 20 },
+    ],
+  } as any;
+  const findings = sourceFidelityFindings(source as any, generated);
+  assert.ok(!findings.some((f) => f.id === "visual-source-text-missing"), "aggregate parent text should not be required verbatim");
+  assert.ok(!findings.some((f) => f.id === "visual-source-box-delta"), "aggregate parent box should not be matched to a child");
+});
+
+test("sourceFidelityFindings ignores a same-text parent when a smaller child carries the text", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "div.logo-wrap", tag: "div", text: "TapNow", box: { x: 16, y: 0, w: 466, h: 64 }, style: {} },
+      { selector: "h2.logo", tag: "h2", text: "TapNow", box: { x: 84, y: 23, w: 62, h: 18 }, style: {} },
+    ],
+  };
+  const generated = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "h2.logo", tag: "h2", text: "TapNow", rect: { left: 84, top: 23, right: 146, bottom: 41, width: 62, height: 18 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 62, scrollHeight: 18, clientWidth: 62, clientHeight: 18 },
+    ],
+  } as any;
+  const findings = sourceFidelityFindings(source as any, generated);
+  assert.ok(!findings.some((f) => f.id === "visual-source-box-delta"), "same-text parent should not be matched instead of the child");
+});
+
+test("sourceFidelityFindings ignores trailing cursor markers in captured source text", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "textarea.prompt", tag: "textarea", text: "帮我记住我的创_", box: { x: 494, y: 418, w: 220, h: 20 }, style: {} },
+    ],
+  };
+  const generated = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: ".source-text", tag: "div", text: "帮我记住我的创", rect: { left: 494, top: 418, right: 714, bottom: 438, width: 220, height: 20 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 220, scrollHeight: 20, clientWidth: 220, clientHeight: 20 },
+    ],
+  } as any;
+  const findings = sourceFidelityFindings(source as any, generated);
+  assert.ok(!findings.some((f) => f.id === "visual-source-text-missing"), "cursor marker is not source content");
+});
+
+test("sourceFidelityFindings matches repeated source text by nearest measured geometry", () => {
+  const source = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: "span.card-a", tag: "span", text: "Untitled", box: { x: 536, y: 439, w: 44, h: 18 }, style: {} },
+      { selector: "span.card-b", tag: "span", text: "Untitled", box: { x: 733, y: 439, w: 44, h: 18 }, style: {} },
+    ],
+  };
+  const generated = {
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [
+      { selector: ".source-text-a", tag: "div", text: "Untitled", rect: { left: 536, top: 439, right: 580, bottom: 457, width: 44, height: 18 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 44, scrollHeight: 18, clientWidth: 44, clientHeight: 18 },
+      { selector: ".source-text-b", tag: "div", text: "Untitled", rect: { left: 733, top: 439, right: 777, bottom: 457, width: 44, height: 18 }, position: "static", overflowX: "visible", overflowY: "visible", scrollWidth: 44, scrollHeight: 18, clientWidth: 44, clientHeight: 18 },
+    ],
+  } as any;
+  const findings = sourceFidelityFindings(source as any, generated);
+  assert.ok(!findings.some((f) => f.id === "visual-source-box-delta"), "duplicate labels should match their nearest generated counterpart");
 });
 
 test("agentReviewPrompt has no source-fidelity section for a normal (non-Sharingan) build", () => {

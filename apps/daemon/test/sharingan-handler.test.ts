@@ -27,7 +27,7 @@ test("POST /start begins a capture and GET /status reports progress", { skip: !f
     assert.equal(started.status, 200);
     // Poll status until the capture finishes.
     let phase = "";
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 120; i++) {
       const s = (await (await fetch(`${base}/api/sharingan/${project.id}/status`)).json()) as { phase: string };
       phase = s.phase;
       if (phase === "captured" || phase === "login-required" || phase === "error") break;

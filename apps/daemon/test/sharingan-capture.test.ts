@@ -226,9 +226,11 @@ test("captureCurrentPage writes an asset inventory + per-node DOM styles", { ski
     const h1 = dom.find((n) => n.tag === "h1");
     assert.equal(h1?.style?.fontSize, "40px", "h1 carries its computed font size");
     const renderMap = JSON.parse(readFileSync(join(dir, page.renderMap!), "utf8")) as {
-      elements: Array<{ selector: string; tag: string }>;
+      elements: Array<{ selector: string; tag: string; currentSrc?: string }>;
     };
     assert.ok(renderMap.elements.some((n) => n.selector === '[data-dezin-id="hero-card"]'), "render map preserves data-dezin-id selectors");
+    const img = renderMap.elements.find((n) => n.tag === "img");
+    assert.ok(img?.currentSrc?.endsWith("/img/logo.png"), "render map carries the image URL used for local asset matching");
   } finally {
     await session.close();
     await new Promise<void>((r) => fixture.close(() => r()));
