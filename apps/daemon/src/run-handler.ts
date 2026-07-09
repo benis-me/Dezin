@@ -58,7 +58,7 @@ import {
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 import { ensureCaptured, capturedPageCount } from "./sharingan-handler.ts";
-import { buildSharinganContext } from "./sharingan-context.ts";
+import { buildSharinganContext, buildSharinganSystemPrompt } from "./sharingan-context.ts";
 import { writeProbeCli } from "./sharingan-probe-cli.ts";
 import { sharinganReviewReference } from "./sharingan-capture.ts";
 import { SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
@@ -174,9 +174,8 @@ interface RunBody {
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
 
 const DEFAULT_AUTO_IMPROVE_MAX_ROUNDS = 8;
-// Only real defects/slop (P0/P1) drive a repair round. Cosmetic P2 anti-slop nits alone must
-// NOT keep the loop grinding — that was the main cause of 8 rounds of no-op churn. Design
-// IMPROVEMENTS (also P2, id "visual-improve-*") drive a separate, bounded ceiling phase (below).
+// Normal Standard/Prototype runs only auto-repair real defects/slop. Sharingan overrides this:
+// every source-fidelity finding is required because reconstruction quality is the product.
 const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"]);
 
 /** Max bounded design-improvement (ceiling) rounds once the floor (defects/slop) is clean. */
@@ -211,6 +210,31 @@ function floorScore(findings: QualityFinding[]): number {
   return lintScore(findings.filter((f) => !f.id.startsWith("visual-improve") && f.id !== "visual-reviewed"));
 }
 
+const SHARINGAN_LAYOUT_DEFECT_IDS = new Set([
+  "visual-horizontal-overflow",
+  "visual-below-fold-strip",
+  "visual-fixed-offscreen",
+  "visual-text-clipped",
+]);
+
+function isSharinganBlockingFinding(finding: QualityFinding): boolean {
+  return finding.id !== "visual-reviewed";
+}
+
+export function standardRunPassed(findings: QualityFinding[], isSharingan: boolean | undefined): boolean {
+  if (isSharingan) return !findings.some(isSharinganBlockingFinding);
+  if (findings.some((f) => f.severity === "P0")) return false;
+  return true;
+}
+
+export function standardRepairableDefects(findings: QualityFinding[], isSharingan: boolean | undefined): QualityFinding[] {
+  if (isSharingan) return findings.filter(isSharinganBlockingFinding);
+  return findings.filter((f) => {
+    if (!AUTO_REPAIR_SEVERITIES.has(f.severity) || f.id.startsWith("visual-improve") || f.id === "visual-reviewed") return false;
+    return true;
+  });
+}
+
 /** Whether the critic actually ran and judged across the run (produced the visual-reviewed marker
  *  or any real finding) — as opposed to only render/capture failures. Lets us avoid reporting a
  *  clean "reviewed" pass when the ceiling never actually ran (e.g. headless render failed). */
@@ -225,6 +249,12 @@ function autoImproveMaxRounds(settings: Settings, override?: number): number {
   const raw = typeof override === "number" ? override : settings.autoImproveMaxRounds;
   const value = Number.isFinite(raw) ? Math.trunc(raw) : DEFAULT_AUTO_IMPROVE_MAX_ROUNDS;
   return Math.max(0, Math.min(20, value));
+}
+
+export function standardRepairPolicy(settings: Settings, isSharingan: boolean | undefined, override?: number): { enabled: boolean; maxRounds: number } {
+  const configuredMaxRounds = autoImproveMaxRounds(settings, override);
+  if (isSharingan) return { enabled: true, maxRounds: Math.max(3, configuredMaxRounds) };
+  return { enabled: settings.autoImproveEnabled, maxRounds: configuredMaxRounds };
 }
 
 function reviewerAgentCommand(settings: Settings, fallback: string): string {
@@ -300,17 +330,43 @@ function visualQaStartPayload(
   };
 }
 
-function standardRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {
-  const lintBlock = renderFindingsForAgent(findings);
+function hasSourceFidelityFindings(findings: QualityFinding[]): boolean {
+  return findings.some((finding) => finding.id.startsWith("visual-source-"));
+}
+
+function hasMeasuredLayoutFindings(findings: QualityFinding[]): boolean {
+  return findings.some((finding) => SHARINGAN_LAYOUT_DEFECT_IDS.has(finding.id));
+}
+
+export function standardRepairPrompt(
+  findings: QualityFinding[],
+  round: number,
+  maxRounds: number,
+  score: number,
+  intent?: string,
+  options: { isSharingan?: boolean } = {},
+): string | null {
+  const lintBlock = renderFindingsForAgent(findings, { unranked: options.isSharingan });
   if (!lintBlock) return null;
+  const sourceFidelityGuard = hasSourceFidelityFindings(findings)
+    ? "Source-fidelity repair mode: visual-source-* findings are source-vs-result measurements. Apply measured local patches to the named element/region only. Do not redesign or re-layout the whole page to chase one delta; preserve the captured source hierarchy, text, assets, and palette."
+    : "";
+  const measuredLayoutGuard = hasMeasuredLayoutFindings(findings)
+    ? "Measured layout repair mode: fix only the named overflow, clipping, or offscreen layout defects. Do not add new content, infer missing sections, or reinterpret the page structure."
+    : "";
+  const taskLine = options.isSharingan
+    ? "You are editing the existing Standard-mode Vite project in this directory. Sharingan reconstruction mode: fix every finding below as a required source-fidelity issue. Complete the full list before stopping."
+    : "You are editing the existing Standard-mode Vite project in this directory. Apply the findings below — defects are bugs to fix; improvements are concrete design upgrades to make.";
   return [
     `Automatic quality repair round ${round}/${maxRounds}.`,
-    "You are editing the existing Standard-mode Vite project in this directory. Apply the findings below — defects are bugs to fix; improvements are concrete design upgrades to make.",
+    taskLine,
     intent ? `Stay true to the original request and the chosen direction — do not drift:\n${intent}` : "Preserve the user's concept and the current visual direction.",
     "Do NOT undo or oscillate on earlier fixes; if a finding is ambiguous, make the choice a senior designer would and keep it. Do not ask a follow-up question. Edit the actual project files, then stop.",
+    sourceFidelityGuard,
+    measuredLayoutGuard,
     `Current quality score: ${score}/100.`,
     lintBlock,
-  ].join("\n\n");
+  ].filter(Boolean).join("\n\n");
 }
 
 function prototypeRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {
@@ -546,9 +602,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   }
 
   // Resolve the active design system (the project's, else the settings default).
+  // Sharingan reconstructs from captured source pixels/assets, so it must not inherit
+  // a project/default design system or brand craft guidance.
   const registry = deps.designRegistry ?? defaultRegistry();
-  const designSystemId = project.designSystemId ?? settings.defaultDesignSystemId;
-  const designSystem = registry.get(designSystemId) ?? registry.default();
+  const designSystemId = project.sharingan ? undefined : (project.designSystemId ?? settings.defaultDesignSystemId);
+  const designSystem = designSystemId ? (registry.get(designSystemId) ?? registry.default()) : null;
 
   // Best-guess skill: an explicit project.skillId pins it; otherwise the brief's
   // top trigger match. This is NOT forced on the agent — it only seeds craft
@@ -558,30 +616,32 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const skill = project.skillId ? findSkill(skills(), project.skillId) : selectSkill(body.brief.trim(), skills());
 
   // Craft = the union of the best-guess skill's required sections and the brand's applied ones.
-  const craftSlugs = Array.from(new Set([...(skill?.craft ?? []), ...(designSystem.craft?.applies ?? [])]));
-  const craft = loadCraftSections(craftSlugs);
+  const craftSlugs = project.sharingan ? [] : Array.from(new Set([...(skill?.craft ?? []), ...(designSystem?.craft?.applies ?? [])]));
+  const craft = project.sharingan ? null : loadCraftSections(craftSlugs);
 
-  const systemPrompt = composeSystemPrompt({
-    designSystem,
-    // The whole catalog, for on-demand loading. A pinned project.skillId is
-    // surfaced first and flagged, but the agent still judges + reads on its own.
-    skills: skills().map((s) => ({
-      id: s.id,
-      name: s.name,
-      description: s.description,
-      triggers: s.triggers,
-      mode: s.mode,
-      libraries: s.libraries,
-      pinned: project.skillId ? s.id === project.skillId : false,
-    })),
-    skillsDir: defaultSkillsDir(),
-    userInstructions: settings.customInstructions || undefined,
-    craft: craft || undefined,
-    imageGen: Boolean(imageApiKey && imageBaseUrl),
-    mode: project.mode,
-    // Variance/motion/density inferred from the brief — bind the design to explicit targets.
-    dials: inferDials(body.brief.trim()),
-  });
+  const systemPrompt = project.sharingan
+    ? buildSharinganSystemPrompt()
+    : composeSystemPrompt({
+        designSystem: designSystem ?? registry.default(),
+        // The whole catalog, for on-demand loading. A pinned project.skillId is
+        // surfaced first and flagged, but the agent still judges + reads on its own.
+        skills: skills().map((s) => ({
+          id: s.id,
+          name: s.name,
+          description: s.description,
+          triggers: s.triggers,
+          mode: s.mode,
+          libraries: s.libraries,
+          pinned: project.skillId ? s.id === project.skillId : false,
+        })),
+        skillsDir: defaultSkillsDir(),
+        userInstructions: settings.customInstructions || undefined,
+        craft: craft || undefined,
+        imageGen: Boolean(imageApiKey && imageBaseUrl),
+        mode: project.mode,
+        // Variance/motion/density inferred from the brief — bind the design to explicit targets.
+        dials: inferDials(body.brief.trim()),
+      });
 
   const brief = body.brief.trim();
   const moodboardRefs = normalizeProjectMoodboardRefs(body.moodboardRefs);
@@ -672,7 +732,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       dir,
       brief: visibleBrief,
       skill: skill ? { id: skill.id, name: skill.name } : undefined,
-      designSystemName: designSystem.name,
+      designSystemName: (designSystem ?? registry.default()).name,
       hasUserReferences: moodboardContext.labels.length > 0 || effectContext.labels.length > 0,
       agentCommand: researchAgentCommand(settings, runAgentCommand),
       model: researchModel(settings, runModel),
@@ -855,7 +915,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   if (project.mode === "standard") {
     try {
       const ensureStandardDevServer = deps.ensureDevServer ?? ensureDevServer;
-      const maxRepairRounds = autoImproveMaxRounds(settings, body.maxRounds);
+      const repairPolicy = standardRepairPolicy(settings, project.sharingan, body.maxRounds);
+      const maxRepairRounds = repairPolicy.maxRounds;
       const turnHistory: Array<{ role: "user" | "assistant"; content: string }> = [...history];
       let round = 0;
       let repairRounds = 0;
@@ -1014,7 +1075,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         }
         findings = [...staticFindings, ...visualFindings];
         score = floorScore(findings);
-        passed = !findings.some((f) => f.severity === "P0");
+        passed = standardRunPassed(findings, project.sharingan);
         if (commitHash) versions.push({ score, commitHash, findings, passed });
         store.updateRun(run.id, {
           commitHash,
@@ -1026,18 +1087,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         await emitStandardPreviewUpdate(round);
 
         // Converge, don't grind. Oscillation guard: if the working tree returns to a state we
-        // already produced, we're cycling (the ellipsis↔wrap flip-flop) — stop. Then repair floor
-        // DEFECTS first (P0/P1); once the floor is clean, allow a bounded design-IMPROVEMENT
-        // (ceiling) phase while the critic's design score keeps rising. P2 anti-slop nits alone
-        // never trigger a round (AUTO_REPAIR_SEVERITIES).
+        // already produced, we're cycling (the ellipsis↔wrap flip-flop) — stop. Normal Standard
+        // runs repair floor defects first, then optional design-improvement ceiling rounds.
+        // Sharingan treats all non-marker findings as required reconstruction issues.
         if (afterTree && convergenceTrees.has(afterTree)) break;
         if (afterTree) convergenceTrees.add(afterTree);
-        if (!settings.autoImproveEnabled || repairRounds >= maxRepairRounds) break;
+        if (!repairPolicy.enabled || repairRounds >= maxRepairRounds) break;
 
-        const defects = findings.filter(
-          (f) => AUTO_REPAIR_SEVERITIES.has(f.severity) && !f.id.startsWith("visual-improve") && f.id !== "visual-reviewed",
-        );
-        const improvements = findings.filter((f) => f.id.startsWith("visual-improve"));
+        const defects = standardRepairableDefects(findings, project.sharingan);
+        const improvements = project.sharingan ? [] : findings.filter((f) => f.id.startsWith("visual-improve"));
         // Give-up guard: a defect the critic keeps re-raising unchanged is one the model can't fix
         // — record it as stuck (surfaced to the user) and stop retrying it so the loop doesn't spin.
         for (const d of defects) if ((defectHistory.get(recurKey(d)) ?? 0) >= DEFECT_RECUR_LIMIT) stuckDefectKeys.add(recurKey(d));
@@ -1054,8 +1112,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           } else {
             floorStalled += 1;
           }
-          if (floorStalled < 2) repairFindings = liveDefects.concat(freshImps.slice(0, 3));
-        } else if (freshImps.length > 0 && improvementRounds < CEILING_MAX_ROUNDS) {
+          if (floorStalled < 2) repairFindings = project.sharingan ? liveDefects : liveDefects.concat(freshImps.slice(0, 3));
+        } else if (!project.sharingan && freshImps.length > 0 && improvementRounds < CEILING_MAX_ROUNDS) {
           // Ceiling phase — ADVISORY design suggestions, verify-applied. Converges when nothing
           // FRESH remains (or the cap / oscillation guard trips). No design SCORE.
           improvementRounds += 1;
@@ -1064,7 +1122,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         if (!repairFindings || !repairFindings.length) break;
 
         const nextRound = repairRounds + 1;
-        const repairPrompt = standardRepairPrompt(repairFindings, nextRound, maxRepairRounds, score, visibleBrief);
+        const repairPrompt = standardRepairPrompt(repairFindings, nextRound, maxRepairRounds, score, visibleBrief, { isSharingan: project.sharingan });
         if (!repairPrompt) break;
         if (commitHash && !repairSnapshotCommits.has(commitHash)) {
           repairSnapshotCommits.add(commitHash);

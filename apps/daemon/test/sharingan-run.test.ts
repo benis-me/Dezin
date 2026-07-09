@@ -11,6 +11,7 @@ import type { AgentRunner, AgentTurnInput } from "../../../packages/agent/src/in
 import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
 import { projectDir } from "../src/serve-static.ts";
+import { closeAllSharinganSessions } from "../src/sharingan-handler.ts";
 
 function parseSse(text: string): Array<Record<string, unknown>> {
   return text
@@ -98,7 +99,9 @@ test("a sharingan run captures the site, injects the context, and skips research
       "research was skipped for the sharingan project",
     );
   } finally {
+    await closeAllSharinganSessions();
     await new Promise<void>((r) => app.close(() => r()));
+    fixture.closeAllConnections();
     await new Promise<void>((r) => fixture.close(() => r()));
     store.close();
   }

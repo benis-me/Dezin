@@ -22,13 +22,14 @@ test("POST /api/projects persists sharingan + sourceUrl and forces standard mode
     const res = await fetch(`${base}/api/projects`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "clone", mode: "prototype", sharingan: true, sourceUrl: "https://example.test/" }),
+      body: JSON.stringify({ name: "clone", mode: "prototype", designSystemId: "modern-minimal", sharingan: true, sourceUrl: "https://example.test/" }),
     });
     assert.equal(res.status, 201);
-    const proj = (await res.json()) as { sharingan: boolean; sourceUrl?: string; mode: string };
+    const proj = (await res.json()) as { sharingan: boolean; sourceUrl?: string; mode: string; designSystemId: string | null };
     assert.equal(proj.sharingan, true);
     assert.equal(proj.sourceUrl, "https://example.test/");
     assert.equal(proj.mode, "standard", "sharingan forces standard even when prototype was requested");
+    assert.equal(proj.designSystemId, null, "sharingan ignores any requested design system");
   } finally {
     await new Promise<void>((r) => app.close(() => r()));
     store.close();

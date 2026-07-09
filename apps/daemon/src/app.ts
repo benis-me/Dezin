@@ -391,7 +391,7 @@ const routes: Route[] = [
       const project = store.createProject({
         name: body.name,
         skillId: body.skillId ?? null,
-        designSystemId: body.designSystemId ?? null,
+        designSystemId: sharingan ? null : (body.designSystemId ?? null),
         mode,
         sharingan,
         sourceUrl: sharingan ? body.sourceUrl : undefined,

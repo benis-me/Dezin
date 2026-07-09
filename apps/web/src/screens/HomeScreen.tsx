@@ -212,7 +212,7 @@ export function HomeScreen({
   onOpenProject,
 }: {
   projects?: Project[];
-  onNewProject?: (brief: string, skillId: string, designSystemId: string, mode: ProjectMode, sharingan?: { sourceUrl: string }) => void | Promise<void>;
+  onNewProject?: (brief: string, skillId: string, designSystemId: string | null, mode: ProjectMode, sharingan?: { sourceUrl: string }) => void | Promise<void>;
   onOpenProject?: (id: string) => void;
 }) {
   const api = useApi();
@@ -505,7 +505,7 @@ export function HomeScreen({
     try {
       // Keep the standard call at 4 args (don't append an undefined 5th) — the sharingan arg is only
       // passed when cloning, preserving onNewProject's existing call shape.
-      if (sharinganArg) await onNewProject?.(text, skillId, designSystemId, projectMode, sharinganArg);
+      if (sharinganArg) await onNewProject?.(text, skillId, null, projectMode, sharinganArg);
       else await onNewProject?.(text, skillId, designSystemId, projectMode);
     } finally {
       creatingRef.current = false;
@@ -891,7 +891,7 @@ export function HomeScreen({
                     onReference={(p) => void referenceProject(p)}
                   />
                   <FieldSelect label="Template" value={skillId} options={skillOptions} onChange={setSkillId} />
-                  <DesignSystemSelect systems={systems} value={designSystemId} onChange={setDesignSystemId} defaultId={DEFAULT_DS} />
+                  {!sharingan ? <DesignSystemSelect systems={systems} value={designSystemId} onChange={setDesignSystemId} defaultId={DEFAULT_DS} /> : null}
                   {!sharingan && (
                     <FieldSelect
                       label="Mode"

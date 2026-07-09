@@ -11,6 +11,7 @@ function fakeThatCaptures(): SharinganSession {
     navigate: async () => ({ status: 200, finalUrl: "http://x.test/" }),
     readDom: async () => [{ tag: "h1", classes: "", text: "Home", box: { x: 0, y: 0, w: 10, h: 10 } }],
     readDomTree: async () => [{ tag: "h1", classes: "", text: "Home", box: { x: 0, y: 0, w: 10, h: 10 }, style: {}, children: [] }],
+    readRenderMap: async () => ({ viewport: { width: 1440, height: 900 }, document: { width: 1440, height: 900 }, elements: [] }),
     hasPasswordField: async () => false,
     setViewport: async () => {},
     settle: async () => {},

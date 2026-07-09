@@ -150,6 +150,51 @@ test("captureCurrentPage captures the current page without navigating + records 
   }
 });
 
+test("captureCurrentPage writes a render map with browser-measured boxes and styles", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-render-map-"));
+  const steps: CaptureStep[] = [];
+  const session = {
+    setViewport: async () => {},
+    settle: async () => {},
+    screenshot: async () => Buffer.from("png"),
+    readDomTree: async () => [
+      { tag: "body", classes: "", text: "", box: { x: 0, y: 0, w: 1440, h: 900 }, style: {}, children: [] },
+    ],
+    readRenderMap: async () => ({
+      viewport: { width: 1440, height: 900 },
+      document: { width: 1440, height: 1200 },
+      elements: [
+        {
+          selector: "h1.hero",
+          tag: "h1",
+          text: "Acme",
+          box: { x: 80, y: 120, w: 520, h: 72 },
+          style: { fontSize: "64px", fontWeight: "700", color: "rgb(17, 17, 17)", backgroundColor: "rgba(0, 0, 0, 0)" },
+        },
+      ],
+    }),
+    styleTokens: async () => ({ colors: [], fontFamilies: [], fontSizes: [], radii: [], shadows: [] }),
+    assets: async () => [],
+    fetchAsset: async () => null,
+    discoverLinks: async () => [],
+  } as unknown as SharinganSession;
+
+  const page = await captureCurrentPage(session, dir, "https://x.test/", (s) => steps.push(s));
+  assert.ok(page.renderMap, "CapturedPage carries the render-map path");
+  assert.ok(existsSync(join(dir, page.renderMap)), "render-map.json is written");
+  const renderMap = JSON.parse(readFileSync(join(dir, page.renderMap), "utf8")) as {
+    viewport: { width: number; height: number };
+    document: { width: number; height: number };
+    elements: Array<{ selector: string; box: { x: number; y: number; w: number; h: number }; style: Record<string, string> }>;
+  };
+  assert.deepEqual(renderMap.viewport, { width: 1440, height: 900 });
+  assert.equal(renderMap.document.height, 1200);
+  assert.equal(renderMap.elements[0]!.selector, "h1.hero");
+  assert.equal(renderMap.elements[0]!.box.y, 120);
+  assert.equal(renderMap.elements[0]!.style.fontSize, "64px");
+  assert.ok(steps.some((s) => s.kind === "render-map"), "capture emits a render-map step");
+});
+
 test("captureCurrentPage writes an asset inventory + per-node DOM styles", { skip: !findChrome() && "no Chrome" }, async () => {
   const html = `<!doctype html><html><head><style>
     #row{display:flex;justify-content:center;gap:12px}
@@ -158,7 +203,7 @@ test("captureCurrentPage writes an asset inventory + per-node DOM styles", { ski
   </style></head><body>
     <div id="row"><h1>Acme</h1></div>
     <img src="/img/logo.png" alt="Acme logo" width="120" height="40">
-    <div class="hero" style="width:200px;height:80px">bg</div>
+    <div class="hero" data-dezin-id="hero-card" style="width:200px;height:80px">bg</div>
   </body></html>`;
   const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end(html); });
   await new Promise<void>((r) => fixture.listen(0, "127.0.0.1", r));
@@ -180,6 +225,12 @@ test("captureCurrentPage writes an asset inventory + per-node DOM styles", { ski
     assert.ok(row && row.style?.justifyContent === "center", "flex container carries computed display + justifyContent");
     const h1 = dom.find((n) => n.tag === "h1");
     assert.equal(h1?.style?.fontSize, "40px", "h1 carries its computed font size");
+    const renderMap = JSON.parse(readFileSync(join(dir, page.renderMap!), "utf8")) as {
+      elements: Array<{ selector: string; tag: string; currentSrc?: string }>;
+    };
+    assert.ok(renderMap.elements.some((n) => n.selector === '[data-dezin-id="hero-card"]'), "render map preserves data-dezin-id selectors");
+    const img = renderMap.elements.find((n) => n.tag === "img");
+    assert.ok(img?.currentSrc?.endsWith("/img/logo.png"), "render map carries the image URL used for local asset matching");
   } finally {
     await session.close();
     await new Promise<void>((r) => fixture.close(() => r()));
@@ -243,13 +294,15 @@ test("sharinganReviewReference resolves the entry screenshot + an asset summary 
   mkdirSync(join(dir, pageRel), { recursive: true });
   writeFileSync(join(dir, pageRel, "shot-desktop.png"), "png");
   writeFileSync(join(dir, pageRel, "assets.json"), JSON.stringify([{ url: "https://x/a.png", kind: "img", alt: "logo" }, { url: "https://x/b.png", kind: "background" }]));
+  writeFileSync(join(dir, pageRel, "render-map.json"), JSON.stringify({ viewport: { width: 1440, height: 900 }, document: { width: 1440, height: 900 }, elements: [] }));
   writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
     sourceUrl: "https://x/",
-    pages: [{ url: "https://x/", title: "Home", screenshots: { desktop: join(pageRel, "shot-desktop.png"), mobile: join(pageRel, "shot-mobile.png") }, dom: join(pageRel, "dom.json"), styles: join(pageRel, "styles.json"), assets: join(pageRel, "assets.json"), links: [] }],
+    pages: [{ url: "https://x/", title: "Home", screenshots: { desktop: join(pageRel, "shot-desktop.png"), mobile: join(pageRel, "shot-mobile.png") }, dom: join(pageRel, "dom.json"), styles: join(pageRel, "styles.json"), assets: join(pageRel, "assets.json"), renderMap: join(pageRel, "render-map.json"), links: [] }],
   }));
   const ref = sharinganReviewReference(dir);
   assert.ok(ref, "returns a reference");
   assert.equal(ref!.screenshotPath, join(dir, pageRel, "shot-desktop.png"), "absolute path to the entry desktop screenshot");
+  assert.equal(ref!.renderMapPath, join(dir, pageRel, "render-map.json"), "absolute path to the source render map");
   assert.match(ref!.assetsSummary ?? "", /2 image/);
   // No bundle -> undefined.
   assert.equal(sharinganReviewReference(mkdtempSync(join(tmpdir(), "shar-empty-"))), undefined);

@@ -176,6 +176,9 @@ export function isPreviewBridgeMessage(event: MessageEvent, iframe: HTMLIFrameEl
 
 export function buildProjectAnalysisPrompt(project: Project): string {
   const projectPath = project.projectPath?.trim() || `(Dezin did not expose a projectPath for ${project.id})`;
+  const gapInstruction = project.sharingan
+    ? "2. Identify every required source-fidelity gap between the generated result and the captured source site. Include file, component, or CSS locations for each issue."
+    : "2. Identify the highest-impact gaps between the result and the intended direction, prioritized as P0/P1/P2. Include file, component, or CSS locations for each issue.";
   return `Analyze this Dezin-generated project and identify why the design result does not match the intended direction.
 
 Project name: ${project.name}
@@ -185,7 +188,7 @@ Project ID: ${project.id}
 
 Read the source, assets, configuration, and generated output under the project path. Structure your answer as:
 1. Describe 5-8 concrete observations about what the project actually renders today.
-2. Identify the highest-impact gaps between the result and the intended direction, prioritized as P0/P1/P2. Include file, component, or CSS locations for each issue.
+${gapInstruction}
 3. Analyze likely contributing factors: original input prompt, agent/model behavior, Dezin context, design system, generation mode, asset selection, and Quality-check blind spots.
 4. Propose improvements that can be verified directly in this project, including concrete code directions.
 5. Recommend Dezin product-side improvements to the generation pipeline, prompt structure, Quality checks, or iteration workflow.
@@ -1239,7 +1242,9 @@ function ImageFileView({ name, url }: { name: string; url: string }) {
         {name}
       </PanelBar>
       <div className="flex flex-1 items-center justify-center overflow-auto bg-muted/20 p-6">
-        <img src={url} alt={name} className="max-h-full max-w-full object-contain" />
+        <object data={url} aria-label={name} className="max-h-full max-w-full object-contain">
+          <div className="rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">Image preview unavailable.</div>
+        </object>
       </div>
     </div>
   );
@@ -2766,13 +2771,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const copyProjectAnalysisPrompt = async (): Promise<void> => {
     const target =
-      project ??
+      (project ? (project.sharingan ? { ...project, designSystemId: null } : project) : null) ??
       (isExisting
         ? {
             id: projectId,
             name: projectName || "Untitled project",
             skillId: null,
-            designSystemId: dsId || null,
+            designSystemId: isSharinganProject ? null : (dsId || null),
             mode: projectMode,
             createdAt: 0,
             updatedAt: 0,
@@ -3663,7 +3668,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }
     if (!activeFile) return;
     if (isImagePath(activeFile)) {
-      // Images render via <img> (ImageFileView), not decoded text — skip the byte fetch.
+      // Images render via ImageFileView, not decoded text — skip the byte fetch.
       setFileText("");
       return () => {
         alive = false;
@@ -4193,6 +4198,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
+  const isSharinganProject = project?.sharingan === true;
   const canOpenProjectPath = Boolean((project?.projectPath || projectPath) && native?.openPath);
   const versionGroups = buildVersionGroups(runs, variants);
   const activeVersionGroup = versionGroups.find((group) => group.active) ?? versionGroups[0] ?? null;
@@ -4228,7 +4234,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const qualityRecorded = qualityLanes.some((lane) => lane.status === "passed" || lane.status === "issues" || lane.status === "failed");
   const qualityClean =
     displayRanOnce && qualityRecorded && !qualityHasFindings && qualityLanes.every((lane) => lane.status === "passed" || lane.status === "not-run");
-  const activeDesignSystem = systems.find((system) => system.id === dsId);
+  const activeDesignSystem = isSharinganProject ? undefined : systems.find((system) => system.id === dsId);
 
   const TAB_ICON: Record<Tab, ReactNode> = {
     Preview: <Eye size={13} strokeWidth={1.75} />,
@@ -4521,7 +4527,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           <div aria-hidden className="bg-gradient-to-t from-background via-background/90 to-transparent" style={{ height: FLOATING_COMPOSER_FADE_PX }} />
           {/* opaque strip — fully masks content scrolling underneath + holds the card */}
           <div ref={composerRef} className="bg-background px-3 pb-3">
-          {isExisting ? (
+          {isExisting && !isSharinganProject ? (
             <div className="pointer-events-auto mb-1.5 flex items-center gap-1 px-0.5">
               <DesignSystemSelect compact systems={systems} value={dsId} onChange={changeDs} />
               {dsId ? (
@@ -5036,9 +5042,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                               <li key={`${f.id}-${idx}`} className="rounded-md border border-border bg-surface p-2.5">
                                 <div className="flex items-center gap-2">
                                   <span
-                                    className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] ${SEVERITY_STYLE[f.severity] ?? "border-border text-muted-foreground"}`}
+                                    className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] ${
+                                      isSharinganProject ? "border-border-strong text-foreground" : (SEVERITY_STYLE[f.severity] ?? "border-border text-muted-foreground")
+                                    }`}
                                   >
-                                    {f.severity}
+                                    {isSharinganProject ? "Required" : f.severity}
                                   </span>
                                   <span className="font-mono text-xs text-muted-foreground">{f.id}</span>
                                 </div>
