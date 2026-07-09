@@ -336,6 +336,28 @@ function finite(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function cssNumber(value) {
+  const match = /-?\d*\.?\d+/.exec(String(value || ""));
+  return match ? Number(match[0]) : NaN;
+}
+
+function fontSizePx(style) {
+  return Math.max(1, finite(cssNumber(style && style.fontSize), 16));
+}
+
+function lineHeightPx(style) {
+  const fontSize = fontSizePx(style);
+  const raw = String((style && style.lineHeight) || "normal").trim();
+  if (!raw || raw === "normal") return fontSize * 1.2;
+  if (/^-?\d*\.?\d+$/.test(raw)) return Math.max(1, finite(raw, 1.2) * fontSize);
+  return Math.max(1, finite(cssNumber(raw), fontSize * 1.2));
+}
+
+function textLineCount(item) {
+  const lineHeight = lineHeightPx(item.style || {});
+  return Math.max(1, Math.min(12, Math.floor((finite(item.box && item.box.h, 0) + 2) / lineHeight)));
+}
+
 function visibleBox(el, viewport, doc) {
   const b = boxOf(el);
   const x = finite(b.x);
@@ -346,6 +368,10 @@ function visibleBox(el, viewport, doc) {
   const dh = finite(doc.height, finite(viewport.height, 900));
   if (w <= 1 || h <= 1) return null;
   if (x + w <= 0 || x >= vw || y + h <= 0 || y >= dh) return null;
+  const visibleW = Math.max(0, Math.min(x + w, vw) - Math.max(x, 0));
+  const visibleH = Math.max(0, Math.min(y + h, dh) - Math.max(y, 0));
+  const visibleRatio = (visibleW * visibleH) / Math.max(1, w * h);
+  if ((x < 0 || x + w > vw) && w * h >= 4000 && visibleRatio < 0.18) return null;
   return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
 }
 
@@ -480,6 +506,7 @@ function sourceScaffold() {
     texts: adjustedTextSlots.map((item) => ({
       box: item.box,
       text: item.text,
+      lines: textLineCount(item),
       color: item.style.color || "rgb(245, 245, 245)",
       fontSize: item.style.fontSize || "16px",
       fontWeight: item.style.fontWeight || "400",
@@ -533,18 +560,27 @@ function vectorStyle(item) {
   };
 }
 
+function textJustify(value) {
+  if (value === "center") return "center";
+  if (value === "right" || value === "end") return "flex-end";
+  return "flex-start";
+}
+
 function textStyle(item) {
+  const lines = Math.max(1, Number(item.lines || 1));
   return {
     left: item.box.x,
     top: item.box.y,
     width: item.box.w,
-    minHeight: item.box.h,
+    height: item.box.h,
     color: item.color,
     fontSize: item.fontSize,
     fontWeight: item.fontWeight,
     lineHeight: item.lineHeight,
     letterSpacing: item.letterSpacing,
     textAlign: item.textAlign,
+    "--source-lines": lines,
+    ...(lines <= 1 ? { justifyContent: textJustify(item.textAlign) } : {}),
   };
 }
 
@@ -566,7 +602,7 @@ export default function App() {
           <div key={"vector-" + index} className="source-vector" style={vectorStyle(item)} dangerouslySetInnerHTML={{ __html: item.html }} />
         ))}
         {SOURCE.texts.map((item, index) => (
-          <div key={"text-" + index} className="source-text" style={textStyle(item)}>
+          <div key={"text-" + index} className="source-text" data-lines={item.lines || 1} style={textStyle(item)}>
             {item.text}
           </div>
         ))}
@@ -644,8 +680,19 @@ body {
 
 .source-text {
   overflow: hidden;
-  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--source-lines, 1);
+  white-space: normal;
+  overflow-wrap: anywhere;
   text-overflow: ellipsis;
+}
+
+.source-text[data-lines="1"] {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 @media (max-width: 700px) {

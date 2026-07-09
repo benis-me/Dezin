@@ -23,29 +23,62 @@ test("standardRepairPrompt constrains visual-source findings to measured local p
   assert.match(prompt!, /h1\.hero/);
 });
 
+test("standardRepairPrompt constrains measured layout repairs instead of inviting structural drift", () => {
+  const findings: QualityFinding[] = [
+    {
+      severity: "P1",
+      id: "visual-text-clipped",
+      selector: ".card-title",
+      message: "Desktop text appears clipped in .card-title.",
+      fix: "Allow wrapping, increase the container height, or remove fixed dimensions that hide text.",
+    },
+  ];
+
+  const prompt = standardRepairPrompt(findings, 1, 3, 91, "Clone https://example.com");
+  assert.ok(prompt, "repair prompt is produced");
+  assert.match(prompt!, /Measured layout repair mode/i);
+  assert.match(prompt!, /Do not add new content|reinterpret the page structure/i);
+});
+
 test("standardRepairPolicy forces a bounded closed loop for Sharingan even when normal auto-improve is off", () => {
   const settings = { autoImproveEnabled: false, autoImproveMaxRounds: 0 } as Settings;
   assert.deepEqual(standardRepairPolicy(settings, false), { enabled: false, maxRounds: 0 });
   assert.deepEqual(standardRepairPolicy(settings, true), { enabled: true, maxRounds: 3 });
 });
 
-test("standardRunPassed treats remaining Sharingan source-fidelity P1 findings as not passed", () => {
+test("standardRunPassed treats remaining Sharingan source-fidelity and measured-layout P1 findings as not passed", () => {
   const sourceDrift: QualityFinding[] = [
     { severity: "P1", id: "visual-source-screenshot-diff", message: "large source diff", fix: "repair" },
   ];
   assert.equal(standardRunPassed(sourceDrift, false), true);
   assert.equal(standardRunPassed(sourceDrift, true), false);
+  assert.equal(standardRunPassed([{ severity: "P1", id: "visual-text-clipped", message: "clipped", fix: "fix" }], true), false);
+  assert.equal(standardRunPassed([{ severity: "P1", id: "visual-horizontal-overflow", message: "overflow", fix: "fix" }], true), false);
   assert.equal(standardRunPassed([{ severity: "P0", id: "runtime", message: "blank", fix: "fix" }], true), false);
 });
 
-test("standardRepairableDefects limits Sharingan auto-repair to source-fidelity P1s and P0s", () => {
+test("standardRepairableDefects limits Sharingan auto-repair to source-fidelity, measured-layout P1s, and P0s", () => {
   const findings: QualityFinding[] = [
     { severity: "P1", id: "visual-below-fold-strip", message: "mobile strip", fix: "fix layout" },
+    { severity: "P1", id: "visual-text-clipped", message: "clipped title", fix: "fix text box" },
+    { severity: "P1", id: "visual-horizontal-overflow", message: "wide content", fix: "constrain content" },
     { severity: "P1", id: "visual-source-box-delta", message: "source drift", fix: "patch measured box" },
     { severity: "P2", id: "visual-improve-1", message: "advisory", fix: "improve" },
     { severity: "P0", id: "runtime-error", message: "blank", fix: "fix runtime" },
   ];
 
-  assert.deepEqual(standardRepairableDefects(findings, true).map((f) => f.id), ["visual-source-box-delta", "runtime-error"]);
-  assert.deepEqual(standardRepairableDefects(findings, false).map((f) => f.id), ["visual-below-fold-strip", "visual-source-box-delta", "runtime-error"]);
+  assert.deepEqual(standardRepairableDefects(findings, true).map((f) => f.id), [
+    "visual-below-fold-strip",
+    "visual-text-clipped",
+    "visual-horizontal-overflow",
+    "visual-source-box-delta",
+    "runtime-error",
+  ]);
+  assert.deepEqual(standardRepairableDefects(findings, false).map((f) => f.id), [
+    "visual-below-fold-strip",
+    "visual-text-clipped",
+    "visual-horizontal-overflow",
+    "visual-source-box-delta",
+    "runtime-error",
+  ]);
 });

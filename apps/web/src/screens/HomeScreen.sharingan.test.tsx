@@ -33,9 +33,11 @@ describe("HomeScreen Sharingan mode", () => {
   it("double-clicking the heading enters Sharingan mode: URL placeholder shown, Research hidden", () => {
     renderHome();
     expect(screen.queryByPlaceholderText("Paste a URL to clone…")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Design system" })).toBeInTheDocument();
     fireEvent.doubleClick(screen.getByText("Start a design"));
     expect(screen.getByPlaceholderText("Paste a URL to clone…")).toBeInTheDocument();
     expect(screen.queryByText("Design Research")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Design system" })).not.toBeInTheDocument();
     expect(screen.getByText(/Sharingan/i)).toBeInTheDocument();
   });
 
@@ -51,7 +53,7 @@ describe("HomeScreen Sharingan mode", () => {
     expect(onNewProject).toHaveBeenCalledWith(
       "https://example.com",
       expect.any(String),
-      expect.any(String),
+      null,
       "standard",
       { sourceUrl: "https://example.com" },
     );
@@ -99,7 +101,7 @@ describe("HomeScreen Sharingan mode", () => {
 
     await waitFor(() => expect(updateSettings).toHaveBeenCalledWith({ sharinganAffirmed: true }));
     await waitFor(() =>
-      expect(onNewProject).toHaveBeenCalledWith("https://example.com", expect.any(String), expect.any(String), "standard", { sourceUrl: "https://example.com" }),
+      expect(onNewProject).toHaveBeenCalledWith("https://example.com", expect.any(String), null, "standard", { sourceUrl: "https://example.com" }),
     );
   });
 });

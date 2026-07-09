@@ -63,7 +63,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
               const project = await api.createProject({
                 name: briefToName(brief),
                 skillId,
-                designSystemId,
+                designSystemId: sharingan ? null : designSystemId,
                 mode,
                 sharingan: !!sharingan,
                 sourceUrl: sharingan?.sourceUrl,

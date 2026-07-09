@@ -2766,13 +2766,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const copyProjectAnalysisPrompt = async (): Promise<void> => {
     const target =
-      project ??
+      (project ? (project.sharingan ? { ...project, designSystemId: null } : project) : null) ??
       (isExisting
         ? {
             id: projectId,
             name: projectName || "Untitled project",
             skillId: null,
-            designSystemId: dsId || null,
+            designSystemId: isSharinganProject ? null : (dsId || null),
             mode: projectMode,
             createdAt: 0,
             updatedAt: 0,
@@ -4193,6 +4193,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
+  const isSharinganProject = project?.sharingan === true;
   const canOpenProjectPath = Boolean((project?.projectPath || projectPath) && native?.openPath);
   const versionGroups = buildVersionGroups(runs, variants);
   const activeVersionGroup = versionGroups.find((group) => group.active) ?? versionGroups[0] ?? null;
@@ -4228,7 +4229,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const qualityRecorded = qualityLanes.some((lane) => lane.status === "passed" || lane.status === "issues" || lane.status === "failed");
   const qualityClean =
     displayRanOnce && qualityRecorded && !qualityHasFindings && qualityLanes.every((lane) => lane.status === "passed" || lane.status === "not-run");
-  const activeDesignSystem = systems.find((system) => system.id === dsId);
+  const activeDesignSystem = isSharinganProject ? undefined : systems.find((system) => system.id === dsId);
 
   const TAB_ICON: Record<Tab, ReactNode> = {
     Preview: <Eye size={13} strokeWidth={1.75} />,
@@ -4521,7 +4522,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           <div aria-hidden className="bg-gradient-to-t from-background via-background/90 to-transparent" style={{ height: FLOATING_COMPOSER_FADE_PX }} />
           {/* opaque strip — fully masks content scrolling underneath + holds the card */}
           <div ref={composerRef} className="bg-background px-3 pb-3">
-          {isExisting ? (
+          {isExisting && !isSharinganProject ? (
             <div className="pointer-events-auto mb-1.5 flex items-center gap-1 px-0.5">
               <DesignSystemSelect compact systems={systems} value={dsId} onChange={changeDs} />
               {dsId ? (

@@ -211,18 +211,30 @@ function floorScore(findings: QualityFinding[]): number {
   return lintScore(findings.filter((f) => !f.id.startsWith("visual-improve") && f.id !== "visual-reviewed"));
 }
 
+const SHARINGAN_LAYOUT_DEFECT_IDS = new Set([
+  "visual-horizontal-overflow",
+  "visual-below-fold-strip",
+  "visual-fixed-offscreen",
+  "visual-text-clipped",
+]);
+
+function isSharinganBlockingFinding(finding: QualityFinding): boolean {
+  if (finding.severity === "P0") return true;
+  if (finding.severity !== "P1") return false;
+  return finding.id.startsWith("visual-source-") || SHARINGAN_LAYOUT_DEFECT_IDS.has(finding.id);
+}
+
 export function standardRunPassed(findings: QualityFinding[], isSharingan: boolean | undefined): boolean {
   if (findings.some((f) => f.severity === "P0")) return false;
   if (!isSharingan) return true;
-  return !findings.some((f) => f.severity === "P1" && (f.id.startsWith("visual-source-") || f.id === "visual-source-screenshot-diff"));
+  return !findings.some(isSharinganBlockingFinding);
 }
 
 export function standardRepairableDefects(findings: QualityFinding[], isSharingan: boolean | undefined): QualityFinding[] {
   return findings.filter((f) => {
     if (!AUTO_REPAIR_SEVERITIES.has(f.severity) || f.id.startsWith("visual-improve") || f.id === "visual-reviewed") return false;
     if (!isSharingan) return true;
-    if (f.severity === "P0") return true;
-    return f.id.startsWith("visual-source-") || f.id === "visual-source-screenshot-diff";
+    return isSharinganBlockingFinding(f);
   });
 }
 
@@ -325,11 +337,18 @@ function hasSourceFidelityFindings(findings: QualityFinding[]): boolean {
   return findings.some((finding) => finding.id.startsWith("visual-source-"));
 }
 
+function hasMeasuredLayoutFindings(findings: QualityFinding[]): boolean {
+  return findings.some((finding) => SHARINGAN_LAYOUT_DEFECT_IDS.has(finding.id));
+}
+
 export function standardRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {
   const lintBlock = renderFindingsForAgent(findings);
   if (!lintBlock) return null;
   const sourceFidelityGuard = hasSourceFidelityFindings(findings)
     ? "Source-fidelity repair mode: visual-source-* findings are source-vs-result measurements. Apply measured local patches to the named element/region only. Do not redesign or re-layout the whole page to chase one delta; preserve the captured source hierarchy, text, assets, and palette."
+    : "";
+  const measuredLayoutGuard = hasMeasuredLayoutFindings(findings)
+    ? "Measured layout repair mode: fix only the named overflow, clipping, or offscreen layout defects. Do not add new content, infer missing sections, or reinterpret the page structure."
     : "";
   return [
     `Automatic quality repair round ${round}/${maxRounds}.`,
@@ -337,6 +356,7 @@ export function standardRepairPrompt(findings: QualityFinding[], round: number, 
     intent ? `Stay true to the original request and the chosen direction — do not drift:\n${intent}` : "Preserve the user's concept and the current visual direction.",
     "Do NOT undo or oscillate on earlier fixes; if a finding is ambiguous, make the choice a senior designer would and keep it. Do not ask a follow-up question. Edit the actual project files, then stop.",
     sourceFidelityGuard,
+    measuredLayoutGuard,
     `Current quality score: ${score}/100.`,
     lintBlock,
   ].filter(Boolean).join("\n\n");
@@ -575,9 +595,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   }
 
   // Resolve the active design system (the project's, else the settings default).
+  // Sharingan reconstructs from captured source pixels/assets, so it must not inherit
+  // a project/default design system or brand craft guidance.
   const registry = deps.designRegistry ?? defaultRegistry();
-  const designSystemId = project.designSystemId ?? settings.defaultDesignSystemId;
-  const designSystem = registry.get(designSystemId) ?? registry.default();
+  const designSystemId = project.sharingan ? undefined : (project.designSystemId ?? settings.defaultDesignSystemId);
+  const designSystem = designSystemId ? (registry.get(designSystemId) ?? registry.default()) : null;
 
   // Best-guess skill: an explicit project.skillId pins it; otherwise the brief's
   // top trigger match. This is NOT forced on the agent — it only seeds craft
@@ -587,13 +609,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const skill = project.skillId ? findSkill(skills(), project.skillId) : selectSkill(body.brief.trim(), skills());
 
   // Craft = the union of the best-guess skill's required sections and the brand's applied ones.
-  const craftSlugs = Array.from(new Set([...(skill?.craft ?? []), ...(designSystem.craft?.applies ?? [])]));
-  const craft = loadCraftSections(craftSlugs);
+  const craftSlugs = project.sharingan ? [] : Array.from(new Set([...(skill?.craft ?? []), ...(designSystem?.craft?.applies ?? [])]));
+  const craft = project.sharingan ? null : loadCraftSections(craftSlugs);
 
   const systemPrompt = project.sharingan
     ? buildSharinganSystemPrompt()
     : composeSystemPrompt({
-        designSystem,
+        designSystem: designSystem ?? registry.default(),
         // The whole catalog, for on-demand loading. A pinned project.skillId is
         // surfaced first and flagged, but the agent still judges + reads on its own.
         skills: skills().map((s) => ({
@@ -703,7 +725,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       dir,
       brief: visibleBrief,
       skill: skill ? { id: skill.id, name: skill.name } : undefined,
-      designSystemName: designSystem.name,
+      designSystemName: (designSystem ?? registry.default()).name,
       hasUserReferences: moodboardContext.labels.length > 0 || effectContext.labels.length > 0,
       agentCommand: researchAgentCommand(settings, runAgentCommand),
       model: researchModel(settings, runModel),

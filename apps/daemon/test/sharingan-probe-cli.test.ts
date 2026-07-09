@@ -124,6 +124,7 @@ test("probe source-scaffold writes a measured React starter from render-map and 
       { selector: "svg.icon", tag: "svg", text: "", box: { x: 416, y: 154, w: 16, h: 16 }, style: {}, svg: '<svg viewBox="0 0 16 16"><defs><linearGradient id="grad"><stop offset="0%" stop-color="white"/></linearGradient></defs><path fill="url(#grad)" d="M2 8h12"/></svg>' },
       { selector: "div.card-bg", tag: "div", text: "", box: { x: 344, y: 220, w: 220, h: 120 }, style: { backgroundImage: "linear-gradient(0deg, transparent, transparent), url(\"https://cdn.test/card.webp\")", objectFit: "cover", borderRadius: "12px" } },
       { selector: "h1.title", tag: "h1", text: "Hello Source", box: { x: 400, y: 148, w: 240, h: 36 }, style: { fontSize: "32px", fontWeight: "700", color: "rgb(255, 255, 255)" } },
+      { selector: "img.edge-sliver", tag: "img", src: "https://cdn.test/card.webp", currentSrc: "https://cdn.test/card.webp", text: "", box: { x: -190, y: 500, w: 200, h: 80 }, style: { objectFit: "cover" } },
     ],
   }));
 
@@ -138,8 +139,11 @@ test("probe source-scaffold writes a measured React starter from render-map and 
   assert.match(app, /Hello Source/);
   assert.match(app, /\/_assets\/logo\.svg/);
   assert.match(app, /\/_assets\/card\.webp/);
+  assert.match(app, /height: item\.box\.h/);
+  assert.doesNotMatch(app, /minHeight: item\.box\.h/);
+  assert.match(app, /data-lines=\{item\.lines \|\| 1\}/);
   const source = JSON.parse(app.match(/const SOURCE = ([\s\S]*?);\n\nfunction boxStyle/)![1]!);
-  assert.equal(source.images.length, 3, "pure CSS gradients are paint boxes, not image slots");
+  assert.equal(source.images.length, 3, "pure CSS gradients are paint boxes and barely visible edge slivers are not replayed as image slots");
   assert.equal(source.images[0].src, "/_assets/logo.svg", "logo maps by captured src URL even when assets are not in DOM order");
   assert.match(source.images[1].src, /^data:image\/svg\+xml/, "source data-image icons are replayed directly");
   assert.equal(source.images[2].src, "/_assets/card.webp", "background image maps by CSS url(...)");
@@ -148,7 +152,10 @@ test("probe source-scaffold writes a measured React starter from render-map and 
   assert.match(source.vectors[1].html, /url\(#sgv-1-grad\)/, "SVG url(#id) references are scoped with the ids");
   assert.ok(source.boxes.some((box: { box: { x: number; y: number; w: number; h: number } }) => box.box.x === 320 && box.box.y === 120 && box.box.w === 520 && box.box.h === 240), "large painted containers survive when they contain small image/vector icons");
   assert.ok(source.texts.some((text: { text: string; box: { x: number } }) => text.text === "Home" && text.box.x > 600), "text boxes containing a left icon are shifted after the icon");
+  assert.equal(source.texts.find((text: { text: string; lines?: number }) => text.text === "Hello Source")?.lines, 1, "text replay records a fixed line budget from the captured box");
   assert.ok(source.boxes.some((box: { backgroundImage?: string }) => box.backgroundImage?.includes("linear-gradient")), "the gradient layer remains painted as a box");
   assert.match(css, /\.sharingan-stage/);
   assert.match(css, /\.source-vector svg/);
+  assert.match(css, /-webkit-line-clamp: var\(--source-lines, 1\)/);
+  assert.match(css, /\.source-text\[data-lines="1"\]/);
 });

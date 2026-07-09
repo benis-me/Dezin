@@ -260,11 +260,12 @@ function rectSnippet(el: GeometryElement): string {
   return `${el.selector} (${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)})`;
 }
 
-export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string): QualityFinding[] {
+export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string, options: { strictTextLayout?: boolean } = {}): QualityFinding[] {
   const findings: QualityFinding[] = [];
   const viewport = snapshot.viewport;
   const doc = snapshot.document;
   const overflowPx = Math.round(doc.scrollWidth - viewport.width);
+  const strictTextLayout = Boolean(options.strictTextLayout);
 
   if (overflowPx > 8) {
     findings.push({
@@ -321,7 +322,7 @@ export function findingsFromGeometry(snapshot: GeometrySnapshot, label: string):
   });
   if (clippedText) {
     findings.push({
-      severity: "P2",
+      severity: strictTextLayout ? "P1" : "P2",
       id: "visual-text-clipped",
       message: `${titleCase(label)} text appears clipped in ${clippedText.selector}.`,
       fix: "Allow wrapping, increase the container height, or remove fixed dimensions that hide text.",
@@ -731,6 +732,7 @@ async function collectGeometry(
   computedCtx: ComputedContext = {},
   runComputed = true,
   sourceDesktopViewport?: { width: number; height: number },
+  strictTextLayout = false,
 ): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[]; elements: CriticElement[]; desktopSnapshot?: GeometrySnapshot }> {
   const consoleMessages: VisualQaConsoleMessage[] = [];
   const executablePath = findChrome();
@@ -977,7 +979,7 @@ async function collectGeometry(
           elements,
         };
       }));
-      all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label));
+      all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label, { strictTextLayout }));
       if (viewport.label === "desktop") {
         desktopSnapshot = snapshot as GeometrySnapshot;
         const desktopElements = desktopSnapshot.elements ?? [];
@@ -1154,6 +1156,7 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
     { provider: input.provider },
     shouldRunComputedDetector(input),
     sourceViewportFromRenderMap(sourceMap),
+    Boolean(input.isSharingan),
   );
   const sourceFindings = sourceMap && geometry.desktopSnapshot ? sourceFidelityFindings(sourceMap, geometry.desktopSnapshot) : [];
   const screenshotFindings = input.isSharingan

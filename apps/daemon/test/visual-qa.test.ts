@@ -164,7 +164,35 @@ test("findingsFromGeometry reports horizontal overflow, offscreen fixed controls
   );
   assert.match(findings[0]!.message, /mobile/i);
   assert.match(findings.find((f) => f.id === "visual-fixed-offscreen")!.snippet ?? "", /header \.menu/);
-  assert.match(findings.find((f) => f.id === "visual-text-clipped")!.fix, /wrapping|height|container/i);
+  const clippedText = findings.find((f) => f.id === "visual-text-clipped")!;
+  assert.equal(clippedText.severity, "P2");
+  assert.match(clippedText.fix, /wrapping|height|container/i);
+});
+
+test("findingsFromGeometry upgrades clipped text to a Sharingan-blocking defect in strict text layout mode", () => {
+  const findings = findingsFromGeometry(
+    {
+      viewport: { width: 1440, height: 900 },
+      document: { scrollWidth: 1440, scrollHeight: 900 },
+      elements: [
+        geomEl({
+          selector: ".card-title",
+          text: "A copied title that no longer fits the captured text box",
+          overflowX: "hidden",
+          overflowY: "hidden",
+          scrollWidth: 420,
+          scrollHeight: 48,
+          clientWidth: 240,
+          clientHeight: 24,
+        }),
+      ],
+    },
+    "desktop",
+    { strictTextLayout: true },
+  );
+
+  const clippedText = findings.find((f) => f.id === "visual-text-clipped");
+  assert.equal(clippedText?.severity, "P1");
 });
 
 test("findingsFromGeometry flags a thin below-the-fold strip (orphaned element), not a long scrolling page", () => {

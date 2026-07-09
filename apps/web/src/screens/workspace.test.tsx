@@ -2880,6 +2880,7 @@ test("shows an auto-selected Sharingan tab for a sharingan project", async () =>
   const tab = await screen.findByRole("tab", { name: /Sharingan/i });
   expect(tab).toBeInTheDocument();
   expect(tab).toHaveAttribute("aria-selected", "true");
+  expect(screen.queryByRole("button", { name: "Design system" })).not.toBeInTheDocument();
 });
 
 test("shows no Sharingan tab for a normal project", async () => {
