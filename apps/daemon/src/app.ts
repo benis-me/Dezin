@@ -127,6 +127,13 @@ export interface AppDeps {
     phase: "before-root-overwrite" | "after-root-overwrite" | "before-rollback",
     signal?: AbortSignal,
   ) => void | Promise<void>;
+  /** Variant creation/rollback checkpoint used to verify exact-scope ownership sequencing. */
+  variantMutationCheckpoint?: (
+    projectId: string,
+    variantId: string,
+    phase: "created" | "before-rollback",
+    signal?: AbortSignal,
+  ) => void | Promise<void>;
   /** Background title generator hook; tests can avoid launching an agent. */
   titleGenerator?: TitleGenerator;
   /** Prompt optimizer hook; tests can avoid launching a real agent. */

@@ -83,8 +83,10 @@ export async function handleCreateVariant(
   const active = deps.store.ensureMainVariant(id);
   const n = deps.store.listVariants(id).length + 1;
   const v = deps.store.createVariant(id, body?.name?.trim() || `Variant ${n}`);
+  let mutationLease: { release: () => void } | undefined;
 
   try {
+    mutationLease = deps.runtimeSupervisor?.acquireOperationLease({ projectId: id, variantId: v.id });
     await withVariantMutation(deps, id, v.id, async (variantSignal) => {
       variantSignal.throwIfAborted();
       if (project.mode === "standard") {
@@ -94,17 +96,20 @@ export async function handleCreateVariant(
         // Forking: save the current branch, then the new branch starts as a copy of root.
         await snapshot(root, snapDir(deps.dataDir, id, active.id));
       }
+      await deps.variantMutationCheckpoint?.(id, v.id, "created", variantSignal);
       variantSignal.throwIfAborted();
       if (project.mode === "standard") (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
       deps.store.setActiveVariant(id, v.id);
     });
+    sendJson(res, 200, deps.store.listVariants(id));
   } catch (err) {
+    await deps.variantMutationCheckpoint?.(id, v.id, "before-rollback");
     if (project.mode === "standard") await removeStandardVariantWorktree(deps, id, v.id).catch(() => {});
     deps.store.deleteVariant(v.id);
-    return sendError(res, 409, err instanceof Error ? err.message : "could not create variant");
+    sendError(res, 409, err instanceof Error ? err.message : "could not create variant");
+  } finally {
+    mutationLease?.release();
   }
-
-  sendJson(res, 200, deps.store.listVariants(id));
 }
 
 /**
@@ -125,32 +130,55 @@ export async function handleVariantFanout(
   const body = (await readJsonBody(req, VARIANT_BODY_MAX_BYTES, signal)) as { count?: number } | null;
   const plan = planVariantFanout(body?.count ?? 3);
   const active = deps.store.ensureMainVariant(id);
-  const created: Variant[] = [];
+  const created: Array<{ variant: Variant; lease?: { release: () => void }; completed: boolean }> = [];
+  let failed: (typeof created)[number] | undefined;
+  let targetScopedCancellation = false;
   try {
     for (const spec of plan.variants) {
       signal?.throwIfAborted();
       const variant = deps.store.createVariant(id, spec.name);
-      created.push(variant);
-      await withVariantMutation(deps, id, variant.id, async (variantSignal) => {
-        variantSignal.throwIfAborted();
-        if (project.mode === "standard") {
-          await createStandardVariantWorktree(deps, id, active.id, variant.id);
-        } else {
-          // Seed the new prototype variant with a copy of the current root so activating it later
-          // (to run a variation into it) restores that content instead of a blank snapshot.
-          await snapshot(projectDir(deps.dataDir, id), snapDir(deps.dataDir, id, variant.id));
-        }
-        variantSignal.throwIfAborted();
-      });
+      const record: (typeof created)[number] = { variant, completed: false };
+      created.push(record);
+      let variantSignal: AbortSignal | undefined;
+      try {
+        record.lease = deps.runtimeSupervisor?.acquireOperationLease({ projectId: id, variantId: variant.id });
+        await withVariantMutation(deps, id, variant.id, async (operationSignal) => {
+          variantSignal = operationSignal;
+          operationSignal.throwIfAborted();
+          if (project.mode === "standard") {
+            await createStandardVariantWorktree(deps, id, active.id, variant.id);
+          } else {
+            // Seed the new prototype variant with a copy of the current root so activating it later
+            // (to run a variation into it) restores that content instead of a blank snapshot.
+            await snapshot(projectDir(deps.dataDir, id), snapDir(deps.dataDir, id, variant.id));
+          }
+          await deps.variantMutationCheckpoint?.(id, variant.id, "created", operationSignal);
+          operationSignal.throwIfAborted();
+        });
+        record.completed = true;
+      } catch (err) {
+        failed = record;
+        targetScopedCancellation = signal?.aborted !== true
+          && (variantSignal?.aborted === true || err instanceof RuntimeScopeUnavailableError);
+        throw err;
+      }
     }
+    sendJson(res, 200, { plan, created: created.map(({ variant }) => variant.id), variants: deps.store.listVariants(id) });
   } catch (err) {
-    for (const c of created) {
-      if (project.mode === "standard") await removeStandardVariantWorktree(deps, id, c.id).catch(() => {});
-      deps.store.deleteVariant(c.id);
+    const rollback = targetScopedCancellation && failed ? [failed] : created;
+    for (const record of rollback) {
+      await deps.variantMutationCheckpoint?.(id, record.variant.id, "before-rollback");
+      if (project.mode === "standard") {
+        await removeStandardVariantWorktree(deps, id, record.variant.id).catch(() => {});
+      } else {
+        await rm(snapDir(deps.dataDir, id, record.variant.id), { recursive: true, force: true }).catch(() => {});
+      }
+      deps.store.deleteVariant(record.variant.id);
     }
-    return sendError(res, 409, err instanceof Error ? err.message : "could not create the variant fan-out");
+    sendError(res, 409, err instanceof Error ? err.message : "could not create the variant fan-out");
+  } finally {
+    for (const record of created) record.lease?.release();
   }
-  sendJson(res, 200, { plan, created: created.map((v) => v.id), variants: deps.store.listVariants(id) });
 }
 
 function versionSnapshotPath(dataDir: string, projectId: string, runId: string): string {

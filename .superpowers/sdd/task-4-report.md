@@ -171,3 +171,31 @@ The two daemon-start tests initially failed only when invoked from the repositor
 - Verified every changed writer boundary: imported variant files/Runs/logs, Prototype root/snapshots, direct cover file, Electron PNG output, Sharingan capture/session state, and Git worktree branches.
 - A fresh read-only reviewer found the rollback lease gap; the deterministic blocked-rollback regression failed before the fix and passes afterward.
 - Sharingan release preserves earlier exact cleanup: only a pre-session opener may detach after the bounded grace; any operation capable of writing project data remains awaited.
+
+---
+
+## Variant creation rollback ownership gate
+
+Closed the final gate-review finding on top of `691c5d33` without changing any other runtime policy.
+
+### Implementation
+
+- Single variant creation now acquires a passive exact-variant lease immediately after its Store row becomes visible and releases it only after success or complete rollback, including asynchronous Standard Git worktree removal.
+- Fan-out keeps one passive exact lease per created row across the whole success/rollback path.
+- A targeted cancellation of the currently failing fan-out variant rolls back only that variant; completed siblings remain valid rows/worktrees. Project/shutdown cancellation and genuine fan-out failures still roll back every created sibling while each sibling lease remains held.
+- Prototype fan-out rollback also removes the rolled-back variant snapshot instead of leaving an unowned `.variants/<id>` directory.
+
+### RED evidence
+
+- `single Standard variant deletion waits for its failed creation cleanup`: DELETE resolved while the deterministic Git-cleanup gate was blocked (`resolved !== pending`).
+- `targeted deletion of blocked fan-out B preserves completed sibling A and waits for B rollback`: DELETE(B) likewise resolved ahead of B cleanup; the old catch subsequently removed completed sibling A.
+
+### GREEN evidence
+
+- The two deterministic creation/rollback races: **2 passed, 0 failed**.
+- Complete `variants.test.ts`: **18 passed, 0 failed**.
+- Final Task 4 affected surface: **54 passed, 0 failed**.
+- `pnpm typecheck`: **TYPECHECK: PASS**.
+- `git diff --check`: pass.
+
+The daemon wildcard suite was not run, per the standing constraint.

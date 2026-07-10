@@ -198,6 +198,116 @@ function initStandardProject(dataDir: string, projectId: string): string {
   return dir;
 }
 
+test("single Standard variant deletion waits for its failed creation cleanup", async () => {
+  const created = deferred();
+  const rollbackStarted = deferred();
+  const allowRollback = deferred();
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Single create cleanup", mode: "standard" });
+      initStandardProject(dataDir, project.id);
+      const main = store.ensureMainVariant(project.id);
+
+      const creating = fetch(`${base}/api/projects/${project.id}/variants`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Delete while creating" }),
+      });
+      await created.promise;
+      const target = store.listVariants(project.id).find((variant) => variant.id !== main.id)!;
+      const worktree = standardWorktreeDir(dataDir, project.id, target.id);
+      assert.ok(existsSync(worktree));
+
+      const deleting = fetch(`${base}/api/projects/${project.id}/variants/${target.id}`, { method: "DELETE" });
+      await rollbackStarted.promise;
+      const deletionWhileRollbackBlocked = await Promise.race([
+        deleting.then(() => "resolved" as const),
+        new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 50)),
+      ]);
+      allowRollback.resolve();
+      const [createResponse, deleteResponse] = await Promise.all([creating, deleting]);
+
+      assert.equal(deletionWhileRollbackBlocked, "pending", "DELETE cannot outrun Git worktree cleanup");
+      assert.equal(createResponse.status, 409);
+      assert.equal(deleteResponse.status, 200);
+      assert.equal(store.getVariant(target.id), null);
+      assert.equal(existsSync(worktree), false);
+    },
+    {
+      variantMutationCheckpoint: async (_projectId, _variantId, phase, signal) => {
+        if (phase === "created") {
+          created.resolve();
+          if (!signal?.aborted) await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+          return;
+        }
+        rollbackStarted.resolve();
+        await allowRollback.promise;
+      },
+    },
+  );
+});
+
+test("targeted deletion of blocked fan-out B preserves completed sibling A and waits for B rollback", async () => {
+  const secondCreated = deferred();
+  const secondRollbackStarted = deferred();
+  const allowSecondRollback = deferred();
+  let createdCount = 0;
+  let blockedVariantId = "";
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Fan-out target cleanup", mode: "standard" });
+      initStandardProject(dataDir, project.id);
+      const main = store.ensureMainVariant(project.id);
+
+      const fanningOut = fetch(`${base}/api/projects/${project.id}/variants/fanout`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ count: 2 }),
+      });
+      await secondCreated.promise;
+      const siblings = store.listVariants(project.id).filter((variant) => variant.id !== main.id);
+      const siblingA = siblings.find((variant) => variant.id !== blockedVariantId)!;
+      const siblingB = siblings.find((variant) => variant.id === blockedVariantId)!;
+      const worktreeA = standardWorktreeDir(dataDir, project.id, siblingA.id);
+      const worktreeB = standardWorktreeDir(dataDir, project.id, siblingB.id);
+      assert.ok(existsSync(worktreeA));
+      assert.ok(existsSync(worktreeB));
+
+      const deletingB = fetch(`${base}/api/projects/${project.id}/variants/${siblingB.id}`, { method: "DELETE" });
+      await secondRollbackStarted.promise;
+      const deletionWhileRollbackBlocked = await Promise.race([
+        deletingB.then(() => "resolved" as const),
+        new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 50)),
+      ]);
+      allowSecondRollback.resolve();
+      const [fanoutResponse, deleteResponse] = await Promise.all([fanningOut, deletingB]);
+
+      assert.equal(deletionWhileRollbackBlocked, "pending", "DELETE(B) waits for B rollback cleanup");
+      assert.equal(fanoutResponse.status, 409);
+      assert.equal(deleteResponse.status, 200);
+      assert.ok(store.getVariant(siblingA.id), "completed sibling A row remains");
+      assert.ok(existsSync(worktreeA), "completed sibling A worktree remains");
+      assert.equal(store.getVariant(siblingB.id), null);
+      assert.equal(existsSync(worktreeB), false);
+    },
+    {
+      variantMutationCheckpoint: async (_projectId, variantId, phase, signal) => {
+        if (phase === "created") {
+          createdCount += 1;
+          if (createdCount !== 2) return;
+          blockedVariantId = variantId;
+          secondCreated.resolve();
+          if (!signal?.aborted) await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+          return;
+        }
+        if (variantId !== blockedVariantId) return;
+        secondRollbackStarted.resolve();
+        await allowSecondRollback.promise;
+      },
+    },
+  );
+});
+
 test("variant deletion unregisters a real Git version worktree before removing its directory", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-version-worktree-delete-"));
   const store = new Store(":memory:");
