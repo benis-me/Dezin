@@ -3,12 +3,7 @@
 // Dezin daemon. The running Dezin app (desktop or web) picks the capture up in its home
 // composer; the worker does not open a browser tab.
 
-const DEFAULT_URL = "http://127.0.0.1:7457"; // the installed desktop app's daemon (the dev daemon uses the same port)
-
-async function dezinUrl() {
-  const { dezinUrl } = await chrome.storage.sync.get("dezinUrl");
-  return (dezinUrl || DEFAULT_URL).replace(/\/+$/, "");
-}
+import { analyze, capture } from "./dezin-client.js";
 
 function bytesToBase64(bytes) {
   let bin = "";
@@ -43,14 +38,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "dezin-analyze") {
     (async () => {
       try {
-        const base = await dezinUrl();
-        const r = await fetch(`${base}/api/analyze-image`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ image: msg.image, source: msg.source || "extension" }),
-        });
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok || !data.brief) throw new Error(data.error || `analyze ${r.status}`);
+        const data = await analyze({ image: msg.image, source: msg.source || "extension" });
+        if (!data.brief) throw new Error("Dezin returned no analysis brief");
         sendResponse({ ok: true, brief: data.brief, agent: data.agent });
       } catch (e) {
         const m = String(e && e.message ? e.message : e);
@@ -68,13 +57,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         else if (item.url) images.push({ name: item.name || "capture.png", base64: await urlToBase64(item.url) });
       }
       if (!images.length) throw new Error("no images");
-      const base = await dezinUrl();
-      const r = await fetch(`${base}/api/capture`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ images, note: msg.note || "", source: msg.source || "extension" }),
-      });
-      if (!r.ok) throw new Error(`Dezin daemon returned ${r.status} — is the Dezin app running at ${base}?`);
+      await capture({ images, note: msg.note || "", source: msg.source || "extension" });
       sendResponse({ ok: true });
     } catch (e) {
       const m = String(e && e.message ? e.message : e);

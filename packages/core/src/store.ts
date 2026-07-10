@@ -33,6 +33,8 @@ import type {
   SaveMoodboardNodeInput,
   Settings,
   UpdateEffectInput,
+  ExtensionCredentialRecord,
+  ExtensionScope,
 } from "./types.ts";
 
 const SCHEMA = `
@@ -196,6 +198,16 @@ CREATE INDEX IF NOT EXISTS idx_moodboard_nodes_board ON moodboard_nodes(board_id
 CREATE INDEX IF NOT EXISTS idx_moodboard_assets_board ON moodboard_assets(board_id);
 CREATE INDEX IF NOT EXISTS idx_moodboard_conversations_board ON moodboard_conversations(board_id);
 CREATE INDEX IF NOT EXISTS idx_moodboard_messages_board ON moodboard_messages(board_id);
+CREATE TABLE IF NOT EXISTS extension_credentials (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  extension_id TEXT NOT NULL,
+  scopes_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_extension_credentials_token_hash ON extension_credentials(token_hash);
 `;
 
 const DEFAULT_SETTINGS: Settings = {
@@ -245,6 +257,21 @@ function asProject(r: Row): Project {
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
     archivedAt: r.archived_at == null ? null : Number(r.archived_at),
+  };
+}
+
+function asExtensionCredential(r: Row): ExtensionCredentialRecord {
+  const scopes = JSON.parse((r.scopes_json as string) || "[]") as unknown;
+  return {
+    id: r.id as string,
+    tokenHash: r.token_hash as string,
+    extensionId: r.extension_id as string,
+    scopes: Array.isArray(scopes)
+      ? scopes.filter((scope): scope is ExtensionScope => scope === "capture:write" || scope === "image:analyze")
+      : [],
+    createdAt: r.created_at as number,
+    lastUsedAt: (r.last_used_at as number | null) ?? null,
+    revokedAt: (r.revoked_at as number | null) ?? null,
   };
 }
 function asConversation(r: Row): Conversation {
@@ -572,6 +599,49 @@ export class Store {
 
   close(): void {
     this.db.close();
+  }
+
+  createExtensionCredential(input: {
+    tokenHash: string;
+    extensionId: string;
+    scopes: ExtensionScope[];
+  }): ExtensionCredentialRecord {
+    if (!/^[a-f0-9]{64}$/.test(input.tokenHash)) throw new Error("expected a SHA-256 token hash");
+    const id = this.clock.id();
+    const now = this.clock.now();
+    const scopes = [...new Set(input.scopes)];
+    this.db
+      .prepare(
+        `INSERT INTO extension_credentials (id, token_hash, extension_id, scopes_json, created_at, last_used_at, revoked_at)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+      )
+      .run(id, input.tokenHash, input.extensionId, JSON.stringify(scopes), now);
+    return this.listExtensionCredentials({ includeRevoked: true }).find((credential) => credential.id === id)!;
+  }
+
+  listExtensionCredentials(options: { includeRevoked?: boolean } = {}): ExtensionCredentialRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM extension_credentials
+         ${options.includeRevoked ? "" : "WHERE revoked_at IS NULL"}
+         ORDER BY created_at DESC, rowid DESC`,
+      )
+      .all() as Row[];
+    return rows.map(asExtensionCredential);
+  }
+
+  touchExtensionCredential(id: string): boolean {
+    const result = this.db
+      .prepare("UPDATE extension_credentials SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL")
+      .run(this.clock.now(), id);
+    return Number(result.changes) > 0;
+  }
+
+  revokeExtensionCredential(id: string): boolean {
+    const result = this.db
+      .prepare("UPDATE extension_credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+      .run(this.clock.now(), id);
+    return Number(result.changes) > 0;
   }
 
   // ── projects ──────────────────────────────────────────────────────────────

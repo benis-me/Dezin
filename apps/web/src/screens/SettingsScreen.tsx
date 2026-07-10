@@ -5,7 +5,7 @@ import { cn } from "../lib/utils.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useToast } from "../components/Toast.tsx";
-import type { DesignSystemCard, Settings } from "../lib/api.ts";
+import type { DesignSystemCard, ExtensionCredential, Settings } from "../lib/api.ts";
 import { agentLabel } from "../components/agent-logos.tsx";
 import { publishSettingsUpdated } from "../lib/settings-events.ts";
 import { AgentProviderSettings } from "../settings/AgentProviderSettings.tsx";
@@ -122,6 +122,10 @@ export function SettingsScreen({
   const agentsLoading = agentsInitial || scanning;
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
   const [version, setVersion] = useState<string>("");
+  const [extensionCredentials, setExtensionCredentials] = useState<ExtensionCredential[]>([]);
+  const [pairingCode, setPairingCode] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [revokingCredentialId, setRevokingCredentialId] = useState<string | null>(null);
   const defaultsModelRefs = useRef<Partial<Record<ImageActionModelField, HTMLDivElement | null>>>({});
   const focusedDefaultsTargetRef = useRef<ImageActionModelField | null>(null);
 
@@ -130,6 +134,7 @@ export function SettingsScreen({
     void api.getSettings().then((s) => alive && setSettings(s)).catch(() => {});
     void api.listDesignSystems().then((d) => alive && setSystems(d)).catch(() => {});
     void api.getHealth().then((h) => alive && setVersion(h.version)).catch(() => {});
+    void api.listExtensionCredentials().then((credentials) => alive && setExtensionCredentials(credentials)).catch(() => {});
     return () => {
       alive = false;
     };
@@ -182,6 +187,27 @@ export function SettingsScreen({
         }),
       )
       .catch(() => toast("Couldn't save settings.", { variant: "error" }));
+  };
+  const generatePairingCode = async () => {
+    setPairingBusy(true);
+    try {
+      setPairingCode(await api.createExtensionPairingCode());
+    } catch {
+      toast("Couldn't generate a pairing code. Try again.", { variant: "error" });
+    } finally {
+      setPairingBusy(false);
+    }
+  };
+  const revokeExtension = async (credential: ExtensionCredential) => {
+    setRevokingCredentialId(credential.id);
+    try {
+      await api.revokeExtensionCredential(credential.id);
+      setExtensionCredentials((credentials) => credentials.filter((item) => item.id !== credential.id));
+    } catch {
+      toast("Couldn't revoke the extension. Try again.", { variant: "error" });
+    } finally {
+      setRevokingCredentialId(null);
+    }
   };
 
   const activeAgent = agents.find((a) => a.command === settings?.agentCommand);
@@ -482,11 +508,52 @@ export function SettingsScreen({
             {section === "extension" && (
               <SettingsPanel title="Browser extension" desc="Capture cover art and shots from Pinterest, Behance & Dribbble straight into Dezin.">
                 <div className="space-y-4 text-sm leading-relaxed text-foreground-2">
+                  <div className="rounded-lg border border-border bg-surface-2/30 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-medium text-foreground">Pair this daemon</div>
+                        <p className="mt-0.5 text-xs text-muted-foreground">Generate a one-time code, then enter it in the extension popup.</p>
+                      </div>
+                      <Button size="sm" onClick={() => void generatePairingCode()} disabled={pairingBusy}>
+                        {pairingBusy ? "Generating…" : "Generate pairing code"}
+                      </Button>
+                    </div>
+                    {pairingCode ? (
+                      <div className="mt-3 flex items-center justify-between rounded-md border border-border bg-background px-3 py-2">
+                        <code className="font-mono text-xl font-semibold tracking-[0.2em] text-foreground">{pairingCode.code}</code>
+                        <span className="text-xs text-muted-foreground">
+                          Expires {new Date(pairingCode.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      </div>
+                    ) : null}
+                  </div>
+                  {extensionCredentials.length > 0 ? (
+                    <div className="space-y-2">
+                      <div className="text-xs font-medium text-muted-foreground">Paired extensions</div>
+                      {extensionCredentials.map((credential) => (
+                        <div key={credential.id} className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
+                          <div className="min-w-0">
+                            <div className="truncate font-mono text-xs text-foreground">{credential.extensionId}</div>
+                            <div className="mt-0.5 text-[11px] text-muted-foreground">Capture and image analysis</div>
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            aria-label={`Revoke ${credential.extensionId}`}
+                            disabled={revokingCredentialId === credential.id}
+                            onClick={() => void revokeExtension(credential)}
+                          >
+                            {revokingCredentialId === credential.id ? "Revoking…" : "Revoke"}
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   <ol className="space-y-2.5">
                     {[
                       <>Open <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-xs">chrome://extensions</code> and turn on Developer mode.</>,
                       <>Click <b className="text-foreground">Load unpacked</b> and choose the <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-xs">apps/extension</code> folder in this repo.</>,
-                      <>Open the extension and set the <b className="text-foreground">Dezin URL</b> to this app's address.</>,
+                      <>Open the extension, set the <b className="text-foreground">Dezin URL</b>, and enter the pairing code above.</>,
                     ].map((step, i) => (
                       <li key={i} className="flex gap-2.5">
                         <span className="grid size-5 shrink-0 place-items-center rounded-full bg-surface-2 text-[11px] font-semibold text-foreground">

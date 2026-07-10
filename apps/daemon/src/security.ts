@@ -2,6 +2,8 @@ import type { IncomingMessage } from "node:http";
 import type { Settings } from "../../../packages/core/src/index.ts";
 import { HttpError } from "./http-util.ts";
 import { redactProviderProfiles } from "./provider-profile-config.ts";
+import type { ExtensionScope } from "../../../packages/core/src/index.ts";
+import type { ExtensionPairingService, RequestPrincipal } from "./extension-auth.ts";
 
 export interface DaemonSecurityOptions {
   token?: string;
@@ -44,6 +46,17 @@ export function isTrustedOrigin(origin: string | string[] | undefined): boolean 
   }
 }
 
+export function extensionIdFromOrigin(origin: string | string[] | undefined): string | null {
+  const value = headerValue(origin);
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "chrome-extension:" && url.hostname ? url.hostname : null;
+  } catch {
+    return null;
+  }
+}
+
 export function extractBearerToken(req: IncomingMessage): string | null {
   const explicit = headerValue(req.headers["x-dezin-daemon-token"]);
   if (explicit?.trim()) return explicit.trim();
@@ -52,17 +65,40 @@ export function extractBearerToken(req: IncomingMessage): string | null {
   return match?.[1]?.trim() || null;
 }
 
-export function requireDaemonRequest(req: IncomingMessage, options: DaemonSecurityOptions = {}): void {
-  if (options.disabled) return;
+export function requireExtensionPairingRequest(req: IncomingMessage): string {
+  if (!isTrustedHost(req.headers.host)) throw new HttpError(403, "untrusted host");
+  const extensionId = extensionIdFromOrigin(req.headers.origin);
+  if (!extensionId) throw new HttpError(403, "chrome extension origin required");
+  return extensionId;
+}
+
+export function requireDaemonRequest(
+  req: IncomingMessage,
+  options: DaemonSecurityOptions = {},
+  extensionPairing?: ExtensionPairingService,
+  extensionScope?: ExtensionScope,
+): RequestPrincipal {
+  if (options.disabled) return { kind: "daemon" };
   if (!isTrustedHost(req.headers.host)) throw new HttpError(403, "untrusted host");
 
   const token = options.token?.trim();
   const suppliedToken = extractBearerToken(req);
+  if (token && suppliedToken === token) return { kind: "daemon" };
+
+  const extensionId = extensionIdFromOrigin(req.headers.origin);
+  if (extensionScope && extensionPairing && suppliedToken) {
+    if (!extensionId) throw new HttpError(403, "chrome extension origin required");
+    return extensionPairing.authorize(suppliedToken, extensionScope, extensionId);
+  }
+  if (extensionId && suppliedToken && token && suppliedToken !== token) {
+    throw new HttpError(403, "extension credential is not allowed for this route");
+  }
   if (token && suppliedToken !== token && !options.allowMissingToken) throw new HttpError(401, "daemon token required");
 
   if (!isTrustedOrigin(req.headers.origin) && (!token || suppliedToken !== token)) {
     throw new HttpError(403, "untrusted origin");
   }
+  return { kind: "daemon" };
 }
 
 export function assertSafeId(id: string, label = "id"): string {

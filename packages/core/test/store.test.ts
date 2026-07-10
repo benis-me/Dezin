@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -435,4 +436,60 @@ test("quality ignores: add, list, and remove persist per project", () => {
   const after = s.listQualityIgnores(p.id);
   assert.equal(after.length, 1);
   assert.equal(after[0]!.ruleId, "cream-palette");
+});
+
+test("extension credentials persist only SHA-256 token hashes", () => {
+  const s = freshStore();
+  const rawToken = "dezin_ext_raw-token-must-never-be-persisted";
+  const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+
+  assert.throws(
+    () =>
+      s.createExtensionCredential({
+        tokenHash: rawToken,
+        extensionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        scopes: ["capture:write"],
+      }),
+    /SHA-256 token hash/,
+  );
+
+  const credential = s.createExtensionCredential({
+    tokenHash,
+    extensionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    scopes: ["capture:write", "image:analyze"],
+  });
+  const row = s.db.prepare("SELECT * FROM extension_credentials WHERE id = ?").get(credential.id) as Record<string, unknown>;
+  const columns = s.db.prepare("PRAGMA table_info(extension_credentials)").all() as Array<{ name: string }>;
+
+  assert.equal(row.token_hash, tokenHash);
+  assert.equal(JSON.stringify(row).includes(rawToken), false);
+  assert.ok(columns.some((column) => column.name === "token_hash"));
+  assert.ok(!columns.some((column) => column.name === "token"));
+  assert.deepEqual(credential.scopes, ["capture:write", "image:analyze"]);
+  s.close();
+});
+
+test("extension credential migration and lifecycle work on an existing database", () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-extension-migration-"));
+  const path = join(dir, "existing.db");
+  const existing = new DatabaseSync(path);
+  existing.exec("CREATE TABLE existing_data (value TEXT NOT NULL); INSERT INTO existing_data VALUES ('kept')");
+  existing.close();
+
+  const s = new Store(path, fakeClock());
+  const tokenHash = createHash("sha256").update("issued-token").digest("hex");
+  const created = s.createExtensionCredential({
+    tokenHash,
+    extensionId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    scopes: ["capture:write"],
+  });
+
+  assert.deepEqual(s.listExtensionCredentials(), [created]);
+  assert.equal(s.touchExtensionCredential(created.id), true);
+  assert.ok((s.listExtensionCredentials()[0]?.lastUsedAt ?? 0) > created.createdAt);
+  assert.equal(s.revokeExtensionCredential(created.id), true);
+  assert.ok(s.listExtensionCredentials({ includeRevoked: true })[0]?.revokedAt);
+  assert.equal(s.revokeExtensionCredential("missing"), false);
+  assert.equal((s.db.prepare("SELECT value FROM existing_data").get() as { value: string }).value, "kept");
+  s.close();
 });

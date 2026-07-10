@@ -7,6 +7,21 @@ export type MessageRole = "user" | "assistant" | "system";
 
 export type RunStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
 
+export type ExtensionScope = "capture:write" | "image:analyze";
+
+export interface ExtensionCredential {
+  id: string;
+  extensionId: string;
+  scopes: ExtensionScope[];
+  createdAt: number;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
+export interface ExtensionCredentialRecord extends ExtensionCredential {
+  tokenHash: string;
+}
+
 /**
  * Build mode. "prototype" = a single self-contained index.html (fast). "standard"
  * = a real frontend project (Vite + React) scaffolded from a template,

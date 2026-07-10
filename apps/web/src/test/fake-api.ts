@@ -38,6 +38,9 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     createEffect: notImpl as ApiClient["createEffect"],
     updateEffect: notImpl as ApiClient["updateEffect"],
     listSkills: async () => [],
+    createExtensionPairingCode: notImpl as ApiClient["createExtensionPairingCode"],
+    listExtensionCredentials: async () => [],
+    revokeExtensionCredential: async () => {},
     getSettings: async () => ({
       agentCommand: "claude",
       model: "",

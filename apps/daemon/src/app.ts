@@ -11,7 +11,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
-import type { CreateProjectInput, Project, Settings } from "../../../packages/core/src/index.ts";
+import type { CreateProjectInput, ExtensionScope, Project, Settings } from "../../../packages/core/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import type { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
@@ -69,8 +69,18 @@ import {
   handleUploadMoodboardAsset,
 } from "./moodboard-handler.ts";
 import type { MoodboardAgentTextRunner } from "./moodboard-agent.ts";
-import { assertSafeId, redactSettings, requireDaemonRequest, type DaemonSecurityOptions } from "./security.ts";
+import {
+  assertSafeId,
+  redactSettings,
+  requireDaemonRequest,
+  requireExtensionPairingRequest,
+  type DaemonSecurityOptions,
+} from "./security.ts";
 import { mergeProviderProfilesForUpdate } from "./provider-profile-config.ts";
+import {
+  StoreExtensionPairingService,
+  type ExtensionPairingService,
+} from "./extension-auth.ts";
 
 export interface AppDeps {
   store: Store;
@@ -110,6 +120,10 @@ export interface AppDeps {
   modelProviderFetch?: typeof fetch;
   /** Optional local API boundary guard. */
   security?: DaemonSecurityOptions;
+  /** Scoped browser-extension pairing service; defaults to the persistent Store implementation. */
+  extensionPairing?: ExtensionPairingService;
+  /** Image analyzer hook; tests can avoid launching a real agent. */
+  imageAnalyzer?: typeof analyzeImage;
   /** Unique owner id for this daemon process; persisted on newly-created runs. */
   daemonOwnerId?: string;
 }
@@ -119,6 +133,7 @@ type Handler = (
   res: ServerResponse,
   params: Record<string, string>,
   deps: AppDeps,
+  extensionPairing: ExtensionPairingService,
 ) => void | Promise<void>;
 
 interface Route {
@@ -126,6 +141,8 @@ interface Route {
   pattern: string;
   handler: Handler;
   publicRead?: boolean;
+  extensionScope?: ExtensionScope;
+  extensionPairing?: boolean;
 }
 
 function isNonEmptyString(v: unknown): v is string {
@@ -166,6 +183,40 @@ const routes: Route[] = [
   },
   {
     method: "POST",
+    pattern: "/api/extension/pairing-code",
+    handler: (_req, res, _p, _deps, extensionPairing) => sendJson(res, 201, extensionPairing.createCode()),
+  },
+  {
+    method: "POST",
+    pattern: "/api/extension/pair",
+    extensionPairing: true,
+    handler: async (req, res, _p, _deps, extensionPairing) => {
+      const body = (await readJsonBody(req)) as { code?: unknown } | null;
+      const code = typeof body?.code === "string" ? body.code.trim() : "";
+      if (!code) return sendError(res, 400, "pairing code required");
+      sendJson(res, 200, extensionPairing.exchange(code, requireExtensionPairingRequest(req)));
+    },
+  },
+  {
+    method: "GET",
+    pattern: "/api/extension/credentials",
+    handler: (_req, res, _p, { store }) =>
+      sendJson(
+        res,
+        200,
+        store.listExtensionCredentials().map(({ tokenHash: _tokenHash, ...credential }) => credential),
+      ),
+  },
+  {
+    method: "DELETE",
+    pattern: "/api/extension/credentials/:id",
+    handler: (_req, res, p, _deps, extensionPairing) => {
+      if (!extensionPairing.revoke(p.id!)) return sendError(res, 404, "extension credential not found");
+      sendJson(res, 200, { ok: true });
+    },
+  },
+  {
+    method: "POST",
     pattern: "/api/fig/parse",
     handler: async (req, res) => {
       let name = "design.fig";
@@ -188,6 +239,7 @@ const routes: Route[] = [
     // Browser extension → Dezin hand-off. The background worker (host_permissions) POSTs here.
     method: "POST",
     pattern: "/api/capture",
+    extensionScope: "capture:write",
     handler: async (req, res) => {
       const body = (await readJsonBody(req)) as Partial<PendingCapture> | null;
       const images = Array.isArray(body?.images)
@@ -225,15 +277,16 @@ const routes: Route[] = [
     // screenshot and return a one-paragraph recreation brief.
     method: "POST",
     pattern: "/api/analyze-image",
-    handler: async (req, res, _p, { store }) => {
+    extensionScope: "image:analyze",
+    handler: async (req, res, _p, deps) => {
       const body = (await readJsonBody(req)) as { image?: string; agentCommand?: string; model?: string } | null;
       const image = typeof body?.image === "string" ? body.image : "";
       if (!image) return sendError(res, 400, "no image");
-      const settings = store.getSettings();
+      const settings = deps.store.getSettings();
       const command = (typeof body?.agentCommand === "string" && body.agentCommand) || settings.agentCommand || "claude";
       const model = typeof body?.model === "string" ? body.model : undefined;
       try {
-        const brief = await analyzeImage(command, image, model, undefined, buildAgentEnv(settings, command));
+        const brief = await (deps.imageAnalyzer ?? analyzeImage)(command, image, model, undefined, buildAgentEnv(settings, command));
         sendJson(res, 200, { brief, agent: command });
       } catch (e) {
         sendError(res, 502, e instanceof Error ? e.message : "analysis failed");
@@ -946,6 +999,7 @@ const routes: Route[] = [
 export function createApp(deps: AppDeps): http.Server {
   const webDir = deps.webDir ?? defaultWebDir();
   const hasWeb = existsSync(webDir);
+  const extensionPairing = deps.extensionPairing ?? new StoreExtensionPairingService(deps.store);
   warmAgents(deps.agentProber, deps.dataDir); // reload the persisted scan (or probe once) at startup
   return http.createServer(async (req, res) => {
     const method = req.method ?? "GET";
@@ -966,8 +1020,9 @@ export function createApp(deps: AppDeps): http.Server {
           continue;
         }
         validateRouteParams(m.params);
-        requireDaemonRequest(req, { ...deps.security, allowMissingToken: route.publicRead === true });
-        await route.handler(req, res, m.params, deps);
+        if (route.extensionPairing) requireExtensionPairingRequest(req);
+        else requireDaemonRequest(req, { ...deps.security, allowMissingToken: route.publicRead === true }, extensionPairing, route.extensionScope);
+        await route.handler(req, res, m.params, deps, extensionPairing);
         return;
       }
       if (matchedPathButNotMethod) {

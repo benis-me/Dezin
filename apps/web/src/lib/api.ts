@@ -6,6 +6,16 @@
 
 export type ProjectMode = "prototype" | "standard";
 
+export type ExtensionScope = "capture:write" | "image:analyze";
+export interface ExtensionCredential {
+  id: string;
+  extensionId: string;
+  scopes: ExtensionScope[];
+  createdAt: number;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -603,6 +613,9 @@ export interface ApiClient {
   createEffect(input: CreateEffectInput): Promise<EffectDetail>;
   updateEffect(id: string, patch: UpdateEffectInput): Promise<EffectDetail>;
   listSkills(): Promise<SkillCard[]>;
+  createExtensionPairingCode(): Promise<{ code: string; expiresAt: number }>;
+  listExtensionCredentials(): Promise<ExtensionCredential[]>;
+  revokeExtensionCredential(id: string): Promise<void>;
   getSettings(): Promise<Settings>;
   updateSettings(patch: Partial<Settings>): Promise<Settings>;
   testModelProvider(providerId: string): Promise<ModelProviderTestResult>;
@@ -843,6 +856,9 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     createEffect: (input) => json<EffectDetail>("/api/effects", jsonInit("POST", input)),
     updateEffect: (id, patch) => json<EffectDetail>(`/api/effects/${enc(id)}`, jsonInit("PATCH", patch)),
     listSkills: () => json<SkillCard[]>("/api/skills"),
+    createExtensionPairingCode: () => json<{ code: string; expiresAt: number }>("/api/extension/pairing-code", { method: "POST" }),
+    listExtensionCredentials: () => json<ExtensionCredential[]>("/api/extension/credentials"),
+    revokeExtensionCredential: (id) => json<void>(`/api/extension/credentials/${enc(id)}`, { method: "DELETE" }),
     getSettings: () => json<Settings>("/api/settings"),
     updateSettings: (patch) => json<Settings>("/api/settings", jsonInit("PUT", patch)),
     testModelProvider: (providerId) => json<ModelProviderTestResult>("/api/model-providers/test", jsonInit("POST", { providerId })),

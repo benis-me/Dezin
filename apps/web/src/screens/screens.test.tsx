@@ -928,6 +928,65 @@ test("SettingsScreen sidebar lists sections; Agents + Defaults show daemon data"
   expect(await screen.findByRole("combobox", { name: "Default design system" })).toHaveTextContent("Modern Minimal");
 });
 
+test("SettingsScreen generates a pairing code and displays its expiration", async () => {
+  const createExtensionPairingCode = vi.fn(async () => ({ code: "123456", expiresAt: Date.now() + 5 * 60_000 }));
+  renderSettings({
+    createExtensionPairingCode,
+    listExtensionCredentials: async () => [],
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Browser extension" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Generate pairing code" }));
+
+  expect(await screen.findByText("123456")).toBeInTheDocument();
+  expect(screen.getByText(/Expires/)).toBeInTheDocument();
+  expect(createExtensionPairingCode).toHaveBeenCalledTimes(1);
+});
+
+test("SettingsScreen revokes a paired extension", async () => {
+  const revokeExtensionCredential = vi.fn(async () => undefined);
+  renderSettings({
+    listExtensionCredentials: async () => [
+      {
+        id: "credential-1",
+        extensionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        scopes: ["capture:write", "image:analyze"],
+        createdAt: Date.now(),
+        lastUsedAt: null,
+        revokedAt: null,
+      },
+    ],
+    revokeExtensionCredential,
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Browser extension" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Revoke aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }));
+
+  await waitFor(() => expect(revokeExtensionCredential).toHaveBeenCalledWith("credential-1"));
+  expect(screen.queryByRole("button", { name: "Revoke aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })).toBeNull();
+});
+
+test("SettingsScreen pairing errors are retryable", async () => {
+  const createExtensionPairingCode = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("daemon busy"))
+    .mockResolvedValueOnce({ code: "654321", expiresAt: Date.now() + 5 * 60_000 });
+  renderSettings({
+    createExtensionPairingCode,
+    listExtensionCredentials: async () => [],
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Browser extension" }));
+  const button = await screen.findByRole("button", { name: "Generate pairing code" });
+  fireEvent.click(button);
+  await waitFor(() => expect(createExtensionPairingCode).toHaveBeenCalledTimes(1));
+  expect(button).toBeEnabled();
+
+  fireEvent.click(button);
+  expect(await screen.findByText("654321")).toBeInTheDocument();
+  expect(createExtensionPairingCode).toHaveBeenCalledTimes(2);
+});
+
 test("SettingsScreen Defaults configures function-specific image models", async () => {
   const user = userEvent.setup();
   let current = settingsFixture({

@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Dezin Capture",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Capture and analyze designs from Pinterest, Behance, and Dribbble, then import a reference + recreation brief into Dezin.",
   "permissions": ["storage"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "<all_urls>"],
-  "background": { "service_worker": "background.js" },
+  "background": { "service_worker": "background.js", "type": "module" },
   "content_scripts": [
     {
       "matches": ["*://*.pinterest.com/*", "*://*.behance.net/*", "*://*.dribbble.com/*", "*://dribbble.com/*"],

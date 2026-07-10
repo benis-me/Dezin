@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import http from "node:http";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -71,6 +72,27 @@ async function rawRequest(
   });
 }
 
+const DAEMON_TOKEN = "test-daemon-token";
+const EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
+
+async function createPairCode(base: string): Promise<{ code: string; expiresAt: number }> {
+  const response = await fetch(`${base}/api/extension/pairing-code`, {
+    method: "POST",
+    headers: { "x-dezin-daemon-token": DAEMON_TOKEN },
+  });
+  assert.equal(response.status, 201);
+  return (await response.json()) as { code: string; expiresAt: number };
+}
+
+async function exchangePairCode(base: string, code: string, origin = EXTENSION_ORIGIN): Promise<Response> {
+  return fetch(`${base}/api/extension/pair`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin },
+    body: JSON.stringify({ code }),
+  });
+}
+
 test("GET /api/health", async () => {
   await withServer(async ({ base }) => {
     const res = await fetch(`${base}/api/health`);
@@ -107,6 +129,175 @@ test("daemon enforces token when configured", async () => {
       assert.equal(accepted.status, 200);
     },
     { security: { token: "test-token" } } as Partial<AppDeps>,
+  );
+});
+
+test("extension credentials are authorized only for their scoped POST route", async () => {
+  const cases = [
+    ["capture:write", "POST", "/api/capture", 200],
+    ["capture:write", "POST", "/api/analyze-image", 403],
+    ["image:analyze", "POST", "/api/analyze-image", 200],
+    ["image:analyze", "POST", "/api/capture", 403],
+    ["capture:write", "GET", "/api/settings", 403],
+  ] as const;
+
+  await withServer(
+    async ({ base, store }) => {
+      for (const [scope, method, path, expected] of cases) {
+        const token = `dezin_ext_${scope}_${method}_${path}`;
+        store.createExtensionCredential({
+          tokenHash: createHash("sha256").update(token).digest("hex"),
+          extensionId: EXTENSION_ID,
+          scopes: [scope],
+        });
+        const body = path === "/api/capture"
+          ? JSON.stringify({ images: [{ name: "shot.png", base64: "YWJjZA==" }], source: "extension" })
+          : path === "/api/analyze-image"
+            ? JSON.stringify({ image: "YWJjZA==" })
+            : undefined;
+        const response = await fetch(`${base}${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${token}`,
+            origin: EXTENSION_ORIGIN,
+            ...(body ? { "content-type": "application/json" } : {}),
+          },
+          body,
+        });
+        assert.equal(response.status, expected, `${scope} ${method} ${path}`);
+      }
+    },
+    {
+      security: { token: DAEMON_TOKEN },
+      imageAnalyzer: async () => "A concise recreation brief.",
+    } as Partial<AppDeps>,
+  );
+});
+
+test("extension pair codes expire and are consumed before concurrent exchanges complete", async () => {
+  const realNow = Date.now;
+  let now = 10_000;
+  Date.now = () => now;
+  try {
+    await withServer(
+      async ({ base }) => {
+        const singleUse = await createPairCode(base);
+        const raced = await Promise.all([
+          exchangePairCode(base, singleUse.code),
+          exchangePairCode(base, singleUse.code),
+        ]);
+        assert.deepEqual(raced.map((response) => response.status).sort((a, b) => a - b), [200, 400]);
+
+        const expiring = await createPairCode(base);
+        assert.equal(expiring.expiresAt, now + 5 * 60_000);
+        now = expiring.expiresAt;
+        const expired = await exchangePairCode(base, expiring.code);
+        assert.equal(expired.status, 400);
+      },
+      { security: { token: DAEMON_TOKEN } } as Partial<AppDeps>,
+    );
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("extension pairing binds origin, lists redacted credentials, and revokes access", async () => {
+  await withServer(
+    async ({ base }) => {
+      const pairCode = await createPairCode(base);
+      const paired = await exchangePairCode(base, pairCode.code);
+      assert.equal(paired.status, 200);
+      const payload = (await paired.json()) as {
+        token: string;
+        credential: { id: string; extensionId: string; scopes: string[]; tokenHash?: string };
+      };
+      assert.equal(payload.credential.extensionId, EXTENSION_ID);
+      assert.deepEqual(payload.credential.scopes, ["capture:write", "image:analyze"]);
+      assert.equal(payload.credential.tokenHash, undefined);
+
+      const wrongOrigin = await fetch(`${base}/api/capture`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${payload.token}`,
+          origin: "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ images: [{ name: "shot.png", base64: "YWJjZA==" }] }),
+      });
+      assert.equal(wrongOrigin.status, 403);
+
+      const listed = await fetch(`${base}/api/extension/credentials`, {
+        headers: { "x-dezin-daemon-token": DAEMON_TOKEN },
+      });
+      assert.equal(listed.status, 200);
+      const credentials = (await listed.json()) as Array<{ id: string; tokenHash?: string }>;
+      assert.equal(credentials.length, 1);
+      assert.equal(credentials[0]?.tokenHash, undefined);
+
+      const revoked = await fetch(`${base}/api/extension/credentials/${payload.credential.id}`, {
+        method: "DELETE",
+        headers: { "x-dezin-daemon-token": DAEMON_TOKEN },
+      });
+      assert.equal(revoked.status, 200);
+
+      const afterRevoke = await fetch(`${base}/api/capture`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${payload.token}`,
+          origin: EXTENSION_ORIGIN,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ images: [{ name: "shot.png", base64: "YWJjZA==" }] }),
+      });
+      assert.equal(afterRevoke.status, 401);
+    },
+    { security: { token: DAEMON_TOKEN } } as Partial<AppDeps>,
+  );
+});
+
+test("pairing rejects non-extension origins and malformed credentials while daemon token keeps full access", async () => {
+  await withServer(
+    async ({ base }) => {
+      const pairCode = await createPairCode(base);
+      const wrongOrigin = await exchangePairCode(base, pairCode.code, "http://127.0.0.1:7457");
+      assert.equal(wrongOrigin.status, 403);
+
+      const malformed = await fetch(`${base}/api/capture`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer malformed-extension-credential",
+          origin: EXTENSION_ORIGIN,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ images: [{ name: "shot.png", base64: "YWJjZA==" }] }),
+      });
+      assert.equal(malformed.status, 401);
+
+      const daemonHeaders = {
+        authorization: `Bearer ${DAEMON_TOKEN}`,
+        "content-type": "application/json",
+      };
+      const capture = await fetch(`${base}/api/capture`, {
+        method: "POST",
+        headers: daemonHeaders,
+        body: JSON.stringify({ images: [{ name: "shot.png", base64: "YWJjZA==" }] }),
+      });
+      assert.equal(capture.status, 200);
+      const analyze = await fetch(`${base}/api/analyze-image`, {
+        method: "POST",
+        headers: daemonHeaders,
+        body: JSON.stringify({ image: "YWJjZA==" }),
+      });
+      assert.equal(analyze.status, 200);
+      const settings = await fetch(`${base}/api/settings`, {
+        headers: { authorization: `Bearer ${DAEMON_TOKEN}` },
+      });
+      assert.equal(settings.status, 200);
+    },
+    {
+      security: { token: DAEMON_TOKEN },
+      imageAnalyzer: async () => "A concise recreation brief.",
+    } as Partial<AppDeps>,
   );
 });
 

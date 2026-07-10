@@ -3,25 +3,43 @@
   <head>
     <meta charset="utf-8" />
     <style>
-      body { width: 260px; margin: 0; padding: 14px; font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; color: #18181b; }
-      h1 { margin: 0 0 2px; font-size: 16px; font-weight: 650; }
-      p.sub { margin: 0 0 12px; color: #71717a; font-size: 12px; }
+      body { width: 292px; margin: 0; padding: 14px; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; color: #18181b; }
+      h1 { margin: 0 0 2px; font-size: 20px; font-weight: 650; }
+      p.sub { margin: 0 0 12px; color: #71717a; font-size: 11px; }
       label { display: block; font-size: 11px; font-weight: 600; color: #52525b; margin-bottom: 4px; }
-      input { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid #e4e4e7; border-radius: 8px; font-size: 13px; outline: none; }
+      input { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid #e4e4e7; border-radius: 8px; font-size: 14px; outline: none; }
       input:focus { border-color: #a1a1aa; }
-      button { width: 100%; margin-top: 10px; border: 0; border-radius: 8px; background: #18181b; color: #fff; padding: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
-      .status { margin: 8px 0 0; font-size: 12px; color: #16a34a; min-height: 16px; }
+      button { width: 100%; margin-top: 10px; border: 0; border-radius: 8px; background: #18181b; color: #fff; padding: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
+      button:disabled { cursor: wait; opacity: .55; }
+      button.secondary { border: 1px solid #e4e4e7; background: #fff; color: #3f3f46; }
+      .divider { height: 1px; margin: 14px 0; background: #e4e4e7; }
+      .pair-state { margin: 0 0 8px; color: #71717a; font-size: 11px; }
+      .pair-state strong { color: #18181b; }
+      .actions { display: flex; gap: 8px; }
+      .actions button { flex: 1; }
+      body[data-state="unpaired"] #forget, body[data-state="pairing"] #forget, body[data-state="error"] #forget { display: none; }
+      body[data-state="paired"] #pair-code, body[data-state="paired"] #pair, body[data-state="paired"] label[for="pair-code"] { display: none; }
+      .status { margin: 8px 0 0; font-size: 11px; color: #16a34a; min-height: 16px; }
+      body[data-state="error"] .status { color: #dc2626; }
       .hint { margin: 10px 0 0; font-size: 11px; color: #a1a1aa; line-height: 1.5; }
     </style>
   </head>
-  <body>
+  <body data-state="unpaired">
     <h1>Dezin Capture</h1>
     <p class="sub">Hover a design, hit ✦ Capture, Analyze, then Import — the reference and brief land in the Dezin app composer.</p>
     <label for="url">Dezin daemon URL</label>
     <input id="url" type="text" placeholder="http://127.0.0.1:7457" />
-    <button id="save">Save</button>
+    <button class="secondary" id="save">Save URL</button>
+    <div class="divider"></div>
+    <p class="pair-state" id="pair-state"><strong>Unpaired.</strong> Generate a code in Dezin Settings.</p>
+    <label for="pair-code">Pairing code</label>
+    <input id="pair-code" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="123456" />
+    <div class="actions">
+      <button id="pair">Pair</button>
+      <button class="secondary" id="forget">Forget</button>
+    </div>
     <p class="status" id="status"></p>
     <p class="hint">Desktop or pnpm dev daemon: <b>http://127.0.0.1:7457</b><br />If you override DEZIN_PORT, use that daemon URL.</p>
-    <script src="popup.js"></script>
+    <script type="module" src="popup.js"></script>
   </body>
 </html>

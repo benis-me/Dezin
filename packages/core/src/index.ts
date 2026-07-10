@@ -32,5 +32,8 @@ export type {
   Settings,
   QualityFinding,
   QualityIgnoreEntry,
+  ExtensionScope,
+  ExtensionCredential,
+  ExtensionCredentialRecord,
 } from "./types.ts";
 export { Store, type StoreClock } from "./store.ts";
