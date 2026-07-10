@@ -13,7 +13,7 @@ import { Store } from "../../../packages/core/src/index.ts";
 import type { CreateProjectInput, ExtensionScope, Project, Settings } from "../../../packages/core/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import type { DesignRegistry } from "../../../packages/design/src/index.ts";
-import { sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
+import { HttpError, sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
 import { scoreTrend } from "../../../packages/quality/src/index.ts";
 import { serveProjectFile, serveFileFromBase, projectDir } from "./serve-static.ts";
 import { figToJson, summarizeFig } from "./parse-fig.ts";
@@ -44,7 +44,7 @@ import {
   releaseVariantRuntime,
   stopAllProjectRuntimes,
 } from "./project-runtime.ts";
-import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, type SharinganOpen } from "./sharingan-handler.ts";
+import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, sharinganRunCaptureId, type SharinganOpen } from "./sharingan-handler.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey, isStandardRootVariant, removeStandardVariantWorktree, removeStandardVersionWorktree } from "./variant-workspaces.ts";
 import { RuntimeScopeUnavailableError, RuntimeSupervisor } from "./runtime-supervisor.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
@@ -201,6 +201,22 @@ function projectPayload(dataDir: string, project: Project): Project & { projectP
 
 function activeVariantId(store: Store, projectId: string): string | undefined {
   return store.getActiveVariantId(projectId) ?? store.listVariants(projectId)[0]?.id;
+}
+
+function sharinganRequestTarget(req: IncomingMessage, projectId: string, deps: AppDeps): {
+  captureId: string;
+  scope: { projectId: string; variantId?: string; runId?: string };
+} {
+  const raw = req.headers["x-dezin-run-id"];
+  const runId = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+  if (!runId) return { captureId: projectId, scope: { projectId } };
+  const run = deps.store.getRun(runId);
+  if (!run || run.projectId !== projectId) throw new HttpError(404, "Sharingan Run scope not found");
+  if (run.status !== "pending" && run.status !== "running") throw new HttpError(409, "Sharingan Run scope is no longer active");
+  return {
+    captureId: sharinganRunCaptureId(projectId, runId),
+    scope: { projectId, variantId: run.variantId ?? undefined, runId },
+  };
 }
 
 export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir">): RuntimeSupervisor {
@@ -1094,9 +1110,10 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/sharingan/:id/status",
-    handler: (_req, res, p, deps) => {
+    handler: (req, res, p, deps) => {
       if (!deps.store.getProject(p.id!)) return sendError(res, 404, "project not found");
-      handleSharinganStatus(res, p.id!, deps.dataDir);
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      handleSharinganStatus(res, target.captureId, deps.dataDir);
     },
   },
   {
@@ -1104,87 +1121,92 @@ const routes: Route[] = [
     method: "GET",
     pattern: "/api/sharingan/:id/shot",
     publicRead: true,
-    handler: (req, res, p, deps) => handleSharinganShot(res, p.id!, new URL(req.url ?? "", "http://x").searchParams.get("path") ?? "", deps.dataDir),
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      handleSharinganShot(res, target.captureId, new URL(req.url ?? "", "http://x").searchParams.get("path") ?? "", deps.dataDir);
+    },
   },
   {
     method: "GET",
     pattern: "/api/sharingan/:id/events",
-    handler: (_req, res, p, deps) => {
-      deps.runtimeSupervisor!.assertAdmission({ projectId: p.id! });
-      handleSharinganEvents(res, p.id!);
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      deps.runtimeSupervisor!.assertAdmission(target.scope);
+      handleSharinganEvents(res, target.captureId);
     },
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/continue",
-    handler: (_req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
-      { projectId: p.id! },
-      () => handleSharinganContinue(res, p.id!, deps.dataDir),
-    ),
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      return deps.runtimeSupervisor!.trackOperation(target.scope, () => handleSharinganContinue(res, target.captureId, deps.dataDir));
+    },
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/focus",
-    handler: (_req, res, p, deps) => {
-      deps.runtimeSupervisor!.assertAdmission({ projectId: p.id! });
-      handleSharinganFocus(res, p.id!);
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      deps.runtimeSupervisor!.assertAdmission(target.scope);
+      handleSharinganFocus(res, target.captureId);
     },
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/navigate",
-    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
-      { projectId: p.id! },
-      (signal) => handleSharinganNavigate(req, res, p.id!, deps.dataDir, signal),
-    ),
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      return deps.runtimeSupervisor!.trackOperation(target.scope, (signal) => handleSharinganNavigate(req, res, target.captureId, deps.dataDir, signal));
+    },
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/capture",
-    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
-      { projectId: p.id! },
-      (signal) => handleSharinganCapture(req, res, p.id!, deps.dataDir, signal),
-    ),
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      return deps.runtimeSupervisor!.trackOperation(target.scope, (signal) => handleSharinganCapture(req, res, target.captureId, deps.dataDir, signal));
+    },
   },
   {
     method: "GET",
     pattern: "/api/sharingan/:id/read-dom",
-    handler: (_req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
-      { projectId: p.id! },
-      () => handleSharinganReadDom(res, p.id!, deps.dataDir),
-    ),
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      return deps.runtimeSupervisor!.trackOperation(target.scope, () => handleSharinganReadDom(res, target.captureId, deps.dataDir));
+    },
   },
   {
     method: "GET",
     pattern: "/api/sharingan/:id/computed-styles",
-    handler: (_req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
-      { projectId: p.id! },
-      () => handleSharinganComputedStyles(res, p.id!, deps.dataDir),
-    ),
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      return deps.runtimeSupervisor!.trackOperation(target.scope, () => handleSharinganComputedStyles(res, target.captureId, deps.dataDir));
+    },
   },
   {
     method: "GET",
     pattern: "/api/sharingan/:id/links",
-    handler: (_req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
-      { projectId: p.id! },
-      () => handleSharinganLinks(res, p.id!, deps.dataDir),
-    ),
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      return deps.runtimeSupervisor!.trackOperation(target.scope, () => handleSharinganLinks(res, target.captureId, deps.dataDir));
+    },
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/click",
-    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
-      { projectId: p.id! },
-      (signal) => handleSharinganClick(req, res, p.id!, deps.dataDir, signal),
-    ),
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      return deps.runtimeSupervisor!.trackOperation(target.scope, (signal) => handleSharinganClick(req, res, target.captureId, deps.dataDir, signal));
+    },
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/scroll",
-    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
-      { projectId: p.id! },
-      (signal) => handleSharinganScroll(req, res, p.id!, deps.dataDir, signal),
-    ),
+    handler: (req, res, p, deps) => {
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      return deps.runtimeSupervisor!.trackOperation(target.scope, (signal) => handleSharinganScroll(req, res, target.captureId, deps.dataDir, signal));
+    },
   },
 ];
 

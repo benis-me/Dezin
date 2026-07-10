@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureCaptured, capturedPageCount, ensureProbeSession, SHARINGAN_PROBE_IDLE_MS } from "../src/sharingan-handler.ts";
@@ -80,4 +80,20 @@ test("ensureCaptured without keepSessionForProbe closes the entry session (probe
   assert.ok(closes >= 1, "entry session closed on captured");
   await ensureProbeSession(id, dataDir, open);
   assert.equal(opens, 2, "probe had to reopen a fresh session");
+});
+
+test("ensureCaptured writes a Run-scoped capture only into the supplied transaction checkout", async () => {
+  const id = "transaction-capture";
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-transaction-"));
+  const transactionDir = join(dataDir, "run-worktrees", "project", "run");
+  const options = {
+    maxWaitMs: 5_000,
+    pollMs: 30,
+    artifactDir: transactionDir,
+    open: async () => fakeThatCaptures(),
+  } as Parameters<typeof ensureCaptured>[3] & { artifactDir: string };
+
+  assert.equal(await ensureCaptured(id, dataDir, "http://x.test/", options), "captured");
+  assert.equal(existsSync(join(transactionDir, ".sharingan", "pages.json")), true);
+  assert.equal(existsSync(join(dataDir, "projects", id, ".sharingan", "pages.json")), false);
 });

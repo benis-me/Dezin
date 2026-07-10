@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { agentSpawnEnv } from "../../../packages/agent/src/index.ts";
 import type { RuntimeSupervisor } from "./runtime-supervisor.ts";
 
@@ -10,6 +10,7 @@ const GIT_IDENTITY = ["-c", "user.name=Dezin", "-c", "user.email=dezin@local"];
 export interface StandardRunTransactionDeps {
   dataDir: string;
   runtimeSupervisor?: RuntimeSupervisor;
+  promotionCheckpoint?: (phase: "after-validation" | "after-ref-advance") => void | Promise<void>;
 }
 
 export interface BeginStandardRunTransactionInput {
@@ -90,6 +91,68 @@ async function sourceStatus(sourceDir: string): Promise<string> {
   return gitOutput(sourceDir, ["status", "--porcelain=v1", "--untracked-files=all"]);
 }
 
+const sourcePromotionTails = new Map<string, Promise<void>>();
+
+async function withSourcePromotionLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = sourcePromotionTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolveGate) => {
+    release = resolveGate;
+  });
+  const tail = previous.then(() => gate);
+  sourcePromotionTails.set(key, tail);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (sourcePromotionTails.get(key) === tail) sourcePromotionTails.delete(key);
+  }
+}
+
+function nulPaths(output: string): string[] {
+  return output.split("\0").filter(Boolean);
+}
+
+async function syncPublishedCheckout(
+  input: BeginStandardRunTransactionInput,
+  sourceHead: string,
+  sourceRef: string,
+  targetHead: string,
+): Promise<void> {
+  // Publication is already durable at this point. Every synchronization action below is
+  // best-effort and may only touch a path that still byte-matches the expected old checkout.
+  const currentRef = await gitOutput(input.sourceDir, ["symbolic-ref", "-q", "HEAD"]).catch(() => "");
+  if (currentRef !== sourceRef) return;
+  const indexUnchanged = await captureGit(input.sourceDir, ["diff", "--cached", "--quiet", sourceHead, "--"]);
+  if (indexUnchanged.code !== 0) return;
+
+  const [changedOutput, deletedOutput] = await Promise.all([
+    gitOutput(input.sourceDir, ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACMRT", sourceHead, targetHead, "--"]),
+    gitOutput(input.sourceDir, ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", sourceHead, targetHead, "--"]),
+  ]);
+  const changed = nulPaths(changedOutput);
+  const deleted = nulPaths(deletedOutput);
+  const safeChanged: string[] = [];
+  const safeDeleted: string[] = [];
+
+  for (const path of changed) {
+    const existedAtSource = (await captureGit(input.sourceDir, ["cat-file", "-e", `${sourceHead}:${path}`])).code === 0;
+    if (!existedAtSource) {
+      if (!existsSync(join(input.sourceDir, path))) safeChanged.push(path);
+      continue;
+    }
+    if ((await captureGit(input.sourceDir, ["diff-files", "--quiet", "--", path])).code === 0) safeChanged.push(path);
+  }
+  for (const path of deleted) {
+    if ((await captureGit(input.sourceDir, ["diff-files", "--quiet", "--", path])).code === 0) safeDeleted.push(path);
+  }
+
+  if ((await captureGit(input.sourceDir, ["read-tree", targetHead])).code !== 0) return;
+  for (const path of safeChanged) await captureGit(input.sourceDir, ["checkout-index", "-f", "--", path]);
+  for (const path of safeDeleted) await rm(join(input.sourceDir, path), { recursive: true, force: true }).catch(() => {});
+}
+
 export async function assertStandardRunSourceClean(sourceDir: string): Promise<void> {
   if (!existsSync(join(sourceDir, ".git"))) throw new Error("standard project is not a git repository yet");
   if (await sourceStatus(sourceDir)) throw new StandardRunSourceDirtyError(sourceDir);
@@ -129,6 +192,8 @@ export async function beginStandardRunTransaction(
   await assertStandardRunSourceClean(input.sourceDir);
   const sourceHead = await gitOutput(input.sourceDir, ["rev-parse", "HEAD"]);
   const sourceRef = await gitOutput(input.sourceDir, ["symbolic-ref", "-q", "HEAD"]);
+  const commonGitDir = await gitOutput(input.sourceDir, ["rev-parse", "--git-common-dir"]);
+  const promotionKey = `${resolve(input.sourceDir, commonGitDir)}:${sourceRef}`;
   const branch = standardRunBranchName(input.runId);
   const dir = standardRunWorktreeDir(deps.dataDir, input.projectId, input.runId);
   const lease = deps.runtimeSupervisor?.acquireOperationLease({
@@ -209,27 +274,37 @@ export async function beginStandardRunTransaction(
     restoreBest,
     async publish(): Promise<string> {
       ensureOpen();
-      const failConflict = (): never => {
-        preserveBranch = true;
-        throw new StandardRunPublishConflictError(branch);
-      };
-      const [currentHead, currentRef, status, transactionStatus] = await Promise.all([
-        gitOutput(input.sourceDir, ["rev-parse", "HEAD"]),
-        gitOutput(input.sourceDir, ["symbolic-ref", "-q", "HEAD"]),
-        sourceStatus(input.sourceDir),
-        sourceStatus(dir),
-      ]);
-      if (currentHead !== sourceHead || currentRef !== sourceRef || status || transactionStatus) failConflict();
-      // Preview preparation may create a Dezin-owned commit in this isolated worktree
-      // (for example an inspect-bridge refresh). It is safe to publish and must become
-      // the transaction's final head, while the source checkout remains untouched.
-      head = await gitOutput(dir, ["rev-parse", "HEAD"]);
-      const merged = await captureGit(input.sourceDir, ["merge", "--ff-only", "--no-edit", head]);
-      if (merged.code !== 0) failConflict();
-      const publishedHead = await gitOutput(input.sourceDir, ["rev-parse", "HEAD"]);
-      if (publishedHead !== head) failConflict();
-      published = true;
-      return publishedHead;
+      return withSourcePromotionLock(promotionKey, async () => {
+        const failConflict = (): never => {
+          preserveBranch = true;
+          throw new StandardRunPublishConflictError(branch);
+        };
+        const validateExpectedSource = async (): Promise<void> => {
+          const [currentHead, currentRef, status, transactionStatus] = await Promise.all([
+            gitOutput(input.sourceDir, ["rev-parse", "HEAD"]),
+            gitOutput(input.sourceDir, ["symbolic-ref", "-q", "HEAD"]),
+            sourceStatus(input.sourceDir),
+            sourceStatus(dir),
+          ]);
+          if (currentHead !== sourceHead || currentRef !== sourceRef || status || transactionStatus) failConflict();
+        };
+
+        await validateExpectedSource();
+        await deps.promotionCheckpoint?.("after-validation");
+        await validateExpectedSource();
+        // Preview preparation may create a Dezin-owned commit in this isolated worktree.
+        head = await gitOutput(dir, ["rev-parse", "HEAD"]);
+        const advanced = await captureGit(input.sourceDir, ["update-ref", sourceRef, head, sourceHead]);
+        if (advanced.code !== 0) failConflict();
+
+        // The exact commit is now published. Nothing after this line may downgrade the
+        // transaction to a conflict. Checkout synchronization is deliberately best-effort
+        // and only writes paths that still match the expected old checkout.
+        published = true;
+        await Promise.resolve().then(() => deps.promotionCheckpoint?.("after-ref-advance")).catch(() => {});
+        await syncPublishedCheckout(input, sourceHead, sourceRef, head).catch(() => {});
+        return head;
+      });
     },
     async rollback(): Promise<void> {
       if (published) throw new Error("Published Standard Run transaction cannot be rolled back");

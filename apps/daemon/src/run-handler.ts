@@ -67,7 +67,7 @@ import {
 } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
-import { ensureCaptured, capturedPageCount } from "./sharingan-handler.ts";
+import { ensureCaptured, capturedPageCount, releaseSharinganProject, sharinganRunCaptureId } from "./sharingan-handler.ts";
 import { buildSharinganContext, buildSharinganSystemPrompt } from "./sharingan-context.ts";
 import { writeProbeCli } from "./sharingan-probe-cli.ts";
 import { sharinganReviewReference } from "./sharingan-capture.ts";
@@ -1006,6 +1006,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   let standardSourceDir: string | null = null;
   let standardSourceError: unknown = null;
   let standardTransaction: StandardRunTransaction | null = null;
+  let sharinganCaptureId: string | null = null;
 
   try {
     if (project.mode === "standard") {
@@ -1198,6 +1199,32 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const sse = emitRunEvent;
   sse({ type: "run-start", runId: run.id, conversationId: conversation.id, variantId: targetVariantId });
 
+  const checkpointChosenDirection = async (chosenDirection: string): Promise<void> => {
+    await writeChosenDirection(dir, chosenDirection);
+    if (!standardTransaction || !standardSourceDir) return;
+    if (!(await workingTreeFingerprint(standardTransaction.dir))) return;
+
+    ctrl!.signal.throwIfAborted();
+    await standardTransaction.commit(`Dezin: choose research direction ${chosenDirection}`);
+    const chosenCommit = await standardTransaction.publish();
+    // The direction choice is now durable. Metadata is secondary and cannot undo that checkpoint.
+    try { store.updateRun(run.id, { commitHash: chosenCommit }); } catch { /* best-effort */ }
+    await standardTransaction.dispose();
+    standardTransaction = null;
+
+    ctrl!.signal.throwIfAborted();
+    standardTransaction = await beginStandardRunTransaction(
+      { dataDir: deps.dataDir, runtimeSupervisor: deps.runtimeSupervisor },
+      {
+        projectId: project.id,
+        variantId: targetVariantId,
+        runId: run.id,
+        sourceDir: standardSourceDir,
+      },
+    );
+    dir = standardTransaction.dir;
+  };
+
   // Optional pre-design Research phase (opt-in via body.research). It writes the
   // research/ directory, then its report is prepended to the brief so the build is
   // grounded in real discovery. Idempotent; a soft failure just proceeds without it.
@@ -1268,7 +1295,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         return;
       }
       // Record the pick so the workspace can show which direction was chosen (survives reload).
-      if (chosenDirection) await writeChosenDirection(dir, chosenDirection).catch(() => {});
+      if (chosenDirection) await checkpointChosenDirection(chosenDirection);
       if (chosenDirection) chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
       const researchContext = await buildResearchContext(dir, chosenDirection);
       if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
@@ -1278,7 +1305,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     // THIS build (its spec for the critic + the research context in the brief) WITHOUT re-running
     // research — re-running it re-persists the user message + research card and redoes the work.
     const chosenDirection = body.directionSlug!.trim();
-    await writeChosenDirection(dir, chosenDirection).catch(() => {});
+    await checkpointChosenDirection(chosenDirection);
     chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
     const researchContext = await buildResearchContext(dir, chosenDirection);
     if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
@@ -1298,26 +1325,31 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // location + the live browser-control probe endpoints). Runs once per build, not per repair
   // round — this sits before turnMessage is first derived from agentBrief, so the FIRST build
   // turn already sees it.
+  if (project.sharingan) {
+    await syncSharinganCaptureBundle(projectDir(deps.dataDir, project.id), dir).catch(() => {});
+  }
   if (project.sharingan && project.sourceUrl) {
-    const sharinganRoot = projectDir(deps.dataDir, project.id);
+    sharinganCaptureId = sharinganRunCaptureId(project.id, run.id);
     // Best-effort: never fail the build on a capture hiccup — the agent can still probe live.
-    await ensureCaptured(project.id, deps.dataDir, project.sourceUrl, { keepSessionForProbe: true }).catch(() => {});
+    await ensureCaptured(sharinganCaptureId, deps.dataDir, project.sourceUrl, {
+      keepSessionForProbe: true,
+      artifactDir: dir,
+      open: deps.sharinganOpen,
+    }).catch(() => {});
     // Write the dezin-probe CLI into .sharingan/ so the agent drives capture with a real tool, not curl.
     const probeBase = `${(origin ?? "").replace(/\/+$/, "")}/api/sharingan/${project.id}`;
-    try { writeProbeCli(sharinganRoot, probeBase); } catch { /* best-effort */ }
+    try { writeProbeCli(dir, probeBase, run.id); } catch { /* best-effort */ }
     agentBrief = [
       agentBrief,
       buildSharinganContext({
         sourceUrl: project.sourceUrl,
         budget: SHARINGAN_PAGE_BUDGET,
-        capturedCount: capturedPageCount(project.id),
+        capturedCount: capturedPageCount(sharinganCaptureId),
       }).promptBlock,
     ]
       .filter(Boolean)
       .join("\n\n");
   }
-  if (project.sharingan) await syncSharinganCaptureBundle(projectDir(deps.dataDir, project.id), dir).catch(() => {});
-
   // Exemplar retrieval: reference the user's previously-kept (👍) designs so the build
   // matches the caliber and direction they have already approved.
   if (project.mode !== "standard") {
@@ -1442,7 +1474,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const stuckDefectKeys = new Set<string>(); // defects the agent repeatedly failed to fix
       const emitStandardPreviewUpdate = async (eventRound: number): Promise<void> => {
         try {
-          const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId));
+          const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId), ctrl!.signal);
           livePreviewUrl = url;
           sse({
             type: "preview-update",
@@ -1570,7 +1602,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           let renderUrl: string | undefined;
           if (!deps.visualQa) {
             try {
-              renderUrl = livePreviewUrl ?? (await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId))).url;
+              renderUrl = livePreviewUrl ?? (await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId), ctrl.signal)).url;
             } catch (err) {
               visualFindings = [
                 {
@@ -1587,7 +1619,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
               projectRoot: dir,
               renderUrl,
               directionSpec: chosenDirectionSpec,
-              sharinganReference: project.sharingan ? sharinganReviewReference(projectDir(deps.dataDir, project.id)) : undefined,
+              sharinganReference: project.sharingan ? sharinganReviewReference(dir) : undefined,
               isSharingan: project.sharingan,
             });
           }
@@ -1689,9 +1721,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       if (!commitHash) throw new Error("The selected Agent did not leave any project changes to publish.");
       commitHash = await standardTransaction!.publish();
       dir = standardSourceDir!;
-      store.updateRun(run.id, { commitHash, repairRounds });
-      await emitStandardPreviewUpdate(round);
-      const assistantMessageId = persistTranscript(finalAssistantText);
+      // Publication is the irreversible success boundary. Everything below is secondary metadata,
+      // transcript, preview, or cover work and must not turn an already-published Run into a failure.
+      try { store.updateRun(run.id, { commitHash, repairRounds }); } catch { /* best-effort after publication */ }
+      await emitStandardPreviewUpdate(round).catch(() => {});
+      let assistantMessageId: string | null = null;
+      try { assistantMessageId = persistTranscript(finalAssistantText); } catch { /* best-effort after publication */ }
       // Design review was ON but never actually judged (headless render/screenshot failed every
       // round) — don't let the run read as a clean "reviewed" pass; the floor (anti-slop) passed,
       // the ceiling simply didn't run, and the user must know.
@@ -1706,7 +1741,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         : "";
       const message =
         (passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`) + reviewNote + stuckNote;
-      store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped, unresolved: stuckDefectKeys.size }));
+      try {
+        store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped, unresolved: stuckDefectKeys.size }));
+      } catch { /* best-effort after publication */ }
       const persistedFindings = withResolvedVisualReviewHistory(findings, visualReviewHistory);
       execution.settle("succeeded", {
         repairRounds,
@@ -2025,6 +2062,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     startingRuns.delete(startKey);
     try {
       stopPoll?.();
+      if (sharinganCaptureId) await releaseSharinganProject(sharinganCaptureId).catch(() => {});
       if (standardTransaction) {
         if (dir === standardTransaction.dir) {
           await releaseVariantRuntime(project.id, targetVariantId, durableRun ? [durableRun.id] : []);

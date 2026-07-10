@@ -29,6 +29,15 @@ class RecordingRunner implements AgentRunner {
   calls: AgentTurnInput[] = [];
   async runTurn(input: AgentTurnInput) {
     this.calls.push(input);
+    const regionId = input.message.match(/Region ID:\s*([a-z0-9_-]+)/i)?.[1];
+    if (regionId) {
+      mkdirSync(join(input.projectDir, "src", "sharingan-regions"), { recursive: true });
+      writeFileSync(
+        join(input.projectDir, "src", "sharingan-regions", `${regionId}.jsx`),
+        `export default function Region(){ return <section>${regionId}</section> }`,
+      );
+      return { text: `built ${regionId}`, artifactHtml: "", artifactPath: "index.html" };
+    }
     writeFileSync(join(input.projectDir, "src", "App.jsx"), "export default function App(){ return <main>Cloned</main> }");
     return { text: "done", artifactHtml: "", artifactPath: "index.html" };
   }

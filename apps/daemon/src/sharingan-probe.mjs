@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const BASE = "__BASE__";
+const RUN_ID = "__RUN_ID__";
 const TOKEN = process.env.DEZIN_DAEMON_TOKEN || "";
 
 function fail(msg) {
@@ -19,6 +20,7 @@ async function api(method, endpoint, body) {
     method,
     headers: {
       "x-dezin-daemon-token": TOKEN,
+      ...(RUN_ID ? { "x-dezin-run-id": RUN_ID } : {}),
       ...(body ? { "content-type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,

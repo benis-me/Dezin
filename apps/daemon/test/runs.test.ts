@@ -12,6 +12,7 @@ import { abortError, FakeRunner } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
+import type { SharinganSession } from "../src/sharingan-browser.ts";
 import { standardRunBranchName, standardRunWorktreeDir } from "../src/standard-run-transaction.ts";
 
 const CLEAN =
@@ -87,6 +88,42 @@ function initStandardRunProject(dataDir: string, store: Store): { project: Retur
   writeFileSync(join(dir, "src", "App.jsx"), "source baseline");
   const head = commitAll(dir, "base");
   return { project, dir, head };
+}
+
+function initFreshSharinganStandardProject(
+  dataDir: string,
+  store: Store,
+): { project: ReturnType<Store["createProject"]>; dir: string; head: string } {
+  const project = store.createProject({ name: "Fresh clone", mode: "standard", sharingan: true, sourceUrl: "http://x.test/" });
+  const dir = join(dataDir, "projects", project.id);
+  mkdirSync(join(dir, "src"), { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+  writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+  writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>source baseline</main> }`);
+  return { project, dir, head: commitAll(dir, "base") };
+}
+
+function fakeFreshSharinganSession(): SharinganSession {
+  let currentUrl = "http://x.test/";
+  return {
+    currentUrl: () => currentUrl,
+    navigate: async (url: string) => {
+      currentUrl = url;
+      return { status: 200, finalUrl: url };
+    },
+    readDom: async () => [{ tag: "h1", classes: "", text: "Captured source", box: { x: 0, y: 0, w: 320, h: 48 } }],
+    readDomTree: async () => [{ tag: "h1", classes: "", text: "Captured source", box: { x: 0, y: 0, w: 320, h: 48 }, style: {}, children: [] }],
+    readRenderMap: async () => ({ viewport: { width: 1440, height: 900 }, document: { width: 1440, height: 900 }, elements: [] }),
+    hasPasswordField: async () => false,
+    setViewport: async () => {},
+    settle: async () => {},
+    screenshot: async () => Buffer.from("captured"),
+    styleTokens: async () => ({ colors: [], fontFamilies: [], fontSizes: [], radii: [], shadows: [] }),
+    assets: async () => [],
+    discoverLinks: async () => [],
+    close: async () => {},
+  } as unknown as SharinganSession;
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1135,6 +1172,8 @@ test("real cancel wins while Standard post-agent preview work is blocked", async
     releasePostAgent = resolve;
   });
   let blockPreviewOnce = true;
+  let previewSignal: AbortSignal | undefined;
+  let previewAbortObserved = false;
   const runner: AgentRunner = {
     id: "standard-post-agent-cancel",
     async runTurn(input) {
@@ -1148,12 +1187,7 @@ test("real cancel wins while Standard post-agent preview work is blocked", async
     runner,
     async ({ base, dataDir, store }) => {
       store.updateSettings({ autoImproveEnabled: false });
-      const project = store.createProject({ name: "Std", mode: "standard" });
-      const dir = join(dataDir, "projects", project.id);
-      mkdirSync(dir, { recursive: true });
-      execFileSync("git", ["init", "-q"], { cwd: dir });
-      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
-      commitAll(dir, "base");
+      const { project, dir, head } = initStandardRunProject(dataDir, store);
 
       const response = await fetch(`${base}/api/runs`, {
         method: "POST",
@@ -1171,17 +1205,35 @@ test("real cancel wins while Standard post-agent preview work is blocked", async
       assert.deepEqual(await cancelResponse.json(), { cancelled: true });
 
       const events = await closedSse(response, "Standard real-cancel race");
+      assert.ok(previewSignal, "Standard preview preparation receives the active Run AbortSignal");
+      assert.equal(previewAbortObserved, true, "cancelling the Run aborts blocked preview preparation");
       assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-cancelled"]);
       assert.equal(events.some((event) => event.type === "run-done"), false);
       assert.equal(store.getRun(runId)?.status, "cancelled");
       assert.equal(typeof store.getRun(runId)?.finishedAt, "number");
+      assert.match(readFileSync(join(dir, "src", "App.jsx"), "utf8"), /source baseline/);
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), head);
+      assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" }), "");
+      assert.equal(existsSync(standardRunWorktreeDir(dataDir, project.id, runId)), false);
     },
     {
-      ensureDevServer: async () => {
+      ensureDevServer: async (_projectId, _dir, _runtimeKey, signal) => {
         if (blockPreviewOnce) {
           blockPreviewOnce = false;
+          previewSignal = signal;
           enterPostAgent();
-          await postAgentRelease;
+          if (signal) {
+            await new Promise<never>((_resolve, reject) => {
+              const onAbort = () => {
+                previewAbortObserved = true;
+                reject(abortError());
+              };
+              if (signal.aborted) onAbort();
+              else signal.addEventListener("abort", onAbort, { once: true });
+            });
+          } else {
+            await postAgentRelease;
+          }
         }
         return { url: "http://127.0.0.1:65530/" };
       },
@@ -1464,6 +1516,175 @@ test("failed and aborted Standard Runs discard only their temporary worktree", a
   }
 });
 
+test("fresh Sharingan capture and agent probe writes stay transactional until a successful Standard Run publishes", async () => {
+  let base = "";
+  let projectId = "";
+  let sourceDir = "";
+  let mainTurns = 0;
+  let visualReferencePath = "";
+  const runner: AgentRunner = {
+    id: "fresh-sharingan-transaction-success",
+    async runTurn(input) {
+      const regionMatch = input.message.match(/Region ID:\s*([a-z0-9_-]+)/i);
+      if (regionMatch) {
+        const regionId = regionMatch[1]!;
+        mkdirSync(join(input.projectDir, "src", "sharingan-regions"), { recursive: true });
+        writeFileSync(join(input.projectDir, "src", "sharingan-regions", `${regionId}.jsx`), `export default function Region(){ return <section>${regionId}</section> }`);
+        return { text: `built ${regionId}`, artifactHtml: "", artifactPath: "index.html" };
+      }
+
+      mainTurns += 1;
+      assert.equal(existsSync(join(input.projectDir, ".sharingan", "pages.json")), true, "fresh capture is available inside the Run transaction");
+      assert.equal(existsSync(join(sourceDir, ".sharingan")), false, "persistent source is untouched while the agent is running");
+      const probe = readFileSync(join(input.projectDir, ".sharingan", "probe.mjs"), "utf8");
+      const runId = probe.match(/const RUN_ID = "([^"]+)";/)?.[1];
+      assert.ok(runId, "probe CLI is bound to the active Run");
+      assert.match(probe, /"x-dezin-run-id": RUN_ID/);
+
+      const capture = await fetch(`${base}/api/sharingan/${projectId}/capture`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-dezin-run-id": runId },
+        body: JSON.stringify({ url: "http://x.test/agent-probe" }),
+      });
+      assert.equal(capture.status, 200, await capture.text());
+      assert.equal(existsSync(join(sourceDir, ".sharingan")), false, "agent-triggered capture also stays transactional");
+
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>published Sharingan clone</main> }`);
+      return { text: "fresh clone complete", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base: serverBase, dataDir, store }) => {
+      base = serverBase;
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const initialized = initFreshSharinganStandardProject(dataDir, store);
+      projectId = initialized.project.id;
+      sourceDir = initialized.dir;
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, brief: "capture and rebuild the source" }),
+      });
+      const events = await closedSse(response, "fresh Sharingan transaction success");
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-done"]);
+      assert.ok(mainTurns >= 1);
+      assert.equal(existsSync(join(sourceDir, ".sharingan", "pages.json")), true);
+      assert.equal(existsSync(join(sourceDir, ".sharingan", "probe.mjs")), true);
+      assert.match(visualReferencePath, /run-worktrees/, "visual QA reads the fresh capture from the Run transaction");
+      assert.match(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), /published Sharingan clone/);
+      assert.notEqual(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), initialized.head);
+      assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceDir, encoding: "utf8" }), "");
+    },
+    {
+      sharinganOpen: async () => fakeFreshSharinganSession(),
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async (input) => {
+        visualReferencePath = input.sharinganReference?.screenshotPath ?? "";
+        return [];
+      },
+    },
+  );
+});
+
+test("fresh Sharingan capture is discarded with failed and aborted Standard Run transactions", async () => {
+  for (const kind of ["failed", "aborted"] as const) {
+    let transactionObserved = false;
+    const runner: AgentRunner = {
+      id: `fresh-sharingan-transaction-${kind}`,
+      async runTurn(input) {
+        transactionObserved = true;
+        assert.equal(existsSync(join(input.projectDir, ".sharingan", "pages.json")), true);
+        assert.equal(existsSync(join(input.projectDir, ".sharingan", "probe.mjs")), true);
+        writeFileSync(join(input.projectDir, "src", "App.jsx"), `${kind} partial clone`);
+        if (kind === "aborted") throw abortError();
+        throw new Error("fresh Sharingan build failed");
+      },
+    };
+
+    await withRunServer(
+      runner,
+      async ({ base, dataDir, store }) => {
+        store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+        const initialized = initFreshSharinganStandardProject(dataDir, store);
+        const response = await fetch(`${base}/api/runs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: initialized.project.id, brief: "capture then stop" }),
+        });
+        const events = await closedSse(response, `fresh Sharingan transaction ${kind}`);
+        const runId = events.find((event) => event.type === "run-start")!.runId as string;
+
+        assert.equal(transactionObserved, true);
+        assert.deepEqual(terminalEvents(events).map((event) => event.type), [kind === "aborted" ? "run-cancelled" : "run-error"]);
+        assert.equal(existsSync(join(initialized.dir, ".sharingan")), false);
+        assert.match(readFileSync(join(initialized.dir, "src", "App.jsx"), "utf8"), /source baseline/);
+        assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim(), initialized.head);
+        assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: initialized.dir, encoding: "utf8" }), "");
+        assert.equal(existsSync(standardRunWorktreeDir(dataDir, initialized.project.id, runId)), false);
+      },
+      {
+        sharinganOpen: async () => fakeFreshSharinganSession(),
+        ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+        captureCoverUrl: async () => true,
+        visualQa: async () => [],
+      },
+    );
+  }
+});
+
+test("fresh Sharingan capture publishes only to the targeted Standard variant", async () => {
+  let rootDir = "";
+  let targetDir = "";
+  const runner: AgentRunner = {
+    id: "fresh-sharingan-target-variant",
+    async runTurn(input) {
+      assert.equal(existsSync(join(input.projectDir, ".sharingan", "pages.json")), true);
+      assert.equal(existsSync(join(rootDir, ".sharingan")), false);
+      assert.equal(existsSync(join(targetDir, ".sharingan")), false, "target source remains unchanged until publication");
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>targeted clone</main> }`);
+      return { text: "targeted clone complete", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const initialized = initFreshSharinganStandardProject(dataDir, store);
+      rootDir = initialized.dir;
+      store.ensureMainVariant(initialized.project.id);
+      const target = store.createVariant(initialized.project.id, "Capture target");
+      targetDir = join(dataDir, "worktrees", initialized.project.id, target.id);
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: initialized.project.id, variantId: target.id, brief: "capture into this variant" }),
+      });
+      const events = await closedSse(response, "fresh Sharingan target variant");
+
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-done"]);
+      assert.equal(existsSync(join(rootDir, ".sharingan")), false);
+      assert.match(readFileSync(join(rootDir, "src", "App.jsx"), "utf8"), /source baseline/);
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: rootDir, encoding: "utf8" }).trim(), initialized.head);
+      assert.equal(existsSync(join(targetDir, ".sharingan", "pages.json")), true);
+      assert.match(readFileSync(join(targetDir, "src", "App.jsx"), "utf8"), /targeted clone/);
+      assert.notEqual(execFileSync("git", ["rev-parse", "HEAD"], { cwd: targetDir, encoding: "utf8" }).trim(), initialized.head);
+      assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: targetDir, encoding: "utf8" }), "");
+    },
+    {
+      sharinganOpen: async () => fakeFreshSharinganSession(),
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
 test("Standard Run publish conflict preserves the user's concurrent edit and a recovery branch", async () => {
   let sourceDir = "";
   let injectedConflict = false;
@@ -1503,6 +1724,67 @@ test("Standard Run publish conflict preserves the user's concurrent edit and a r
       },
     },
   );
+});
+
+test("post-publish metadata and transcript failures cannot downgrade a successful Standard Run", async () => {
+  for (const failure of ["update-run", "assistant-message", "result-message"] as const) {
+    const runner: AgentRunner = {
+      id: `post-publish-${failure}`,
+      async runTurn(input) {
+        writeFileSync(join(input.projectDir, "src", "App.jsx"), `published despite ${failure}`);
+        return { text: `assistant summary for ${failure}`, artifactHtml: "", artifactPath: "index.html" };
+      },
+    };
+
+    await withRunServer(
+      runner,
+      async ({ base, dataDir, store }) => {
+        store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+        const initialized = initStandardRunProject(dataDir, store);
+        let injected = false;
+        const published = () => execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim() !== initialized.head;
+        const originalUpdateRun = store.updateRun.bind(store);
+        const originalAddMessage = store.addMessage.bind(store);
+        store.updateRun = ((id, patch) => {
+          if (!injected && failure === "update-run" && published()) {
+            injected = true;
+            throw new Error("injected post-publish updateRun failure");
+          }
+          return originalUpdateRun(id, patch);
+        }) as Store["updateRun"];
+        store.addMessage = ((conversationId, role, content) => {
+          const isTarget =
+            (failure === "assistant-message" && role === "assistant") ||
+            (failure === "result-message" && role === "system" && content.includes('"result"'));
+          if (!injected && isTarget && published()) {
+            injected = true;
+            throw new Error(`injected post-publish ${failure} failure`);
+          }
+          return originalAddMessage(conversationId, role, content);
+        }) as Store["addMessage"];
+
+        const response = await fetch(`${base}/api/runs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: initialized.project.id, brief: `publish through ${failure}` }),
+        });
+        const events = await closedSse(response, `post-publish ${failure}`);
+        const runId = events.find((event) => event.type === "run-start")!.runId as string;
+
+        assert.equal(injected, true, `the ${failure} fault was reached after publication`);
+        assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-done"]);
+        assert.equal(store.getRun(runId)?.status, "succeeded");
+        assert.match(readFileSync(join(initialized.dir, "src", "App.jsx"), "utf8"), new RegExp(failure));
+        assert.notEqual(execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim(), initialized.head);
+        assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: initialized.dir, encoding: "utf8" }), "");
+      },
+      {
+        ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+        captureCoverUrl: async () => true,
+        visualQa: async () => [],
+      },
+    );
+  }
 });
 
 test("standard version actions use commit snapshots instead of prototype html snapshots", async () => {
@@ -2127,16 +2409,20 @@ test("Sharingan standard run delegates source regions to isolated subagents befo
       const events = parseSse(await res.text());
       assert.ok(!events.some((e) => e.type === "run-error"), `unexpected run-error: ${JSON.stringify(events)}`);
       assert.deepEqual(calls.map((c) => c.phase), ["region", "region", "main"]);
-      assert.equal(calls[0]?.historyLength, 0, "region subagents run with isolated context");
-      assert.equal(calls[1]?.historyLength, 0, "each region subagent gets isolated context");
-      assert.match(calls[0]?.message ?? "", /Header/);
-      assert.match(calls[0]?.message ?? "", /textRuns/);
-      assert.match(calls[0]?.message ?? "", /rgb\(255,255,255\)/);
-      assert.match(calls[1]?.message ?? "", /Hero/);
-      assert.match(calls[1]?.message ?? "", /media/);
-      assert.match(calls[1]?.message ?? "", /\/_assets\/hero\.png/);
-      assert.match(calls[2]?.message ?? "", /SHARINGAN MAIN INTEGRATION/);
-      assert.match(calls[2]?.message ?? "", /src\/sharingan-regions\/region-1\.jsx/);
+      const regionCalls = calls.filter((call) => call.phase === "region");
+      const headerCall = regionCalls.find((call) => /Region ID:\s*region-1/.test(call.message));
+      const heroCall = regionCalls.find((call) => /Region ID:\s*region-2/.test(call.message));
+      const mainCall = calls.find((call) => call.phase === "main");
+      assert.equal(headerCall?.historyLength, 0, "region subagents run with isolated context");
+      assert.equal(heroCall?.historyLength, 0, "each region subagent gets isolated context");
+      assert.match(headerCall?.message ?? "", /Header/);
+      assert.match(headerCall?.message ?? "", /textRuns/);
+      assert.match(headerCall?.message ?? "", /rgb\(255,255,255\)/);
+      assert.match(heroCall?.message ?? "", /Hero/);
+      assert.match(heroCall?.message ?? "", /media/);
+      assert.match(heroCall?.message ?? "", /\/_assets\/hero\.png/);
+      assert.match(mainCall?.message ?? "", /SHARINGAN MAIN INTEGRATION/);
+      assert.match(mainCall?.message ?? "", /src\/sharingan-regions\/region-1\.jsx/);
       assert.equal(events.filter((e) => e.type === "sharingan-region-start").length, 2);
       assert.equal(events.filter((e) => e.type === "sharingan-region-done").length, 2);
       assert.match(readFileSync(join(dir, "src", "App.jsx"), "utf8"), /Region1/);
@@ -3200,6 +3486,90 @@ const researchWithDirections: NonNullable<AppDeps["researchPhase"]> = async (inp
   writeFileSync(join(dirs, "beta", "direction.md"), "# Beta — calm\n\nCalm concept for beta.");
   return { ran: true, produced: true, visualProduced: false };
 };
+
+test("Standard chosen direction is durably checkpointed before failure, abort, question, or no-op and retry reuses it", async () => {
+  for (const exit of ["failure", "abort", "question", "noop"] as const) {
+    let retrying = false;
+    let researchCalls = 0;
+    const runner: AgentRunner = {
+      id: `direction-checkpoint-${exit}`,
+      async runTurn(input) {
+        if (retrying) {
+          assert.match(input.message, /Chosen direction/);
+          assert.match(input.message, /Bold concept for alpha/);
+          writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>retry ${exit} with alpha</main> }`);
+          return { text: "retry built the chosen direction", artifactHtml: "", artifactPath: "index.html" };
+        }
+        if (exit === "failure") throw new Error("agent failed after direction choice");
+        if (exit === "abort") throw abortError();
+        if (exit === "question") {
+          return {
+            text: "<dezin-ask-user-question>\nWhich CTA label should I use?\n</dezin-ask-user-question>",
+            artifactHtml: "",
+            artifactPath: "index.html",
+          };
+        }
+        return { text: "no project changes", artifactHtml: "", artifactPath: "index.html" };
+      },
+    };
+
+    await withRunServer(
+      runner,
+      async ({ base, dataDir, store }) => {
+        store.updateSettings({ researchEnabled: true, visualQaEnabled: false, autoImproveEnabled: false });
+        const initialized = initStandardRunProject(dataDir, store);
+        const directionsDir = join(initialized.dir, ".research", "directions");
+        mkdirSync(join(directionsDir, "alpha"), { recursive: true });
+        mkdirSync(join(directionsDir, "beta"), { recursive: true });
+        writeFileSync(join(initialized.dir, ".research", "research.md"), "# Research\n\nFindings.");
+        writeFileSync(join(directionsDir, "alpha", "direction.md"), "# Alpha — bold\n\nBold concept for alpha.");
+        writeFileSync(join(directionsDir, "beta", "direction.md"), "# Beta — calm\n\nCalm concept for beta.");
+        const researchHead = commitAll(initialized.dir, "published research directions");
+
+        const first = await fetch(`${base}/api/runs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: initialized.project.id, brief: "build selected direction", directionSlug: "alpha" }),
+        });
+        const firstEvents = await closedSse(first, `direction checkpoint ${exit}`);
+        const firstRunId = firstEvents.find((event) => event.type === "run-start")!.runId as string;
+        const expectedTerminal = exit === "abort" || exit === "question" ? "run-cancelled" : "run-error";
+
+        assert.deepEqual(terminalEvents(firstEvents).map((event) => event.type), [expectedTerminal]);
+        assert.equal(researchCalls, 0, "choosing a published direction never re-runs research");
+        assert.equal(existsSync(join(initialized.dir, ".research", "chosen")), true, "the choice is published before the build turn");
+        assert.equal(readFileSync(join(initialized.dir, ".research", "chosen"), "utf8").trim(), "alpha");
+        assert.notEqual(execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim(), researchHead);
+        assert.match(readFileSync(join(initialized.dir, "src", "App.jsx"), "utf8"), /source baseline/);
+        assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: initialized.dir, encoding: "utf8" }), "");
+        assert.equal(existsSync(standardRunWorktreeDir(dataDir, initialized.project.id, firstRunId)), false);
+
+        retrying = true;
+        const retry = await fetch(`${base}/api/runs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: initialized.project.id, brief: "retry the selected direction" }),
+        });
+        const retryEvents = await closedSse(retry, `direction checkpoint retry ${exit}`);
+
+        assert.deepEqual(terminalEvents(retryEvents).map((event) => event.type), ["run-done"]);
+        assert.equal(researchCalls, 0, "retry reuses the durable direction without research");
+        assert.equal(readFileSync(join(initialized.dir, ".research", "chosen"), "utf8").trim(), "alpha");
+        assert.match(readFileSync(join(initialized.dir, "src", "App.jsx"), "utf8"), new RegExp(`retry ${exit} with alpha`));
+        assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: initialized.dir, encoding: "utf8" }), "");
+      },
+      {
+        researchPhase: async (input) => {
+          researchCalls += 1;
+          return researchWithDirections(input);
+        },
+        ensureDevServer: async () => ({ url: "http://127.0.0.1:6221/" }),
+        captureCoverUrl: async () => true,
+        visualQa: async () => [],
+      },
+    );
+  }
+});
 
 test("Standard direction gate publishes research from its transaction before disposing it", async () => {
   let researchCalls = 0;

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { ensureDevServer, ensureProjectPickerBridge, gitRestoreTree, getSetup, releaseProjectRuntime, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
 import {
@@ -11,6 +11,7 @@ import {
   beginStandardRunTransaction,
   standardRunBranchName,
   standardRunWorktreeDir,
+  type StandardRunTransactionDeps,
 } from "../src/standard-run-transaction.ts";
 
 async function waitForPortDown(url: string): Promise<void> {
@@ -414,6 +415,88 @@ test("standard Run transaction rejects concurrent source edits and preserves a r
       recoveryHead,
     );
   } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+type PromotionCheckpoint = (phase: "after-validation" | "after-ref-advance") => void | Promise<void>;
+
+function transactionDepsWithCheckpoint(dataDir: string, promotionCheckpoint: PromotionCheckpoint): StandardRunTransactionDeps {
+  return { dataDir, promotionCheckpoint } as StandardRunTransactionDeps & { promotionCheckpoint: PromotionCheckpoint };
+}
+
+test("standard Run publication rejects an edit injected after validation without advancing the source ref", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  try {
+    const transaction = await beginStandardRunTransaction(
+      transactionDepsWithCheckpoint(dataDir, (phase) => {
+        if (phase === "after-validation") writeFileSync(join(sourceDir, "src", "user.txt"), "concurrent user edit");
+      }),
+      { projectId: "project-1", variantId: "main", runId: "validation-edit", sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "agent result");
+    await transaction.commit("agent change");
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1");
+    assert.equal(readFileSync(join(sourceDir, "src", "user.txt"), "utf8"), "concurrent user edit");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run publication rejects a ref switch injected after validation", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  try {
+    execFileSync("git", ["branch", "user-work"], { cwd: sourceDir });
+    const transaction = await beginStandardRunTransaction(
+      transactionDepsWithCheckpoint(dataDir, (phase) => {
+        if (phase === "after-validation") execFileSync("git", ["switch", "user-work"], { cwd: sourceDir });
+      }),
+      { projectId: "project-1", variantId: "main", runId: "validation-switch", sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "agent result");
+    await transaction.commit("agent change");
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: sourceDir, encoding: "utf8" }).trim(), "user-work");
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run publication stays successful after CAS when checkout sync fails and preserves later user bytes", async () => {
+  const { dataDir, sourceDir } = initTransactionRepository();
+  let indexLock = "";
+  try {
+    const transaction = await beginStandardRunTransaction(
+      transactionDepsWithCheckpoint(dataDir, (phase) => {
+        if (phase !== "after-ref-advance") return;
+        writeFileSync(join(sourceDir, "src", "App.jsx"), "post-CAS user edit");
+        const lockPath = execFileSync("git", ["rev-parse", "--git-path", "index.lock"], { cwd: sourceDir, encoding: "utf8" }).trim();
+        indexLock = isAbsolute(lockPath) ? lockPath : join(sourceDir, lockPath);
+        writeFileSync(indexLock, "locked");
+      }),
+      { projectId: "project-1", variantId: "main", runId: "post-cas-sync", sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "agent result");
+    const target = await transaction.commit("agent change");
+
+    assert.equal(await transaction.publish(), target);
+    if (indexLock) rmSync(indexLock, { force: true });
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), target);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "post-CAS user edit");
+  } finally {
+    if (indexLock) rmSync(indexLock, { force: true });
     rmSync(dataDir, { recursive: true, force: true });
   }
 });

@@ -28,6 +28,8 @@ interface Capture {
   error?: string;
   probeTimer?: ReturnType<typeof setTimeout>;
   keepForProbe?: boolean;
+  /** Run-scoped Standard transactions redirect every capture/probe write here. */
+  artifactDir?: string;
 }
 
 interface CaptureOperation {
@@ -69,6 +71,14 @@ function get(id: string): Capture {
     captures.set(id, c);
   }
   return c;
+}
+
+function captureArtifactDir(id: string, dataDir: string): string {
+  return captures.get(id)?.artifactDir ?? projectDir(dataDir, id);
+}
+
+export function sharinganRunCaptureId(projectId: string, runId: string): string {
+  return `${projectId}--run-${runId}`;
 }
 
 function isActive(id: string, c: Capture, generation: number): boolean {
@@ -155,7 +165,7 @@ export function ensureProbeSession(
   return retainCaptureOperation(c, async (signal, operation) => {
     // Seed from the on-disk manifest so re-captures dedup against what's already there (e.g. after a
     // daemon restart, when the in-memory page list is empty but the entry page is on disk).
-    if (!c.pages.length) c.pages = readCapturedPages(projectDir(dataDir, id));
+    if (!c.pages.length) c.pages = readCapturedPages(captureArtifactDir(id, dataDir));
     if (!c.session) {
       if (!c.opening) {
         const profileDir = join(dataDir, ".sharingan-profile");
@@ -194,7 +204,7 @@ export function ensureProbeSession(
  *  build Agent to reuse as a probe (phase "probing", idle-released) or close it (phase "captured").
  *  Keeping it open avoids reopening Chrome mid-build and preserves the just-authenticated session. */
 async function finishCapturedSession(id: string, dataDir: string, c: Capture, page: CapturedPage | null): Promise<void> {
-  if (page) { upsertPage(c.pages, page); writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages); }
+  if (page) { upsertPage(c.pages, page); writePagesManifest(captureArtifactDir(id, dataDir), c.url ?? page.url, c.pages); }
   if (c.keepForProbe && c.session) {
     c.phase = "probing";
     armProbeIdle(id);
@@ -221,7 +231,7 @@ export function startCapture(
   // Seed from the on-disk manifest (not []): after a daemon restart the in-memory map is empty, so
   // re-running the entry capture would otherwise clobber pages.json + discard prior probe captures.
   // The entry capture then upserts into this, preserving them.
-  c.phase = "capturing"; c.steps = []; c.pages = readCapturedPages(projectDir(dataDir, id)); c.error = undefined;
+  c.phase = "capturing"; c.steps = []; c.pages = readCapturedPages(captureArtifactDir(id, dataDir)); c.error = undefined;
   const generation = c.generation;
   return retainCaptureOperation(c, async (signal, operation) => {
     let session: SharinganSession | undefined;
@@ -242,7 +252,7 @@ export function startCapture(
       }
       c.session = session;
       c.url = url;
-      const { page, loginRequired } = await capturePage(session, projectDir(dataDir, id), url, (s) => emit(c, s));
+      const { page, loginRequired } = await capturePage(session, captureArtifactDir(id, dataDir), url, (s) => emit(c, s));
       if (!isActive(id, c, generation)) return;
       if (loginRequired) { c.phase = "login-required"; return; }
       await finishCapturedSession(id, dataDir, c, page);
@@ -273,11 +283,15 @@ export async function ensureCaptured(
   id: string,
   dataDir: string,
   url: string,
-  opts: { maxWaitMs?: number; pollMs?: number; keepSessionForProbe?: boolean; open?: (url: string, o: { userDataDir?: string; headless?: boolean }) => Promise<SharinganSession> } = {},
+  opts: { maxWaitMs?: number; pollMs?: number; keepSessionForProbe?: boolean; artifactDir?: string; open?: SharinganOpen } = {},
 ): Promise<Phase> {
   const maxWaitMs = opts.maxWaitMs ?? 300_000;
   const pollMs = opts.pollMs ?? 500;
   const c = get(id);
+  if (opts.artifactDir) {
+    if (c.artifactDir && c.artifactDir !== opts.artifactDir) throw new Error("capture scope already targets another artifact directory");
+    c.artifactDir = opts.artifactDir;
+  }
   if (opts.keepSessionForProbe) c.keepForProbe = true;
   if (c.phase === "captured") return c.phase;
   // Kick the entry capture if nothing is in flight (idle, or retry after a prior error).
@@ -329,7 +343,7 @@ export function continueCapture(id: string, dataDir: string): Promise<void> {
   c.phase = "capturing";
   return retainCaptureOperation(c, async () => {
     try {
-      const { page, loginRequired } = await capturePage(session, projectDir(dataDir, id), url, (s) => emit(c, s));
+      const { page, loginRequired } = await capturePage(session, captureArtifactDir(id, dataDir), url, (s) => emit(c, s));
       if (!isActive(id, c, generation)) return;
       if (loginRequired) { c.phase = "login-required"; return; }
       await finishCapturedSession(id, dataDir, c, page);
@@ -395,9 +409,9 @@ export async function handleSharinganCapture(req: IncomingMessage, res: ServerRe
       emit(c, { at: Date.now(), kind: "navigate", text: `Agent navigating to ${body.url}` });
       await session.navigate(body.url.trim());
     }
-    const page = await captureCurrentPage(session, projectDir(dataDir, id), session.currentUrl(), (s) => emit(c, s));
+    const page = await captureCurrentPage(session, captureArtifactDir(id, dataDir), session.currentUrl(), (s) => emit(c, s));
     upsertPage(c.pages, page); // dedup by URL — re-capturing the same page updates it, never appends a dup
-    writePagesManifest(projectDir(dataDir, id), c.url ?? page.url, c.pages);
+    writePagesManifest(captureArtifactDir(id, dataDir), c.url ?? page.url, c.pages);
     armProbeIdle(id);
     sendJson(res, 200, page);
   } catch (err) {
@@ -475,7 +489,7 @@ export function peekSharinganStatus(id: string, dataDir: string): {
   // displayed state from that evidence, but do not allocate or mutate capture ownership just
   // because a client is polling status.
   if (phase === "idle" && !c?.session) {
-    const persisted = readCapturedPages(projectDir(dataDir, id));
+    const persisted = readCapturedPages(captureArtifactDir(id, dataDir));
     if (persisted.length) {
       phase = "captured";
       pages = persisted;
@@ -502,7 +516,7 @@ export function handleSharinganStatus(res: ServerResponse, id: string, dataDir: 
  * project files. Rejects path traversal / escapes (400) and missing files (404).
  */
 export function handleSharinganShot(res: ServerResponse, id: string, relPath: string, dataDir: string): void {
-  const base = projectDir(dataDir, id);
+  const base = captureArtifactDir(id, dataDir);
   const shotRoot = join(base, ".sharingan");
   const abs = safeJoin(base, relPath);
   if (!abs || !(abs === shotRoot || abs.startsWith(shotRoot + sep))) { sendJson(res, 400, { error: "bad path" }); return; }
