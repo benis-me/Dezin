@@ -1065,6 +1065,117 @@ test("cancelled runs persist partial summary before final steps and status", asy
   });
 });
 
+test("real cancel wins while Prototype post-agent review is blocked", async () => {
+  let enterPostAgent!: () => void;
+  let releasePostAgent!: () => void;
+  const postAgentEntered = new Promise<void>((resolve) => {
+    enterPostAgent = resolve;
+  });
+  const postAgentRelease = new Promise<void>((resolve) => {
+    releasePostAgent = resolve;
+  });
+
+  await withRunServer(
+    new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }),
+    async ({ base, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: false });
+      const project = store.createProject({ name: "P" });
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "go" }),
+      });
+      await postAgentEntered;
+      const runId = store.listRuns(project.id)[0]!.id;
+      let cancelResponse!: Response;
+      try {
+        cancelResponse = await fetch(`${base}/api/runs/${runId}/cancel`, { method: "POST" });
+      } finally {
+        releasePostAgent();
+      }
+      assert.deepEqual(await cancelResponse.json(), { cancelled: true });
+
+      const events = await closedSse(response, "Prototype real-cancel race");
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-cancelled"]);
+      assert.equal(events.some((event) => event.type === "run-done"), false);
+      assert.equal(store.getRun(runId)?.status, "cancelled");
+      assert.equal(typeof store.getRun(runId)?.finishedAt, "number");
+    },
+    {
+      visualQa: async () => {
+        enterPostAgent();
+        await postAgentRelease;
+        return [];
+      },
+    },
+  );
+});
+
+test("real cancel wins while Standard post-agent preview work is blocked", async () => {
+  let enterPostAgent!: () => void;
+  let releasePostAgent!: () => void;
+  const postAgentEntered = new Promise<void>((resolve) => {
+    enterPostAgent = resolve;
+  });
+  const postAgentRelease = new Promise<void>((resolve) => {
+    releasePostAgent = resolve;
+  });
+  let blockPreviewOnce = true;
+  const runner: AgentRunner = {
+    id: "standard-post-agent-cancel",
+    async runTurn(input) {
+      mkdirSync(join(input.projectDir, "src"), { recursive: true });
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "export default function App(){ return <main>Changed</main> }");
+      return { text: "done", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ autoImproveEnabled: false });
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      commitAll(dir, "base");
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "change it" }),
+      });
+      await postAgentEntered;
+      const runId = store.listRuns(project.id)[0]!.id;
+      let cancelResponse!: Response;
+      try {
+        cancelResponse = await fetch(`${base}/api/runs/${runId}/cancel`, { method: "POST" });
+      } finally {
+        releasePostAgent();
+      }
+      assert.deepEqual(await cancelResponse.json(), { cancelled: true });
+
+      const events = await closedSse(response, "Standard real-cancel race");
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-cancelled"]);
+      assert.equal(events.some((event) => event.type === "run-done"), false);
+      assert.equal(store.getRun(runId)?.status, "cancelled");
+      assert.equal(typeof store.getRun(runId)?.finishedAt, "number");
+    },
+    {
+      ensureDevServer: async () => {
+        if (blockPreviewOnce) {
+          blockPreviewOnce = false;
+          enterPostAgent();
+          await postAgentRelease;
+        }
+        return { url: "http://127.0.0.1:65530/" };
+      },
+      captureCoverUrl: async () => true,
+    },
+  );
+});
+
 test("agent AskUserQuestion markers stream and persist as structured questions", async () => {
   const runner = new FakeRunner({
     artifacts: [CLEAN, CLEAN],

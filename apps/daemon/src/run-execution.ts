@@ -12,6 +12,7 @@ export interface RunExecutionOptions {
   store: Store;
   runId: string;
   emit: (event: unknown) => void;
+  fallbackEmit: (event: unknown) => void;
   finish: () => void;
   unsubscribe: () => void;
   closeStream: () => void;
@@ -32,8 +33,12 @@ export class RunExecution {
     if (result.changed) {
       try {
         this.options.emit(event);
-      } catch {
-        // The durable terminal state wins even if the live transport has already disappeared.
+      } catch (primaryError) {
+        try {
+          this.options.fallbackEmit(event);
+        } catch (fallbackError) {
+          throw new AggregateError([primaryError, fallbackError], "Failed to emit terminal Run event");
+        }
       }
     }
     return result;

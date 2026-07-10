@@ -21,6 +21,7 @@ import {
   extractAskUserQuestion,
   extractFinalSummary,
   isAbortError,
+  abortError,
   type GenerateEvent,
   type AgentRunner,
 } from "../../../packages/agent/src/index.ts";
@@ -282,7 +283,8 @@ function researchModel(settings: Settings, fallback?: string): string | undefine
  * In-memory guard that closes the TOCTOU window between findActiveRun and createRun: the DB row that
  * makes a concurrent request lose the race isn't inserted until createRun, and there are awaits in
  * between, so two near-simultaneous run POSTs could both pass the DB check. A synchronous check+add
- * keyed by project:variant prevents that (the daemon is single-process). Released once the row exists.
+ * keyed by project:variant prevents that (the daemon is single-process). Held until handleRun's
+ * outermost finally so failures before or after durable row creation cannot strand or overlap a start.
  */
 const startingRuns = new Set<string>();
 
@@ -1065,21 +1067,30 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     });
   };
   const writeStreamEvent = (event: unknown): void => {
-    openStream();
     try {
+      openStream();
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     } catch {
       /* socket closed */
     }
   };
+  const emitBrokerEvent = (event: unknown): void => {
+    if (!brokerRegistered) throw new Error("Run broker is not registered");
+    pushEvent(run.id, event);
+    if (!streamSubscribed) throw new Error("Run stream is not subscribed");
+  };
   const emitRunEvent = (event: unknown): void => {
-    if (brokerRegistered) pushEvent(run.id, event);
-    if (!streamSubscribed) writeStreamEvent(event);
+    try {
+      emitBrokerEvent(event);
+    } catch {
+      writeStreamEvent(event);
+    }
   };
   execution = new RunExecution({
     store,
     runId: run.id,
-    emit: emitRunEvent,
+    emit: emitBrokerEvent,
+    fallbackEmit: writeStreamEvent,
     finish: () => {
       if (brokerRegistered) finishRun(run.id);
     },
@@ -1630,6 +1641,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         }
       }
 
+      if (ctrl.signal.aborted) throw abortError();
       const assistantMessageId = persistTranscript(finalAssistantText);
       // Design review was ON but never actually judged (headless render/screenshot failed every
       // round) — don't let the run read as a clean "reviewed" pass; the floor (anti-slop) passed,
@@ -1849,6 +1861,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       await reviewCurrentArtifact(nextRound, staticFindings);
     }
 
+    if (ctrl.signal.aborted) throw abortError();
     const passed = !finalFindings.some((f) => f.severity === "P0");
     store.recordArtifact(project.id, artifactPath, passed);
     const assistantMessageId = persistTranscript(assistantText);

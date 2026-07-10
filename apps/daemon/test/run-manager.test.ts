@@ -110,6 +110,7 @@ test("RunExecution cancellation racing success emits only the winning terminal e
     store,
     runId: run.id,
     emit: (event) => events.push(event),
+    fallbackEmit: () => {},
     finish: () => {},
     unsubscribe: () => {},
     closeStream: () => {},
@@ -139,6 +140,70 @@ test("RunExecution cancellation racing success emits only the winning terminal e
   store.close();
 });
 
+test("RunExecution uses fallbackEmit when primary terminal emission throws", async () => {
+  const { RunExecution } = await import("../src/run-execution.ts");
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "P" });
+  const conversation = store.createConversation(project.id);
+  const run = store.createRun(project.id, conversation.id);
+  store.updateRun(run.id, { status: "running" });
+  const terminalEvent = { type: "run-error", runId: run.id, message: "failed" };
+  const fallbackEvents: unknown[] = [];
+  const execution = new RunExecution({
+    store,
+    runId: run.id,
+    emit: () => {
+      throw new Error("primary emit failed");
+    },
+    fallbackEmit: (event) => fallbackEvents.push(event),
+    finish: () => {},
+    unsubscribe: () => {},
+    closeStream: () => {},
+  });
+
+  const result = execution.settle("failed", { finishedAt: 2_000, event: terminalEvent });
+
+  assert.equal(result.changed, true);
+  assert.equal(result.run.status, "failed");
+  assert.deepEqual(fallbackEvents, [terminalEvent]);
+  store.close();
+});
+
+test("RunExecution surfaces AggregateError when primary and fallback terminal emission both throw", async () => {
+  const { RunExecution } = await import("../src/run-execution.ts");
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "P" });
+  const conversation = store.createConversation(project.id);
+  const run = store.createRun(project.id, conversation.id);
+  store.updateRun(run.id, { status: "running" });
+  const primaryError = new Error("primary emit failed");
+  const fallbackError = new Error("fallback emit failed");
+  const execution = new RunExecution({
+    store,
+    runId: run.id,
+    emit: () => {
+      throw primaryError;
+    },
+    fallbackEmit: () => {
+      throw fallbackError;
+    },
+    finish: () => {},
+    unsubscribe: () => {},
+    closeStream: () => {},
+  });
+
+  assert.throws(
+    () => execution.settle("failed", { finishedAt: 2_000, event: { type: "run-error", runId: run.id } }),
+    (error) =>
+      error instanceof AggregateError &&
+      error.errors.length === 2 &&
+      error.errors[0] === primaryError &&
+      error.errors[1] === fallbackError,
+  );
+  assert.equal(store.getRun(run.id)?.status, "failed", "the winning DB transition remains durable");
+  store.close();
+});
+
 test("RunExecution dispose releases broker, subscription, and stream exactly once", async () => {
   const { RunExecution } = await import("../src/run-execution.ts");
   const store = new Store(":memory:");
@@ -150,6 +215,7 @@ test("RunExecution dispose releases broker, subscription, and stream exactly onc
     store,
     runId: run.id,
     emit: () => {},
+    fallbackEmit: () => {},
     finish: () => {
       calls.push("finish");
       throw new Error("finish cleanup failed");
