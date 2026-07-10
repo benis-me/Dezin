@@ -3,9 +3,10 @@
 // lives here. Not packaged/signed; run with `pnpm --filter dezin-desktop start`.
 
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require("electron");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } = require("node:fs");
 const { join, dirname } = require("node:path");
+const { createDaemonSupervisor, loadUrlWithRetry } = require("./daemon-supervisor.js");
 const { isAllowedAppNavigation, isSafeExternalUrl } = require("./navigation-policy.js");
 const { readWindowState, writeWindowState } = require("./window-state.js");
 
@@ -20,8 +21,8 @@ const WEB_PORTFILE = join(ROOT, ".dezin", "web.json");
 const DEV_URL = process.env.DEZIN_DEV_URL || "";
 const DEV = process.env.DEZIN_DEV === "1";
 
-let daemon = null;
 let win = null;
+let quitting = false;
 
 function openSafeExternal(url) {
   if (!isSafeExternalUrl(url)) return;
@@ -35,36 +36,82 @@ function openSafeExternal(url) {
   }
 }
 
-function startDaemon() {
+function spawnDaemon({ ownerId }) {
   mkdirSync(dirname(PORTFILE), { recursive: true });
   try {
     rmSync(PORTFILE, { force: true });
   } catch {
     /* ignore */
   }
-  daemon = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
+  const child = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
     cwd: join(ROOT, "apps", "daemon"),
+    detached: true,
     // Fixed default port so the browser extension can reach the daemon at a known address
     // (127.0.0.1:7457); still overridable via env. The portfile records whatever it binds.
-    env: { ...process.env, DEZIN_PORT: process.env.DEZIN_PORT || "7457", DEZIN_PORTFILE: PORTFILE, DEZIN_DATA_DIR: DATA_DIR, DEZIN_ELECTRON: "1" },
+    env: {
+      ...process.env,
+      DEZIN_PORT: process.env.DEZIN_PORT || "7457",
+      DEZIN_PORTFILE: PORTFILE,
+      DEZIN_DATA_DIR: DATA_DIR,
+      DEZIN_ELECTRON: "1",
+      DEZIN_DAEMON_OWNER_ID: ownerId,
+    },
     // IPC channel lets the daemon ask us to capture covers via our own Chromium.
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
-  daemon.stdout.on("data", (d) => process.stdout.write(`[daemon] ${d}`));
-  daemon.stderr.on("data", (d) => process.stderr.write(`[daemon] ${d}`));
-  daemon.on("error", (e) => console.error("[daemon] failed to spawn:", e.message));
-  daemon.on("message", (msg) => {
+  child.stdout.on("data", (d) => process.stdout.write(`[daemon] ${d}`));
+  child.stderr.on("data", (d) => process.stderr.write(`[daemon] ${d}`));
+  child.on("error", (e) => console.error("[daemon] failed to spawn:", e.message));
+  child.on("message", (msg) => {
     if (msg && msg.type === "capture") {
       captureCover(msg.htmlPath, msg.outPath).then((ok) => {
         try {
-          daemon.send({ type: "capture-result", id: msg.id, ok });
+          child.send({ type: "capture-result", id: msg.id, ok });
         } catch {
           /* daemon gone */
         }
       });
     }
   });
+  return child;
 }
+
+function readDaemonPortFile() {
+  if (!existsSync(PORTFILE)) return null;
+  try {
+    return JSON.parse(readFileSync(PORTFILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function schedule(callback, delay) {
+  const timer = setTimeout(callback, delay);
+  return () => clearTimeout(timer);
+}
+
+function killProcessGroup(pid) {
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" });
+    if (result.error) console.error("[daemon] failed to stop process tree:", result.error.message);
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch (error) {
+    if (!error || error.code !== "ESRCH") {
+      console.error("[daemon] failed to stop process group:", error && error.message);
+    }
+  }
+}
+
+const daemonSupervisor = createDaemonSupervisor({
+  spawnDaemon,
+  readPortFile: readDaemonPortFile,
+  now: Date.now,
+  schedule,
+  killProcessGroup,
+});
 
 // Render a self-contained HTML into a 1280×800 PNG using a hidden Chromium window —
 // no external Chrome, no puppeteer. paintWhenInitiallyHidden makes the offscreen
@@ -99,21 +146,6 @@ async function captureCover(htmlPath, outPath) {
   }
 }
 
-async function waitForDaemon(timeoutMs = 20000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (existsSync(PORTFILE)) {
-      try {
-        return JSON.parse(readFileSync(PORTFILE, "utf8")).url;
-      } catch {
-        /* not written fully yet */
-      }
-    }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  return null;
-}
-
 // Dev: poll for the Vite portfile (.dezin/web.json), written by webPortfilePlugin
 // with whatever port Vite actually bound — so a port-conflict fallback stays in sync.
 async function waitForWebUrl(timeoutMs = 20000) {
@@ -134,7 +166,7 @@ async function waitForWebUrl(timeoutMs = 20000) {
 async function createWindow() {
   const windowStateFile = join(app.getPath("userData"), "window-state.json");
   const windowState = readWindowState(windowStateFile);
-  win = new BrowserWindow({
+  const window = new BrowserWindow({
     width: windowState.width,
     height: windowState.height,
     minWidth: 920,
@@ -145,13 +177,14 @@ async function createWindow() {
     webPreferences: {
       preload: join(__dirname, "preload.js"),
       contextIsolation: true,
-      sandbox: false,
+      sandbox: true,
     },
   });
+  win = window;
   let saveWindowStateTimer = null;
   const saveWindowState = () => {
-    if (!win || win.isDestroyed() || win.isMinimized()) return;
-    writeWindowState(windowStateFile, win.getBounds());
+    if (window.isDestroyed() || window.isMinimized()) return;
+    writeWindowState(windowStateFile, window.getBounds());
   };
   const scheduleSaveWindowState = () => {
     if (saveWindowStateTimer) clearTimeout(saveWindowStateTimer);
@@ -160,13 +193,16 @@ async function createWindow() {
       saveWindowState();
     }, 200);
   };
-  win.on("resize", scheduleSaveWindowState);
-  win.on("close", () => {
+  window.on("resize", scheduleSaveWindowState);
+  window.on("close", () => {
     if (saveWindowStateTimer) {
       clearTimeout(saveWindowStateTimer);
       saveWindowStateTimer = null;
     }
     saveWindowState();
+  });
+  window.on("closed", () => {
+    if (win === window) win = null;
   });
 
   let url = DEV_URL;
@@ -179,26 +215,35 @@ async function createWindow() {
     }
   }
   if (!url) {
-    startDaemon();
-    url = await waitForDaemon();
+    try {
+      url = await daemonSupervisor.ensureStarted();
+    } catch (error) {
+      console.error("[daemon] failed to become ready:", error && error.message);
+    }
   }
   if (!url) {
     dialog.showErrorBox("Dezin", "The Dezin daemon didn't start. Make sure `node` (v22+) is on your PATH.");
     app.quit();
     return;
   }
+  if (window.isDestroyed()) return;
 
-  win.webContents.setWindowOpenHandler(({ url: u }) => {
+  window.webContents.setWindowOpenHandler(({ url: u }) => {
     openSafeExternal(u);
     return { action: "deny" };
   });
-  win.webContents.on("will-navigate", (event, targetUrl) => {
+  window.webContents.on("will-navigate", (event, targetUrl) => {
     if (isAllowedAppNavigation(targetUrl, url)) return;
     event.preventDefault();
     openSafeExternal(targetUrl);
   });
-  win.once("ready-to-show", () => win.show());
-  await win.loadURL(url);
+  window.once("ready-to-show", () => window.show());
+  try {
+    await loadUrlWithRetry(() => window.loadURL(url), { shouldRetry: () => !window.isDestroyed() });
+  } catch (error) {
+    if (quitting || window.isDestroyed()) return;
+    throw error;
+  }
 }
 
 function buildMenu() {
@@ -224,6 +269,16 @@ function buildMenu() {
     { role: "windowMenu" },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function launchWindow() {
+  void createWindow().catch((error) => {
+    console.error("[desktop] failed to load app window:", error && error.message);
+    if (!quitting) {
+      dialog.showErrorBox("Dezin", "The Dezin app window failed to load.");
+      app.quit();
+    }
+  });
 }
 
 ipcMain.handle("dezin:pickFiles", async () => {
@@ -253,23 +308,18 @@ ipcMain.handle("dezin:openPath", async (_event, pathToOpen) => {
 
 app.whenReady().then(() => {
   buildMenu();
-  createWindow();
+  launchWindow();
 });
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  if (BrowserWindow.getAllWindows().length === 0) launchWindow();
 });
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("quit", () => {
-  if (daemon) {
-    try {
-      daemon.kill();
-    } catch {
-      /* ignore */
-    }
-  }
+app.on("before-quit", () => {
+  quitting = true;
+  void daemonSupervisor.stop();
 });
