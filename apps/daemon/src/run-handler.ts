@@ -33,11 +33,12 @@ import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
 import { ensureDevServer, gitCommit, gitDiscardChanges, gitRestoreTree, workingTreeFingerprint } from "./project-runtime.ts";
 import { bestVersion } from "./best-version.ts";
-import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
+import type { QualityFinding, Run, Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
+import { RunExecution } from "./run-execution.ts";
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
@@ -986,15 +987,17 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const startKey = `${project.id}:${targetVariantId}`;
   if (startingRuns.has(startKey)) return sendError(res, 409, "run already in progress for this project variant");
   startingRuns.add(startKey);
-  conversation ??= store.createConversation(project.id);
-  let dir: string;
+  let durableRun: Run | null = null;
+  let execution: RunExecution | null = null;
+  let ctrl: AbortController | null = null;
+  let unsubscribe = (): void => {};
+  let brokerRegistered = false;
+  let streamSubscribed = false;
+  let stopPoll: (() => void) | null = null;
+  let dir!: string;
+
   try {
-    dir = project.mode === "standard" ? await standardVariantArtifactDir(deps, project.id, targetVariantId) : projectDir(deps.dataDir, project.id);
-    await mkdir(dir, { recursive: true });
-  } catch (err) {
-    startingRuns.delete(startKey);
-    return sendError(res, 409, err instanceof Error ? err.message : "variant workspace unavailable");
-  }
+    conversation ??= store.createConversation(project.id);
 
   // Resolve the active design system (the project's, else the settings default).
   // Sharingan reconstructs from captured source pixels/assets, so it must not inherit
@@ -1052,8 +1055,44 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     agentCommand: runAgentCommand,
     skillId: skill?.id ?? null,
   });
-  // The DB row now exists → findActiveRun guards further requests; release the in-memory lock.
-  startingRuns.delete(startKey);
+  durableRun = run;
+  const openStream = (): void => {
+    if (res.headersSent) return;
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+  };
+  const writeStreamEvent = (event: unknown): void => {
+    openStream();
+    try {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    } catch {
+      /* socket closed */
+    }
+  };
+  const emitRunEvent = (event: unknown): void => {
+    if (brokerRegistered) pushEvent(run.id, event);
+    if (!streamSubscribed) writeStreamEvent(event);
+  };
+  execution = new RunExecution({
+    store,
+    runId: run.id,
+    emit: emitRunEvent,
+    finish: () => {
+      if (brokerRegistered) finishRun(run.id);
+    },
+    unsubscribe: () => unsubscribe(),
+    closeStream: () => {
+      if (!res.writableEnded) res.end();
+    },
+  });
+
+  // Workspace preparation is post-record work: failures become a durable failed Run.
+  dir = project.mode === "standard" ? await standardVariantArtifactDir(deps, project.id, targetVariantId) : projectDir(deps.dataDir, project.id);
+  await mkdir(dir, { recursive: true });
+
   const moodboardContext = buildProjectMoodboardContext({
     store,
     dataDir: deps.dataDir,
@@ -1085,13 +1124,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // a per-run log so another client can reattach (after navigating away, or an app restart) and
   // replay what the run reached. The run continues regardless of THIS client's connection — it
   // ends only on completion, an explicit cancel, or the daemon exiting.
-  res.writeHead(200, {
-    "content-type": "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache",
-    connection: "keep-alive",
-  });
-  const ctrl = createRun({ runId: run.id, conversationId: conversation.id, dataDir: deps.dataDir });
-  const unsubscribe = subscribe(
+  openStream();
+  ctrl = createRun({ runId: run.id, conversationId: conversation.id, dataDir: deps.dataDir });
+  brokerRegistered = true;
+  unsubscribe = subscribe(
     run.id,
     deps.dataDir,
     (ev) => {
@@ -1103,9 +1139,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     },
     () => {},
   );
+  streamSubscribed = true;
   // On disconnect just stop writing — do NOT cancel; the run keeps going for reattach.
   req.on("close", unsubscribe);
-  const sse = (event: unknown): void => pushEvent(run.id, event);
+  const sse = emitRunEvent;
   sse({ type: "run-start", runId: run.id, conversationId: conversation.id, variantId: targetVariantId });
 
   // Optional pre-design Research phase (opt-in via body.research). It writes the
@@ -1162,12 +1199,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       if (directions.length >= 2) {
         const options = directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown), markdown: d.markdown }));
         store.addMessage(conversation.id, "system", directionGateMessage(options, run.id, visibleBrief));
-        store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
         sse({ type: "direction-gate", runId: run.id, directions: options, brief: visibleBrief });
-        sse({ type: "run-cancelled", runId: run.id, reason: "direction" });
-        finishRun(run.id);
-        unsubscribe();
-        res.end();
+        execution.settle("cancelled", {
+          finishedAt: Date.now(),
+          event: { type: "run-cancelled", runId: run.id, reason: "direction" },
+        });
         return;
       }
       // Record the pick so the workspace can show which direction was chosen (survives reload).
@@ -1283,12 +1319,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     processItems.filter((item) => includeText || item.type === "tool");
   const persistProcess = (includeText = summaryBoundarySeen): void => {
     const items = processRecordItems(includeText);
-    if (items.length) store.addMessage(conversation.id, "system", processMessage(items, Math.max(0, Date.now() - processStartedAt)));
+    if (items.length) store.addMessage(run.conversationId, "system", processMessage(items, Math.max(0, Date.now() - processStartedAt)));
     processItems.splice(0);
     summaryBoundarySeen = false;
   };
   const persistSteps = (): void => {
-    if (steps.length) store.addMessage(conversation.id, "system", JSON.stringify({ steps }));
+    if (steps.length) store.addMessage(run.conversationId, "system", JSON.stringify({ steps }));
     steps.splice(0);
   };
   const queueVisualReviewRecord = (round: number, enabled: boolean, findings: QualityFinding[], screenshotUrl?: string, screenshotPath?: string): void => {
@@ -1296,12 +1332,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     visualReviewRecords.push(visualReviewMessage({ runId: run.id, round, enabled, settings, agentCommand: runAgentCommand, model: runModel, screenshotUrl, screenshotPath, findings }));
   };
   const persistVisualReviews = (): void => {
-    for (const record of visualReviewRecords.splice(0)) store.addMessage(conversation.id, "system", record);
+    for (const record of visualReviewRecords.splice(0)) store.addMessage(run.conversationId, "system", record);
   };
   const persistTranscript = (assistantText?: string): string | null => {
     persistProcess();
     const trimmed = assistantText?.trim() ?? "";
-    const assistantMessage = trimmed ? store.addMessage(conversation.id, "assistant", trimmed) : null;
+    const assistantMessage = trimmed ? store.addMessage(run.conversationId, "assistant", trimmed) : null;
     persistSteps();
     persistVisualReviews();
     return assistantMessage?.id ?? null;
@@ -1432,9 +1468,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         if (asked.question) {
           persistTranscript(asked.text);
           store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
-          store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
           sse({ type: "ask-user-question", runId: run.id, question: asked.question });
-          sse({ type: "run-cancelled", runId: run.id, reason: "question" });
+          execution.settle("cancelled", {
+            finishedAt: Date.now(),
+            event: { type: "run-cancelled", runId: run.id, reason: "question" },
+          });
           return;
         }
 
@@ -1609,8 +1647,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         (passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`) + reviewNote + stuckNote;
       store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped, unresolved: stuckDefectKeys.size }));
       const persistedFindings = withResolvedVisualReviewHistory(findings, visualReviewHistory);
-      store.updateRun(run.id, {
-        status: "succeeded",
+      execution.settle("succeeded", {
         repairRounds,
         lintPassed: passed,
         score,
@@ -1618,8 +1655,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         assistantMessageId,
         commitHash,
         finishedAt: Date.now(),
+        event: { type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", designReviewed: !designReviewSkipped, findings: persistedFindings },
       });
-      sse({ type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", designReviewed: !designReviewSkipped, findings: persistedFindings });
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
         void (async () => {
@@ -1633,7 +1670,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       }
     } catch (err) {
       const cancelled = ctrl.signal.aborted || isAbortError(err);
-      store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
+      const errorMessage = err instanceof Error ? err.message : "generation failed";
+      const settled = execution.settle(cancelled ? "cancelled" : "failed", {
+        finishedAt: Date.now(),
+        event: cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: errorMessage },
+      });
+      if (!settled.changed) return;
       // Discard the aborted turn's half-written edits so the NEXT run's `git add -A` doesn't silently
       // bundle them into its version snapshot (standard mode edits src/ directly). Best-effort.
       await gitDiscardChanges(dir).catch(() => {});
@@ -1642,20 +1684,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
       persistSteps();
       persistVisualReviews();
-      const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
+      const message = cancelled ? "Stopped." : `The run failed: ${errorMessage}`;
       store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
-      sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
-    } finally {
-      finishRun(run.id);
-      unsubscribe();
-      res.end();
     }
     return;
   }
 
   // Stream the preview live: emit an event whenever the agent rewrites index.html.
   const previewUrl = `/projects/${project.id}/preview/`;
-  const stopPoll = startPreviewPoller(join(dir, "index.html"), (t) => sse({ type: "preview-update", previewUrl, t }));
+  stopPoll = startPreviewPoller(join(dir, "index.html"), (t) => sse({ type: "preview-update", previewUrl, t }));
 
   try {
     const result = await generateArtifact({
@@ -1695,9 +1732,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     if (asked.question) {
       persistTranscript(assistantText);
       store.addMessage(conversation.id, "system", questionMessage(asked.question, run.id));
-      store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
       sse({ type: "ask-user-question", runId: run.id, question: asked.question });
-      sse({ type: "run-cancelled", runId: run.id, reason: "question" });
+      execution.settle("cancelled", {
+        finishedAt: Date.now(),
+        event: { type: "run-cancelled", runId: run.id, reason: "question" },
+      });
       return;
     }
 
@@ -1791,9 +1830,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       if (repairedAsked.question) {
         persistTranscript(repairedFinal.summaryText);
         store.addMessage(conversation.id, "system", questionMessage(repairedAsked.question, run.id));
-        store.updateRun(run.id, { status: "cancelled", finishedAt: Date.now() });
         sse({ type: "ask-user-question", runId: run.id, question: repairedAsked.question });
-        sse({ type: "run-cancelled", runId: run.id, reason: "question" });
+        execution.settle("cancelled", {
+          finishedAt: Date.now(),
+          event: { type: "run-cancelled", runId: run.id, reason: "question" },
+        });
         return;
       }
 
@@ -1824,45 +1865,71 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       resultMessage(text, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped, materialSources: generatedTotal > 0 ? [`Generated image assets (${generatedTotal})`] : [] }),
     );
     const persistedFindings = withResolvedVisualReviewHistory(finalFindings, visualReviewHistory);
-    store.updateRun(run.id, {
-      status: "succeeded",
+    sse({ type: "done", rounds: repairRounds, passed });
+    execution.settle("succeeded", {
       repairRounds,
       lintPassed: passed,
       score,
       findings: persistedFindings,
       assistantMessageId,
       finishedAt: Date.now(),
-    });
-
-    sse({ type: "done", rounds: repairRounds, passed });
-    sse({
-      type: "run-done",
-      runId: run.id,
-      passed,
-      rounds: repairRounds,
-      score,
-      designReviewed: !designReviewSkipped,
-      previewUrl: `/projects/${project.id}/preview/`,
-      findings: persistedFindings,
+      event: {
+        type: "run-done",
+        runId: run.id,
+        passed,
+        rounds: repairRounds,
+        score,
+        designReviewed: !designReviewSkipped,
+        previewUrl: `/projects/${project.id}/preview/`,
+        findings: persistedFindings,
+      },
     });
     // Headless-screenshot the finished artifact as the gallery cover (best-effort, async).
     void captureCover(join(dir, artifactPath), join(dir, ".cover.png"));
   } catch (err) {
     const cancelled = ctrl.signal.aborted || isAbortError(err);
-    store.updateRun(run.id, { status: cancelled ? "cancelled" : "failed", finishedAt: Date.now() });
+    const errorMessage = err instanceof Error ? err.message : "generation failed";
+    const settled = execution.settle(cancelled ? "cancelled" : "failed", {
+      finishedAt: Date.now(),
+      event: cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: errorMessage },
+    });
+    if (!settled.changed) return;
     const partial = processAssistantText();
     persistProcess(); // keep the partial process record + whatever the agent wrote to disk
     if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
     persistSteps();
     persistVisualReviews();
-    const message = cancelled ? "Stopped." : `The run failed: ${err instanceof Error ? err.message : "generation failed"}`;
+    const message = cancelled ? "Stopped." : `The run failed: ${errorMessage}`;
     store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
-    sse(cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: err instanceof Error ? err.message : "generation failed" });
+  }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "generation failed";
+    if (!execution || !durableRun) {
+      if (!res.headersSent) sendError(res, 500, message);
+      else if (!res.writableEnded) res.end();
+      return;
+    }
+    const cancelled = ctrl?.signal.aborted === true || isAbortError(err);
+    const settled = execution.settle(cancelled ? "cancelled" : "failed", {
+      finishedAt: Date.now(),
+      event: cancelled
+        ? { type: "run-cancelled", runId: durableRun.id }
+        : { type: "run-error", runId: durableRun.id, message },
+    });
+    if (settled.changed) {
+      try {
+        store.addMessage(durableRun.conversationId, "system", resultMessage(cancelled ? "Stopped." : `The run failed: ${message}`, cancelled ? {} : { error: true }));
+      } catch {
+        // The terminal Run and event are already durable/best-effort; message persistence is secondary.
+      }
+    }
   } finally {
-    stopPoll();
-    finishRun(run.id);
-    unsubscribe();
-    res.end();
+    startingRuns.delete(startKey);
+    try {
+      stopPoll?.();
+    } finally {
+      execution?.dispose();
+    }
   }
 }
 

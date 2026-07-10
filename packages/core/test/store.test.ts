@@ -99,6 +99,37 @@ test("run lifecycle: pending → running → succeeded", () => {
   s.close();
 });
 
+test("terminalizeRun preserves the first terminal status and patch", () => {
+  const s = freshStore();
+  const p = s.createProject({ name: "P" });
+  const c = s.createConversation(p.id);
+  const run = s.createRun(p.id, c.id);
+  s.updateRun(run.id, { status: "running" });
+
+  const cancelled = s.terminalizeRun(run.id, "cancelled", {
+    repairRounds: 2,
+    finishedAt: 2_000,
+  });
+  const lateSuccess = s.terminalizeRun(run.id, "succeeded", {
+    repairRounds: 3,
+    lintPassed: true,
+    score: 100,
+    finishedAt: 3_000,
+  });
+
+  assert.equal(cancelled.changed, true);
+  assert.equal(cancelled.run.status, "cancelled");
+  assert.equal(cancelled.run.repairRounds, 2);
+  assert.equal(cancelled.run.finishedAt, 2_000);
+  assert.equal(lateSuccess.changed, false);
+  assert.equal(lateSuccess.run.status, "cancelled");
+  assert.equal(lateSuccess.run.repairRounds, 2);
+  assert.equal(lateSuccess.run.lintPassed, false);
+  assert.equal(lateSuccess.run.score, null);
+  assert.equal(lateSuccess.run.finishedAt, 2_000);
+  s.close();
+});
+
 test("Store configures a busy timeout for concurrent sqlite writers", () => {
   const s = freshStore();
   const row = s.db.prepare("PRAGMA busy_timeout").get() as Record<string, unknown>;

@@ -139,12 +139,18 @@ export function subscribe(
     ended = true;
     onEnd();
   };
-  if (!e.done) {
-    e.emitter.on("event", onEv);
-    e.emitter.once("done", onDone);
+  try {
+    if (!e.done) {
+      e.emitter.on("event", onEv);
+      e.emitter.once("done", onDone);
+    }
+    for (const ev of e.buffer.slice()) onEv(ev);
+    if (e.done) onDone();
+  } catch (err) {
+    e.emitter.off("event", onEv);
+    e.emitter.off("done", onDone);
+    throw err;
   }
-  for (const ev of e.buffer.slice()) onEv(ev);
-  if (e.done) onDone();
   return () => {
     e.emitter.off("event", onEv);
     e.emitter.off("done", onDone);

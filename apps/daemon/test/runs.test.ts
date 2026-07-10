@@ -6,9 +6,11 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { Store } from "../../../packages/core/src/index.ts";
 import { abortError, FakeRunner } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
+import { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { createApp, type AppDeps } from "../src/index.ts";
 
 const CLEAN =
@@ -74,6 +76,20 @@ function commitAll(dir: string, message: string): string {
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function closedSse(res: Response, label: string): Promise<Array<Record<string, unknown>>> {
+  const text = await Promise.race([
+    res.text(),
+    delay(2_000).then(() => {
+      throw new Error(`${label} stream did not close`);
+    }),
+  ]);
+  return parseSse(text);
+}
+
+function terminalEvents(events: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return events.filter((event) => event.type === "run-done" || event.type === "run-error" || event.type === "run-cancelled");
+}
 
 function createSharinganRegionFixture(dataDir: string, store: Store, regions: unknown[]): { project: ReturnType<Store["createProject"]>; dir: string } {
   const project = store.createProject({ name: "Clone", mode: "standard", sharingan: true });
@@ -371,6 +387,189 @@ test("POST /api/runs closes the TOCTOU window: two racing runs → one starts, o
     while (!releaseTurn) await delay(5);
     releaseTurn();
     await winner.text();
+  });
+});
+
+test("exactly-once lifecycle releases the start key when registry lookup throws before createRun", async () => {
+  const registry = new DesignRegistry();
+  const registryGet = registry.get.bind(registry);
+  let failRegistry = true;
+  registry.get = (id: string) => {
+    if (failRegistry) {
+      failRegistry = false;
+      throw new Error("registry exploded");
+    }
+    return registryGet(id);
+  };
+
+  await withRunServer(
+    new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }),
+    async ({ base, store }) => {
+      const project = await createProject(base);
+      const first = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "first attempt" }),
+      });
+      assert.equal(first.status, 500);
+      assert.match(await first.text(), /registry exploded/);
+      assert.equal(store.listRuns(project.id).length, 0, "a pre-record failure creates no Run row");
+
+      const retry = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "immediate retry" }),
+      });
+      assert.equal(retry.status, 200, "the pre-record start key is released for an immediate retry");
+      const events = await closedSse(retry, "registry retry");
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-done"]);
+      assert.equal(store.listRuns(project.id).length, 1);
+    },
+    { designRegistry: registry },
+  );
+});
+
+test("exactly-once lifecycle terminalizes a research throw and accepts an immediate retry", async () => {
+  let failResearch = true;
+  const researchPhase: NonNullable<AppDeps["researchPhase"]> = async () => {
+    if (failResearch) {
+      failResearch = false;
+      throw new Error("research exploded");
+    }
+    return { ran: true, produced: false, visualProduced: false };
+  };
+
+  await withRunServer(
+    new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }),
+    async ({ base, store }) => {
+      const project = await createProject(base);
+      const first = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "first attempt", research: true }),
+      });
+      assert.equal(first.status, 200);
+      const failedEvents = await closedSse(first, "research failure");
+      assert.deepEqual(terminalEvents(failedEvents).map((event) => event.type), ["run-error"]);
+      const failedRunId = failedEvents.find((event) => event.type === "run-start")?.runId as string;
+      const failedRun = store.getRun(failedRunId);
+      assert.equal(failedRun?.status, "failed");
+      assert.equal(typeof failedRun?.finishedAt, "number");
+
+      const retry = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "immediate retry", research: true }),
+      });
+      assert.equal(retry.status, 200, "a failed durable Run no longer blocks its target");
+      const retryEvents = await closedSse(retry, "research retry");
+      assert.deepEqual(terminalEvents(retryEvents).map((event) => event.type), ["run-done"]);
+    },
+    { researchPhase },
+  );
+});
+
+test("exactly-once lifecycle terminalizes broker creation failure and accepts an immediate retry", async () => {
+  await withRunServer(new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }), async ({ base, store }) => {
+    const project = await createProject(base);
+    const originalSetMaxListeners = EventEmitter.prototype.setMaxListeners;
+    let failBrokerCreation = true;
+    EventEmitter.prototype.setMaxListeners = function (count: number) {
+      if (failBrokerCreation && this.constructor === EventEmitter && count === 64) {
+        failBrokerCreation = false;
+        throw new Error("broker creation exploded");
+      }
+      return originalSetMaxListeners.call(this, count);
+    };
+    let first: Response;
+    try {
+      first = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "first attempt" }),
+      });
+      assert.equal(first.status, 200);
+      const failedEvents = await closedSse(first, "broker creation failure");
+      assert.deepEqual(terminalEvents(failedEvents).map((event) => event.type), ["run-error"]);
+      const failedRun = store.listRuns(project.id)[0];
+      assert.equal(failedRun?.status, "failed");
+      assert.equal(typeof failedRun?.finishedAt, "number");
+    } finally {
+      EventEmitter.prototype.setMaxListeners = originalSetMaxListeners;
+    }
+
+    const retry = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "immediate retry" }),
+    });
+    assert.equal(retry.status, 200);
+    assert.deepEqual(terminalEvents(await closedSse(retry, "broker creation retry")).map((event) => event.type), ["run-done"]);
+  });
+});
+
+test("exactly-once lifecycle terminalizes broker subscription failure and accepts an immediate retry", async () => {
+  await withRunServer(new FakeRunner({ artifacts: [CLEAN], texts: ["done"] }), async ({ base, store }) => {
+    const project = await createProject(base);
+    const originalOnce = EventEmitter.prototype.once;
+    let failBrokerSubscription = true;
+    EventEmitter.prototype.once = function (eventName: string | symbol, listener: (...args: unknown[]) => void) {
+      if (failBrokerSubscription && this.constructor === EventEmitter && eventName === "done") {
+        failBrokerSubscription = false;
+        throw new Error("broker subscription exploded");
+      }
+      return originalOnce.call(this, eventName, listener);
+    };
+    let first: Response;
+    try {
+      first = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "first attempt" }),
+      });
+      assert.equal(first.status, 200);
+      const failedEvents = await closedSse(first, "broker subscription failure");
+      assert.deepEqual(terminalEvents(failedEvents).map((event) => event.type), ["run-error"]);
+      const failedRun = store.listRuns(project.id)[0];
+      assert.equal(failedRun?.status, "failed");
+      assert.equal(typeof failedRun?.finishedAt, "number");
+    } finally {
+      EventEmitter.prototype.once = originalOnce;
+    }
+
+    const retry = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "immediate retry" }),
+    });
+    assert.equal(retry.status, 200);
+    assert.deepEqual(terminalEvents(await closedSse(retry, "broker subscription retry")).map((event) => event.type), ["run-done"]);
+  });
+});
+
+test("exactly-once lifecycle terminalizes Standard workspace setup failure and releases the start key", async () => {
+  await withRunServer(new FakeRunner({ artifacts: [CLEAN, CLEAN], texts: ["done", "done"] }), async ({ base, store }) => {
+    const project = store.createProject({ name: "Std", mode: "standard" });
+    store.ensureMainVariant(project.id);
+    const branch = store.createVariant(project.id, "Broken branch");
+    const post = () =>
+      fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, variantId: branch.id, brief: "run on branch" }),
+      });
+
+    const first = await post();
+    assert.equal(first.status, 200);
+    assert.deepEqual(terminalEvents(await closedSse(first, "Standard setup failure")).map((event) => event.type), ["run-error"]);
+    const failedRun = store.listRuns(project.id)[0];
+    assert.equal(failedRun?.status, "failed");
+    assert.equal(typeof failedRun?.finishedAt, "number");
+
+    const retry = await post();
+    assert.equal(retry.status, 200, "workspace setup failure releases the start key immediately");
+    assert.deepEqual(terminalEvents(await closedSse(retry, "Standard setup retry")).map((event) => event.type), ["run-error"]);
+    assert.equal(store.listRuns(project.id).length, 2);
   });
 });
 
@@ -884,8 +1083,10 @@ test("agent AskUserQuestion markers stream and persist as structured questions",
     assert.equal(question?.question, "Which pricing tier should be featured?");
     const done = events.find((e) => e.type === "run-cancelled");
     assert.equal(done?.reason, "question");
+    assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-cancelled"]);
     const runId = events.find((e) => e.type === "run-start")!.runId as string;
     assert.equal(store.getRun(runId)?.status, "cancelled");
+    assert.equal(typeof store.getRun(runId)?.finishedAt, "number");
 
     const convId = events.find((e) => e.type === "run-start")!.conversationId as string;
     const persisted = store
@@ -2675,7 +2876,7 @@ test("research with 2+ directions fires the direction gate and stops before buil
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   await withRunServer(
     runner,
-    async ({ base }) => {
+    async ({ base, store }) => {
       const project = await createProject(base);
       const res = await fetch(`${base}/api/runs`, {
         method: "POST",
@@ -2687,7 +2888,25 @@ test("research with 2+ directions fires the direction gate and stops before buil
       assert.ok(gate, "expected a direction-gate event");
       assert.equal((gate!.directions as unknown[]).length, 2);
       assert.equal(events.find((e) => e.type === "run-cancelled")!.reason, "direction");
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-cancelled"]);
+      const runId = events.find((event) => event.type === "run-start")!.runId as string;
+      assert.equal(store.getRun(runId)?.status, "cancelled");
+      assert.equal(typeof store.getRun(runId)?.finishedAt, "number");
       assert.equal(runner.calls.length, 0); // build never ran
+
+      const retry = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: project.id,
+          conversationId: events.find((event) => event.type === "run-start")!.conversationId,
+          brief: "make a hero",
+          research: true,
+          directionSlug: "alpha",
+        }),
+      });
+      assert.equal(retry.status, 200, "direction-gate settlement releases the target for an immediate retry");
+      assert.deepEqual(terminalEvents(await closedSse(retry, "direction retry")).map((event) => event.type), ["run-done"]);
     },
     { researchPhase: researchWithDirections },
   );

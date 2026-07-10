@@ -1286,6 +1286,47 @@ export class Store {
     return this.getRun(id)!;
   }
 
+  terminalizeRun(
+    id: string,
+    status: Extract<RunStatus, "succeeded" | "failed" | "cancelled">,
+    patch: Partial<
+      Pick<Run, "repairRounds" | "lintPassed" | "score" | "findings" | "finishedAt" | "userMessageId" | "assistantMessageId" | "commitHash">
+    >,
+  ): { changed: boolean; run: Run } {
+    const cur = this.getRun(id);
+    if (!cur) throw new Error(`run not found: ${id}`);
+    const next = {
+      repairRounds: patch.repairRounds ?? cur.repairRounds,
+      lintPassed: patch.lintPassed ?? cur.lintPassed,
+      score: patch.score !== undefined ? patch.score : cur.score,
+      findings: patch.findings !== undefined ? patch.findings : cur.findings,
+      finishedAt: patch.finishedAt !== undefined ? patch.finishedAt : cur.finishedAt,
+      userMessageId: patch.userMessageId !== undefined ? patch.userMessageId : cur.userMessageId,
+      assistantMessageId: patch.assistantMessageId !== undefined ? patch.assistantMessageId : cur.assistantMessageId,
+      commitHash: patch.commitHash !== undefined ? patch.commitHash : cur.commitHash,
+    };
+    const result = this.db
+      .prepare(
+        `UPDATE runs
+         SET status = ?, repair_rounds = ?, lint_passed = ?, score = ?, final_findings = ?, finished_at = ?, user_message_id = ?, assistant_message_id = ?, commit_hash = ?
+         WHERE id = ? AND status IN ('pending', 'running')`,
+      )
+      .run(
+        status,
+        next.repairRounds,
+        next.lintPassed ? 1 : 0,
+        next.score,
+        JSON.stringify(next.findings),
+        next.finishedAt,
+        next.userMessageId,
+        next.assistantMessageId,
+        next.commitHash,
+        id,
+      );
+    const run = this.getRun(id)!;
+    return { changed: result.changes === 1, run };
+  }
+
   findSucceededRunForAssistantMessage(messageId: string): Run | null {
     const exact = this.db
       .prepare(`SELECT * FROM runs WHERE assistant_message_id = ? AND status = 'succeeded' ORDER BY created_at DESC, rowid DESC LIMIT 1`)

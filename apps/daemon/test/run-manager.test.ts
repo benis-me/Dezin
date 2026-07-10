@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EventEmitter } from "node:events";
+import { Store } from "../../../packages/core/src/index.ts";
 import { createRun, finishRun, pushEvent, readRunLog, subscribe } from "../src/run-manager.ts";
 
 test("subscribe attaches live listener before replay so reattach cannot miss events", () => {
@@ -71,4 +73,94 @@ test("finished run logs persist sequence numbers for restart reattach cursors", 
   subscribe("r-log", dataDir, (event) => seen.push(event), () => {}, { afterSeq: 1 });
   assert.deepEqual(readRunLog(join(dataDir, ".runs", "r-log.jsonl")).map((event) => (event as { seq?: number }).seq), [1, 2]);
   assert.deepEqual(seen.map((event) => (event as { type?: string }).type), ["second"]);
+});
+
+test("subscribe removes a partially attached listener when broker subscription throws", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-manager-"));
+  createRun({ runId: "r-subscribe-fail", conversationId: "c1", dataDir });
+  const originalOnce = EventEmitter.prototype.once;
+  EventEmitter.prototype.once = function (eventName: string | symbol, listener: (...args: unknown[]) => void) {
+    if (this.constructor === EventEmitter && eventName === "done") throw new Error("subscribe exploded");
+    return originalOnce.call(this, eventName, listener);
+  };
+  const seen: unknown[] = [];
+  try {
+    assert.throws(
+      () => subscribe("r-subscribe-fail", dataDir, (event) => seen.push(event), () => {}),
+      /subscribe exploded/,
+    );
+  } finally {
+    EventEmitter.prototype.once = originalOnce;
+  }
+
+  pushEvent("r-subscribe-fail", { type: "after-failure" });
+  finishRun("r-subscribe-fail");
+  assert.deepEqual(seen, []);
+});
+
+test("RunExecution cancellation racing success emits only the winning terminal event", async () => {
+  const { RunExecution } = await import("../src/run-execution.ts");
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "P" });
+  const conversation = store.createConversation(project.id);
+  const run = store.createRun(project.id, conversation.id);
+  store.updateRun(run.id, { status: "running" });
+  const events: unknown[] = [];
+  const execution = new RunExecution({
+    store,
+    runId: run.id,
+    emit: (event) => events.push(event),
+    finish: () => {},
+    unsubscribe: () => {},
+    closeStream: () => {},
+  });
+
+  const [cancelled, succeeded] = await Promise.all([
+    Promise.resolve().then(() =>
+      execution.settle("cancelled", {
+        finishedAt: 2_000,
+        event: { type: "run-cancelled", runId: run.id },
+      }),
+    ),
+    Promise.resolve().then(() =>
+      execution.settle("succeeded", {
+        lintPassed: true,
+        score: 100,
+        finishedAt: 3_000,
+        event: { type: "run-done", runId: run.id },
+      }),
+    ),
+  ]);
+
+  assert.equal(cancelled.changed, true);
+  assert.equal(succeeded.changed, false);
+  assert.equal(store.getRun(run.id)?.status, "cancelled");
+  assert.deepEqual(events, [{ type: "run-cancelled", runId: run.id }]);
+  store.close();
+});
+
+test("RunExecution dispose releases broker, subscription, and stream exactly once", async () => {
+  const { RunExecution } = await import("../src/run-execution.ts");
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "P" });
+  const conversation = store.createConversation(project.id);
+  const run = store.createRun(project.id, conversation.id);
+  const calls: string[] = [];
+  const execution = new RunExecution({
+    store,
+    runId: run.id,
+    emit: () => {},
+    finish: () => {
+      calls.push("finish");
+      throw new Error("finish cleanup failed");
+    },
+    unsubscribe: () => calls.push("unsubscribe"),
+    closeStream: () => calls.push("close"),
+  });
+
+  execution.dispose();
+  execution.dispose();
+
+  assert.deepEqual(calls, ["finish", "unsubscribe", "close"]);
+  store.close();
 });
