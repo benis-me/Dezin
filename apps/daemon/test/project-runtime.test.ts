@@ -4,7 +4,14 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { ensureDevServer, ensureProjectPickerBridge, gitDiscardChanges, gitRestoreTree, getSetup, releaseProjectRuntime, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
+import { ensureDevServer, ensureProjectPickerBridge, gitRestoreTree, getSetup, releaseProjectRuntime, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
+import {
+  StandardRunPublishConflictError,
+  StandardRunSourceDirtyError,
+  beginStandardRunTransaction,
+  standardRunBranchName,
+  standardRunWorktreeDir,
+} from "../src/standard-run-transaction.ts";
 
 async function waitForPortDown(url: string): Promise<void> {
   for (let i = 0; i < 20; i++) {
@@ -297,36 +304,117 @@ setInterval(() => {}, 1000);
   }
 });
 
-test("gitDiscardChanges reverts the working tree to HEAD but preserves .research", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "dezin-discard-"));
+function initTransactionRepository(): { dataDir: string; sourceDir: string; sourceHead: string } {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-transaction-"));
+  const sourceDir = join(dataDir, "projects", "project-1");
+  mkdirSync(join(sourceDir, "src"), { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: sourceDir });
+  execFileSync("git", ["config", "user.email", "t@t.dev"], { cwd: sourceDir });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: sourceDir });
+  writeFileSync(join(sourceDir, "src", "App.jsx"), "v1");
+  execFileSync("git", ["add", "-A"], { cwd: sourceDir });
+  execFileSync("git", ["commit", "-qm", "baseline"], { cwd: sourceDir });
+  const sourceHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim();
+  return { dataDir, sourceDir, sourceHead };
+}
+
+test("standard Run transaction rejects tracked and untracked source changes without touching bytes or HEAD", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
   try {
-    execFileSync("git", ["init", "-q"], { cwd: dir });
-    execFileSync("git", ["config", "user.email", "t@t.dev"], { cwd: dir });
-    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
-    mkdirSync(join(dir, "src"), { recursive: true });
-    writeFileSync(join(dir, "src", "App.jsx"), "v1");
-    execFileSync("git", ["add", "-A"], { cwd: dir });
-    execFileSync("git", ["commit", "-qm", "baseline"], { cwd: dir });
+    writeFileSync(join(sourceDir, "src", "App.jsx"), "user tracked edit");
+    writeFileSync(join(sourceDir, "src", "notes.txt"), "user untracked file");
 
-    // A cancelled run's leftovers: a modified tracked file, a new untracked file, and a Dezin-internal
-    // .research dir (untracked) that must survive the discard.
-    writeFileSync(join(dir, "src", "App.jsx"), "v2-half-written");
-    writeFileSync(join(dir, "src", "New.jsx"), "leftover");
-    mkdirSync(join(dir, ".research"), { recursive: true });
-    writeFileSync(join(dir, ".research", "research.md"), "keep me");
-    // A Sharingan capture bundle (untracked) must also survive a failed build's discard, so a retry
-    // can reuse it instead of re-capturing.
-    mkdirSync(join(dir, ".sharingan"), { recursive: true });
-    writeFileSync(join(dir, ".sharingan", "pages.json"), "{}");
+    await assert.rejects(
+      beginStandardRunTransaction(
+        { dataDir },
+        { projectId: "project-1", variantId: "main", runId: "dirty-run", sourceDir },
+      ),
+      StandardRunSourceDirtyError,
+    );
 
-    await gitDiscardChanges(dir);
-
-    assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "v1", "tracked edit reverted to HEAD");
-    assert.equal(existsSync(join(dir, "src", "New.jsx")), false, "untracked leftover removed");
-    assert.equal(readFileSync(join(dir, ".research", "research.md"), "utf8"), "keep me", ".research preserved");
-    assert.equal(existsSync(join(dir, ".sharingan", "pages.json")), true, ".sharingan capture preserved");
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "user tracked edit");
+    assert.equal(readFileSync(join(sourceDir, "src", "notes.txt"), "utf8"), "user untracked file");
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(existsSync(standardRunWorktreeDir(dataDir, "project-1", "dirty-run")), false);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run transaction rollback removes partial throw and abort worktrees without changing the source", async () => {
+  for (const runId of ["throw-run", "abort-run"]) {
+    const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+    try {
+      const transaction = await beginStandardRunTransaction(
+        { dataDir },
+        { projectId: "project-1", variantId: "main", runId, sourceDir },
+      );
+      writeFileSync(join(transaction.dir, "src", "App.jsx"), `${runId} partial edit`);
+      writeFileSync(join(transaction.dir, "src", "partial.txt"), "partial");
+
+      await transaction.rollback();
+      await transaction.dispose();
+
+      assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1");
+      assert.equal(existsSync(join(sourceDir, "src", "partial.txt")), false);
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+      assert.equal(existsSync(transaction.dir), false);
+      assert.equal(execFileSync("git", ["branch", "--list", standardRunBranchName(runId)], { cwd: sourceDir, encoding: "utf8" }).trim(), "");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("standard Run transaction publishes only committed agent changes and disposes its temporary branch", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  try {
+    const transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId: "success-run", sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "agent result");
+    writeFileSync(join(transaction.dir, "src", "Agent.jsx"), "agent-only");
+    const committed = await transaction.commit("agent change");
+
+    assert.notEqual(committed, sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1", "source stays untouched before publish");
+    assert.equal(await transaction.publish(), committed);
+    await transaction.dispose();
+
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "agent result");
+    assert.equal(readFileSync(join(sourceDir, "src", "Agent.jsx"), "utf8"), "agent-only");
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), committed);
+    assert.equal(existsSync(transaction.dir), false);
+    assert.equal(execFileSync("git", ["branch", "--list", standardRunBranchName("success-run")], { cwd: sourceDir, encoding: "utf8" }).trim(), "");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run transaction rejects concurrent source edits and preserves a recovery branch", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  try {
+    const transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId: "conflict-run", sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "agent result");
+    const recoveryHead = await transaction.commit("agent change");
+    writeFileSync(join(sourceDir, "src", "App.jsx"), "concurrent user edit");
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    await transaction.dispose();
+
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "concurrent user edit");
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(existsSync(transaction.dir), false);
+    assert.equal(
+      execFileSync("git", ["rev-parse", standardRunBranchName("conflict-run")], { cwd: sourceDir, encoding: "utf8" }).trim(),
+      recoveryHead,
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 

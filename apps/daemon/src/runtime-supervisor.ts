@@ -169,6 +169,7 @@ export class RuntimeSupervisor {
       ...runIds.flatMap((runId) => [
         rm(join(this.options.dataDir, ".runs", `${runId}.jsonl`), { recursive: true, force: true }),
         rm(join(this.options.dataDir, ".runs", runId), { recursive: true, force: true }),
+        rm(join(this.options.dataDir, "run-worktrees", projectId, runId), { recursive: true, force: true }),
         rm(join(this.options.dataDir, "version-worktrees", projectId, runId), { recursive: true, force: true }),
         rm(
           join(
@@ -197,6 +198,7 @@ export class RuntimeSupervisor {
     await this.options.releaseProjectResources?.({ projectId, runIds });
     await Promise.all([
       rm(join(this.options.dataDir, "worktrees", projectId), { recursive: true, force: true }),
+      rm(join(this.options.dataDir, "run-worktrees", projectId), { recursive: true, force: true }),
       rm(join(this.options.dataDir, "version-worktrees", projectId), { recursive: true, force: true }),
       rm(join(this.options.dataDir, "projects", projectId), { recursive: true, force: true }),
       ...runIds.flatMap((runId) => [

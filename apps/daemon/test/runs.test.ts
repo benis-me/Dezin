@@ -12,6 +12,7 @@ import { abortError, FakeRunner } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
+import { standardRunBranchName, standardRunWorktreeDir } from "../src/standard-run-transaction.ts";
 
 const CLEAN =
   `<style>:root{--accent:#2563eb}</style>\n` +
@@ -75,6 +76,17 @@ function commitAll(dir: string, message: string): string {
   execFileSync("git", ["add", "-A"], { cwd: dir });
   execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", message], { cwd: dir });
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+}
+
+function initStandardRunProject(dataDir: string, store: Store): { project: ReturnType<Store["createProject"]>; dir: string; head: string } {
+  const project = store.createProject({ name: "Std", mode: "standard" });
+  const dir = join(dataDir, "projects", project.id);
+  mkdirSync(join(dir, "src"), { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  writeFileSync(join(dir, "package.json"), "{}");
+  writeFileSync(join(dir, "src", "App.jsx"), "source baseline");
+  const head = commitAll(dir, "base");
+  return { project, dir, head };
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1391,6 +1403,108 @@ test("standard run fails when the agent finishes without changing files", async 
   });
 });
 
+test("standard Run rejects dirty tracked and untracked input with 409 without creating a Run", async () => {
+  await withRunServer(
+    {
+      id: "should-not-run",
+      async runTurn() {
+        throw new Error("runner must not start for dirty input");
+      },
+    },
+    async ({ base, dataDir, store }) => {
+      const { project, dir, head } = initStandardRunProject(dataDir, store);
+      writeFileSync(join(dir, "src", "App.jsx"), "user tracked edit");
+      writeFileSync(join(dir, "src", "notes.txt"), "user untracked edit");
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+      });
+
+      assert.equal(response.status, 409);
+      assert.match(await response.text(), /uncommitted changes/i);
+      assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "user tracked edit");
+      assert.equal(readFileSync(join(dir, "src", "notes.txt"), "utf8"), "user untracked edit");
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), head);
+      assert.equal(store.listRuns(project.id).length, 0);
+    },
+  );
+});
+
+test("failed and aborted Standard Runs discard only their temporary worktree", async () => {
+  for (const kind of ["failed", "aborted"] as const) {
+    const runner: AgentRunner = {
+      id: `standard-${kind}`,
+      async runTurn(input) {
+        writeFileSync(join(input.projectDir, "src", "App.jsx"), `${kind} partial`);
+        writeFileSync(join(input.projectDir, "src", "partial.txt"), "partial");
+        if (kind === "aborted") throw abortError();
+        throw new Error("agent failed after writing");
+      },
+    };
+    await withRunServer(runner, async ({ base, dataDir, store }) => {
+      const { project, dir, head } = initStandardRunProject(dataDir, store);
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+      });
+      const events = await closedSse(response, `${kind} Standard transaction`);
+      const terminal = terminalEvents(events);
+      const runId = events.find((event) => event.type === "run-start")!.runId as string;
+
+      assert.deepEqual(terminal.map((event) => event.type), [kind === "aborted" ? "run-cancelled" : "run-error"]);
+      assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "source baseline");
+      assert.equal(existsSync(join(dir, "src", "partial.txt")), false);
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), head);
+      assert.equal(existsSync(standardRunWorktreeDir(dataDir, project.id, runId)), false);
+      assert.equal(execFileSync("git", ["branch", "--list", standardRunBranchName(runId)], { cwd: dir, encoding: "utf8" }).trim(), "");
+    });
+  }
+});
+
+test("Standard Run publish conflict preserves the user's concurrent edit and a recovery branch", async () => {
+  let sourceDir = "";
+  let injectedConflict = false;
+  const runner: AgentRunner = {
+    id: "standard-publish-conflict",
+    async runTurn(input) {
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "agent result");
+      return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      const initialized = initStandardRunProject(dataDir, store);
+      sourceDir = initialized.dir;
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: initialized.project.id, brief: "make it better" }),
+      });
+      const events = await closedSse(response, "Standard publish conflict");
+      const runId = events.find((event) => event.type === "run-start")!.runId as string;
+
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-error"]);
+      assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "concurrent user edit");
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), initialized.head);
+      assert.equal(existsSync(standardRunWorktreeDir(dataDir, initialized.project.id, runId)), false);
+      assert.match(execFileSync("git", ["branch", "--list", standardRunBranchName(runId)], { cwd: sourceDir, encoding: "utf8" }), /dezin\/run\//);
+    },
+    {
+      ensureDevServer: async () => {
+        if (!injectedConflict) {
+          injectedConflict = true;
+          writeFileSync(join(sourceDir, "src", "App.jsx"), "concurrent user edit");
+        }
+        return { url: "http://127.0.0.1:6209/" };
+      },
+    },
+  );
+});
+
 test("standard version actions use commit snapshots instead of prototype html snapshots", async () => {
   const devServers: Array<{ dir: string; runtimeKey?: string; url: string }> = [];
   let captured: { url: string; outPath: string } | null = null;
@@ -1501,26 +1615,33 @@ test("standard run succeeds only after project files change", async () => {
       return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
     },
   };
-  await withRunServer(runner, async ({ base, dataDir, store }) => {
-    const project = store.createProject({ name: "Std", mode: "standard" });
-    const dir = join(dataDir, "projects", project.id);
-    mkdirSync(dir, { recursive: true });
-    execFileSync("git", ["init", "-q"], { cwd: dir });
-    writeFileSync(join(dir, "package.json"), "{}");
-    execFileSync("git", ["add", "-A"], { cwd: dir });
-    execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), "{}");
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
 
-    const res = await fetch(`${base}/api/runs`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
-    });
-    const events = parseSse(await res.text());
-    const done = events.find((e) => e.type === "run-done")!;
-    assert.equal(done.mode, "standard");
-    assert.equal(done.passed, true);
-    assert.equal(store.getRun(done.runId as string)?.status, "succeeded");
-  });
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+      });
+      const events = parseSse(await res.text());
+      const done = events.find((e) => e.type === "run-done")!;
+      assert.equal(done.mode, "standard");
+      assert.equal(done.passed, true);
+      assert.equal(store.getRun(done.runId as string)?.status, "succeeded");
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6212/" }),
+      captureCoverUrl: async () => true,
+    },
+  );
 });
 
 test("standard run streams preview updates from the live dev server before completion", async () => {
@@ -1584,31 +1705,38 @@ test("standard run persists deterministic anti-slop findings from source files",
       return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
     },
   };
-  await withRunServer(runner, async ({ base, dataDir, store }) => {
-    const project = store.createProject({ name: "Std", mode: "standard" });
-    const dir = join(dataDir, "projects", project.id);
-    mkdirSync(dir, { recursive: true });
-    execFileSync("git", ["init", "-q"], { cwd: dir });
-    writeFileSync(join(dir, "package.json"), "{}");
-    execFileSync("git", ["add", "-A"], { cwd: dir });
-    execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(dir, { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), "{}");
+      execFileSync("git", ["add", "-A"], { cwd: dir });
+      execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
 
-    const res = await fetch(`${base}/api/runs`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
-    });
-    const events = parseSse(await res.text());
-    const done = events.find((e) => e.type === "run-done")!;
-    assert.equal(done.mode, "standard");
-    assert.equal(done.passed, false);
-    assert.equal(done.score, 75);
-    assert.equal((done.findings as Array<{ id: string }>)[0]?.id, "ai-default-indigo");
-    const run = store.getRun(done.runId as string)!;
-    assert.equal(run.lintPassed, false);
-    assert.equal(run.score, 75);
-    assert.equal(run.findings[0]?.id, "ai-default-indigo");
-  });
+      const res = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+      });
+      const events = parseSse(await res.text());
+      const done = events.find((e) => e.type === "run-done")!;
+      assert.equal(done.mode, "standard");
+      assert.equal(done.passed, false);
+      assert.equal(done.score, 75);
+      assert.equal((done.findings as Array<{ id: string }>)[0]?.id, "ai-default-indigo");
+      const run = store.getRun(done.runId as string)!;
+      assert.equal(run.lintPassed, false);
+      assert.equal(run.score, 75);
+      assert.equal(run.findings[0]?.id, "ai-default-indigo");
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6213/" }),
+      captureCoverUrl: async () => true,
+    },
+  );
 });
 
 test("standard run captures the gallery cover from the dev server URL", async () => {
@@ -1774,7 +1902,8 @@ test("standard run persists visual QA findings and score when enabled", async ()
       const done = events.find((e) => e.type === "run-done")!;
       assert.equal((visual.findings as Array<{ id: string }>)[0]?.id, "visual-fixed-offscreen");
       assert.equal(done.score, 92);
-      assert.equal(visualInput?.projectRoot, expectedDir);
+      assert.equal(visualInput?.projectRoot, standardRunWorktreeDir(dataDir, project.id, done.runId as string));
+      assert.notEqual(visualInput?.projectRoot, expectedDir, "visual QA reads only the isolated Run worktree");
       assert.match(visualInput?.htmlPath ?? "", /index\.html$/);
       assert.equal(visualInput?.agentCommand, "codebuddy");
       assert.equal(visualInput?.model, "hunyuan");
@@ -1784,6 +1913,8 @@ test("standard run persists visual QA findings and score when enabled", async ()
       assert.equal(run.findings[0]?.id, "visual-fixed-offscreen");
     },
     {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6214/" }),
+      captureCoverUrl: async () => true,
       visualQa: async (input) => {
         visualInput = input;
         return [
@@ -2418,6 +2549,8 @@ test("standard run auto-improves visual QA findings without a manual button", as
       assert.equal((run.findings[0] as { reviewStatus?: string } | undefined)?.reviewStatus, "resolved");
     },
     {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6216/" }),
+      captureCoverUrl: async () => true,
       visualQa: async () => {
         visualQaCalls.push(`call-${visualQaCalls.length + 1}`);
         return visualQaCalls.length === 1
@@ -2499,6 +2632,8 @@ test("standard auto-improve creates a version before repairing a visual defect",
       assert.equal((finalRun.findings[0] as { reviewStatus?: string } | undefined)?.reviewStatus, "resolved");
     },
     {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6219/" }),
+      captureCoverUrl: async () => true,
       visualQa: async () => {
         visualQaCalls.push(`call-${visualQaCalls.length + 1}`);
         return visualQaCalls.length === 1
@@ -2558,6 +2693,8 @@ test("standard auto-improve persists each turn summary before its visual review"
       assert.equal(persisted[3]?.content, "round one summary");
     },
     {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6217/" }),
+      captureCoverUrl: async () => true,
       visualQa: async () => {
         visualQaCalls += 1;
         return visualQaCalls === 1
@@ -2633,6 +2770,8 @@ test("standard auto-improve persists process elapsed time per turn", async () =>
         assert.ok(processElapsed[1]! < processElapsed[0]!);
       },
       {
+        ensureDevServer: async () => ({ url: "http://127.0.0.1:6218/" }),
+        captureCoverUrl: async () => true,
         visualQa: async () => {
           visualQaCalls += 1;
           return visualQaCalls === 1
@@ -3061,6 +3200,55 @@ const researchWithDirections: NonNullable<AppDeps["researchPhase"]> = async (inp
   writeFileSync(join(dirs, "beta", "direction.md"), "# Beta — calm\n\nCalm concept for beta.");
   return { ran: true, produced: true, visualProduced: false };
 };
+
+test("Standard direction gate publishes research from its transaction before disposing it", async () => {
+  let researchCalls = 0;
+  const runner: AgentRunner = {
+    id: "standard-direction-build",
+    async runTurn(input) {
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "chosen direction build");
+      return { text: "built", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ researchEnabled: true });
+      const { project, dir, head } = initStandardRunProject(dataDir, store);
+      const first = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+      });
+      const firstEvents = parseSse(await first.text());
+      const firstRunId = firstEvents.find((event) => event.type === "run-start")!.runId as string;
+      const conversationId = firstEvents.find((event) => event.type === "run-start")!.conversationId as string;
+
+      assert.ok(firstEvents.some((event) => event.type === "direction-gate"));
+      assert.equal(readFileSync(join(dir, ".research", "research.md"), "utf8"), "# Research\n\nFindings.");
+      assert.notEqual(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), head);
+      assert.equal(existsSync(standardRunWorktreeDir(dataDir, project.id, firstRunId)), false);
+      assert.equal(execFileSync("git", ["branch", "--list", standardRunBranchName(firstRunId)], { cwd: dir, encoding: "utf8" }).trim(), "");
+
+      const second = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, conversationId, brief: "make a hero", directionSlug: "alpha" }),
+      });
+      assert.ok(parseSse(await second.text()).some((event) => event.type === "run-done"));
+      assert.equal(researchCalls, 1, "the chosen-direction build reuses the published research");
+      assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "chosen direction build");
+    },
+    {
+      researchPhase: async (input) => {
+        researchCalls += 1;
+        return researchWithDirections(input);
+      },
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6220/" }),
+      captureCoverUrl: async () => true,
+    },
+  );
+});
 
 test("research with 2+ directions fires the direction gate and stops before build", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });

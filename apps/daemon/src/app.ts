@@ -89,6 +89,7 @@ import {
   StoreExtensionPairingService,
   type ExtensionPairingService,
 } from "./extension-auth.ts";
+import { removeStandardRunTransaction } from "./standard-run-transaction.ts";
 
 export interface AppDeps {
   store: Store;
@@ -213,6 +214,7 @@ export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir">
       const project = deps.store.getProject(projectId);
       if (project?.mode === "standard") {
         for (const runId of runIds) {
+          await removeStandardRunTransaction(deps.dataDir, projectId, runId);
           await removeStandardVersionWorktree(cleanupDeps, projectId, runId);
         }
         for (const variant of deps.store.listVariants(projectId)) {
@@ -227,6 +229,7 @@ export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir">
       const project = deps.store.getProject(projectId);
       if (project?.mode === "standard") {
         for (const runId of runIds) {
+          await removeStandardRunTransaction(deps.dataDir, projectId, runId);
           await removeStandardVersionWorktree(cleanupDeps, projectId, runId);
         }
         if (!isStandardRootVariant(cleanupDeps, projectId, variantId)) {

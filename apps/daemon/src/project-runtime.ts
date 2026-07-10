@@ -475,20 +475,6 @@ export async function gitCommit(projectDir: string, message: string): Promise<{ 
 }
 
 /**
- * Discard the working tree's uncommitted changes back to HEAD. Called when a run is cancelled or
- * fails mid-turn so its half-written edits aren't silently bundled into the NEXT run's `git add -A`
- * commit (and don't corrupt the workingTreeFingerprint "changed?" check). Preserves Dezin's internal
- * dirs (.research/.versions/.refs/.sharingan) and .gitignore'd files (node_modules, dist). Keeping
- * .sharingan means a failed Sharingan build doesn't discard the (expensive) capture bundle, so a retry
- * can reuse it instead of re-capturing.
- */
-export async function gitDiscardChanges(projectDir: string): Promise<void> {
-  if (!existsSync(join(projectDir, ".git"))) return;
-  await run("git", ["reset", "--hard", "HEAD"], projectDir);
-  await run("git", ["clean", "-fd", "-e", ".research", "-e", ".versions", "-e", ".refs", "-e", ".sharingan"], projectDir);
-}
-
-/**
  * Restore the project files to a PAST commit's content and commit that as a NEW HEAD — history is
  * preserved (the intermediate commits stay reachable, so the version snapshots that point at them keep
  * working). Used to return the best-scoring repair round instead of a worse last round. Internal dirs

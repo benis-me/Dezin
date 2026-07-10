@@ -32,12 +32,18 @@ import { lintArtifact, lintScore, renderFindingsForAgent, applyIgnores } from ".
 import { generateImages } from "./image-gen.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
-import { ensureDevServer, gitCommit, gitDiscardChanges, gitRestoreTree, workingTreeFingerprint } from "./project-runtime.ts";
+import { ensureDevServer, releaseVariantRuntime, workingTreeFingerprint } from "./project-runtime.ts";
 import { bestVersion } from "./best-version.ts";
 import type { QualityFinding, Run, Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
 import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
+import {
+  StandardRunSourceDirtyError,
+  assertStandardRunSourceClean,
+  beginStandardRunTransaction,
+  type StandardRunTransaction,
+} from "./standard-run-transaction.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
 import { RunExecution } from "./run-execution.ts";
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
@@ -997,8 +1003,25 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   let streamSubscribed = false;
   let stopPoll: (() => void) | null = null;
   let dir!: string;
+  let standardSourceDir: string | null = null;
+  let standardSourceError: unknown = null;
+  let standardTransaction: StandardRunTransaction | null = null;
 
   try {
+    if (project.mode === "standard") {
+      try {
+        standardSourceDir = await standardVariantArtifactDir(deps, project.id, targetVariantId);
+        await assertStandardRunSourceClean(standardSourceDir);
+      } catch (error) {
+        if (error instanceof StandardRunSourceDirtyError) {
+          sendError(res, 409, error.message);
+          return;
+        }
+        standardSourceError = error;
+      }
+    } else {
+      standardSourceDir = null;
+    }
     conversation ??= store.createConversation(project.id);
 
   // Resolve the active design system (the project's, else the settings default).
@@ -1058,6 +1081,22 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     skillId: skill?.id ?? null,
   });
   durableRun = run;
+  if (standardSourceError) throw standardSourceError;
+  if (project.mode === "standard") {
+    standardTransaction = await beginStandardRunTransaction(
+      { dataDir: deps.dataDir, runtimeSupervisor: deps.runtimeSupervisor },
+      {
+        projectId: project.id,
+        variantId: targetVariantId,
+        runId: run.id,
+        sourceDir: standardSourceDir!,
+      },
+    );
+    dir = standardTransaction.dir;
+  } else {
+    dir = projectDir(deps.dataDir, project.id);
+  }
+  await mkdir(dir, { recursive: true });
   const openStream = (): void => {
     if (res.headersSent) return;
     res.writeHead(200, {
@@ -1108,10 +1147,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     runtimeSupervisor: deps.runtimeSupervisor,
   });
   brokerRegistered = true;
-
-  // Workspace preparation is post-record work: failures become a durable failed Run.
-  dir = project.mode === "standard" ? await standardVariantArtifactDir(deps, project.id, targetVariantId) : projectDir(deps.dataDir, project.id);
-  await mkdir(dir, { recursive: true });
 
   const moodboardContext = buildProjectMoodboardContext({
     store,
@@ -1216,6 +1251,14 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const directions = chosenDirection ? [] : await listDirections(dir);
       if (directions.length >= 2) {
         const options = directions.map((d) => ({ slug: d.slug, title: directionTitle(d.markdown), markdown: d.markdown }));
+        if (standardTransaction) {
+          if (await workingTreeFingerprint(standardTransaction.dir)) {
+            await standardTransaction.commit("Dezin: save research directions");
+          }
+          const publishedResearch = await standardTransaction.publish();
+          dir = standardSourceDir!;
+          store.updateRun(run.id, { commitHash: publishedResearch });
+        }
         store.addMessage(conversation.id, "system", directionGateMessage(options, run.id, visibleBrief));
         sse({ type: "direction-gate", runId: run.id, directions: options, brief: visibleBrief });
         execution.settle("cancelled", {
@@ -1512,13 +1555,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           break;
         }
         if (!unchangedInitialSharinganTurn) {
-          const commit = await gitCommit(dir, isRepair ? `Auto-improve round ${round}: ${visibleBrief}` : visibleBrief);
-          if (!commit.changed) {
-            if (!isRepair) throw new Error("The selected Agent did not leave any project changes to save.");
-            break;
-          }
-          if (!commit.committed) throw new Error("Project files changed, but Dezin could not commit a version snapshot.");
-          commitHash = commit.commitHash;
+          commitHash = await standardTransaction!.commit(isRepair ? `Auto-improve round ${round}: ${visibleBrief}` : visibleBrief);
           store.updateRun(run.id, { commitHash, repairRounds });
         }
         await emitStandardPreviewUpdate(round);
@@ -1638,9 +1675,9 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       // restore its files (history-preserving) so the live preview + the returned run reflect it.
       const best = bestVersion(versions);
       if (best && best.commitHash !== commitHash) {
-        const restored = await gitRestoreTree(dir, best.commitHash, `Best-scoring version (${best.score}/100)`).catch(() => ({ committed: false, commitHash: null as string | null }));
-        if (restored.committed && restored.commitHash) {
-          commitHash = restored.commitHash;
+        const restored = await standardTransaction!.restoreBest(best.commitHash).then(() => true, () => false);
+        if (restored) {
+          commitHash = standardTransaction!.head;
           score = best.score;
           passed = best.passed;
           findings = best.findings;
@@ -1649,6 +1686,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       }
 
       if (ctrl.signal.aborted) throw abortError();
+      if (!commitHash) throw new Error("The selected Agent did not leave any project changes to publish.");
+      commitHash = await standardTransaction!.publish();
+      dir = standardSourceDir!;
+      store.updateRun(run.id, { commitHash, repairRounds });
+      await emitStandardPreviewUpdate(round);
       const assistantMessageId = persistTranscript(finalAssistantText);
       // Design review was ON but never actually judged (headless render/screenshot failed every
       // round) — don't let the run read as a clean "reviewed" pass; the floor (anti-slop) passed,
@@ -1706,9 +1748,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         event: cancelled ? { type: "run-cancelled", runId: run.id } : { type: "run-error", runId: run.id, message: errorMessage },
       });
       if (!settled.changed) return;
-      // Discard the aborted turn's half-written edits so the NEXT run's `git add -A` doesn't silently
-      // bundle them into its version snapshot (standard mode edits src/ directly). Best-effort.
-      await gitDiscardChanges(dir).catch(() => {});
       const partial = processAssistantText();
       persistProcess();
       if (cancelled && partial) store.addMessage(conversation.id, "assistant", partial);
@@ -1943,6 +1982,26 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   }
   } catch (err) {
     const message = err instanceof Error ? err.message : "generation failed";
+    if (err instanceof StandardRunSourceDirtyError) {
+      if (durableRun) {
+        store.terminalizeRun(durableRun.id, "failed", { finishedAt: Date.now() });
+      }
+      if (!res.headersSent) sendError(res, 409, message);
+      else if (!res.writableEnded) res.end();
+      return;
+    }
+    if (durableRun && !execution) {
+      store.terminalizeRun(durableRun.id, "failed", { finishedAt: Date.now() });
+      if (!res.headersSent) {
+        res.writeHead(200, {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+      }
+      if (!res.writableEnded) res.end(`data: ${JSON.stringify({ type: "run-error", runId: durableRun.id, message })}\n\n`);
+      return;
+    }
     if (!execution || !durableRun) {
       if (!res.headersSent) sendError(res, 500, message);
       else if (!res.writableEnded) res.end();
@@ -1966,6 +2025,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     startingRuns.delete(startKey);
     try {
       stopPoll?.();
+      if (standardTransaction) {
+        if (dir === standardTransaction.dir) {
+          await releaseVariantRuntime(project.id, targetVariantId, durableRun ? [durableRun.id] : []);
+        }
+        await standardTransaction.dispose();
+      }
     } finally {
       execution?.dispose();
     }

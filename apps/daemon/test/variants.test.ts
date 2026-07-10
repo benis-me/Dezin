@@ -11,6 +11,7 @@ import { FakeRunner, abortError } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner, AgentTurnInput } from "../../../packages/agent/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 import { removeStandardVariantWorktree, standardVersionArtifactDir, standardWorktreeDir } from "../src/variant-workspaces.ts";
+import { standardRunBranchName, standardRunWorktreeDir } from "../src/standard-run-transaction.ts";
 
 interface Ctx {
   base: string;
@@ -522,8 +523,10 @@ test("standard branch can fork from a specific assistant message commit", async 
       const main = store.ensureMainVariant(project.id);
 
       const firstEvents = await runProject(base, { projectId: project.id, variantId: main.id, brief: "first" });
+      assert.ok(firstEvents.some((event) => event.type === "run-done"), JSON.stringify(firstEvents));
       const conversationId = firstEvents.find((e) => e.type === "run-start")!.conversationId as string;
-      await runProject(base, { projectId: project.id, conversationId, variantId: main.id, brief: "second" });
+      const secondEvents = await runProject(base, { projectId: project.id, conversationId, variantId: main.id, brief: "second" });
+      assert.ok(secondEvents.some((event) => event.type === "run-done"), JSON.stringify(secondEvents));
 
       const firstAssistant = store.listMessages(conversationId).filter((m) => m.role === "assistant")[0]!;
       const fork = await forkMessage(base, project.id, firstAssistant.id, "Fork first standard");
@@ -533,7 +536,12 @@ test("standard branch can fork from a specific assistant message commit", async 
       assert.equal(store.listVariants(project.id).find((v) => v.active)?.id, fork.variantId);
       assert.notEqual(fork.variantId, main.id);
     },
-    { runner, visualQa: async () => [] },
+    {
+      runner,
+      visualQa: async () => [],
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6210/" }),
+      captureCoverUrl: async () => true,
+    },
   );
 });
 
@@ -561,6 +569,7 @@ test("standard variants use git worktrees for preview, files, and targeted runs"
 
       writeFileSync(join(worktree, "index.html"), "<main>Worktree active</main>");
       writeFileSync(join(worktree, "src", "variant-only.txt"), "only in the active variant");
+      commitAll(worktree, "variant state before run");
 
       const activePreview = await fetch(`${base}/projects/${project.id}/preview/`);
       assert.equal(activePreview.status, 200);
@@ -584,16 +593,26 @@ test("standard variants use git worktrees for preview, files, and targeted runs"
         body: JSON.stringify({ projectId: project.id, variantId: variant.id, brief: "make it better" }),
       });
       assert.equal(runRes.status, 200);
-      const done = parseSse(await runRes.text()).find((e) => e.type === "run-done")!;
+      const runEvents = parseSse(await runRes.text());
+      const done = runEvents.find((e) => e.type === "run-done");
+      assert.ok(done, JSON.stringify(runEvents));
       assert.equal(store.getRun(done.runId as string)?.variantId, variant.id);
-      assert.equal(runnerDir, worktree);
+      assert.equal(runnerDir, standardRunWorktreeDir(dataDir, project.id, done.runId as string));
+      assert.notEqual(runnerDir, worktree);
       assert.equal(readFileSync(join(worktree, "src", "run-marker.txt"), "utf8"), "wrote in variant worktree");
       assert.equal(existsSync(join(root, "src", "run-marker.txt")), false, "standard variant run did not write root");
+      assert.equal(existsSync(runnerDir), false, "successful Run disposes its temporary worktree");
+      assert.equal(execFileSync("git", ["branch", "--list", standardRunBranchName(done.runId as string)], { cwd: root, encoding: "utf8" }).trim(), "");
 
       const stillMainPreview = await fetch(`${base}/projects/${project.id}/preview/`);
       assert.match(await stillMainPreview.text(), /Root main/, "targeted run does not switch the active variant");
     },
-    { runner, visualQa: async () => [] },
+    {
+      runner,
+      visualQa: async () => [],
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:6211/" }),
+      captureCoverUrl: async () => true,
+    },
   );
 });
 
@@ -603,9 +622,11 @@ test("targeted variant deletion aborts its Run and removes only variant-owned re
     entered = resolve;
   });
   let abortObserved = false;
+  let runWorktree = "";
   const runner: AgentRunner = {
     id: "blocked-variant-delete",
     async runTurn(input) {
+      runWorktree = input.projectDir;
       entered();
       return await new Promise((resolve, reject) => {
         const fallback = setTimeout(() => reject(new Error("blocked runner test fallback")), 500);
@@ -639,6 +660,8 @@ test("targeted variant deletion aborts its Run and removes only variant-owned re
       });
       await runEntered;
       const run = store.listRuns(project.id).find((candidate) => candidate.variantId === target.id)!;
+      assert.equal(runWorktree, standardRunWorktreeDir(dataDir, project.id, run.id));
+      assert.ok(existsSync(runWorktree), "the transaction worktree exists while the Run is active");
       const ownedPaths = [
         join(dataDir, ".runs", `${run.id}.jsonl`),
         join(dataDir, ".runs", run.id, "bundle.txt"),
@@ -664,6 +687,8 @@ test("targeted variant deletion aborts its Run and removes only variant-owned re
       assert.ok(store.getVariant(main.id));
       assert.ok(existsSync(root), "the project root remains");
       assert.equal(existsSync(join(worktree, "post-abort.txt")), false, "no write lands after deletion");
+      assert.equal(existsSync(runWorktree), false, "variant deletion awaits transaction disposal");
+      assert.equal(execFileSync("git", ["branch", "--list", standardRunBranchName(run.id)], { cwd: root, encoding: "utf8" }).trim(), "");
     },
     { runner, visualQa: async () => [] },
   );
