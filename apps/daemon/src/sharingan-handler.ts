@@ -15,10 +15,14 @@ import { sendJson, readJsonBody } from "./http-util.ts";
 
 type Phase = "idle" | "capturing" | "login-required" | "captured" | "error" | "probing";
 interface Capture {
+  generation: number;
+  released: boolean;
   phase: Phase;
   steps: CaptureStep[];
   pages: CapturedPage[];
   session?: SharinganSession;
+  opening?: Promise<SharinganSession>;
+  operations: Set<Promise<unknown>>;
   listeners: Set<ServerResponse>;
   url?: string;
   error?: string;
@@ -26,18 +30,51 @@ interface Capture {
   keepForProbe?: boolean;
 }
 
+export type SharinganOpen = (
+  url: string,
+  opts: { userDataDir?: string; headless?: boolean },
+) => Promise<SharinganSession>;
+
 /** Idle-release window for a lazily-opened (or build-reused) probe session. */
 export const SHARINGAN_PROBE_IDLE_MS = 300_000;
 
 const captures = new Map<string, Capture>();
+let nextCaptureGeneration = 1;
 
 function get(id: string): Capture {
   let c = captures.get(id);
-  if (!c) { c = { phase: "idle", steps: [], pages: [], listeners: new Set() }; captures.set(id, c); }
+  if (!c) {
+    c = {
+      generation: nextCaptureGeneration++,
+      released: false,
+      phase: "idle",
+      steps: [],
+      pages: [],
+      listeners: new Set(),
+      operations: new Set(),
+    };
+    captures.set(id, c);
+  }
   return c;
 }
 
+function isActive(id: string, c: Capture, generation: number): boolean {
+  return !c.released && c.generation === generation && captures.get(id) === c;
+}
+
+function retainCaptureOperation<T>(c: Capture, start: () => Promise<T>): Promise<T> {
+  if (c.released) return Promise.reject(new Error("capture scope released"));
+  const operation = (async () => start())();
+  c.operations.add(operation);
+  void operation.then(
+    () => c.operations.delete(operation),
+    () => c.operations.delete(operation),
+  );
+  return operation;
+}
+
 function emit(c: Capture, step: CaptureStep): void {
+  if (c.released) return;
   c.steps.push(step);
   const line = `data: ${JSON.stringify(step)}\n\n`;
   for (const res of c.listeners) res.write(line);
@@ -45,18 +82,22 @@ function emit(c: Capture, step: CaptureStep): void {
 
 function armProbeIdle(id: string): void {
   const c = get(id);
+  if (c.released) return;
   if (c.probeTimer) clearTimeout(c.probeTimer);
-  c.probeTimer = setTimeout(() => { void releaseProbeSession(id); }, SHARINGAN_PROBE_IDLE_MS);
+  c.probeTimer = setTimeout(() => { void releaseProbeSession(id).catch(() => {}); }, SHARINGAN_PROBE_IDLE_MS);
   c.probeTimer.unref?.();
 }
 
 /** Close and clear an idle (or explicitly released) probe session, restoring phase "captured". */
-async function releaseProbeSession(id: string): Promise<void> {
-  const c = get(id);
-  if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
-  if (c.phase !== "probing") return;
-  const s = c.session; c.session = undefined; c.phase = "captured";
-  if (s) await s.close().catch(() => {});
+function releaseProbeSession(id: string): Promise<void> {
+  const c = captures.get(id);
+  if (!c) return Promise.resolve();
+  return retainCaptureOperation(c, async () => {
+    if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
+    if (c.phase !== "probing") return;
+    const s = c.session; c.session = undefined; c.phase = "captured";
+    if (s) await s.close().catch(() => {});
+  });
 }
 
 /**
@@ -66,23 +107,44 @@ async function releaseProbeSession(id: string): Promise<void> {
  * mid-flight ("capturing"/"login-required") — those phases mean a headful browser is already
  * live for that id, and opening a second one would orphan it. Every call resets the idle timer.
  */
-export async function ensureProbeSession(
+export function ensureProbeSession(
   id: string,
   dataDir: string,
-  open: (url: string, opts: { userDataDir?: string; headless?: boolean }) => Promise<SharinganSession> = SharinganSession.open,
+  open: SharinganOpen = SharinganSession.open,
 ): Promise<SharinganSession> {
   const c = get(id);
   if (c.phase === "capturing" || c.phase === "login-required") throw new Error("capture in progress");
-  // Seed from the on-disk manifest so re-captures dedup against what's already there (e.g. after a
-  // daemon restart, when the in-memory page list is empty but the entry page is on disk).
-  if (!c.pages.length) c.pages = readCapturedPages(projectDir(dataDir, id));
-  if (!c.session) {
-    const profileDir = join(dataDir, ".sharingan-profile");
-    c.session = await open(c.url ?? "about:blank", { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
-    c.phase = "probing";
-  }
-  armProbeIdle(id);
-  return c.session;
+  const generation = c.generation;
+  return retainCaptureOperation(c, async () => {
+    // Seed from the on-disk manifest so re-captures dedup against what's already there (e.g. after a
+    // daemon restart, when the in-memory page list is empty but the entry page is on disk).
+    if (!c.pages.length) c.pages = readCapturedPages(projectDir(dataDir, id));
+    if (!c.session) {
+      if (!c.opening) {
+        const profileDir = join(dataDir, ".sharingan-profile");
+        let opening!: Promise<SharinganSession>;
+        opening = open(c.url ?? "about:blank", {
+          userDataDir: profileDir,
+          headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1",
+        }).then(async (session) => {
+          if (!isActive(id, c, generation)) {
+            await session.close().catch(() => {});
+            throw new Error("capture scope released");
+          }
+          c.session = session;
+          c.phase = "probing";
+          return session;
+        }).finally(() => {
+          if (c.opening === opening) c.opening = undefined;
+        });
+        c.opening = opening;
+      }
+      await c.opening;
+    }
+    if (!isActive(id, c, generation) || !c.session) throw new Error("capture scope released");
+    armProbeIdle(id);
+    return c.session;
+  });
 }
 
 /** Finalize a successful capture: persist the manifest, then either KEEP the session open for the
@@ -100,12 +162,12 @@ async function finishCapturedSession(id: string, dataDir: string, c: Capture, pa
   }
 }
 
-export async function startCapture(
+export function startCapture(
   id: string,
   url: string,
   dataDir: string,
   profileDir: string,
-  open: (url: string, opts: { userDataDir?: string; headless?: boolean }) => Promise<SharinganSession> = SharinganSession.open,
+  open: SharinganOpen = SharinganSession.open,
 ): Promise<void> {
   const c = get(id);
   // Refuse re-entry whenever a session is live: "capturing" (guards concurrent starts,
@@ -113,26 +175,37 @@ export async function startCapture(
   // open for user sign-in), and "probing" (a lazily-opened probe session is live) —
   // re-opening in any of these would orphan the existing session and its
   // persistent-profile lock.
-  if (c.phase === "capturing" || c.phase === "login-required" || c.phase === "probing") return;
+  if (c.phase === "capturing" || c.phase === "login-required" || c.phase === "probing") return Promise.resolve();
   // Seed from the on-disk manifest (not []): after a daemon restart the in-memory map is empty, so
   // re-running the entry capture would otherwise clobber pages.json + discard prior probe captures.
   // The entry capture then upserts into this, preserving them.
   c.phase = "capturing"; c.steps = []; c.pages = readCapturedPages(projectDir(dataDir, id)); c.error = undefined;
-  try {
-    const session = await open(url, { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
-    c.session = session;
-    c.url = url;
-    const { page, loginRequired } = await capturePage(session, projectDir(dataDir, id), url, (s) => emit(c, s));
-    if (loginRequired) { c.phase = "login-required"; return; }
-    await finishCapturedSession(id, dataDir, c, page);
-  } catch (err) {
-    // Capture threw after open() launched a browser holding the persistent-profile lock.
-    // Close it so it cannot leak (and free the lock), then mark the terminal phase.
-    if (c.session) { await c.session.close().catch(() => {}); c.session = undefined; }
-    c.error = err instanceof Error ? err.message : "capture failed";
-    emit(c, { at: Date.now(), kind: "done", text: `Capture failed: ${c.error}` });
-    c.phase = "error";
-  }
+  const generation = c.generation;
+  return retainCaptureOperation(c, async () => {
+    let session: SharinganSession | undefined;
+    try {
+      session = await open(url, { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
+      if (!isActive(id, c, generation)) {
+        await session.close().catch(() => {});
+        return;
+      }
+      c.session = session;
+      c.url = url;
+      const { page, loginRequired } = await capturePage(session, projectDir(dataDir, id), url, (s) => emit(c, s));
+      if (!isActive(id, c, generation)) return;
+      if (loginRequired) { c.phase = "login-required"; return; }
+      await finishCapturedSession(id, dataDir, c, page);
+    } catch (err) {
+      // Capture threw after open() launched a browser holding the persistent-profile lock.
+      // Close it so it cannot leak (and free the lock), then mark the terminal phase.
+      if (c.session === session) c.session = undefined;
+      if (session) await session.close().catch(() => {});
+      if (!isActive(id, c, generation)) return;
+      c.error = err instanceof Error ? err.message : "capture failed";
+      emit(c, { at: Date.now(), kind: "done", text: `Capture failed: ${c.error}` });
+      c.phase = "error";
+    }
+  });
 }
 
 export function capturedPageCount(id: string): number {
@@ -175,12 +248,18 @@ export async function ensureCaptured(
   }
 }
 
-export async function handleSharinganStart(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
+export async function handleSharinganStart(
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string,
+  dataDir: string,
+  open: SharinganOpen = SharinganSession.open,
+): Promise<void> {
   const body = (await readJsonBody(req)) as { url?: string };
   const url = typeof body.url === "string" ? body.url.trim() : "";
   if (!/^https?:\/\//i.test(url)) { sendJson(res, 400, { error: "a valid http(s) url is required" }); return; }
   const profileDir = join(dataDir, ".sharingan-profile");
-  void startCapture(id, url, dataDir, profileDir);
+  void startCapture(id, url, dataDir, profileDir, open);
   sendJson(res, 200, { ok: true });
 }
 
@@ -190,20 +269,28 @@ export async function handleSharinganStart(req: IncomingMessage, res: ServerResp
  * phase stayed "login-required"). A no-op unless that exact pause state is present —
  * called with a stale/wrong id, or before/after the pause, it does nothing.
  */
-export async function continueCapture(id: string, dataDir: string): Promise<void> {
+export function continueCapture(id: string, dataDir: string): Promise<void> {
   const c = get(id);
-  if (c.phase !== "login-required" || !c.session || !c.url) return;
+  if (c.phase !== "login-required" || !c.session || !c.url) return Promise.resolve();
+  const generation = c.generation;
+  const session = c.session;
+  const url = c.url;
   c.phase = "capturing";
-  try {
-    const { page, loginRequired } = await capturePage(c.session, projectDir(dataDir, id), c.url, (s) => emit(c, s));
-    if (loginRequired) { c.phase = "login-required"; return; }
-    await finishCapturedSession(id, dataDir, c, page);
-  } catch (err) {
-    if (c.session) { await c.session.close().catch(() => {}); c.session = undefined; }
-    c.error = err instanceof Error ? err.message : "capture failed";
-    emit(c, { at: Date.now(), kind: "done", text: `Capture failed: ${c.error}` });
-    c.phase = "error";
-  }
+  return retainCaptureOperation(c, async () => {
+    try {
+      const { page, loginRequired } = await capturePage(session, projectDir(dataDir, id), url, (s) => emit(c, s));
+      if (!isActive(id, c, generation)) return;
+      if (loginRequired) { c.phase = "login-required"; return; }
+      await finishCapturedSession(id, dataDir, c, page);
+    } catch (err) {
+      if (!isActive(id, c, generation)) return;
+      if (c.session === session) c.session = undefined;
+      await session.close().catch(() => {});
+      c.error = err instanceof Error ? err.message : "capture failed";
+      emit(c, { at: Date.now(), kind: "done", text: `Capture failed: ${c.error}` });
+      c.phase = "error";
+    }
+  });
 }
 
 export function handleSharinganContinue(res: ServerResponse, id: string, dataDir: string): void {
@@ -213,7 +300,10 @@ export function handleSharinganContinue(res: ServerResponse, id: string, dataDir
 
 export function handleSharinganFocus(res: ServerResponse, id: string): void {
   const c = get(id);
-  void c.session?.bringToFront();
+  const focus = retainCaptureOperation(c, async () => {
+    await c.session?.bringToFront();
+  });
+  void focus.catch(() => {});
   sendJson(res, 200, { ok: true });
 }
 
@@ -359,7 +449,8 @@ export function handleSharinganShot(res: ServerResponse, id: string, relPath: st
 export async function releaseSharinganProject(id: string): Promise<void> {
   const c = captures.get(id);
   if (!c) return;
-  captures.delete(id);
+  c.released = true;
+  c.generation += 1;
   if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
   for (const listener of c.listeners) {
     try { listener.end(); } catch { /* best-effort */ }
@@ -367,7 +458,15 @@ export async function releaseSharinganProject(id: string): Promise<void> {
   c.listeners.clear();
   const s = c.session;
   c.session = undefined;
-  if (s) await s.close().catch(() => {});
+  const operations = [...c.operations];
+  await Promise.allSettled([
+    ...(s ? [Promise.resolve().then(() => s.close())] : []),
+    ...operations,
+  ]);
+  const lateSession = c.session as SharinganSession | undefined;
+  c.session = undefined;
+  if (lateSession && lateSession !== s) await lateSession.close().catch(() => {});
+  if (captures.get(id) === c) captures.delete(id);
 }
 
 export async function closeAllSharinganSessions(): Promise<void> {

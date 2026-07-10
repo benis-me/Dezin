@@ -11,7 +11,7 @@ import { Store } from "../../../packages/core/src/index.ts";
 import { abortError, FakeRunner } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import { DesignRegistry } from "../../../packages/design/src/index.ts";
-import { createApp, type AppDeps } from "../src/index.ts";
+import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 
 const CLEAN =
   `<style>:root{--accent:#2563eb}</style>\n` +
@@ -31,12 +31,14 @@ async function withRunServer(
 ): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-"));
   const store = new Store(":memory:");
-  const server = createApp({ store, dataDir, runner, visualQa: async () => [], ...extraDeps });
+  const runtimeSupervisor = extraDeps.runtimeSupervisor ?? createRuntimeSupervisor({ store, dataDir });
+  const server = createApp({ store, dataDir, runner, visualQa: async () => [], ...extraDeps, runtimeSupervisor });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
     await fn({ base: `http://127.0.0.1:${port}`, dataDir, store });
   } finally {
+    await runtimeSupervisor.shutdown();
     await new Promise<void>((r) => server.close(() => r()));
     store.close();
   }
@@ -1654,6 +1656,83 @@ test("standard run captures the gallery cover from the dev server URL", async ()
       },
     },
   );
+});
+
+test("project deletion cancels and awaits post-success cover capture in Standard and Prototype modes", async () => {
+  for (const mode of ["prototype", "standard"] as const) {
+    let captureEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { captureEntered = resolve; });
+    let finishCapture!: () => void;
+    const finish = new Promise<void>((resolve) => { finishCapture = resolve; });
+    let abortObserved!: () => void;
+    const aborted = new Promise<void>((resolve) => { abortObserved = resolve; });
+    let sawAbort = false;
+    let coverPath = "";
+    const runner: AgentRunner = mode === "prototype"
+      ? new FakeRunner({ artifacts: [CLEAN] })
+      : {
+          id: "standard-blocked-cover",
+          async runTurn(input) {
+            writeFileSync(join(input.projectDir, "src-App.jsx"), "export default function App(){ return <main>Cover</main> }");
+            return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
+          },
+        };
+    const blockedCapture = async (_source: string, outPath: string, signal?: AbortSignal): Promise<boolean> => {
+      coverPath = outPath;
+      signal?.addEventListener("abort", () => {
+        sawAbort = true;
+        abortObserved();
+      }, { once: true });
+      captureEntered();
+      await finish;
+      writeFileSync(outPath, "late cover");
+      return true;
+    };
+
+    await withRunServer(
+      runner,
+      async ({ base, dataDir, store }) => {
+        const project = store.createProject({ name: `${mode} cover ownership`, mode });
+        if (mode === "standard") {
+          const dir = join(dataDir, "projects", project.id);
+          mkdirSync(dir, { recursive: true });
+          execFileSync("git", ["init", "-q"], { cwd: dir });
+          writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+          execFileSync("git", ["add", "-A"], { cwd: dir });
+          execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
+        }
+
+        const runResponse = await fetch(`${base}/api/runs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: project.id, brief: "make it better" }),
+        });
+        const events = parseSse(await runResponse.text());
+        assert.ok(events.some((event) => event.type === "run-done"), `${mode} run succeeds before cover capture`);
+        await entered;
+
+        let deletionSettled = false;
+        const deleting = fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" }).then((response) => {
+          deletionSettled = true;
+          return response;
+        });
+        await Promise.race([aborted, delay(100)]);
+        await delay(10);
+        assert.equal(sawAbort, true, `${mode} cover receives project cancellation`);
+        assert.equal(deletionSettled, false, `${mode} deletion waits for cover settlement`);
+
+        finishCapture();
+        const deleted = await deleting;
+        assert.equal(deleted.status, 204);
+        assert.equal(existsSync(coverPath), false, `${mode} late cover cannot survive project deletion`);
+      },
+      {
+        ensureDevServer: async () => ({ url: "http://127.0.0.1:5998/" }),
+        captureCover: blockedCapture,
+        captureCoverUrl: blockedCapture,
+      },
+    );
+  }
 });
 
 test("standard run persists visual QA findings and score when enabled", async () => {

@@ -24,14 +24,21 @@ export interface RuntimeLog {
 }
 
 interface Runtime {
+  runtimeKey: string;
+  generation: number;
+  released: boolean;
   phase: SetupPhase;
   error?: string;
   logs: RuntimeLog[];
   children: Set<ChildProcess>;
+  operation?: Promise<void>;
+  stopPromise?: Promise<void>;
   dev?: { proc: ChildProcess; port: number; url: string; projectDir: string; fingerprint: string; releaseTimer?: ReturnType<typeof setTimeout> };
 }
 
 const runtimes = new Map<string, Runtime>();
+const retiredRuntimes = new Set<Runtime>();
+let nextRuntimeGeneration = 1;
 export const DEV_SERVER_IDLE_MS = 60_000;
 const PICKER_BRIDGE_BLOCK = /const PICKER_BRIDGE = `[\s\S]*?<\/script>`;/;
 const PICKER_BRIDGE_START = "const PICKER_BRIDGE = ";
@@ -72,17 +79,61 @@ function waitForChildExit(child: ChildProcess, timeoutMs = 1_000): Promise<void>
   });
 }
 
-async function stopRuntime(rt: Runtime): Promise<void> {
-  const children = new Set(rt.children);
-  if (rt.dev?.proc) children.add(rt.dev.proc);
-  const exits = [...children].map((child) => waitForChildExit(child));
-  stopDev(rt.dev);
-  rt.dev = undefined;
-  for (const child of rt.children) {
-    if (!child.killed && child.exitCode === null && child.signalCode === null) child.kill();
+function stopRuntime(rt: Runtime): Promise<void> {
+  rt.released = true;
+  rt.stopPromise ??= (async () => {
+    const children = new Set(rt.children);
+    if (rt.dev?.proc) children.add(rt.dev.proc);
+    const exits = [...children].map((child) => waitForChildExit(child));
+    stopDev(rt.dev);
+    rt.dev = undefined;
+    for (const child of rt.children) {
+      if (!child.killed && child.exitCode === null && child.signalCode === null) child.kill();
+    }
+    rt.children.clear();
+    await Promise.allSettled(exits);
+  })();
+  return rt.stopPromise;
+}
+
+function createRuntime(runtimeKey: string, phase: SetupPhase, signal?: AbortSignal): { rt: Runtime; detach: () => void } {
+  const previous = runtimes.get(runtimeKey);
+  if (previous) retireRuntime(previous);
+  const rt: Runtime = {
+    runtimeKey,
+    generation: nextRuntimeGeneration++,
+    released: false,
+    phase,
+    logs: [],
+    children: new Set(),
+  };
+  runtimes.set(runtimeKey, rt);
+  return { rt, detach: attachRuntimeSignal(rt, signal) };
+}
+
+function retireRuntime(rt: Runtime): void {
+  retiredRuntimes.add(rt);
+  void Promise.resolve().then(async () => {
+    await Promise.allSettled([stopRuntime(rt), rt.operation ?? Promise.resolve()]);
+    retiredRuntimes.delete(rt);
+  });
+}
+
+function attachRuntimeSignal(rt: Runtime, signal?: AbortSignal): () => void {
+  const onAbort = (): void => {
+    void stopRuntime(rt);
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  return () => signal?.removeEventListener("abort", onAbort);
+}
+
+function assertRuntimeActive(runtimeKey: string, rt: Runtime, signal?: AbortSignal): void {
+  if (rt.released || signal?.aborted || runtimes.get(runtimeKey) !== rt) {
+    const error = new Error("runtime released");
+    error.name = "AbortError";
+    throw error;
   }
-  rt.children.clear();
-  await Promise.allSettled(exits);
 }
 
 export async function ensureProjectPickerBridge(projectDir: string): Promise<boolean> {
@@ -131,7 +182,8 @@ function appendLog(rt: Runtime, message: string, level: RuntimeLog["level"] = "i
 
 function run(command: string, args: string[], cwd: string, rt?: Runtime, label = `${command} ${args.join(" ")}`): Promise<number> {
   return new Promise((resolve) => {
-    appendLog(rt ?? { phase: "ready", logs: [], children: new Set() }, `$ ${label}`);
+    appendLog(rt ?? { runtimeKey: "", generation: 0, released: false, phase: "ready", logs: [], children: new Set() }, `$ ${label}`);
+    if (rt?.released) return resolve(1);
     const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv() });
     rt?.children.add(child);
     child.stdout?.setEncoding("utf8");
@@ -167,49 +219,76 @@ function capture(command: string, args: string[], cwd: string): Promise<{ code: 
 const GIT_IDENTITY = ["-c", "user.name=Dezin", "-c", "user.email=dezin@local"];
 
 /** Copy the template, git init + initial commit, then npm install (the slow part). */
-export async function setupStandardProject(projectId: string, projectDir: string): Promise<void> {
-  const rt: Runtime = { phase: "scaffolding", logs: [], children: new Set() };
-  runtimes.set(projectId, rt);
-  try {
+export async function setupStandardProject(projectId: string, projectDir: string, signal?: AbortSignal): Promise<void> {
+  const { rt, detach } = createRuntime(projectId, "scaffolding", signal);
+  const operation = (async () => {
+    try {
+    assertRuntimeActive(projectId, rt, signal);
     appendLog(rt, "Scaffolding standard project");
     await mkdir(projectDir, { recursive: true });
+    assertRuntimeActive(projectId, rt, signal);
     await cp(templateDir(), projectDir, { recursive: true });
+    assertRuntimeActive(projectId, rt, signal);
     await run("git", ["init", "-q"], projectDir, rt, "git init");
+    assertRuntimeActive(projectId, rt, signal);
     await gitCommit(projectDir, "Dezin: scaffold Vite + React");
+    assertRuntimeActive(projectId, rt, signal);
 
     rt.phase = "installing";
     appendLog(rt, "Installing dependencies");
     const code = await run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install");
+    assertRuntimeActive(projectId, rt, signal);
     if (code === 0) await gitCommit(projectDir, "Dezin: install dependencies");
+    assertRuntimeActive(projectId, rt, signal);
     rt.phase = code === 0 ? "ready" : "error";
     appendLog(rt, rt.phase === "ready" ? "Standard project is ready" : "Standard project setup failed", rt.phase === "ready" ? "info" : "error");
     if (code !== 0) rt.error = "npm install failed";
-  } catch (err) {
-    rt.phase = "error";
-    rt.error = err instanceof Error ? err.message : "setup failed";
-    appendLog(rt, rt.error, "error");
-  }
+    } catch (err) {
+      if (!rt.released && !signal?.aborted && runtimes.get(projectId) === rt) {
+        rt.phase = "error";
+        rt.error = err instanceof Error ? err.message : "setup failed";
+        appendLog(rt, rt.error, "error");
+      }
+    } finally {
+      detach();
+    }
+  })();
+  rt.operation = operation;
+  await operation;
 }
 
 /** Prepare an imported Standard project without copying the template over its source. */
-export async function setupImportedStandardProject(projectId: string, projectDir: string): Promise<void> {
-  const rt: Runtime = { phase: "installing", logs: [], children: new Set() };
-  runtimes.set(projectId, rt);
-  try {
+export async function setupImportedStandardProject(projectId: string, projectDir: string, signal?: AbortSignal): Promise<void> {
+  const { rt, detach } = createRuntime(projectId, "installing", signal);
+  const operation = (async () => {
+    try {
+    assertRuntimeActive(projectId, rt, signal);
     appendLog(rt, "Preparing imported standard project");
     await mkdir(projectDir, { recursive: true });
+    assertRuntimeActive(projectId, rt, signal);
     if (!existsSync(join(projectDir, ".git"))) await run("git", ["init", "-q"], projectDir, rt, "git init");
+    assertRuntimeActive(projectId, rt, signal);
     await gitCommit(projectDir, "Dezin: import project");
+    assertRuntimeActive(projectId, rt, signal);
     const code = await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install --ignore-scripts");
+    assertRuntimeActive(projectId, rt, signal);
     if (code === 0) await gitCommit(projectDir, "Dezin: install dependencies");
+    assertRuntimeActive(projectId, rt, signal);
     rt.phase = code === 0 ? "ready" : "error";
     appendLog(rt, rt.phase === "ready" ? "Imported standard project is ready" : "Imported standard project setup failed", rt.phase === "ready" ? "info" : "error");
     if (code !== 0) rt.error = "npm install failed";
-  } catch (err) {
-    rt.phase = "error";
-    rt.error = err instanceof Error ? err.message : "setup failed";
-    appendLog(rt, rt.error, "error");
-  }
+    } catch (err) {
+      if (!rt.released && !signal?.aborted && runtimes.get(projectId) === rt) {
+        rt.phase = "error";
+        rt.error = err instanceof Error ? err.message : "setup failed";
+        appendLog(rt, rt.error, "error");
+      }
+    } finally {
+      detach();
+    }
+  })();
+  rt.operation = operation;
+  await operation;
 }
 
 export function getSetup(projectId: string, projectDir: string): { phase: SetupPhase; error?: string; logs: RuntimeLog[] } {
@@ -226,7 +305,8 @@ export function getSetup(projectId: string, projectDir: string): { phase: SetupP
   return { phase: "scaffolding", logs: relatedLogs };
 }
 
-async function ensurePreviewDependencies(projectDir: string, rt: Runtime): Promise<void> {
+async function ensurePreviewDependencies(projectDir: string, runtimeKey: string, rt: Runtime, signal?: AbortSignal): Promise<void> {
+  assertRuntimeActive(runtimeKey, rt, signal);
   if (existsSync(join(projectDir, "node_modules"))) {
     rt.phase = "ready";
     rt.error = undefined;
@@ -238,6 +318,7 @@ async function ensurePreviewDependencies(projectDir: string, rt: Runtime): Promi
   rt.error = undefined;
   appendLog(rt, "Installing preview dependencies");
   const code = await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install --ignore-scripts");
+  assertRuntimeActive(runtimeKey, rt, signal);
   if (code !== 0) {
     rt.phase = "error";
     rt.error = "npm install failed";
@@ -273,14 +354,22 @@ function freePort(): Promise<number> {
  * loads this URL directly (cross-origin) with allow-same-origin, so JSX is
  * transpiled and there is no CORS — no daemon proxy in the path.
  */
-export async function ensureDevServer(projectId: string, projectDir: string, runtimeKey = projectId): Promise<{ url: string }> {
+export async function ensureDevServer(projectId: string, projectDir: string, runtimeKey = projectId, signal?: AbortSignal): Promise<{ url: string }> {
   let rt = runtimes.get(runtimeKey);
+  let detach = (): void => {};
   if (!rt) {
-    rt = { phase: existsSync(join(projectDir, "node_modules")) ? "ready" : "installing", logs: [], children: new Set() };
-    runtimes.set(runtimeKey, rt);
+    const created = createRuntime(runtimeKey, existsSync(join(projectDir, "node_modules")) ? "ready" : "installing", signal);
+    rt = created.rt;
+    detach = created.detach;
+  } else {
+    detach = attachRuntimeSignal(rt, signal);
   }
+  try {
+  assertRuntimeActive(runtimeKey, rt, signal);
   const statusBeforeBridgeUpdate = existsSync(join(projectDir, ".git")) ? await workingTreeFingerprint(projectDir) : "";
+  assertRuntimeActive(runtimeKey, rt, signal);
   const bridgeUpdated = await ensureProjectPickerBridge(projectDir).catch(() => false);
+  assertRuntimeActive(runtimeKey, rt, signal);
   if (bridgeUpdated) {
     appendLog(rt, "Updated preview inspect bridge");
     if (!statusBeforeBridgeUpdate) await gitCommit(projectDir, "Dezin: update preview inspect bridge");
@@ -289,14 +378,16 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
       rt.dev = undefined;
     }
   }
-  await ensurePreviewDependencies(projectDir, rt);
+  await ensurePreviewDependencies(projectDir, runtimeKey, rt, signal);
   const currentFingerprint = await devServerFingerprint(projectDir);
+  assertRuntimeActive(runtimeKey, rt, signal);
   if (rt.dev && !rt.dev.proc.killed) {
     if (rt.dev.projectDir !== projectDir || rt.dev.fingerprint !== currentFingerprint) {
       appendLog(rt, "Restarting dev server for updated project files");
       stopDev(rt.dev);
       rt.dev = undefined;
     } else if (await portResponds(rt.dev.port)) {
+      assertRuntimeActive(runtimeKey, rt, signal);
       clearDevReleaseTimer(rt.dev);
       return { url: rt.dev.url };
     }
@@ -307,6 +398,7 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
   }
 
   const port = await freePort();
+  assertRuntimeActive(runtimeKey, rt, signal);
   appendLog(rt, `Starting dev server on ${port}`);
   const proc = spawn("npm", ["run", "dev", "--", "--port", String(port), "--strictPort", "--host", "127.0.0.1"], {
     cwd: projectDir,
@@ -330,17 +422,22 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
 
   // Wait for Vite to come up (up to ~15s).
   for (let i = 0; i < 30; i++) {
+    assertRuntimeActive(runtimeKey, rt, signal);
     if (await portResponds(port)) return { url };
     await new Promise((r) => setTimeout(r, 500));
   }
+  assertRuntimeActive(runtimeKey, rt, signal);
   return { url }; // return anyway; the iframe will retry
+  } finally {
+    detach();
+  }
 }
 
 /** Mark one dev server as no longer used; it is stopped after a short idle grace period. */
 export function releaseDevServer(runtimeKey: string, idleMs = DEV_SERVER_IDLE_MS): boolean {
   const rt = runtimes.get(runtimeKey);
   const dev = rt?.dev;
-  if (!rt || !dev || dev.proc.killed) return false;
+  if (!rt || rt.released || !dev || dev.proc.killed) return false;
   clearDevReleaseTimer(dev);
   dev.releaseTimer = setTimeout(() => {
     if (rt.dev !== dev) return;
@@ -421,34 +518,46 @@ export async function gitRestoreTree(projectDir: string, commitHash: string, mes
 /** Stop and forget every runtime owned by one project, including setup children. */
 export async function releaseProjectRuntime(projectId: string): Promise<void> {
   const entries = [...runtimes.entries()].filter(([key]) => key === projectId || key.startsWith(`${projectId}:`));
-  await Promise.allSettled(entries.map(([, rt]) => stopRuntime(rt)));
-  for (const [key] of entries) runtimes.delete(key);
+  const retired = [...retiredRuntimes].filter((rt) => rt.runtimeKey === projectId || rt.runtimeKey.startsWith(`${projectId}:`));
+  const owned = [...new Set([...entries.map(([, rt]) => rt), ...retired])];
+  for (const rt of owned) void stopRuntime(rt);
+  await Promise.allSettled(owned.flatMap((rt) => [stopRuntime(rt), rt.operation ?? Promise.resolve()]));
+  for (const rt of retired) retiredRuntimes.delete(rt);
+  for (const [key, rt] of entries) {
+    if (runtimes.get(key) === rt) runtimes.delete(key);
+  }
 }
 
 /** Stop and forget one variant runtime plus version previews owned by its Runs. */
 export async function releaseVariantRuntime(projectId: string, variantId: string, runIds: string[] = []): Promise<void> {
   const keys = new Set([`${projectId}:${variantId}`, ...runIds.map((runId) => `${projectId}:version:${runId}`)]);
   const entries = [...runtimes.entries()].filter(([key]) => keys.has(key));
-  await Promise.allSettled(entries.map(([, rt]) => stopRuntime(rt)));
-  for (const [key] of entries) runtimes.delete(key);
+  const retired = [...retiredRuntimes].filter((rt) => keys.has(rt.runtimeKey));
+  const owned = [...new Set([...entries.map(([, rt]) => rt), ...retired])];
+  for (const rt of owned) void stopRuntime(rt);
+  await Promise.allSettled(owned.flatMap((rt) => [stopRuntime(rt), rt.operation ?? Promise.resolve()]));
+  for (const rt of retired) retiredRuntimes.delete(rt);
+  for (const [key, rt] of entries) {
+    if (runtimes.get(key) === rt) runtimes.delete(key);
+  }
 }
 
 /** Stop all runtime resources and await bounded child settlement. */
 export async function stopAllProjectRuntimes(): Promise<void> {
-  const entries = [...runtimes.values()];
-  await Promise.allSettled(entries.map((rt) => stopRuntime(rt)));
-  runtimes.clear();
+  const entries = [...new Set([...runtimes.values(), ...retiredRuntimes])];
+  for (const rt of entries) void stopRuntime(rt);
+  await Promise.allSettled(entries.flatMap((rt) => [stopRuntime(rt), rt.operation ?? Promise.resolve()]));
+  for (const [key, rt] of runtimes) {
+    if (entries.includes(rt)) runtimes.delete(key);
+  }
+  retiredRuntimes.clear();
 }
 
 /** Stop all dev/setup resources synchronously enough for legacy teardown callers. */
 export function stopAllDevServers(): void {
-  for (const rt of runtimes.values()) {
-    stopDev(rt.dev);
-    rt.dev = undefined;
-    for (const child of rt.children) {
-      if (!child.killed && child.exitCode === null && child.signalCode === null) child.kill();
-    }
-    rt.children.clear();
+  for (const rt of new Set([...runtimes.values(), ...retiredRuntimes])) {
+    void stopRuntime(rt);
   }
   runtimes.clear();
+  retiredRuntimes.clear();
 }

@@ -7,6 +7,7 @@ import type { Project } from "../../../packages/core/src/index.ts";
 import type { AppDeps } from "./app.ts";
 import { gitCommit } from "./project-runtime.ts";
 import { projectDir, safeJoin } from "./serve-static.ts";
+import type { RuntimeScope } from "./runtime-supervisor.ts";
 
 export function standardWorktreeDir(dataDir: string, projectId: string, variantId: string): string {
   return join(dataDir, "worktrees", projectId, variantId);
@@ -57,6 +58,12 @@ function rootVariantId(deps: AppDeps, projectId: string): string {
   return deps.store.listVariants(projectId)[0]?.id ?? main.id;
 }
 
+function withRuntimeOperation<T>(deps: AppDeps, scope: RuntimeScope, start: () => Promise<T>): Promise<T> {
+  return deps.runtimeSupervisor
+    ? deps.runtimeSupervisor.trackOperation(scope, start)
+    : start();
+}
+
 export function isStandardRootVariant(deps: AppDeps, projectId: string, variantId: string): boolean {
   return rootVariantId(deps, projectId) === variantId;
 }
@@ -85,21 +92,23 @@ export async function createStandardVariantWorktree(
   sourceVariantId: string,
   variantId: string,
 ): Promise<string> {
-  const source = await standardVariantArtifactDir(deps, projectId, sourceVariantId);
-  const saved = await gitCommit(source, "Dezin: save variant before fork");
-  if (saved.changed && !saved.committed) throw new Error("could not save the current variant before forking");
+  return withRuntimeOperation(deps, { projectId, variantId }, async () => {
+    const source = await ensureStandardVariantArtifactDir(deps, projectId, sourceVariantId);
+    const saved = await gitCommit(source, "Dezin: save variant before fork");
+    if (saved.changed && !saved.committed) throw new Error("could not save the current variant before forking");
 
-  const root = projectDir(deps.dataDir, projectId);
-  if (!existsSync(join(root, ".git"))) throw new Error("standard project is not a git repository yet");
-  const commit = await gitOutput(source, ["rev-parse", "HEAD"]);
-  const dir = standardWorktreeDir(deps.dataDir, projectId, variantId);
-  const branch = variantBranchName(variantId);
+    const root = projectDir(deps.dataDir, projectId);
+    if (!existsSync(join(root, ".git"))) throw new Error("standard project is not a git repository yet");
+    const commit = await gitOutput(source, ["rev-parse", "HEAD"]);
+    const dir = standardWorktreeDir(deps.dataDir, projectId, variantId);
+    const branch = variantBranchName(variantId);
 
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(dirname(dir), { recursive: true });
-  await captureGit(root, ["worktree", "prune"]);
-  await git(root, ["worktree", "add", "-b", branch, dir, commit]);
-  return dir;
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(dirname(dir), { recursive: true });
+    await captureGit(root, ["worktree", "prune"]);
+    await git(root, ["worktree", "add", "-b", branch, dir, commit]);
+    return dir;
+  });
 }
 
 export async function createStandardVariantWorktreeFromCommit(
@@ -108,37 +117,42 @@ export async function createStandardVariantWorktreeFromCommit(
   variantId: string,
   commit: string,
 ): Promise<string> {
-  if (!/^[0-9a-f]{7,40}$/i.test(commit)) throw new Error("run has no valid commit snapshot");
-  const root = projectDir(deps.dataDir, projectId);
-  if (!existsSync(join(root, ".git"))) throw new Error("standard project is not a git repository yet");
-  const dir = standardWorktreeDir(deps.dataDir, projectId, variantId);
-  const branch = variantBranchName(variantId);
+  return withRuntimeOperation(deps, { projectId, variantId }, async () => {
+    if (!/^[0-9a-f]{7,40}$/i.test(commit)) throw new Error("run has no valid commit snapshot");
+    const root = projectDir(deps.dataDir, projectId);
+    if (!existsSync(join(root, ".git"))) throw new Error("standard project is not a git repository yet");
+    const dir = standardWorktreeDir(deps.dataDir, projectId, variantId);
+    const branch = variantBranchName(variantId);
 
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(dirname(dir), { recursive: true });
-  await captureGit(root, ["worktree", "prune"]);
-  await git(root, ["worktree", "add", "-b", branch, dir, commit]);
-  return dir;
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(dirname(dir), { recursive: true });
+    await captureGit(root, ["worktree", "prune"]);
+    await git(root, ["worktree", "add", "-b", branch, dir, commit]);
+    return dir;
+  });
 }
 
 export async function standardVersionArtifactDir(deps: AppDeps, projectId: string, runId: string, commit: string): Promise<string> {
-  if (!/^[0-9a-f]{7,40}$/i.test(commit)) throw new Error("run has no valid commit snapshot");
-  const root = projectDir(deps.dataDir, projectId);
-  if (!existsSync(join(root, ".git"))) throw new Error("standard project is not a git repository yet");
-  const dir = standardVersionWorktreeDir(deps.dataDir, projectId, runId);
-  const targetCommit = await gitOutput(root, ["rev-parse", commit]);
-  if (existsSync(join(dir, ".git"))) {
-    const currentCommit = await gitOutput(dir, ["rev-parse", "HEAD"]).catch(() => "");
-    if (currentCommit === targetCommit) return dir;
-    const removed = await captureGit(root, ["worktree", "remove", "--force", dir]);
-    if (removed.code !== 0) await rm(dir, { recursive: true, force: true });
-  }
+  const variantId = deps.store.getRun(runId)?.variantId ?? undefined;
+  return withRuntimeOperation(deps, { projectId, variantId, runId }, async () => {
+    if (!/^[0-9a-f]{7,40}$/i.test(commit)) throw new Error("run has no valid commit snapshot");
+    const root = projectDir(deps.dataDir, projectId);
+    if (!existsSync(join(root, ".git"))) throw new Error("standard project is not a git repository yet");
+    const dir = standardVersionWorktreeDir(deps.dataDir, projectId, runId);
+    const targetCommit = await gitOutput(root, ["rev-parse", commit]);
+    if (existsSync(join(dir, ".git"))) {
+      const currentCommit = await gitOutput(dir, ["rev-parse", "HEAD"]).catch(() => "");
+      if (currentCommit === targetCommit) return dir;
+      const removed = await captureGit(root, ["worktree", "remove", "--force", dir]);
+      if (removed.code !== 0) await rm(dir, { recursive: true, force: true });
+    }
 
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(dirname(dir), { recursive: true });
-  await captureGit(root, ["worktree", "prune"]);
-  await git(root, ["worktree", "add", "--detach", dir, targetCommit]);
-  return dir;
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(dirname(dir), { recursive: true });
+    await captureGit(root, ["worktree", "prune"]);
+    await git(root, ["worktree", "add", "--detach", dir, targetCommit]);
+    return dir;
+  });
 }
 
 export async function diffStandardArtifactDirFromCommit(dir: string, commit: string): Promise<string> {
@@ -162,9 +176,31 @@ export async function removeStandardVariantWorktree(deps: AppDeps, projectId: st
   await captureGit(root, ["worktree", "prune"]);
 }
 
-export async function standardVariantArtifactDir(deps: AppDeps, projectId: string, variantId: string): Promise<string> {
+export async function removeStandardVersionWorktree(deps: AppDeps, projectId: string, runId: string): Promise<void> {
+  const root = projectDir(deps.dataDir, projectId);
+  const dir = standardVersionWorktreeDir(deps.dataDir, projectId, runId);
+  if (!existsSync(join(root, ".git"))) {
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  if (existsSync(dir)) {
+    const removed = await captureGit(root, ["worktree", "remove", "--force", dir]);
+    if (removed.code !== 0) await rm(dir, { recursive: true, force: true });
+  }
+  await captureGit(root, ["worktree", "prune"]);
+}
+
+async function ensureStandardVariantArtifactDir(deps: AppDeps, projectId: string, variantId: string): Promise<string> {
   if (isStandardRootVariant(deps, projectId, variantId)) return projectDir(deps.dataDir, projectId);
   return ensureStandardWorktree(deps, projectId, variantId);
+}
+
+export async function standardVariantArtifactDir(deps: AppDeps, projectId: string, variantId: string): Promise<string> {
+  return withRuntimeOperation(
+    deps,
+    { projectId, variantId },
+    () => ensureStandardVariantArtifactDir(deps, projectId, variantId),
+  );
 }
 
 export async function activeArtifactDir(deps: AppDeps, project: Project): Promise<string> {

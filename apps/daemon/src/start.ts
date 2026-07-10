@@ -14,6 +14,7 @@ import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDir } from "../../../packages/design/src/index.ts";
 import { createApp, createRuntimeSupervisor } from "./app.ts";
+import { shutdownDaemon } from "./daemon-shutdown.ts";
 
 const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
 // 0 = ephemeral (portless). Set DEZIN_PORT to pin a fixed port.
@@ -127,15 +128,11 @@ function main(): void {
     } catch {
       // ignore
     }
-    void (async () => {
-      await runtimeSupervisor.shutdown().catch(() => false);
-      await new Promise<void>((resolve) => {
-        if (!server.listening) return resolve();
-        server.close(() => resolve());
-      });
-      store.close();
-      process.exit(0);
-    })();
+    void shutdownDaemon({
+      server,
+      runtimeSupervisor,
+      closeStore: () => store.close(),
+    }).catch(() => false).finally(() => process.exit(0));
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

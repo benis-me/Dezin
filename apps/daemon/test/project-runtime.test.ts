@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { ensureDevServer, ensureProjectPickerBridge, gitDiscardChanges, gitRestoreTree, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
+import { ensureDevServer, ensureProjectPickerBridge, gitDiscardChanges, gitRestoreTree, getSetup, releaseProjectRuntime, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
 
 async function waitForPortDown(url: string): Promise<void> {
   for (let i = 0; i < 20; i++) {
@@ -29,6 +29,14 @@ async function waitForText(url: string): Promise<string> {
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("test dev server never responded");
+}
+
+async function waitForFile(path: string): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    if (existsSync(path)) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed out waiting for ${path}`);
 }
 
 test("ensureProjectPickerBridge updates only the copied Dezin picker bridge", async () => {
@@ -241,6 +249,51 @@ test("setupImportedStandardProject installs without running imported package scr
     assert.equal(existsSync(marker), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("releaseProjectRuntime invalidates and awaits an in-flight setup generation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-runtime-release-"));
+  const binDir = join(root, "bin");
+  const dir = join(root, "project");
+  const entered = join(root, "npm-entered.txt");
+  const late = join(dir, "late-from-npm.txt");
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "release-race", version: "1.0.0" }));
+  writeFileSync(
+    join(binDir, "npm"),
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(entered)}, "entered");
+process.on("SIGTERM", () => {
+  fs.writeFileSync(${JSON.stringify(late)}, "late");
+  setTimeout(() => process.exit(0), 25);
+});
+setInterval(() => {}, 1000);
+`,
+    { mode: 0o755 },
+  );
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+  let setupFinished = false;
+  try {
+    const setup = setupImportedStandardProject("release-generation", dir).then(() => {
+      setupFinished = true;
+    });
+    await waitForFile(entered);
+
+    await releaseProjectRuntime("release-generation");
+
+    assert.equal(setupFinished, true, "release waits through the setup continuation after child exit");
+    await setup;
+    const commits = execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+    assert.equal(commits, "1", "released setup never resumes into a post-release commit");
+    assert.equal(getSetup("release-generation", dir).phase, "installing", "the released runtime generation is absent");
+  } finally {
+    process.env.PATH = originalPath;
+    stopAllDevServers();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

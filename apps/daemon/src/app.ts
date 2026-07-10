@@ -44,9 +44,9 @@ import {
   releaseVariantRuntime,
   stopAllProjectRuntimes,
 } from "./project-runtime.ts";
-import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject } from "./sharingan-handler.ts";
-import { activeArtifactDir, variantArtifactDir, variantRuntimeKey, isStandardRootVariant, removeStandardVariantWorktree } from "./variant-workspaces.ts";
-import { RuntimeSupervisor } from "./runtime-supervisor.ts";
+import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, type SharinganOpen } from "./sharingan-handler.ts";
+import { activeArtifactDir, variantArtifactDir, variantRuntimeKey, isStandardRootVariant, removeStandardVariantWorktree, removeStandardVersionWorktree } from "./variant-workspaces.ts";
+import { RuntimeScopeUnavailableError, RuntimeSupervisor } from "./runtime-supervisor.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleCreateEffect, handleGetEffect, handleListEffects, handleUpdateEffect } from "./effects-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
@@ -106,14 +106,16 @@ export interface AppDeps {
   /** Visual QA runner for final prototype artifacts (defaults to screenshot + geometry checks). */
   visualQa?: VisualQaRunner;
   /** Standard project setup hook; tests can replace the slow npm-installing default. */
-  standardProjectSetup?: (projectId: string, projectDir: string) => void | Promise<void>;
+  standardProjectSetup?: (projectId: string, projectDir: string, signal?: AbortSignal) => void | Promise<void>;
   /** Standard dev-server hooks; tests can avoid spawning npm. */
   ensureDevServer?: typeof ensureDevServer;
   releaseDevServer?: typeof releaseDevServer;
   /** Cover capture hook for Standard dev-server URLs; tests can avoid launching Chrome. */
-  captureCoverUrl?: (url: string, outPath: string) => Promise<boolean>;
+  captureCoverUrl?: (url: string, outPath: string, signal?: AbortSignal) => Promise<boolean>;
   /** Cover capture hook for HTML snapshot files; tests can avoid launching Chrome. */
-  captureCover?: typeof captureCover;
+  captureCover?: (htmlPath: string, outPath: string, signal?: AbortSignal) => Promise<boolean>;
+  /** Sharingan browser opener; tests can delay session creation without launching Chrome. */
+  sharinganOpen?: SharinganOpen;
   /** Background title generator hook; tests can avoid launching an agent. */
   titleGenerator?: TitleGenerator;
   /** Prompt optimizer hook; tests can avoid launching a real agent. */
@@ -183,11 +185,14 @@ export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir">
   return new RuntimeSupervisor({
     dataDir: deps.dataDir,
     store: deps.store,
-    releaseProjectResources: async ({ projectId }) => {
+    releaseProjectResources: async ({ projectId, runIds }) => {
       await releaseProjectRuntime(projectId);
       await releaseSharinganProject(projectId);
       const project = deps.store.getProject(projectId);
       if (project?.mode === "standard") {
+        for (const runId of runIds) {
+          await removeStandardVersionWorktree(cleanupDeps, projectId, runId);
+        }
         for (const variant of deps.store.listVariants(projectId)) {
           if (!isStandardRootVariant(cleanupDeps, projectId, variant.id)) {
             await removeStandardVariantWorktree(cleanupDeps, projectId, variant.id);
@@ -198,8 +203,13 @@ export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir">
     releaseVariantResources: async ({ projectId, variantId, runIds }) => {
       await releaseVariantRuntime(projectId, variantId, runIds);
       const project = deps.store.getProject(projectId);
-      if (project?.mode === "standard" && !isStandardRootVariant(cleanupDeps, projectId, variantId)) {
-        await removeStandardVariantWorktree(cleanupDeps, projectId, variantId);
+      if (project?.mode === "standard") {
+        for (const runId of runIds) {
+          await removeStandardVersionWorktree(cleanupDeps, projectId, runId);
+        }
+        if (!isStandardRootVariant(cleanupDeps, projectId, variantId)) {
+          await removeStandardVariantWorktree(cleanupDeps, projectId, variantId);
+        }
       }
     },
     shutdownResources: async () => {
@@ -490,7 +500,14 @@ const routes: Route[] = [
         sourceUrl: sharingan ? body.sourceUrl : undefined,
       });
       // Standard projects scaffold a real Vite project + install deps in the background.
-      if (mode === "standard") void (deps.standardProjectSetup ?? setupStandardProject)(project.id, projectDir(dataDir, project.id));
+      if (mode === "standard") {
+        void deps.runtimeSupervisor!
+          .trackOperation(
+            { projectId: project.id },
+            (signal) => (deps.standardProjectSetup ?? setupStandardProject)(project.id, projectDir(dataDir, project.id), signal),
+          )
+          .catch(() => {});
+      }
       sendJson(res, 201, projectPayload(dataDir, project));
     },
   },
@@ -606,7 +623,14 @@ const routes: Route[] = [
       if (!project) return sendError(res, 404, "project not found");
       try {
         const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
-        const { url } = await (deps.ensureDevServer ?? ensureDevServer)(id!, await activeArtifactDir(deps, project), variantRuntimeKey(id!, active));
+        const { url } = await deps.runtimeSupervisor!.trackOperation(
+          { projectId: id!, variantId: active },
+          async (signal) => {
+            const dir = await activeArtifactDir(deps, project);
+            signal.throwIfAborted();
+            return (deps.ensureDevServer ?? ensureDevServer)(id!, dir, variantRuntimeKey(id!, active), signal);
+          },
+        );
         sendJson(res, 200, { url });
       } catch (err) {
         sendError(res, 409, err instanceof Error ? err.message : "dev server unavailable");
@@ -822,22 +846,34 @@ const routes: Route[] = [
   {
     method: "POST",
     pattern: "/api/projects/:id/variants",
-    handler: (req, res, params, deps) => handleCreateVariant(req, res, params, deps),
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      () => handleCreateVariant(req, res, params, deps),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/projects/:id/variants/fanout",
-    handler: (req, res, params, deps) => handleVariantFanout(req, res, params, deps),
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      () => handleVariantFanout(req, res, params, deps),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/projects/:id/messages/:messageId/fork",
-    handler: (req, res, params, deps) => handleForkMessage(req, res, params, deps),
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      () => handleForkMessage(req, res, params, deps),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/projects/:id/variants/:vid/activate",
-    handler: (_req, res, params, deps) => handleActivateVariant(res, params, deps),
+    handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      () => handleActivateVariant(res, params, deps),
+    ),
   },
   {
     method: "PATCH",
@@ -856,7 +892,10 @@ const routes: Route[] = [
     handler: async (_req, res, { id, vid, rest }, deps) => {
       const project = deps.store.getProject(id!);
       if (!project) return sendError(res, 404, "project not found");
-      const base = await variantArtifactDir(deps, project, vid!);
+      const base = await deps.runtimeSupervisor!.trackOperation(
+        { projectId: id!, variantId: vid! },
+        () => variantArtifactDir(deps, project, vid!),
+      );
       if (!base) return sendError(res, 404, "variant not found");
       return serveFileFromBase(res, base, rest ?? "");
     },
@@ -865,28 +904,63 @@ const routes: Route[] = [
     method: "GET",
     pattern: "/api/projects/:id/versions/:runId",
     publicRead: true,
-    handler: (_req, res, params, deps) => handleGetVersion(res, params, deps),
+    handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      {
+        projectId: params.id!,
+        variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
+        runId: params.runId!,
+      },
+      () => handleGetVersion(res, params, deps),
+    ),
   },
   {
     method: "GET",
     pattern: "/api/projects/:id/versions/:runId/preview-url",
     publicRead: true,
-    handler: (_req, res, params, deps) => handleGetVersionPreviewUrl(res, params, deps),
+    handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      {
+        projectId: params.id!,
+        variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
+        runId: params.runId!,
+      },
+      () => handleGetVersionPreviewUrl(res, params, deps),
+    ),
   },
   {
     method: "GET",
     pattern: "/api/projects/:id/versions/:runId/diff",
-    handler: (_req, res, params, deps) => handleGetVersionDiff(res, params, deps),
+    handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      {
+        projectId: params.id!,
+        variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
+        runId: params.runId!,
+      },
+      () => handleGetVersionDiff(res, params, deps),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/projects/:id/versions/:runId/restore",
-    handler: (_req, res, params, deps) => handleRestoreVersion(res, params, deps),
+    handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      {
+        projectId: params.id!,
+        variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
+        runId: params.runId!,
+      },
+      () => handleRestoreVersion(res, params, deps),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/projects/:id/versions/:runId/cover",
-    handler: (_req, res, params, deps) => handleSetVersionCover(res, params, deps),
+    handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      {
+        projectId: params.id!,
+        variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
+        runId: params.runId!,
+      },
+      () => handleSetVersionCover(res, params, deps),
+    ),
   },
   {
     method: "POST",
@@ -923,24 +997,28 @@ const routes: Route[] = [
       const project = deps.store.getProject(id!);
       if (!project) return sendError(res, 404, "project not found");
       if (project.mode !== "standard") return sendJson(res, 200, { captured: false, reason: "unsupported" });
-
-      const root = projectDir(deps.dataDir, id!);
-      const coverPath = join(root, ".cover.png");
-      if (existsSync(coverPath)) return sendJson(res, 200, { captured: false, reason: "exists" });
-
       const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
-      const runtimeKey = variantRuntimeKey(id!, active);
-      const releaseAfter = new URL(req.url ?? "", "http://localhost").searchParams.get("release") === "1";
-      try {
-        const dir = await activeArtifactDir(deps, project);
-        const { url } = await (deps.ensureDevServer ?? ensureDevServer)(id!, dir, runtimeKey);
-        const captured = await (deps.captureCoverUrl ?? captureCoverUrl)(url, coverPath);
-        sendJson(res, 200, { captured });
-      } catch (err) {
-        sendError(res, 409, err instanceof Error ? err.message : "cover capture failed");
-      } finally {
-        if (releaseAfter) (deps.releaseDevServer ?? releaseDevServer)(runtimeKey);
-      }
+      return deps.runtimeSupervisor!.trackOperation(
+        { projectId: id!, variantId: active },
+        async (signal) => {
+          const root = projectDir(deps.dataDir, id!);
+          const coverPath = join(root, ".cover.png");
+          if (existsSync(coverPath)) return sendJson(res, 200, { captured: false, reason: "exists" });
+          const runtimeKey = variantRuntimeKey(id!, active);
+          const releaseAfter = new URL(req.url ?? "", "http://localhost").searchParams.get("release") === "1";
+          try {
+            const dir = await activeArtifactDir(deps, project);
+            const { url } = await (deps.ensureDevServer ?? ensureDevServer)(id!, dir, runtimeKey, signal);
+            signal.throwIfAborted();
+            const captured = await (deps.captureCoverUrl ?? captureCoverUrl)(url, coverPath, signal);
+            sendJson(res, 200, { captured });
+          } catch (err) {
+            sendError(res, 409, err instanceof Error ? err.message : "cover capture failed");
+          } finally {
+            if (releaseAfter) (deps.releaseDevServer ?? releaseDevServer)(runtimeKey);
+          }
+        },
+      );
     },
   },
   {
@@ -969,7 +1047,10 @@ const routes: Route[] = [
   {
     method: "POST",
     pattern: "/api/sharingan/:id/start",
-    handler: (req, res, p, deps) => handleSharinganStart(req, res, p.id!, deps.dataDir),
+    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      () => handleSharinganStart(req, res, p.id!, deps.dataDir, deps.sharinganOpen),
+    ),
   },
   {
     method: "GET",
@@ -986,52 +1067,82 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/sharingan/:id/events",
-    handler: (_req, res, p) => handleSharinganEvents(res, p.id!),
+    handler: (_req, res, p, deps) => {
+      deps.runtimeSupervisor!.assertAdmission({ projectId: p.id! });
+      handleSharinganEvents(res, p.id!);
+    },
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/continue",
-    handler: (_req, res, p, deps) => handleSharinganContinue(res, p.id!, deps.dataDir),
+    handler: (_req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      () => handleSharinganContinue(res, p.id!, deps.dataDir),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/focus",
-    handler: (_req, res, p) => handleSharinganFocus(res, p.id!),
+    handler: (_req, res, p, deps) => {
+      deps.runtimeSupervisor!.assertAdmission({ projectId: p.id! });
+      handleSharinganFocus(res, p.id!);
+    },
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/navigate",
-    handler: (req, res, p, deps) => handleSharinganNavigate(req, res, p.id!, deps.dataDir),
+    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      () => handleSharinganNavigate(req, res, p.id!, deps.dataDir),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/capture",
-    handler: (req, res, p, deps) => handleSharinganCapture(req, res, p.id!, deps.dataDir),
+    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      () => handleSharinganCapture(req, res, p.id!, deps.dataDir),
+    ),
   },
   {
     method: "GET",
     pattern: "/api/sharingan/:id/read-dom",
-    handler: (_req, res, p, deps) => handleSharinganReadDom(res, p.id!, deps.dataDir),
+    handler: (_req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      () => handleSharinganReadDom(res, p.id!, deps.dataDir),
+    ),
   },
   {
     method: "GET",
     pattern: "/api/sharingan/:id/computed-styles",
-    handler: (_req, res, p, deps) => handleSharinganComputedStyles(res, p.id!, deps.dataDir),
+    handler: (_req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      () => handleSharinganComputedStyles(res, p.id!, deps.dataDir),
+    ),
   },
   {
     method: "GET",
     pattern: "/api/sharingan/:id/links",
-    handler: (_req, res, p, deps) => handleSharinganLinks(res, p.id!, deps.dataDir),
+    handler: (_req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      () => handleSharinganLinks(res, p.id!, deps.dataDir),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/click",
-    handler: (req, res, p, deps) => handleSharinganClick(req, res, p.id!, deps.dataDir),
+    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      () => handleSharinganClick(req, res, p.id!, deps.dataDir),
+    ),
   },
   {
     method: "POST",
     pattern: "/api/sharingan/:id/scroll",
-    handler: (req, res, p, deps) => handleSharinganScroll(req, res, p.id!, deps.dataDir),
+    handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: p.id! },
+      () => handleSharinganScroll(req, res, p.id!, deps.dataDir),
+    ),
   },
 ];
 
@@ -1077,6 +1188,11 @@ export function createApp(deps: AppDeps): http.Server {
       requireDaemonRequest(req, appDeps.security);
       sendError(res, 404, "not found");
     } catch (err) {
+      if (err instanceof RuntimeScopeUnavailableError) {
+        if (!res.headersSent) sendError(res, 409, err.message);
+        else res.end();
+        return;
+      }
       if (isHttpError(err)) {
         if (!res.headersSent) sendError(res, err.status, err.message);
         else res.end();

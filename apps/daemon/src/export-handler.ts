@@ -696,6 +696,14 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
     await writeFile(target, rewriteRunBundleFile(rel, file.data, rewriteMaps, join(deps.dataDir, ".runs", newRunId, "moodboards")));
   }
 
-  if (project.mode === "standard") void setupImportedStandardProject(project.id, root);
+  if (project.mode === "standard") {
+    const setup = deps.runtimeSupervisor
+      ? deps.runtimeSupervisor.trackOperation(
+          { projectId: project.id },
+          (signal) => setupImportedStandardProject(project.id, root, signal),
+        )
+      : setupImportedStandardProject(project.id, root);
+    void setup.catch(() => {});
+  }
   sendJson(res, 201, project);
 }

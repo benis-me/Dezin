@@ -1678,14 +1678,25 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       });
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
-        void (async () => {
-          try {
-            const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId));
-            await (deps.captureCoverUrl ?? captureCoverUrl)(url, join(projectDir(deps.dataDir, project.id), ".cover.png"));
-          } catch {
-            // Covers are best-effort; the successful run is already persisted.
-          }
-        })();
+        const cover = deps.runtimeSupervisor!.trackOperation(
+          { projectId: project.id, variantId: targetVariantId, runId: run.id },
+          async (signal) => {
+            const { url } = await ensureStandardDevServer(
+              project.id,
+              dir,
+              variantRuntimeKey(project.id, targetVariantId),
+              signal,
+            );
+            signal.throwIfAborted();
+            await (deps.captureCoverUrl ?? captureCoverUrl)(
+              url,
+              join(projectDir(deps.dataDir, project.id), ".cover.png"),
+              signal,
+            );
+          },
+        );
+        // Covers are best-effort; the successful run is already persisted.
+        void cover.catch(() => {});
       }
     } catch (err) {
       const cancelled = ctrl.signal.aborted || isAbortError(err);
@@ -1905,7 +1916,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       },
     });
     // Headless-screenshot the finished artifact as the gallery cover (best-effort, async).
-    void captureCover(join(dir, artifactPath), join(dir, ".cover.png"));
+    const cover = deps.runtimeSupervisor!.trackOperation(
+      { projectId: project.id, variantId: targetVariantId, runId: run.id },
+      (signal) => (deps.captureCover ?? captureCover)(
+        join(dir, artifactPath),
+        join(dir, ".cover.png"),
+        signal,
+      ),
+    );
+    void cover.catch(() => {});
   } catch (err) {
     const cancelled = ctrl.signal.aborted || isAbortError(err);
     const errorMessage = err instanceof Error ? err.message : "generation failed";

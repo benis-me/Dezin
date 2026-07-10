@@ -495,6 +495,151 @@ test("project deletion aborts its active Run before removing every daemon-owned 
   }, { runner, visualQa: async () => [] });
 });
 
+test("project deletion owns in-flight setup and rejects concurrent preview and variant acquisition", async () => {
+  let setupEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    setupEntered = resolve;
+  });
+  let finishSetup!: () => void;
+  const finish = new Promise<void>((resolve) => {
+    finishSetup = resolve;
+  });
+  let setupFinished!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    setupFinished = resolve;
+  });
+  let abortObserved!: () => void;
+  const aborted = new Promise<void>((resolve) => {
+    abortObserved = resolve;
+  });
+  let setupSawAbort = false;
+  let previewCalls = 0;
+
+  await withServer(
+    async ({ base, dataDir }) => {
+      const created = await fetch(`${base}/api/projects`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Setup race", mode: "standard" }),
+      });
+      assert.equal(created.status, 201);
+      const project = (await created.json()) as { id: string };
+      const projectPath = join(dataDir, "projects", project.id);
+      await entered;
+
+      let deletionFinished = false;
+      const deleting = fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" }).then((response) => {
+        deletionFinished = true;
+        return response;
+      });
+      await Promise.race([aborted, new Promise((resolve) => setTimeout(resolve, 50))]);
+
+      const [preview, variant] = await Promise.all([
+        fetch(`${base}/api/projects/${project.id}/devserver`),
+        fetch(`${base}/api/projects/${project.id}/variants`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "Too late" }),
+        }),
+      ]);
+      const deletionWasPending = !deletionFinished;
+      finishSetup();
+      await finished;
+      const deleted = await deleting;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      assert.equal(setupSawAbort, true, "deletion aborts tracked setup work");
+      assert.equal(deletionWasPending, true, "204 waits for the setup operation to settle");
+      assert.equal(preview.status, 409, "preview acquisition is rejected once deletion starts");
+      assert.equal(variant.status, 409, "variant resource creation is rejected once deletion starts");
+      assert.equal(previewCalls, 0, "the preview resource hook is never entered");
+      assert.equal(deleted.status, 204);
+      assert.equal(existsSync(projectPath), false, "late setup writes are removed before 204");
+    },
+    {
+      standardProjectSetup: async (_projectId, projectPath, signal?: AbortSignal) => {
+        signal?.addEventListener("abort", () => {
+          setupSawAbort = true;
+          abortObserved();
+        }, { once: true });
+        setupEntered();
+        await finish;
+        mkdirSync(projectPath, { recursive: true });
+        writeFileSync(join(projectPath, "late-setup.txt"), "late");
+        setupFinished();
+      },
+      ensureDevServer: async () => {
+        previewCalls += 1;
+        return { url: "http://127.0.0.1:65530/" };
+      },
+    },
+  );
+});
+
+test("project deletion invalidates a delayed Sharingan open and closes the late session", async () => {
+  let openEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    openEntered = resolve;
+  });
+  let resolveOpen!: (session: import("../src/sharingan-browser.ts").SharinganSession) => void;
+  const delayedOpen = new Promise<import("../src/sharingan-browser.ts").SharinganSession>((resolve) => {
+    resolveOpen = resolve;
+  });
+  let openCalls = 0;
+  let closeCalls = 0;
+
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({
+        name: "Sharingan open race",
+        mode: "standard",
+        sharingan: true,
+        sourceUrl: "https://example.test/",
+      });
+      const projectPath = join(dataDir, "projects", project.id);
+      mkdirSync(projectPath, { recursive: true });
+
+      const started = await fetch(`${base}/api/sharingan/${project.id}/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: "https://example.test/" }),
+      });
+      assert.equal(started.status, 200);
+      await entered;
+
+      let deletionSettled = false;
+      const deleting = fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" }).then((response) => {
+        deletionSettled = true;
+        return response;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const restarted = await fetch(`${base}/api/sharingan/${project.id}/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: "https://example.test/again" }),
+      });
+      const deletionWaitedForOpen = !deletionSettled;
+      resolveOpen({ close: async () => { closeCalls += 1; } } as unknown as import("../src/sharingan-browser.ts").SharinganSession);
+      const deleted = await deleting;
+
+      assert.equal(deletionWaitedForOpen, true, "DELETE waits for the synchronously retained open promise");
+      assert.equal(restarted.status, 409, "a blocked project cannot start a second browser session");
+      assert.equal(openCalls, 1, "only the admitted start reaches the browser opener");
+      assert.equal(closeCalls, 1, "the session resolving after release is closed exactly once");
+      assert.equal(deleted.status, 204);
+      assert.equal(existsSync(projectPath), false);
+    },
+    {
+      sharinganOpen: async () => {
+        openCalls += 1;
+        openEntered();
+        return delayedOpen;
+      },
+    },
+  );
+});
+
 test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
   await withServer(async ({ base, dataDir }) => {
     assert.deepEqual(await (await fetch(`${base}/api/moodboards`)).json(), []);

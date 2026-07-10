@@ -9,6 +9,7 @@ import { Store } from "../../../packages/core/src/index.ts";
 import { FakeRunner, abortError } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner, AgentTurnInput } from "../../../packages/agent/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
+import { standardVersionArtifactDir } from "../src/variant-workspaces.ts";
 
 interface Ctx {
   base: string;
@@ -52,6 +53,31 @@ function initStandardProject(dataDir: string, projectId: string): string {
   commitAll(dir);
   return dir;
 }
+
+test("variant deletion unregisters a real Git version worktree before removing its directory", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-version-worktree-delete-"));
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "Git cleanup", mode: "standard" });
+  const root = initStandardProject(dataDir, project.id);
+  const variant = store.createVariant(project.id, "Branch");
+  const conversation = store.createConversation(project.id);
+  const run = store.createRun(project.id, conversation.id, variant.id);
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  const supervisor = createRuntimeSupervisor({ store, dataDir });
+  const deps = { store, dataDir, runtimeSupervisor: supervisor } as AppDeps;
+
+  const versionDir = await standardVersionArtifactDir(deps, project.id, run.id, commit);
+  const before = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: root, encoding: "utf8" });
+  assert.match(before, new RegExp(versionDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  await supervisor.releaseVariant(project.id, variant.id);
+
+  const after = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: root, encoding: "utf8" });
+  assert.doesNotMatch(after, new RegExp(versionDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(existsSync(versionDir), false);
+  await supervisor.shutdown();
+  store.close();
+});
 
 async function createVariant(base: string, projectId: string): Promise<{ id: string; active?: boolean }> {
   const res = await fetch(`${base}/api/projects/${projectId}/variants`, {

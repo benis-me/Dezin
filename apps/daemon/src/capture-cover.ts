@@ -65,39 +65,55 @@ function captureViaElectron(htmlPath: string, outPath: string): Promise<boolean>
 }
 
 // ── Puppeteer fallback ────────────────────────────────────────────────────────
-async function captureTargetViaPuppeteer(targetUrl: string, outPath: string): Promise<boolean> {
+async function captureTargetViaPuppeteer(targetUrl: string, outPath: string, signal?: AbortSignal): Promise<boolean> {
   const executablePath = findChrome();
-  if (!executablePath) return false;
+  if (!executablePath || signal?.aborted) return false;
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
+  const closeOnAbort = (): void => { void browser?.close().catch(() => {}); };
+  signal?.addEventListener("abort", closeOnAbort, { once: true });
   try {
     browser = await puppeteer.launch({ executablePath, headless: true, args: ["--no-sandbox", "--hide-scrollbars"] });
+    signal?.throwIfAborted();
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
     await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 12000 });
-    await new Promise((r) => setTimeout(r, COVER_CAPTURE_SETTLE_MS)); // let fonts, first paint, and intro motion settle
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        reject(signal?.reason ?? new Error("cover capture aborted"));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, COVER_CAPTURE_SETTLE_MS);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }); // let fonts, first paint, and intro motion settle
+    signal?.throwIfAborted();
     await page.screenshot({ path: outPath as `${string}.png`, type: "png", clip: { x: 0, y: 0, width: 1280, height: 800 } });
     return true;
   } catch {
     return false;
   } finally {
+    signal?.removeEventListener("abort", closeOnAbort);
     await browser?.close().catch(() => {});
   }
 }
 
-function captureViaPuppeteer(htmlPath: string, outPath: string): Promise<boolean> {
-  return captureTargetViaPuppeteer(pathToFileURL(htmlPath).href, outPath);
+function captureViaPuppeteer(htmlPath: string, outPath: string, signal?: AbortSignal): Promise<boolean> {
+  return captureTargetViaPuppeteer(pathToFileURL(htmlPath).href, outPath, signal);
 }
 
-export async function captureCover(htmlPath: string, outPath: string): Promise<boolean> {
-  if (!existsSync(htmlPath)) return false;
+export async function captureCover(htmlPath: string, outPath: string, signal?: AbortSignal): Promise<boolean> {
+  if (!existsSync(htmlPath) || signal?.aborted) return false;
   if (process.env.DEZIN_ELECTRON && typeof process.send === "function") {
     if (await captureViaElectron(htmlPath, outPath)) return true;
+    if (signal?.aborted) return false;
     // fall through to puppeteer if the Electron capture failed
   }
-  return captureViaPuppeteer(htmlPath, outPath);
+  return captureViaPuppeteer(htmlPath, outPath, signal);
 }
 
-export async function captureCoverUrl(url: string, outPath: string): Promise<boolean> {
-  if (!/^https?:\/\//i.test(url)) return false;
-  return captureTargetViaPuppeteer(url, outPath);
+export async function captureCoverUrl(url: string, outPath: string, signal?: AbortSignal): Promise<boolean> {
+  if (!/^https?:\/\//i.test(url) || signal?.aborted) return false;
+  return captureTargetViaPuppeteer(url, outPath, signal);
 }
