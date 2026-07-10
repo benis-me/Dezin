@@ -1787,6 +1787,123 @@ test("post-publish metadata and transcript failures cannot downgrade a successfu
   }
 });
 
+test("a one-shot succeeded terminalization failure after publication retries success without reapplying the commit", async () => {
+  let runnerCalls = 0;
+  const runner: AgentRunner = {
+    id: "published-terminalize-retry",
+    async runTurn(input) {
+      runnerCalls += 1;
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "published exactly once");
+      return { text: "published", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const initialized = initStandardRunProject(dataDir, store);
+      const baseCommitCount = Number(execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim());
+      const originalTerminalize = store.terminalizeRun.bind(store);
+      let succeededAttempts = 0;
+      let succeededTransitions = 0;
+      let failedAttempts = 0;
+      store.terminalizeRun = ((runId, status, patch) => {
+        if (status === "succeeded") {
+          succeededAttempts += 1;
+        }
+        if (status === "failed") failedAttempts += 1;
+        const result = originalTerminalize(runId, status, patch);
+        if (status === "succeeded" && result.changed) succeededTransitions += 1;
+        if (status === "succeeded" && succeededAttempts === 1) {
+          throw new Error("injected one-shot post-transition terminalization failure");
+        }
+        return result;
+      }) as Store["terminalizeRun"];
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: initialized.project.id, brief: "publish once then settle" }),
+      });
+      const events = await closedSse(response, "published success terminalization retry");
+      const runId = events.find((event) => event.type === "run-start")!.runId as string;
+      const publishedHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim();
+
+      assert.equal(succeededAttempts, 2, "the same succeeded settlement is retried once");
+      assert.equal(succeededTransitions, 1, "only one durable succeeded transition is recorded");
+      assert.equal(failedAttempts, 0, "published work never enters failed settlement");
+      assert.equal(store.getRun(runId)?.status, "succeeded");
+      assert.equal(events.filter((event) => event.type === "run-done").length, 1);
+      assert.equal(events.some((event) => event.type === "run-error"), false);
+      assert.equal(runnerCalls, 1);
+      assert.notEqual(publishedHead, initialized.head);
+      assert.equal(Number(execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim()), baseCommitCount + 1);
+      assert.equal(readFileSync(join(initialized.dir, "src", "App.jsx"), "utf8"), "published exactly once");
+
+      const replay = originalTerminalize(runId, "succeeded", { commitHash: publishedHead });
+      assert.equal(replay.changed, false, "retrying the durable success is idempotent");
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim(), publishedHead);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("a persistent succeeded terminalization failure surfaces an operational event without recording published work as failed", async () => {
+  const runner: AgentRunner = {
+    id: "published-terminalize-persistent-failure",
+    async runTurn(input) {
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "published despite persistent Store failure");
+      return { text: "published", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const initialized = initStandardRunProject(dataDir, store);
+      const originalTerminalize = store.terminalizeRun.bind(store);
+      let succeededAttempts = 0;
+      let failedAttempts = 0;
+      store.terminalizeRun = ((runId, status, patch) => {
+        if (status === "succeeded") {
+          succeededAttempts += 1;
+          throw new Error("persistent succeeded terminalization failure");
+        }
+        if (status === "failed") failedAttempts += 1;
+        return originalTerminalize(runId, status, patch);
+      }) as Store["terminalizeRun"];
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: initialized.project.id, brief: "publish before persistent Store failure" }),
+      });
+      const events = await closedSse(response, "persistent published-success Store failure");
+      const runId = events.find((event) => event.type === "run-start")!.runId as string;
+
+      assert.ok(succeededAttempts >= 2, "success persistence is retried before surfacing the operational error");
+      assert.equal(failedAttempts, 0);
+      assert.equal(store.getRun(runId)?.status, "running", "an unrepresentable success is never falsified as failed");
+      assert.equal(events.filter((event) => event.type === "run-persistence-error").length, 1);
+      assert.equal(events.some((event) => event.type === "run-error"), false);
+      assert.equal(events.some((event) => event.type === "run-done"), false);
+      assert.notEqual(execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim(), initialized.head);
+      assert.equal(readFileSync(join(initialized.dir, "src", "App.jsx"), "utf8"), "published despite persistent Store failure");
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
 test("standard version actions use commit snapshots instead of prototype html snapshots", async () => {
   const devServers: Array<{ dir: string; runtimeKey?: string; url: string }> = [];
   let captured: { url: string; outPath: string } | null = null;
@@ -2774,6 +2891,79 @@ test("Sharingan variant runs sync the root capture bundle before region subagent
       assert.equal(existsSync(join(variantDir, ".sharingan", "region-build.json")), true);
       assert.equal(existsSync(join(variantDir, ".sharingan", "region-work", "stale")), false);
       assert.equal(existsSync(join(variantDir, "public", "_assets", "hero.png")), true);
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("a second targeted Sharingan Run keeps the variant capture when the root legacy bundle diverges", async () => {
+  let expectedBundle = "root-v1";
+  let runNumber = 1;
+  const runner: AgentRunner = {
+    id: "sharingan-variant-bundle-authority",
+    async runTurn(input) {
+      assert.equal(
+        readFileSync(join(input.projectDir, ".sharingan", "bundle-origin.txt"), "utf8"),
+        expectedBundle,
+        "the selected variant transaction owns its existing capture bundle",
+      );
+      writeFileSync(
+        join(input.projectDir, "src", "App.jsx"),
+        `export default function App(){ return <main>targeted Sharingan run ${runNumber}</main> }`,
+      );
+      return { text: `targeted run ${runNumber}`, artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const project = store.createProject({ name: "Variant capture authority", mode: "standard", sharingan: true });
+      const rootDir = join(dataDir, "projects", project.id);
+      mkdirSync(join(rootDir, "src"), { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: rootDir });
+      writeFileSync(join(rootDir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      writeFileSync(join(rootDir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+      writeFileSync(join(rootDir, "src", "App.jsx"), `export default function App(){ return <main>root</main> }`);
+      commitAll(rootDir, "base without capture");
+
+      mkdirSync(join(rootDir, ".sharingan"), { recursive: true });
+      writeFileSync(join(rootDir, ".sharingan", "pages.json"), JSON.stringify({ sourceUrl: "https://root.example", pages: [] }));
+      writeFileSync(join(rootDir, ".sharingan", "bundle-origin.txt"), "root-v1");
+
+      store.ensureMainVariant(project.id);
+      const variant = store.createVariant(project.id, "Capture-owning variant");
+      const first = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, variantId: variant.id, brief: "first targeted clone" }),
+      });
+      const firstEvents = await closedSse(first, "first targeted Sharingan capture seed");
+      assert.deepEqual(terminalEvents(firstEvents).map((event) => event.type), ["run-done"]);
+
+      const variantDir = join(dataDir, "worktrees", project.id, variant.id);
+      assert.equal(readFileSync(join(variantDir, ".sharingan", "bundle-origin.txt"), "utf8"), "root-v1");
+      writeFileSync(join(rootDir, ".sharingan", "bundle-origin.txt"), "root-v2");
+      expectedBundle = "root-v1";
+      runNumber = 2;
+
+      const second = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, variantId: variant.id, brief: "second targeted clone" }),
+      });
+      const secondEvents = await closedSse(second, "second targeted Sharingan capture authority");
+
+      assert.deepEqual(terminalEvents(secondEvents).map((event) => event.type), ["run-done"]);
+      assert.equal(readFileSync(join(variantDir, ".sharingan", "bundle-origin.txt"), "utf8"), "root-v1");
+      assert.equal(readFileSync(join(rootDir, ".sharingan", "bundle-origin.txt"), "utf8"), "root-v2");
+      assert.match(readFileSync(join(variantDir, "src", "App.jsx"), "utf8"), /targeted Sharingan run 2/);
+      assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: variantDir, encoding: "utf8" }), "");
     },
     {
       ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),

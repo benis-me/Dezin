@@ -419,7 +419,120 @@ test("standard Run transaction rejects concurrent source edits and preserves a r
   }
 });
 
-type PromotionCheckpoint = (phase: "after-validation" | "after-ref-advance") => void | Promise<void>;
+test("standard Run publication rejects a detached transaction and pins recovery to the exact candidate", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  const runId = "detached-candidate";
+  try {
+    const transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId, sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "detached candidate");
+    const candidate = await transaction.commit("detached candidate");
+    execFileSync("git", ["checkout", "--detach", candidate], { cwd: transaction.dir });
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1");
+    assert.equal(
+      execFileSync("git", ["rev-parse", standardRunBranchName(runId)], { cwd: sourceDir, encoding: "utf8" }).trim(),
+      candidate,
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run publication rejects a branch-switched transaction and pins recovery to the exact candidate", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  const runId = "switched-candidate";
+  try {
+    const transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId, sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "branch-switched candidate");
+    const candidate = await transaction.commit("branch-switched candidate");
+    execFileSync("git", ["switch", "-c", "transaction-other"], { cwd: transaction.dir });
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1");
+    assert.equal(
+      execFileSync("git", ["rev-parse", standardRunBranchName(runId)], { cwd: sourceDir, encoding: "utf8" }).trim(),
+      candidate,
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run publication rejects an unrelated candidate and pins recovery to that exact commit", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  const runId = "unrelated-candidate";
+  const runBranch = standardRunBranchName(runId);
+  try {
+    const transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId, sourceDir },
+    );
+    execFileSync("git", ["checkout", "--orphan", "unrelated-state"], { cwd: transaction.dir });
+    execFileSync("git", ["rm", "-rf", "."], { cwd: transaction.dir });
+    mkdirSync(join(transaction.dir, "src"), { recursive: true });
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "unrelated candidate");
+    execFileSync("git", ["add", "-A"], { cwd: transaction.dir });
+    execFileSync("git", ["commit", "-qm", "unrelated candidate"], { cwd: transaction.dir });
+    const candidate = execFileSync("git", ["rev-parse", "HEAD"], { cwd: transaction.dir, encoding: "utf8" }).trim();
+    execFileSync("git", ["branch", "-f", runBranch, candidate], { cwd: transaction.dir });
+    execFileSync("git", ["checkout", runBranch], { cwd: transaction.dir });
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1");
+    assert.equal(execFileSync("git", ["rev-parse", runBranch], { cwd: sourceDir, encoding: "utf8" }).trim(), candidate);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run publication rejects a candidate rewound behind source HEAD and pins exact recovery", async () => {
+  const { dataDir, sourceDir } = initTransactionRepository();
+  const runId = "rewound-candidate";
+  try {
+    writeFileSync(join(sourceDir, "src", "App.jsx"), "v2");
+    execFileSync("git", ["add", "-A"], { cwd: sourceDir });
+    execFileSync("git", ["commit", "-qm", "source v2"], { cwd: sourceDir });
+    const sourceHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim();
+    const rewoundCandidate = execFileSync("git", ["rev-parse", "HEAD^"], { cwd: sourceDir, encoding: "utf8" }).trim();
+    const transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId, sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "agent candidate");
+    await transaction.commit("agent candidate");
+    execFileSync("git", ["reset", "--hard", rewoundCandidate], { cwd: transaction.dir });
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v2");
+    assert.equal(
+      execFileSync("git", ["rev-parse", standardRunBranchName(runId)], { cwd: sourceDir, encoding: "utf8" }).trim(),
+      rewoundCandidate,
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+type PromotionCheckpoint = (phase: "after-validation" | "before-promotion" | "after-ref-advance") => void | Promise<void>;
 
 function transactionDepsWithCheckpoint(dataDir: string, promotionCheckpoint: PromotionCheckpoint): StandardRunTransactionDeps {
   return { dataDir, promotionCheckpoint } as StandardRunTransactionDeps & { promotionCheckpoint: PromotionCheckpoint };
@@ -472,7 +585,89 @@ test("standard Run publication rejects a ref switch injected after validation", 
   }
 });
 
-test("standard Run publication stays successful after CAS when checkout sync fails and preserves later user bytes", async () => {
+test("standard Run publication rejects a user edit at the final pre-promotion checkpoint", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  const runId = "late-promotion-edit";
+  try {
+    const sourceBranch = execFileSync("git", ["branch", "--show-current"], { cwd: sourceDir, encoding: "utf8" }).trim();
+    const transaction = await beginStandardRunTransaction(
+      transactionDepsWithCheckpoint(dataDir, (phase) => {
+        if (phase === "before-promotion") writeFileSync(join(sourceDir, "src", "App.jsx"), "late user edit");
+      }),
+      { projectId: "project-1", variantId: "main", runId, sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "agent result");
+    const candidate = await transaction.commit("agent change");
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceBranch);
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "late user edit");
+    assert.equal(execFileSync("git", ["rev-parse", standardRunBranchName(runId)], { cwd: sourceDir, encoding: "utf8" }).trim(), candidate);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run publication rejects a ref switch at the final pre-promotion checkpoint", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  const runId = "late-promotion-switch";
+  try {
+    execFileSync("git", ["branch", "late-user-work"], { cwd: sourceDir });
+    const transaction = await beginStandardRunTransaction(
+      transactionDepsWithCheckpoint(dataDir, (phase) => {
+        if (phase === "before-promotion") execFileSync("git", ["switch", "late-user-work"], { cwd: sourceDir });
+      }),
+      { projectId: "project-1", variantId: "main", runId, sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "agent result");
+    const candidate = await transaction.commit("agent change");
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["branch", "--show-current"], { cwd: sourceDir, encoding: "utf8" }).trim(), "late-user-work");
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1");
+    assert.equal(execFileSync("git", ["rev-parse", standardRunBranchName(runId)], { cwd: sourceDir, encoding: "utf8" }).trim(), candidate);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run promotion lets Git reject a locked source index before moving the branch", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  const runId = "native-index-lock";
+  let indexLock = "";
+  try {
+    const transaction = await beginStandardRunTransaction(
+      transactionDepsWithCheckpoint(dataDir, (phase) => {
+        if (phase !== "before-promotion") return;
+        const lockPath = execFileSync("git", ["rev-parse", "--git-path", "index.lock"], { cwd: sourceDir, encoding: "utf8" }).trim();
+        indexLock = isAbsolute(lockPath) ? lockPath : join(sourceDir, lockPath);
+        writeFileSync(indexLock, "locked");
+      }),
+      { projectId: "project-1", variantId: "main", runId, sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "agent result");
+    const candidate = await transaction.commit("agent change");
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    if (indexLock) rmSync(indexLock, { force: true });
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1");
+    assert.equal(execFileSync("git", ["rev-parse", standardRunBranchName(runId)], { cwd: sourceDir, encoding: "utf8" }).trim(), candidate);
+  } finally {
+    if (indexLock) rmSync(indexLock, { force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run publication stays successful after native promotion and preserves later user bytes", async () => {
   const { dataDir, sourceDir } = initTransactionRepository();
   let indexLock = "";
   try {

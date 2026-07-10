@@ -259,6 +259,49 @@ test("RunExecution surfaces AggregateError when primary and fallback terminal em
   store.close();
 });
 
+test("RunExecution retries a one-shot terminal event failure without duplicating the durable success", async () => {
+  const { RunExecution } = await import("../src/run-execution.ts");
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "P" });
+  const conversation = store.createConversation(project.id);
+  const run = store.createRun(project.id, conversation.id);
+  store.updateRun(run.id, { status: "running" });
+  const terminalEvent = { type: "run-done", runId: run.id };
+  const delivered: unknown[] = [];
+  let primaryAttempts = 0;
+  let fallbackAttempts = 0;
+  const execution = new RunExecution({
+    store,
+    runId: run.id,
+    emit: (event) => {
+      primaryAttempts += 1;
+      if (primaryAttempts === 1) throw new Error("one-shot primary event failure");
+      delivered.push(event);
+    },
+    fallbackEmit: (event) => {
+      fallbackAttempts += 1;
+      if (fallbackAttempts === 1) throw new Error("one-shot fallback event failure");
+      delivered.push(event);
+    },
+    finish: () => {},
+    unsubscribe: () => {},
+    closeStream: () => {},
+  });
+
+  assert.throws(
+    () => execution.settle("succeeded", { commitHash: "abc1234", finishedAt: 2_000, event: terminalEvent }),
+    AggregateError,
+  );
+  const retried = execution.settle("succeeded", { commitHash: "abc1234", finishedAt: 2_000, event: terminalEvent });
+
+  assert.equal(retried.changed, false, "the succeeded DB transition remains exactly once");
+  assert.equal(store.getRun(run.id)?.status, "succeeded");
+  assert.deepEqual(delivered, [terminalEvent]);
+  assert.equal(primaryAttempts, 2);
+  assert.equal(fallbackAttempts, 1);
+  store.close();
+});
+
 test("RunExecution dispose releases broker, subscription, and stream exactly once", async () => {
   const { RunExecution } = await import("../src/run-execution.ts");
   const store = new Store(":memory:");

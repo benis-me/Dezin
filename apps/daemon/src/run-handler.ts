@@ -45,7 +45,7 @@ import {
   type StandardRunTransaction,
 } from "./standard-run-transaction.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
-import { RunExecution } from "./run-execution.ts";
+import { RunExecution, type RunSettlementPatch } from "./run-execution.ts";
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
@@ -639,6 +639,9 @@ async function copyIfExists(from: string, to: string): Promise<void> {
 
 async function syncSharinganCaptureBundle(sourceRoot: string, targetRoot: string): Promise<void> {
   if (sourceRoot === targetRoot) return;
+  // A selected variant's checked-in capture is authoritative. The project-root bundle is only a
+  // legacy seed for a transaction that has no bundle of its own; never overlay divergent variants.
+  if (existsSync(join(targetRoot, ".sharingan"))) return;
   await copyIfExists(join(sourceRoot, ".sharingan"), join(targetRoot, ".sharingan"));
   await rm(join(targetRoot, ".sharingan", "region-work"), { recursive: true, force: true });
   await rm(join(targetRoot, ".sharingan", "region-build.json"), { force: true });
@@ -1439,6 +1442,19 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // Standard mode: the agent edits a real Vite project (src/*), not a single HTML.
   // No closed lint loop on one file; run a turn, commit the diff to git as a version.
   if (project.mode === "standard") {
+    let publishedSuccessPatch: RunSettlementPatch | null = null;
+    const settlePublishedSuccess = (patch: RunSettlementPatch): void => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          execution!.settle("succeeded", patch);
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError;
+    };
     try {
       const ensureStandardDevServer = deps.ensureDevServer ?? ensureDevServer;
       const repairPolicy = standardRepairPolicy(settings, project.sharingan, body.maxRounds);
@@ -1720,6 +1736,18 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       if (ctrl.signal.aborted) throw abortError();
       if (!commitHash) throw new Error("The selected Agent did not leave any project changes to publish.");
       commitHash = await standardTransaction!.publish();
+      // Establish the published-success recovery invariant immediately after the irreversible
+      // filesystem boundary. If any later computation throws, the catch path can only settle this
+      // same success (or surface a persistence error), never manufacture a failed Run.
+      publishedSuccessPatch = {
+        repairRounds,
+        lintPassed: passed,
+        score,
+        findings,
+        commitHash,
+        finishedAt: Date.now(),
+        event: { type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", findings },
+      };
       dir = standardSourceDir!;
       // Publication is the irreversible success boundary. Everything below is secondary metadata,
       // transcript, preview, or cover work and must not turn an already-published Run into a failure.
@@ -1745,7 +1773,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped, unresolved: stuckDefectKeys.size }));
       } catch { /* best-effort after publication */ }
       const persistedFindings = withResolvedVisualReviewHistory(findings, visualReviewHistory);
-      execution.settle("succeeded", {
+      publishedSuccessPatch = {
         repairRounds,
         lintPassed: passed,
         score,
@@ -1754,7 +1782,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         commitHash,
         finishedAt: Date.now(),
         event: { type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", designReviewed: !designReviewSkipped, findings: persistedFindings },
-      });
+      };
+      settlePublishedSuccess(publishedSuccessPatch);
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
         const cover = deps.runtimeSupervisor!.trackOperation(
@@ -1778,6 +1807,21 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         void cover.catch(() => {});
       }
     } catch (err) {
+      if (publishedSuccessPatch) {
+        try {
+          settlePublishedSuccess(publishedSuccessPatch);
+        } catch (settlementError) {
+          // The commit is already published. Surface an operational persistence failure without
+          // manufacturing a false failed Run or invoking the agent/publisher again.
+          sse({
+            type: "run-persistence-error",
+            runId: run.id,
+            published: true,
+            message: settlementError instanceof Error ? settlementError.message : "published Run success could not be persisted",
+          });
+        }
+        return;
+      }
       const cancelled = ctrl.signal.aborted || isAbortError(err);
       const errorMessage = err instanceof Error ? err.message : "generation failed";
       const settled = execution.settle(cancelled ? "cancelled" : "failed", {

@@ -21,6 +21,9 @@ export interface RunExecutionOptions {
 /** Owns the exactly-once terminal transition and idempotent runtime cleanup for one Run. */
 export class RunExecution {
   private disposed = false;
+  private terminalEventDelivered = false;
+  private pendingTerminalStatus: TerminalRunStatus | null = null;
+  private pendingTerminalEvent: unknown;
   private readonly options: RunExecutionOptions;
 
   constructor(options: RunExecutionOptions) {
@@ -29,13 +32,30 @@ export class RunExecution {
 
   settle(status: TerminalRunStatus, patch: RunSettlementPatch): { changed: boolean; run: Run } {
     const { event, ...runPatch } = patch;
+    // Record the intended event before the Store call. A Store adapter can durably transition and
+    // still throw before returning; a retry must then emit the same terminal event exactly once.
+    if (!this.terminalEventDelivered) {
+      this.pendingTerminalStatus = status;
+      this.pendingTerminalEvent = event;
+    }
     const result = this.options.store.terminalizeRun(this.options.runId, status, runPatch);
     if (result.changed) {
+      this.pendingTerminalStatus = status;
+      this.pendingTerminalEvent = event;
+    }
+    if (
+      result.run.status === status &&
+      this.pendingTerminalStatus === status &&
+      !this.terminalEventDelivered
+    ) {
+      const terminalEvent = this.pendingTerminalEvent;
       try {
-        this.options.emit(event);
+        this.options.emit(terminalEvent);
+        this.terminalEventDelivered = true;
       } catch (primaryError) {
         try {
-          this.options.fallbackEmit(event);
+          this.options.fallbackEmit(terminalEvent);
+          this.terminalEventDelivered = true;
         } catch (fallbackError) {
           throw new AggregateError([primaryError, fallbackError], "Failed to emit terminal Run event");
         }
