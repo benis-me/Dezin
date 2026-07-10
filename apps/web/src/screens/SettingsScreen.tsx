@@ -134,9 +134,28 @@ export function SettingsScreen({
     void api.getSettings().then((s) => alive && setSettings(s)).catch(() => {});
     void api.listDesignSystems().then((d) => alive && setSystems(d)).catch(() => {});
     void api.getHealth().then((h) => alive && setVersion(h.version)).catch(() => {});
-    void api.listExtensionCredentials().then((credentials) => alive && setExtensionCredentials(credentials)).catch(() => {});
     return () => {
       alive = false;
+    };
+  }, [api]);
+
+  useEffect(() => {
+    let alive = true;
+    let latestRequest = 0;
+    const refreshExtensionCredentials = () => {
+      const request = ++latestRequest;
+      void api
+        .listExtensionCredentials()
+        .then((credentials) => {
+          if (alive && request === latestRequest) setExtensionCredentials(credentials);
+        })
+        .catch(() => {});
+    };
+    refreshExtensionCredentials();
+    window.addEventListener("focus", refreshExtensionCredentials);
+    return () => {
+      alive = false;
+      window.removeEventListener("focus", refreshExtensionCredentials);
     };
   }, [api]);
 

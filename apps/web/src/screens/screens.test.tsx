@@ -966,6 +966,34 @@ test("SettingsScreen revokes a paired extension", async () => {
   expect(screen.queryByRole("button", { name: "Revoke aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })).toBeNull();
 });
 
+test("SettingsScreen refreshes externally paired credentials on window focus without remounting", async () => {
+  const newlyPaired = {
+    id: "credential-new",
+    extensionId: "cccccccccccccccccccccccccccccccc",
+    scopes: ["capture:write", "image:analyze"] as const,
+    createdAt: Date.now(),
+    lastUsedAt: null,
+    revokedAt: null,
+  };
+  let credentials: typeof newlyPaired[] = [];
+  const listExtensionCredentials = vi.fn(async () => credentials);
+  const revokeExtensionCredential = vi.fn(async () => undefined);
+  renderSettings({ listExtensionCredentials, revokeExtensionCredential });
+
+  fireEvent.click(screen.getByRole("button", { name: "Browser extension" }));
+  await waitFor(() => expect(listExtensionCredentials).toHaveBeenCalledTimes(1));
+  expect(screen.queryByRole("button", { name: `Revoke ${newlyPaired.extensionId}` })).toBeNull();
+
+  credentials = [newlyPaired];
+  act(() => window.dispatchEvent(new Event("focus")));
+  const revoke = await screen.findByRole("button", { name: `Revoke ${newlyPaired.extensionId}` });
+  expect(listExtensionCredentials).toHaveBeenCalledTimes(2);
+
+  fireEvent.click(revoke);
+  await waitFor(() => expect(revokeExtensionCredential).toHaveBeenCalledWith(newlyPaired.id));
+  expect(screen.queryByRole("button", { name: `Revoke ${newlyPaired.extensionId}` })).toBeNull();
+});
+
 test("SettingsScreen pairing errors are retryable", async () => {
   const createExtensionPairingCode = vi
     .fn()

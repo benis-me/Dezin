@@ -7,7 +7,10 @@ import type {
 } from "../../../packages/core/src/index.ts";
 import { HttpError } from "./http-util.ts";
 
-const PAIR_CODE_TTL_MS = 5 * 60_000;
+export const EXTENSION_PAIR_CODE_TTL_MS = 5 * 60_000;
+export const EXTENSION_PAIR_ATTEMPT_WINDOW_MS = 5 * 60_000;
+export const EXTENSION_PAIR_ATTEMPTS_PER_EXTENSION = 8;
+export const EXTENSION_PAIR_ATTEMPTS_GLOBAL = 32;
 
 export type RequestPrincipal =
   | { kind: "daemon" }
@@ -36,6 +39,8 @@ function publicCredential(record: ExtensionCredentialRecord): ExtensionCredentia
 
 export class StoreExtensionPairingService implements ExtensionPairingService {
   private readonly codes = new Map<string, number>();
+  private globalAttempts: number[] = [];
+  private readonly attemptsByExtension = new Map<string, number[]>();
   private readonly store: Store;
   private readonly now: () => number;
   private readonly random: (size: number) => Buffer;
@@ -55,13 +60,14 @@ export class StoreExtensionPairingService implements ExtensionPairingService {
       const code = String(this.random(4).readUInt32BE(0) % 1_000_000).padStart(6, "0");
       const hash = sha256(code);
       if (this.codes.has(hash)) continue;
-      const expiresAt = now + PAIR_CODE_TTL_MS;
+      const expiresAt = now + EXTENSION_PAIR_CODE_TTL_MS;
       this.codes.set(hash, expiresAt);
       return { code, expiresAt };
     }
   }
 
   exchange(code: string, extensionId: string): { token: string; credential: ExtensionCredential } {
+    this.consumePairAttempt(extensionId);
     const hash = sha256(code.trim());
     const expiresAt = this.codes.get(hash);
     if (expiresAt === undefined) throw new HttpError(400, "invalid or expired pairing code");
@@ -97,5 +103,27 @@ export class StoreExtensionPairingService implements ExtensionPairingService {
 
   revoke(id: string): boolean {
     return this.store.revokeExtensionCredential(id);
+  }
+
+  private consumePairAttempt(extensionId: string): void {
+    const now = this.now();
+    const cutoff = now - EXTENSION_PAIR_ATTEMPT_WINDOW_MS;
+    this.globalAttempts = this.globalAttempts.filter((attemptedAt) => attemptedAt > cutoff);
+    for (const [id, attempts] of this.attemptsByExtension) {
+      const active = attempts.filter((attemptedAt) => attemptedAt > cutoff);
+      if (active.length > 0) this.attemptsByExtension.set(id, active);
+      else this.attemptsByExtension.delete(id);
+    }
+
+    const extensionAttempts = this.attemptsByExtension.get(extensionId) ?? [];
+    if (
+      extensionAttempts.length >= EXTENSION_PAIR_ATTEMPTS_PER_EXTENSION
+      || this.globalAttempts.length >= EXTENSION_PAIR_ATTEMPTS_GLOBAL
+    ) {
+      throw new HttpError(429, "too many pairing attempts");
+    }
+    extensionAttempts.push(now);
+    this.attemptsByExtension.set(extensionId, extensionAttempts);
+    this.globalAttempts.push(now);
   }
 }

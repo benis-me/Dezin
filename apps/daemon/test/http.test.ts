@@ -11,6 +11,7 @@ import { createApp, matchPath, safeJoin } from "../src/index.ts";
 import type { AppDeps } from "../src/index.ts";
 import { buildMoodboardAgentContext, buildMoodboardAgentPrompt, parseMoodboardAgentOutput } from "../src/moodboard-agent.ts";
 import { injectSelectBridge } from "../src/serve-static.ts";
+import * as extensionAuth from "../src/extension-auth.ts";
 
 interface Ctx {
   base: string;
@@ -199,6 +200,27 @@ test("extension pair codes expire and are consumed before concurrent exchanges c
   } finally {
     Date.now = realNow;
   }
+});
+
+test("extension pairing throttles concurrent guesses globally across chrome-extension origins", async () => {
+  const globalLimit = extensionAuth.EXTENSION_PAIR_ATTEMPTS_GLOBAL ?? 32;
+  await withServer(async ({ base }) => {
+    const responses = await Promise.all(
+      Array.from({ length: globalLimit + 4 }, (_, index) => {
+        const originId = String.fromCharCode(97 + (index % 16)).repeat(32);
+        return exchangePairCode(base, "000000", `chrome-extension://${originId}`);
+      }),
+    );
+    const statuses = responses.map((response) => response.status);
+    assert.equal(statuses.filter((status) => status === 400).length, globalLimit);
+    assert.equal(statuses.filter((status) => status === 429).length, 4);
+    const invalidMessages = await Promise.all(
+      responses
+        .filter((response) => response.status === 400)
+        .map(async (response) => ((await response.json()) as { error: string }).error),
+    );
+    assert.deepEqual(new Set(invalidMessages), new Set(["invalid or expired pairing code"]));
+  });
 });
 
 test("extension pairing binds origin, lists redacted credentials, and revokes access", async () => {
