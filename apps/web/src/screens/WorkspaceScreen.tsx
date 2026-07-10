@@ -54,7 +54,7 @@ import { navigate } from "../router.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
-import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, ResearchDetail, RunEvent, RunSummary, Settings as AppSettings, SetupPhase } from "../lib/api.ts";
+import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, ResearchDetail, RunEvent, RunSummary, Settings as AppSettings, SetupPhase, VersionPreview } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { previewBridgeOriginForSrc, previewSandboxForSrc } from "../lib/preview-sandbox.ts";
@@ -73,6 +73,7 @@ type MoodboardRunRef = RunReference;
 type EffectRunRef = RunReference;
 type QueuedPrompt = { text: string; moodboardRefs?: MoodboardRunRef[]; effectRefs?: EffectRunRef[] };
 type PreviewBusyState = { title: string; detail?: string };
+type OwnedPreviewLease = { leaseId: string; expiresAt?: number };
 type WorkspaceContextItem = AgentComposerContextItem<MarkupTarget>;
 
 const SEVERITY_STYLE: Record<string, string> = {
@@ -2457,6 +2458,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   useEffect(() => () => { abortRef.current?.abort(); }, []);
   const selectionModeRef = useRef<"markup" | "inspect" | null>(null);
   const versionPreviewRequestRef = useRef(0);
+  const comparePreviewRequestRef = useRef(0);
+  const mainPreviewRequestRef = useRef(0);
+  const mainPreviewLeaseRef = useRef<OwnedPreviewLease | null>(null);
+  const versionPreviewLeaseRef = useRef<OwnedPreviewLease | null>(null);
+  const comparePreviewLeasesRef = useRef<OwnedPreviewLease[]>([]);
+  const workspaceDisposedRef = useRef(false);
   const inspectedTargetRef = useRef<MarkupTarget | null>(null);
   const terminalEventRef = useRef(false);
   const liveQualityRef = useRef(false);
@@ -2468,6 +2475,57 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   // The conversation the currently-watched run belongs to — used to drop its events if the user
   // switches to a different conversation mid-run (so they don't stream into the wrong transcript).
   const activeRunConvRef = useRef<string | null>(null);
+
+  const releaseOwnedPreviewLease = (lease: OwnedPreviewLease | null): void => {
+    if (lease?.leaseId) void api.releasePreviewLease(lease.leaseId).catch(() => {});
+  };
+
+  const replaceOwnedPreviewLease = (
+    ref: { current: OwnedPreviewLease | null },
+    next: OwnedPreviewLease | null,
+  ): void => {
+    const previous = ref.current;
+    ref.current = next;
+    if (previous?.leaseId && previous.leaseId !== next?.leaseId) releaseOwnedPreviewLease(previous);
+  };
+
+  const releaseComparePreviewLeases = (): void => {
+    const leases = comparePreviewLeasesRef.current;
+    comparePreviewLeasesRef.current = [];
+    for (const lease of leases) releaseOwnedPreviewLease(lease);
+  };
+
+  useEffect(() => {
+    workspaceDisposedRef.current = false;
+    const renewTimer = window.setInterval(() => {
+      const ids = new Set<string>();
+      for (const lease of [
+        mainPreviewLeaseRef.current,
+        versionPreviewLeaseRef.current,
+        ...comparePreviewLeasesRef.current,
+      ]) {
+        if (lease?.leaseId) ids.add(lease.leaseId);
+      }
+      for (const leaseId of ids) void api.renewPreviewLease(leaseId).catch(() => {});
+    }, 30_000);
+    return () => {
+      workspaceDisposedRef.current = true;
+      versionPreviewRequestRef.current += 1;
+      comparePreviewRequestRef.current += 1;
+      mainPreviewRequestRef.current += 1;
+      window.clearInterval(renewTimer);
+      const mainLease = mainPreviewLeaseRef.current;
+      mainPreviewLeaseRef.current = null;
+      releaseOwnedPreviewLease(mainLease);
+      const versionLease = versionPreviewLeaseRef.current;
+      versionPreviewLeaseRef.current = null;
+      releaseOwnedPreviewLease(versionLease);
+      releaseComparePreviewLeases();
+      if (modeRef.current === "standard" && !mainLease?.leaseId && !versionLease?.leaseId) {
+        void api.releaseDevServer(projectId).catch(() => {});
+      }
+    };
+  }, [api, projectId]);
 
   const updateQualityChecks = (next: QualityCheckState | ((current: QualityCheckState) => QualityCheckState)): void => {
     const resolved = typeof next === "function" ? next(qualityChecksRef.current) : next;
@@ -2555,6 +2613,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   };
 
   const clearVersionPreviewState = (): void => {
+    versionPreviewRequestRef.current += 1;
+    const lease = versionPreviewLeaseRef.current;
+    versionPreviewLeaseRef.current = null;
+    releaseOwnedPreviewLease(lease);
     setPreviewVersionRunId(null);
     setVersionFiles([]);
     setVersionActiveFile(null);
@@ -2635,6 +2697,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
    * and there's no CORS — see the sandbox keyed off an absolute src below).
    */
   const loadDevPreview = async (): Promise<void> => {
+    const requestId = mainPreviewRequestRef.current + 1;
+    mainPreviewRequestRef.current = requestId;
     try {
       for (let i = 0; i < 160; i++) {
         const s = await api.getSetup(projectId);
@@ -2645,9 +2709,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         if (s.phase === "error") return;
         await new Promise((r) => setTimeout(r, 1500));
       }
-      const { url } = await api.getDevServerUrl(projectId);
+      const preview = await api.getDevServerUrl(projectId);
+      const acquiredLease = preview.leaseId ? { leaseId: preview.leaseId, expiresAt: preview.expiresAt } : null;
+      if (workspaceDisposedRef.current || mainPreviewRequestRef.current !== requestId) {
+        releaseOwnedPreviewLease(acquiredLease);
+        return;
+      }
       clearVersionPreviewState();
-      setPreviewSrc(url);
+      replaceOwnedPreviewLease(mainPreviewLeaseRef, acquiredLease);
+      setPreviewSrc(preview.url);
       void api.getSetup(projectId).then((s) => {
         setSetupPhase(s.phase);
         setSetupError(s.error ?? null);
@@ -2660,12 +2730,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   };
 
   useEffect(() => {
-    return () => {
-      if (modeRef.current === "standard") void api.releaseDevServer(projectId).catch(() => {});
-    };
-  }, [api, projectId]);
-
-  useEffect(() => {
     const onTitle = (event: Event): void => {
       const project = (event as CustomEvent<Project>).detail;
       if (project?.id === projectId && typeof project.name === "string") setProjectName(project.name);
@@ -2674,9 +2738,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     return () => window.removeEventListener("dezin:project-title", onTitle);
   }, [projectId]);
 
-  const resolveVersionPreviewUrl = async (runId: string): Promise<string> => cacheBustPreviewUrl((await api.getVersionPreview(projectId, runId)).url);
+  const resolveVersionPreview = async (runId: string): Promise<VersionPreview> => {
+    const preview = await api.getVersionPreview(projectId, runId);
+    return { ...preview, url: cacheBustPreviewUrl(preview.url) };
+  };
 
   const viewVersion = async (runId: string): Promise<void> => {
+    mainPreviewRequestRef.current += 1;
     const requestId = versionPreviewRequestRef.current + 1;
     versionPreviewRequestRef.current = requestId;
     setPreviewVersionRunId(runId);
@@ -2686,12 +2754,21 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setPreviewBusy({ title: "Loading version preview", detail: "Preparing the saved snapshot and starting its preview server." });
     setTab("Preview");
     try {
-      const [url, text] = await Promise.all([
-        resolveVersionPreviewUrl(runId),
+      const [preview, text] = await Promise.all([
+        resolveVersionPreview(runId),
         api.getVersionText(projectId, runId).catch(() => ""),
       ]);
-      if (versionPreviewRequestRef.current !== requestId) return;
-      setPreviewSrc(url);
+      const acquiredLease = preview.leaseId ? { leaseId: preview.leaseId, expiresAt: preview.expiresAt } : null;
+      if (workspaceDisposedRef.current || versionPreviewRequestRef.current !== requestId) {
+        releaseOwnedPreviewLease(acquiredLease);
+        return;
+      }
+      const mainLease = mainPreviewLeaseRef.current;
+      mainPreviewLeaseRef.current = null;
+      releaseOwnedPreviewLease(mainLease);
+      if (!mainLease?.leaseId && modeRef.current === "standard") void api.releaseDevServer(projectId).catch(() => {});
+      replaceOwnedPreviewLease(versionPreviewLeaseRef, acquiredLease);
+      setPreviewSrc(preview.url);
       setVersionFileText(text);
       setVersionFiles(text ? [{ path: "index.html", size: text.length }] : []);
       setPreviewBusy(null);
@@ -2706,18 +2783,46 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const openVersionCompare = async (runId: string, label: string): Promise<void> => {
     if (!currentRun) return;
+    const requestId = comparePreviewRequestRef.current + 1;
+    comparePreviewRequestRef.current = requestId;
     setPreviewBusy({ title: "Loading version comparison", detail: "Preparing both saved snapshots for visual comparison." });
     try {
-      const [versionUrl, currentUrl] = await Promise.all([resolveVersionPreviewUrl(runId), resolveVersionPreviewUrl(currentRun.id)]);
+      const results = await Promise.allSettled([resolveVersionPreview(runId), resolveVersionPreview(currentRun.id)]);
+      const fulfilled = results
+        .filter((result): result is PromiseFulfilledResult<VersionPreview> => result.status === "fulfilled")
+        .map((result) => result.value);
+      if (results.some((result) => result.status === "rejected")) {
+        for (const preview of fulfilled) {
+          if (preview.leaseId) releaseOwnedPreviewLease({ leaseId: preview.leaseId, expiresAt: preview.expiresAt });
+        }
+        throw new Error("version comparison preview unavailable");
+      }
+      const [versionPreview, currentPreview] = fulfilled;
+      if (!versionPreview || !currentPreview) throw new Error("version comparison preview unavailable");
+      const acquiredLeases = [versionPreview, currentPreview]
+        .filter((preview): preview is VersionPreview & { leaseId: string } => Boolean(preview.leaseId))
+        .map((preview) => ({ leaseId: preview.leaseId, expiresAt: preview.expiresAt }));
+      if (workspaceDisposedRef.current || comparePreviewRequestRef.current !== requestId) {
+        for (const lease of acquiredLeases) releaseOwnedPreviewLease(lease);
+        return;
+      }
+      releaseComparePreviewLeases();
+      comparePreviewLeasesRef.current = acquiredLeases;
       setCompare({
-        a: { url: versionUrl, label },
-        b: { url: currentUrl, label: `${activeVersionGroup?.name ?? "Current branch"} current` },
+        a: { url: versionPreview.url, label },
+        b: { url: currentPreview.url, label: `${activeVersionGroup?.name ?? "Current branch"} current` },
       });
     } catch {
       toast("Couldn't load that comparison.", { variant: "error" });
     } finally {
       setPreviewBusy(null);
     }
+  };
+
+  const closeVersionCompare = (): void => {
+    comparePreviewRequestRef.current += 1;
+    releaseComparePreviewLeases();
+    setCompare(null);
   };
 
   const openDiff = async (runId: string, label: string): Promise<void> => {
@@ -3073,6 +3178,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "preview-update":
         // The agent rewrote the artifact mid-run — show it building live.
         clearVersionPreviewState();
+        if (typeof ev.leaseId === "string" && ev.leaseId) {
+          replaceOwnedPreviewLease(mainPreviewLeaseRef, {
+            leaseId: ev.leaseId,
+            expiresAt: typeof ev.expiresAt === "number" ? ev.expiresAt : undefined,
+          });
+        }
         if (typeof ev.previewUrl === "string" && ev.previewUrl.trim()) {
           setPreviewSrc(cacheBustPreviewUrl(ev.previewUrl.trim(), typeof ev.t === "number" ? ev.t : Date.now()));
         } else if (ev.mode !== "standard" && modeRef.current !== "standard") {
@@ -4188,10 +4299,18 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   };
 
   const refreshDevPreview = async (): Promise<void> => {
+    const requestId = mainPreviewRequestRef.current + 1;
+    mainPreviewRequestRef.current = requestId;
     try {
-      const { url } = await api.getDevServerUrl(projectId);
+      const preview = await api.getDevServerUrl(projectId);
+      const acquiredLease = preview.leaseId ? { leaseId: preview.leaseId, expiresAt: preview.expiresAt } : null;
+      if (workspaceDisposedRef.current || mainPreviewRequestRef.current !== requestId) {
+        releaseOwnedPreviewLease(acquiredLease);
+        return;
+      }
       clearVersionPreviewState();
-      setPreviewSrc(`${url.split("?")[0]}?t=${Date.now()}`);
+      replaceOwnedPreviewLease(mainPreviewLeaseRef, acquiredLease);
+      setPreviewSrc(`${preview.url.split("?")[0]}?t=${Date.now()}`);
       void api.getSetup(projectId)
         .then((s) => {
           setSetupPhase(s.phase);
@@ -4435,11 +4554,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                   onCompare={(vid) => {
                     const a = variants.find((v) => v.active);
                     const b = variants.find((v) => v.id === vid);
-                    if (a && b)
+                    if (a && b) {
+                      comparePreviewRequestRef.current += 1;
+                      releaseComparePreviewLeases();
                       setCompare({
                         a: { url: api.variantPreviewUrl(projectId, a.id), label: a.name },
                         b: { url: api.variantPreviewUrl(projectId, b.id), label: b.name },
                       });
+                    }
                   }}
                 />
               </>
@@ -5137,7 +5259,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       </Group>
 
       {pendingMark ? <MarkUpPopover mark={pendingMark} onAdd={addMark} onCancel={dismissMark} /> : null}
-      {compare ? <VersionCompare open onClose={() => setCompare(null)} a={compare.a} b={compare.b} /> : null}
+      {compare ? <VersionCompare open onClose={closeVersionCompare} a={compare.a} b={compare.b} /> : null}
       {viewDs && dsId ? (
         <Dialog open onClose={() => setViewDs(false)} label="Design system" className="sm:max-w-5xl" showClose>
           <div className="h-[82vh]">

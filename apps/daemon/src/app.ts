@@ -90,6 +90,13 @@ import {
   type ExtensionPairingService,
 } from "./extension-auth.ts";
 import { removeStandardRunTransaction } from "./standard-run-transaction.ts";
+import {
+  previewLeaseManager,
+  type PreviewLease,
+  type PreviewLeaseManager,
+} from "./preview-lease.ts";
+
+export type DevServerLease = Pick<PreviewLease, "url"> & Partial<Omit<PreviewLease, "url">>;
 
 export interface AppDeps {
   store: Store;
@@ -109,8 +116,16 @@ export interface AppDeps {
   /** Standard project setup hook; tests can replace the slow npm-installing default. */
   standardProjectSetup?: (projectId: string, projectDir: string, signal?: AbortSignal) => void | Promise<void>;
   /** Standard dev-server hooks; tests can avoid spawning npm. */
-  ensureDevServer?: typeof ensureDevServer;
+  ensureDevServer?: (
+    projectId: string,
+    projectDir: string,
+    runtimeKey?: string,
+    signal?: AbortSignal,
+    leaseManager?: PreviewLeaseManager,
+  ) => Promise<DevServerLease>;
   releaseDevServer?: typeof releaseDevServer;
+  /** Daemon-owned preview process leases; tests may inject a deterministic manager. */
+  previewLeaseManager?: PreviewLeaseManager;
   /** Cover capture hook for Standard dev-server URLs; tests can avoid launching Chrome. */
   captureCoverUrl?: (url: string, outPath: string, signal?: AbortSignal) => Promise<boolean>;
   /** Cover capture hook for HTML snapshot files; tests can avoid launching Chrome. */
@@ -219,11 +234,13 @@ function sharinganRequestTarget(req: IncomingMessage, projectId: string, deps: A
   };
 }
 
-export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir">): RuntimeSupervisor {
+export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir" | "previewLeaseManager">): RuntimeSupervisor {
   const cleanupDeps = deps as AppDeps;
+  const previewLeases = cleanupDeps.previewLeaseManager ?? previewLeaseManager;
   return new RuntimeSupervisor({
     dataDir: deps.dataDir,
     store: deps.store,
+    previewLeaseManager: previewLeases,
     releaseProjectResources: async ({ projectId, runIds }) => {
       await releaseProjectRuntime(projectId);
       await releaseSharinganProject(projectId);
@@ -271,6 +288,22 @@ const routes: Route[] = [
     method: "GET",
     pattern: "/api/health",
     handler: (_req, res, _p, deps) => sendJson(res, 200, { ok: true, version: deps.version ?? "0.0.0" }),
+  },
+  {
+    method: "PATCH",
+    pattern: "/api/preview-leases/:leaseId",
+    handler: async (_req, res, { leaseId }, deps) => {
+      const lease = await deps.previewLeaseManager!.renew(leaseId!);
+      if (!lease) return sendError(res, 404, "preview lease not found");
+      sendJson(res, 200, { leaseId: lease.leaseId, url: lease.url, expiresAt: lease.expiresAt });
+    },
+  },
+  {
+    method: "DELETE",
+    pattern: "/api/preview-leases/:leaseId",
+    handler: async (_req, res, { leaseId }, deps) => {
+      sendJson(res, 200, { released: await deps.previewLeaseManager!.release(leaseId!) });
+    },
   },
   {
     method: "POST",
@@ -664,15 +697,21 @@ const routes: Route[] = [
       if (!project) return sendError(res, 404, "project not found");
       try {
         const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
-        const { url } = await deps.runtimeSupervisor!.trackOperation(
+        const lease = await deps.runtimeSupervisor!.trackOperation(
           { projectId: id!, variantId: active },
           async (signal) => {
             const dir = await activeArtifactDir(deps, project);
             signal.throwIfAborted();
-            return (deps.ensureDevServer ?? ensureDevServer)(id!, dir, variantRuntimeKey(id!, active), signal);
+            return (deps.ensureDevServer ?? ensureDevServer)(
+              id!,
+              dir,
+              variantRuntimeKey(id!, active),
+              signal,
+              deps.previewLeaseManager,
+            );
           },
         );
-        sendJson(res, 200, { url });
+        sendJson(res, 200, { url: lease.url, leaseId: lease.leaseId, expiresAt: lease.expiresAt });
       } catch (err) {
         sendError(res, 409, err instanceof Error ? err.message : "dev server unavailable");
       }
@@ -681,11 +720,13 @@ const routes: Route[] = [
   {
     method: "DELETE",
     pattern: "/api/projects/:id/devserver",
-    handler: (_req, res, { id }, deps) => {
+    handler: async (_req, res, { id }, deps) => {
       const project = deps.store.getProject(id!);
       if (!project) return sendError(res, 404, "project not found");
       const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
-      const released = (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id!, active));
+      const released = deps.releaseDevServer
+        ? deps.releaseDevServer(variantRuntimeKey(id!, active))
+        : await deps.previewLeaseManager!.stopScope({ projectId: id!, variantId: active }).then(() => true);
       sendJson(res, 200, { released });
     },
   },
@@ -962,14 +1003,13 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/versions/:runId/preview-url",
-    publicRead: true,
     handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
       {
         projectId: params.id!,
         variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
         runId: params.runId!,
       },
-      () => handleGetVersionPreviewUrl(res, params, deps),
+      (signal) => handleGetVersionPreviewUrl(res, params, deps, signal),
     ),
   },
   {
@@ -1005,7 +1045,7 @@ const routes: Route[] = [
         variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
         runId: params.runId!,
       },
-      () => handleSetVersionCover(res, params, deps),
+      (signal) => handleSetVersionCover(res, params, deps, signal),
     ),
   },
   {
@@ -1055,16 +1095,24 @@ const routes: Route[] = [
           if (existsSync(coverPath)) return sendJson(res, 200, { captured: false, reason: "exists" });
           const runtimeKey = variantRuntimeKey(id!, active);
           const releaseAfter = new URL(req.url ?? "", "http://localhost").searchParams.get("release") === "1";
+          let lease: DevServerLease | undefined;
           try {
             const dir = await activeArtifactDir(deps, project);
-            const { url } = await (deps.ensureDevServer ?? ensureDevServer)(id!, dir, runtimeKey, signal);
+            lease = await (deps.ensureDevServer ?? ensureDevServer)(
+              id!,
+              dir,
+              runtimeKey,
+              signal,
+              deps.previewLeaseManager,
+            );
             signal.throwIfAborted();
-            const captured = await (deps.captureCoverUrl ?? captureCoverUrl)(url, coverPath, signal);
+            const captured = await (deps.captureCoverUrl ?? captureCoverUrl)(lease.url, coverPath, signal);
             sendJson(res, 200, { captured });
           } catch (err) {
             sendError(res, 409, err instanceof Error ? err.message : "cover capture failed");
           } finally {
-            if (releaseAfter) (deps.releaseDevServer ?? releaseDevServer)(runtimeKey);
+            if (lease?.release) await lease.release();
+            else if (releaseAfter) (deps.releaseDevServer ?? releaseDevServer)(runtimeKey);
           }
         },
       );
@@ -1211,7 +1259,15 @@ const routes: Route[] = [
 ];
 
 export function createApp(deps: AppDeps): http.Server {
-  const appDeps: AppDeps = { ...deps, runtimeSupervisor: deps.runtimeSupervisor ?? createRuntimeSupervisor(deps) };
+  const resolvedPreviewLeaseManager = deps.previewLeaseManager ?? previewLeaseManager;
+  const appDeps: AppDeps = {
+    ...deps,
+    previewLeaseManager: resolvedPreviewLeaseManager,
+    runtimeSupervisor: deps.runtimeSupervisor ?? createRuntimeSupervisor({
+      ...deps,
+      previewLeaseManager: resolvedPreviewLeaseManager,
+    }),
+  };
   const webDir = appDeps.webDir ?? defaultWebDir();
   const hasWeb = existsSync(webDir);
   const extensionPairing = appDeps.extensionPairing ?? new StoreExtensionPairingService(appDeps.store);

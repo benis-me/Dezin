@@ -8,6 +8,7 @@ import type { AppDeps } from "./app.ts";
 import { gitCommit } from "./project-runtime.ts";
 import { projectDir, safeJoin } from "./serve-static.ts";
 import type { RuntimeScope } from "./runtime-supervisor.ts";
+import { previewLeaseManager } from "./preview-lease.ts";
 
 export function standardWorktreeDir(dataDir: string, projectId: string, variantId: string): string {
   return join(dataDir, "worktrees", projectId, variantId);
@@ -182,6 +183,7 @@ export async function removeStandardVariantWorktree(deps: AppDeps, projectId: st
 }
 
 export async function removeStandardVersionWorktree(deps: AppDeps, projectId: string, runId: string): Promise<void> {
+  await (deps.previewLeaseManager ?? previewLeaseManager).stopScope({ projectId, runId });
   const root = projectDir(deps.dataDir, projectId);
   const dir = standardVersionWorktreeDir(deps.dataDir, projectId, runId);
   if (!existsSync(join(root, ".git"))) {

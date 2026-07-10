@@ -12,6 +12,8 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     getSetup: async () => ({ phase: "ready" as const }),
     getDevServerUrl: async (id: string) => ({ url: `http://127.0.0.1:5300/${id}` }),
     releaseDevServer: async () => {},
+    renewPreviewLease: async (leaseId: string) => ({ leaseId, url: "http://127.0.0.1:5300/", expiresAt: Date.now() + 60_000 }),
+    releasePreviewLease: async () => {},
     captureProjectCover: async () => ({ captured: false }),
     getProject: notImpl as ApiClient["getProject"],
     patchProject: notImpl as ApiClient["patchProject"],

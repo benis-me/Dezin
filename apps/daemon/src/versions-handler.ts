@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { ServerResponse } from "node:http";
 import { sendJson, sendError } from "./http-util.ts";
 import { injectSelectBridge, projectDir } from "./serve-static.ts";
-import type { AppDeps } from "./app.ts";
+import type { AppDeps, DevServerLease } from "./app.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { ensureDevServer } from "./project-runtime.ts";
 import {
@@ -40,11 +40,16 @@ function versionPreviewPath(projectId: string, runId: string): string {
   return `/api/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(runId)}`;
 }
 
-async function standardVersionPreviewUrl(deps: AppDeps, project: Project, run: Run): Promise<string> {
+async function standardVersionPreviewLease(deps: AppDeps, project: Project, run: Run, signal?: AbortSignal): Promise<DevServerLease> {
   if (!run.commitHash) throw new Error("no snapshot for this run");
   const dir = await standardVersionArtifactDir(deps, project.id, run.id, run.commitHash);
-  const { url } = await (deps.ensureDevServer ?? ensureDevServer)(project.id, dir, versionRuntimeKey(project.id, run.id));
-  return url;
+  return (deps.ensureDevServer ?? ensureDevServer)(
+    project.id,
+    dir,
+    versionRuntimeKey(project.id, run.id),
+    signal,
+    deps.previewLeaseManager,
+  );
 }
 
 function gitDiffLines(text: string): DiffLine[] {
@@ -63,9 +68,10 @@ export async function handleGetVersion(res: ServerResponse, params: Record<strin
   if (!found) return sendError(res, 404, "project not found");
   if (found.project.mode === "standard") {
     try {
-      const url = await standardVersionPreviewUrl(deps, found.project, found.run);
-      res.writeHead(302, { location: url });
+      const lease = await standardVersionPreviewLease(deps, found.project, found.run);
+      res.writeHead(302, { location: lease.url });
       res.end();
+      await lease.release?.();
     } catch (err) {
       sendError(res, err instanceof Error && err.message === "no snapshot for this run" ? 404 : 409, err instanceof Error ? err.message : "version unavailable");
     }
@@ -81,12 +87,23 @@ export async function handleGetVersion(res: ServerResponse, params: Record<strin
   res.end(html);
 }
 
-export async function handleGetVersionPreviewUrl(res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+export async function handleGetVersionPreviewUrl(
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+  signal?: AbortSignal,
+): Promise<void> {
   const found = projectRun(deps, params.id!, params.runId!);
   if (!found) return sendError(res, 404, "project not found");
   if (found.project.mode === "standard") {
     try {
-      sendJson(res, 200, { url: await standardVersionPreviewUrl(deps, found.project, found.run), mode: "standard" });
+      const lease = await standardVersionPreviewLease(deps, found.project, found.run, signal);
+      sendJson(res, 200, {
+        url: lease.url,
+        mode: "standard",
+        leaseId: lease.leaseId,
+        expiresAt: lease.expiresAt,
+      });
     } catch (err) {
       sendError(res, err instanceof Error && err.message === "no snapshot for this run" ? 404 : 409, err instanceof Error ? err.message : "version unavailable");
     }
@@ -131,17 +148,26 @@ export async function handleRestoreVersion(res: ServerResponse, params: Record<s
   sendJson(res, 200, { ok: true });
 }
 
-export async function handleSetVersionCover(res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+export async function handleSetVersionCover(
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+  signal?: AbortSignal,
+): Promise<void> {
   const found = projectRun(deps, params.id!, params.runId!);
   if (!found) return sendError(res, 404, "project not found");
   const outPath = join(projectDir(deps.dataDir, params.id!), ".cover.png");
   if (found.project.mode === "standard") {
+    let lease: DevServerLease | undefined;
     try {
-      const url = await standardVersionPreviewUrl(deps, found.project, found.run);
-      const captured = await (deps.captureCoverUrl ?? captureCoverUrl)(url, outPath);
+      lease = await standardVersionPreviewLease(deps, found.project, found.run, signal);
+      signal?.throwIfAborted();
+      const captured = await (deps.captureCoverUrl ?? captureCoverUrl)(lease.url, outPath, signal);
       sendJson(res, 200, { captured });
     } catch (err) {
       sendError(res, err instanceof Error && err.message === "no snapshot for this run" ? 404 : 409, err instanceof Error ? err.message : "cover capture failed");
+    } finally {
+      await lease?.release?.();
     }
     return;
   }

@@ -7,10 +7,15 @@
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer } from "node:net";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSpawnEnv } from "../../../packages/agent/src/index.ts";
+import {
+  previewLeaseManager,
+  type PreviewLease,
+  type PreviewLeaseManager,
+} from "./preview-lease.ts";
+import type { RuntimeScope } from "./runtime-supervisor.ts";
 
 export function templateDir(name = "react-vite"): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "content", "templates", name);
@@ -33,7 +38,6 @@ interface Runtime {
   children: Set<ChildProcess>;
   operation?: Promise<void>;
   stopPromise?: Promise<void>;
-  dev?: { proc: ChildProcess; port: number; url: string; projectDir: string; fingerprint: string; releaseTimer?: ReturnType<typeof setTimeout> };
 }
 
 const runtimes = new Map<string, Runtime>();
@@ -43,23 +47,6 @@ export const DEV_SERVER_IDLE_MS = 60_000;
 const PICKER_BRIDGE_BLOCK = /const PICKER_BRIDGE = `[\s\S]*?<\/script>`;/;
 const PICKER_BRIDGE_START = "const PICKER_BRIDGE = ";
 const PICKER_PLUGIN_START = "\nfunction dezinPicker";
-
-function clearDevReleaseTimer(dev: Runtime["dev"]): void {
-  if (!dev?.releaseTimer) return;
-  clearTimeout(dev.releaseTimer);
-  dev.releaseTimer = undefined;
-}
-
-function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
-  const maybeNodeTimer = timer as { unref?: () => void };
-  if (typeof maybeNodeTimer.unref === "function") maybeNodeTimer.unref();
-}
-
-function stopDev(dev: Runtime["dev"]): void {
-  if (!dev) return;
-  clearDevReleaseTimer(dev);
-  if (!dev.proc.killed) dev.proc.kill();
-}
 
 function waitForChildExit(child: ChildProcess, timeoutMs = 1_000): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -83,10 +70,7 @@ function stopRuntime(rt: Runtime): Promise<void> {
   rt.released = true;
   rt.stopPromise ??= (async () => {
     const children = new Set(rt.children);
-    if (rt.dev?.proc) children.add(rt.dev.proc);
     const exits = [...children].map((child) => waitForChildExit(child));
-    stopDev(rt.dev);
-    rt.dev = undefined;
     for (const child of rt.children) {
       if (!child.killed && child.exitCode === null && child.signalCode === null) child.kill();
     }
@@ -328,25 +312,12 @@ async function ensurePreviewDependencies(projectDir: string, runtimeKey: string,
   appendLog(rt, "Preview dependencies are ready");
 }
 
-async function portResponds(port: number): Promise<boolean> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(800) });
-    return res.ok || res.status === 200 || res.status === 404;
-  } catch {
-    return false;
-  }
-}
-
-/** Grab a free TCP port from the OS (avoids clashing with orphaned dev servers). */
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const port = (srv.address() as { port: number }).port;
-      srv.close(() => resolve(port));
-    });
-  });
+export function previewRuntimeScope(projectId: string, runtimeKey = projectId): RuntimeScope {
+  const versionPrefix = `${projectId}:version:`;
+  if (runtimeKey.startsWith(versionPrefix)) return { projectId, runId: runtimeKey.slice(versionPrefix.length) };
+  const variantPrefix = `${projectId}:`;
+  if (runtimeKey.startsWith(variantPrefix)) return { projectId, variantId: runtimeKey.slice(variantPrefix.length) };
+  return { projectId };
 }
 
 /**
@@ -354,7 +325,13 @@ function freePort(): Promise<number> {
  * loads this URL directly (cross-origin) with allow-same-origin, so JSX is
  * transpiled and there is no CORS — no daemon proxy in the path.
  */
-export async function ensureDevServer(projectId: string, projectDir: string, runtimeKey = projectId, signal?: AbortSignal): Promise<{ url: string }> {
+export async function ensureDevServer(
+  projectId: string,
+  projectDir: string,
+  runtimeKey = projectId,
+  signal?: AbortSignal,
+  leaseManager: PreviewLeaseManager = previewLeaseManager,
+): Promise<PreviewLease> {
   let rt = runtimes.get(runtimeKey);
   let detach = (): void => {};
   if (!rt) {
@@ -373,78 +350,26 @@ export async function ensureDevServer(projectId: string, projectDir: string, run
   if (bridgeUpdated) {
     appendLog(rt, "Updated preview inspect bridge");
     if (!statusBeforeBridgeUpdate) await gitCommit(projectDir, "Dezin: update preview inspect bridge");
-    if (rt.dev && !rt.dev.proc.killed) {
-      stopDev(rt.dev);
-      rt.dev = undefined;
-    }
   }
   await ensurePreviewDependencies(projectDir, runtimeKey, rt, signal);
   const currentFingerprint = await devServerFingerprint(projectDir);
   assertRuntimeActive(runtimeKey, rt, signal);
-  if (rt.dev && !rt.dev.proc.killed) {
-    if (rt.dev.projectDir !== projectDir || rt.dev.fingerprint !== currentFingerprint) {
-      appendLog(rt, "Restarting dev server for updated project files");
-      stopDev(rt.dev);
-      rt.dev = undefined;
-    } else if (await portResponds(rt.dev.port)) {
-      assertRuntimeActive(runtimeKey, rt, signal);
-      clearDevReleaseTimer(rt.dev);
-      return { url: rt.dev.url };
-    }
-    if (rt.dev) {
-      stopDev(rt.dev);
-      rt.dev = undefined;
-    }
-  }
-
-  const port = await freePort();
-  assertRuntimeActive(runtimeKey, rt, signal);
-  appendLog(rt, `Starting dev server on ${port}`);
-  const proc = spawn("npm", ["run", "dev", "--", "--port", String(port), "--strictPort", "--host", "127.0.0.1"], {
-    cwd: projectDir,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: agentSpawnEnv(),
-    detached: false,
+  appendLog(rt, "Acquiring ready preview server");
+  return await leaseManager.acquire(previewRuntimeScope(projectId, runtimeKey), projectDir, {
+    fingerprint: currentFingerprint,
+    signal,
+    onLog: (message, level) => appendLog(rt!, message, level),
   });
-  proc.stdout?.setEncoding("utf8");
-  proc.stderr?.setEncoding("utf8");
-  proc.stdout?.on("data", (data: string) => appendLog(rt!, data, "info"));
-  proc.stderr?.on("data", (data: string) => appendLog(rt!, data, "error"));
-  proc.on("close", () => {
-    appendLog(rt!, "Dev server stopped");
-    if (rt!.dev?.proc === proc) {
-      clearDevReleaseTimer(rt!.dev);
-      rt!.dev = undefined;
-    }
-  });
-  const url = `http://127.0.0.1:${port}/`;
-  rt.dev = { proc, port, url, projectDir, fingerprint: currentFingerprint };
-
-  // Wait for Vite to come up (up to ~15s).
-  for (let i = 0; i < 30; i++) {
-    assertRuntimeActive(runtimeKey, rt, signal);
-    if (await portResponds(port)) return { url };
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  assertRuntimeActive(runtimeKey, rt, signal);
-  return { url }; // return anyway; the iframe will retry
   } finally {
     detach();
   }
 }
 
-/** Mark one dev server as no longer used; it is stopped after a short idle grace period. */
-export function releaseDevServer(runtimeKey: string, idleMs = DEV_SERVER_IDLE_MS): boolean {
-  const rt = runtimes.get(runtimeKey);
-  const dev = rt?.dev;
-  if (!rt || rt.released || !dev || dev.proc.killed) return false;
-  clearDevReleaseTimer(dev);
-  dev.releaseTimer = setTimeout(() => {
-    if (rt.dev !== dev) return;
-    stopDev(dev);
-    if (rt.dev === dev) rt.dev = undefined;
-  }, idleMs);
-  unrefTimer(dev.releaseTimer);
+/** Compatibility cleanup for legacy callers that only retained the runtime key. */
+export function releaseDevServer(runtimeKey: string): boolean {
+  const projectId = runtimeKey.split(":", 1)[0];
+  if (!projectId) return false;
+  void previewLeaseManager.stopScope(previewRuntimeScope(projectId, runtimeKey));
   return true;
 }
 
@@ -512,6 +437,7 @@ export async function releaseProjectRuntime(projectId: string): Promise<void> {
   for (const [key, rt] of entries) {
     if (runtimes.get(key) === rt) runtimes.delete(key);
   }
+  await previewLeaseManager.stopScope({ projectId });
 }
 
 /** Stop and forget one variant runtime plus version previews owned by its Runs. */
@@ -526,6 +452,10 @@ export async function releaseVariantRuntime(projectId: string, variantId: string
   for (const [key, rt] of entries) {
     if (runtimes.get(key) === rt) runtimes.delete(key);
   }
+  await Promise.all([
+    previewLeaseManager.stopScope({ projectId, variantId }),
+    ...runIds.map((runId) => previewLeaseManager.stopScope({ projectId, runId })),
+  ]);
 }
 
 /** Stop all runtime resources and await bounded child settlement. */
@@ -537,6 +467,7 @@ export async function stopAllProjectRuntimes(): Promise<void> {
     if (entries.includes(rt)) runtimes.delete(key);
   }
   retiredRuntimes.clear();
+  await previewLeaseManager.stopAll();
 }
 
 /** Stop all dev/setup resources synchronously enough for legacy teardown callers. */
@@ -546,4 +477,5 @@ export function stopAllDevServers(): void {
   }
   runtimes.clear();
   retiredRuntimes.clear();
+  void previewLeaseManager.stopAll();
 }

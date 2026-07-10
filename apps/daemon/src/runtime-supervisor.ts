@@ -1,6 +1,7 @@
 import type { Store } from "../../../packages/core/src/index.ts";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import type { PreviewLeaseManager } from "./preview-lease.ts";
 
 export type RuntimeScope = { projectId: string; variantId?: string; runId?: string };
 
@@ -27,6 +28,7 @@ export interface RuntimeSupervisorOptions {
   releaseProjectResources?: (scope: RuntimeReleaseScope) => void | Promise<void>;
   releaseVariantResources?: (scope: RuntimeReleaseScope & { variantId: string }) => void | Promise<void>;
   shutdownResources?: () => void | Promise<void>;
+  previewLeaseManager?: PreviewLeaseManager;
   shutdownWaitMs?: number;
 }
 
@@ -162,6 +164,10 @@ export class RuntimeSupervisor {
       .listRuns(projectId)
       .filter((run) => run.variantId === variantId)
       .map((run) => run.id);
+    await Promise.all([
+      this.options.previewLeaseManager?.stopScope({ projectId, variantId }),
+      ...runIds.map((runId) => this.options.previewLeaseManager?.stopScope({ projectId, runId })),
+    ]);
     await this.options.releaseVariantResources?.({ projectId, variantId, runIds });
     await Promise.all([
       rm(join(this.options.dataDir, "worktrees", projectId, variantId), { recursive: true, force: true }),
@@ -195,6 +201,7 @@ export class RuntimeSupervisor {
     // A tracked import may create Runs/log paths while unwinding after abort. Re-read ownership
     // only after every project operation settles so cleanup cannot use a stale pre-import snapshot.
     const runIds = this.options.store.listRuns(projectId).map((run) => run.id);
+    await this.options.previewLeaseManager?.stopScope({ projectId });
     await this.options.releaseProjectResources?.({ projectId, runIds });
     await Promise.all([
       rm(join(this.options.dataDir, "worktrees", projectId), { recursive: true, force: true }),
@@ -232,7 +239,10 @@ export class RuntimeSupervisor {
       deadlineAt,
     );
     const resourcesSettled = await this.waitForSettlements(
-      [Promise.resolve().then(() => this.options.shutdownResources?.()).then(() => {})],
+      [
+        Promise.resolve().then(() => this.options.previewLeaseManager?.stopAll()).then(() => {}),
+        Promise.resolve().then(() => this.options.shutdownResources?.()).then(() => {}),
+      ],
       deadlineAt,
     );
     return settled && resourcesSettled;

@@ -173,6 +173,31 @@ test("releaseDevServer DELETEs the project devserver lease", async () => {
   );
 });
 
+test("preview lease APIs renew and release the exact lease id", async () => {
+  const fetchImpl = vi.fn<FetchLike>(async (_input, init) => {
+    if (init?.method === "PATCH") return jsonResponse({ leaseId: "lease-1", url: "http://127.0.0.1:5300/", expiresAt: 99 });
+    return jsonResponse({ released: true });
+  });
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  await expect(api.renewPreviewLease("lease-1")).resolves.toEqual({
+    leaseId: "lease-1",
+    url: "http://127.0.0.1:5300/",
+    expiresAt: 99,
+  });
+  await expect(api.releasePreviewLease("lease-1")).resolves.toBeUndefined();
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    1,
+    "http://d/api/preview-leases/lease-1",
+    expect.objectContaining({ method: "PATCH" }),
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    2,
+    "http://d/api/preview-leases/lease-1",
+    expect.objectContaining({ method: "DELETE" }),
+  );
+});
+
 test("captureProjectCover POSTs the cover capture endpoint", async () => {
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ captured: true }));
   const api = createApiClient({ baseUrl: "http://d", fetchImpl });

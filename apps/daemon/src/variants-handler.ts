@@ -22,7 +22,6 @@ import {
   standardVariantArtifactDir,
   variantRuntimeKey,
 } from "./variant-workspaces.ts";
-import { releaseDevServer } from "./project-runtime.ts";
 import { RuntimeScopeUnavailableError } from "./runtime-supervisor.ts";
 
 // Daemon-internal entries that are never part of a branch's artifact.
@@ -43,6 +42,14 @@ function withVariantMutation<T>(
     return deps.runtimeSupervisor.trackOperation({ projectId, variantId }, start);
   }
   return start(new AbortController().signal);
+}
+
+async function releaseStandardPreview(deps: AppDeps, projectId: string, variantId: string): Promise<void> {
+  if (deps.releaseDevServer) {
+    await deps.releaseDevServer(variantRuntimeKey(projectId, variantId));
+    return;
+  }
+  await deps.previewLeaseManager?.stopScope({ projectId, variantId });
 }
 
 async function artifactEntries(dir: string): Promise<string[]> {
@@ -98,7 +105,7 @@ export async function handleCreateVariant(
       }
       await deps.variantMutationCheckpoint?.(id, v.id, "created", variantSignal);
       variantSignal.throwIfAborted();
-      if (project.mode === "standard") (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
+      if (project.mode === "standard") await releaseStandardPreview(deps, id, active.id);
       deps.store.setActiveVariant(id, v.id);
     });
     sendJson(res, 200, deps.store.listVariants(id));
@@ -225,7 +232,7 @@ export async function handleForkMessage(
       if (project.mode === "standard") {
         if (!run.commitHash) throw new Error("this Standard run has no commit snapshot");
         await createStandardVariantWorktreeFromCommit(deps, id, variant.id, run.commitHash);
-        (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
+        await releaseStandardPreview(deps, id, active.id);
       } else {
         const versionFile = versionSnapshotPath(deps.dataDir, id, run.id);
         if (!existsSync(versionFile)) throw new Error("this run has no version snapshot");
@@ -323,7 +330,7 @@ export async function handleActivateVariant(
       }
     }
     signal?.throwIfAborted();
-    if (project.mode === "standard" && active) (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active));
+    if (project.mode === "standard" && active) await releaseStandardPreview(deps, id, active);
     deps.store.setActiveVariant(id, vid);
     if (activatedPrototypeSnapshot) {
       await rm(activatedPrototypeSnapshot, { recursive: true, force: true });

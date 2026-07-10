@@ -72,7 +72,7 @@ import { buildSharinganContext, buildSharinganSystemPrompt } from "./sharingan-c
 import { writeProbeCli } from "./sharingan-probe-cli.ts";
 import { sharinganReviewReference } from "./sharingan-capture.ts";
 import { SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
-import type { AppDeps } from "./app.ts";
+import type { AppDeps, DevServerLease } from "./app.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -1443,6 +1443,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // No closed lint loop on one file; run a turn, commit the diff to git as a version.
   if (project.mode === "standard") {
     let publishedSuccessPatch: RunSettlementPatch | null = null;
+    let livePreviewLease: DevServerLease | null = null;
+    let handedOffLivePreviewLease = false;
     const settlePublishedSuccess = (patch: RunSettlementPatch): void => {
       let lastError: unknown;
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1490,14 +1492,25 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const stuckDefectKeys = new Set<string>(); // defects the agent repeatedly failed to fix
       const emitStandardPreviewUpdate = async (eventRound: number): Promise<void> => {
         try {
-          const { url } = await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId), ctrl!.signal);
-          livePreviewUrl = url;
+          const nextLease = await ensureStandardDevServer(
+            project.id,
+            dir,
+            variantRuntimeKey(project.id, targetVariantId),
+            ctrl!.signal,
+            deps.previewLeaseManager,
+          );
+          const previousLease = livePreviewLease;
+          livePreviewLease = nextLease;
+          livePreviewUrl = nextLease.url;
+          await previousLease?.release?.();
           sse({
             type: "preview-update",
             runId: run.id,
             mode: "standard",
             variantId: targetVariantId,
-            previewUrl: url,
+            previewUrl: nextLease.url,
+            leaseId: nextLease.leaseId,
+            expiresAt: nextLease.expiresAt,
             t: Date.now(),
             round: eventRound,
           });
@@ -1616,9 +1629,20 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
           const screenshotUrl = `/api/projects/${project.id}/variants/${targetVariantId}/preview/.visual-qa/screenshot.png`;
           sse({ ...visualQaStartPayload(round, visualQaSettings, runAgentCommand, runModel, screenshotUrl), runId: run.id });
           let renderUrl: string | undefined;
+          let temporaryQaLease: DevServerLease | undefined;
           if (!deps.visualQa) {
             try {
-              renderUrl = livePreviewUrl ?? (await ensureStandardDevServer(project.id, dir, variantRuntimeKey(project.id, targetVariantId), ctrl.signal)).url;
+              if (livePreviewUrl) renderUrl = livePreviewUrl;
+              else {
+                temporaryQaLease = await ensureStandardDevServer(
+                  project.id,
+                  dir,
+                  variantRuntimeKey(project.id, targetVariantId),
+                  ctrl.signal,
+                  deps.previewLeaseManager,
+                );
+                renderUrl = temporaryQaLease.url;
+              }
             } catch (err) {
               visualFindings = [
                 {
@@ -1630,14 +1654,18 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
               ];
             }
           }
-          if (!visualFindings.length) {
-            visualFindings = await runVisualQa(deps, join(dir, "index.html"), visualQaSettings, runAgentCommand, runModel, visibleBrief, turnHistory, {
-              projectRoot: dir,
-              renderUrl,
-              directionSpec: chosenDirectionSpec,
-              sharinganReference: project.sharingan ? sharinganReviewReference(dir) : undefined,
-              isSharingan: project.sharingan,
-            });
+          try {
+            if (!visualFindings.length) {
+              visualFindings = await runVisualQa(deps, join(dir, "index.html"), visualQaSettings, runAgentCommand, runModel, visibleBrief, turnHistory, {
+                projectRoot: dir,
+                renderUrl,
+                directionSpec: chosenDirectionSpec,
+                sharinganReference: project.sharingan ? sharinganReviewReference(dir) : undefined,
+                isSharingan: project.sharingan,
+              });
+            }
+          } finally {
+            await temporaryQaLease?.release?.();
           }
           visualFindings = suppress(markVisualReviewRound(withVisualScreenshotUrl(visualFindings, screenshotUrl), round));
           visualReviewHistory = [...visualReviewHistory, ...visualFindings];
@@ -1784,23 +1812,29 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         event: { type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", designReviewed: !designReviewSkipped, findings: persistedFindings },
       };
       settlePublishedSuccess(publishedSuccessPatch);
+      handedOffLivePreviewLease = true;
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
         const cover = deps.runtimeSupervisor!.trackOperation(
           { projectId: project.id, variantId: targetVariantId, runId: run.id },
           async (signal) => {
-            const { url } = await ensureStandardDevServer(
+            const lease = await ensureStandardDevServer(
               project.id,
               dir,
               variantRuntimeKey(project.id, targetVariantId),
               signal,
+              deps.previewLeaseManager,
             );
-            signal.throwIfAborted();
-            await (deps.captureCoverUrl ?? captureCoverUrl)(
-              url,
-              join(projectDir(deps.dataDir, project.id), ".cover.png"),
-              signal,
-            );
+            try {
+              signal.throwIfAborted();
+              await (deps.captureCoverUrl ?? captureCoverUrl)(
+                lease.url,
+                join(projectDir(deps.dataDir, project.id), ".cover.png"),
+                signal,
+              );
+            } finally {
+              await lease.release?.();
+            }
           },
         );
         // Covers are best-effort; the successful run is already persisted.
@@ -1836,6 +1870,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       persistVisualReviews();
       const message = cancelled ? "Stopped." : `The run failed: ${errorMessage}`;
       store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
+    } finally {
+      if (!handedOffLivePreviewLease) await (livePreviewLease as DevServerLease | null)?.release?.();
     }
     return;
   }

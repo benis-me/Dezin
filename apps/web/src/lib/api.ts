@@ -574,7 +574,12 @@ export interface RunSummary {
 }
 
 export type VersionDiffLine = { t: "ctx" | "add" | "del"; text: string };
-export interface VersionPreview {
+export interface PreviewLeaseInfo {
+  leaseId: string;
+  url: string;
+  expiresAt: number;
+}
+export interface VersionPreview extends Partial<Pick<PreviewLeaseInfo, "leaseId" | "expiresAt">> {
   url: string;
   mode: ProjectMode;
 }
@@ -584,8 +589,10 @@ export interface ApiClient {
   createProject(input: CreateProjectInput): Promise<Project>;
   generateProjectTitle(id: string, brief: string): Promise<Project>;
   getSetup(id: string): Promise<SetupStatus>;
-  getDevServerUrl(id: string): Promise<{ url: string }>;
+  getDevServerUrl(id: string): Promise<{ url: string; leaseId?: string; expiresAt?: number }>;
   releaseDevServer(id: string): Promise<void>;
+  renewPreviewLease(leaseId: string): Promise<PreviewLeaseInfo>;
+  releasePreviewLease(leaseId: string): Promise<void>;
   captureProjectCover(id: string, options?: { release?: boolean }): Promise<{ captured: boolean; reason?: string }>;
   getProject(id: string): Promise<Project>;
   patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean }): Promise<Project>;
@@ -820,8 +827,10 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     createProject: (input) => json<Project>("/api/projects", jsonInit("POST", input)),
     generateProjectTitle: (id, brief) => json<Project>(`/api/projects/${enc(id)}/title`, jsonInit("POST", { brief })),
     getSetup: (id) => json<SetupStatus>(`/api/projects/${enc(id)}/setup`),
-    getDevServerUrl: (id) => json<{ url: string }>(`/api/projects/${enc(id)}/devserver`),
+    getDevServerUrl: (id) => json<{ url: string; leaseId?: string; expiresAt?: number }>(`/api/projects/${enc(id)}/devserver`),
     releaseDevServer: (id) => json<{ released: boolean }>(`/api/projects/${enc(id)}/devserver`, { method: "DELETE" }).then(() => {}),
+    renewPreviewLease: (leaseId) => json<PreviewLeaseInfo>(`/api/preview-leases/${enc(leaseId)}`, { method: "PATCH" }),
+    releasePreviewLease: (leaseId) => json<{ released: boolean }>(`/api/preview-leases/${enc(leaseId)}`, { method: "DELETE" }).then(() => {}),
     captureProjectCover: (id, options) =>
       json<{ captured: boolean; reason?: string }>(`/api/projects/${enc(id)}/cover/capture${options?.release ? "?release=1" : ""}`, { method: "POST" }),
     getProject: (id) => json<Project>(`/api/projects/${enc(id)}`),

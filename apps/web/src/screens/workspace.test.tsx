@@ -2172,11 +2172,84 @@ test("viewing a standard version resolves the dev-server URL before rendering th
   expect(screen.queryByText("Loading version preview")).toBeNull();
 });
 
+test("standard preview switching and unmount release the exact main and version leases", async () => {
+  const releasePreviewLease = vi.fn(async () => {});
+  const fake = makeFakeApi({
+    getProject: async () => ({
+      id: "p1",
+      name: "Standard",
+      skillId: null,
+      designSystemId: "modern-minimal",
+      mode: "standard",
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [
+      { id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
+    ],
+    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/current", leaseId: "main-lease", expiresAt: Date.now() + 60_000 }),
+    getVersionPreview: async () => ({
+      url: "http://127.0.0.1:5401/",
+      mode: "standard" as const,
+      leaseId: "version-lease",
+      expiresAt: Date.now() + 60_000,
+    }),
+    releasePreviewLease,
+  });
+  const view = render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", "http://127.0.0.1:5300/current"));
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
+  await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("main-lease"));
+  expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/));
+
+  view.unmount();
+  await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("version-lease"));
+});
+
+test("a stale standard version response releases its lease instead of replacing the current preview", async () => {
+  const pending: Array<(value: { url: string; mode: "standard"; leaseId: string; expiresAt: number }) => void> = [];
+  const getVersionPreview = vi.fn(() => new Promise<{ url: string; mode: "standard"; leaseId: string; expiresAt: number }>((resolve) => pending.push(resolve)));
+  const releasePreviewLease = vi.fn(async () => {});
+  const fake = makeFakeApi({
+    getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [{ id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 }],
+    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/current" }),
+    getVersionPreview,
+    releasePreviewLease,
+  });
+  render(<ApiProvider client={fake}><WorkspaceScreen projectId="p1" /></ApiProvider>);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+  const switchButton = await screen.findByRole("button", { name: "Switch to Main v1" });
+  fireEvent.click(switchButton);
+  fireEvent.click(screen.getByLabelText("Refresh preview"));
+  await waitFor(() => expect(getVersionPreview).toHaveBeenCalledTimes(2));
+  pending[1]?.({ url: "http://127.0.0.1:5402/", mode: "standard", leaseId: "new-lease", expiresAt: Date.now() + 60_000 });
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/5402/)));
+  pending[0]?.({ url: "http://127.0.0.1:5401/", mode: "standard", leaseId: "stale-lease", expiresAt: Date.now() + 60_000 });
+
+  await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("stale-lease"));
+  expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/5402/));
+});
+
 test("standard version compare resolves both dev-server URLs before opening the frames", async () => {
-  const pending = new Map<string, (value: { url: string; mode: "standard" }) => void>();
+  const pending = new Map<string, (value: { url: string; mode: "standard"; leaseId: string; expiresAt: number }) => void>();
+  const releasePreviewLease = vi.fn(async () => {});
   const getVersionPreview = vi.fn(
     (_projectId: string, runId: string) =>
-      new Promise<{ url: string; mode: "standard" }>((resolve) => {
+      new Promise<{ url: string; mode: "standard"; leaseId: string; expiresAt: number }>((resolve) => {
         pending.set(runId, resolve);
       }),
   );
@@ -2199,6 +2272,7 @@ test("standard version compare resolves both dev-server URLs before opening the 
     ],
     getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/current" }),
     getVersionPreview,
+    releasePreviewLease,
   });
   render(
     <ApiProvider client={fake}>
@@ -2213,8 +2287,8 @@ test("standard version compare resolves both dev-server URLs before opening the 
   expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-new");
   expect(await screen.findByText("Loading version comparison")).toBeInTheDocument();
 
-  pending.get("r-old")?.({ url: "http://127.0.0.1:5401/", mode: "standard" });
-  pending.get("r-new")?.({ url: "http://127.0.0.1:5402/", mode: "standard" });
+  pending.get("r-old")?.({ url: "http://127.0.0.1:5401/", mode: "standard", leaseId: "compare-old", expiresAt: Date.now() + 60_000 });
+  pending.get("r-new")?.({ url: "http://127.0.0.1:5402/", mode: "standard", leaseId: "compare-new", expiresAt: Date.now() + 60_000 });
 
   const oldFrame = await screen.findByTitle("Main v1");
   const currentFrame = await screen.findByTitle("Main current");
@@ -2223,6 +2297,11 @@ test("standard version compare resolves both dev-server URLs before opening the 
   expect(oldFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(currentFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(screen.queryByText("Loading version comparison")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  await waitFor(() => {
+    expect(releasePreviewLease).toHaveBeenCalledWith("compare-old");
+    expect(releasePreviewLease).toHaveBeenCalledWith("compare-new");
+  });
 });
 
 test("artifact header keeps Versions, divider, and tabs tight", async () => {

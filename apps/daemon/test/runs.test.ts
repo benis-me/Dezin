@@ -1974,6 +1974,7 @@ test("standard version actions use commit snapshots instead of prototype html sn
 
 test("standard version preview URL endpoint resolves the dev server URL without iframe redirect", async () => {
   const devServers: Array<{ dir: string; runtimeKey?: string; url: string }> = [];
+  const released: string[] = [];
   await withRunServer(
     undefined,
     async ({ base, dataDir, store }) => {
@@ -1992,15 +1993,36 @@ test("standard version preview URL endpoint resolves the dev server URL without 
 
       const preview = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/preview-url`);
       assert.equal(preview.status, 200);
-      assert.deepEqual(await preview.json(), { url: "http://127.0.0.1:6201/", mode: "standard" });
+      assert.deepEqual(await preview.json(), {
+        url: "http://127.0.0.1:6201/",
+        mode: "standard",
+        leaseId: "version-lease-1",
+        expiresAt: 123_456,
+      });
       assert.match(devServers[0]!.dir, new RegExp(`version-worktrees/${project.id}/${run.id}$`));
       assert.equal(devServers[0]!.runtimeKey, `${project.id}:version:${run.id}`);
+
+      const release = await fetch(`${base}/api/preview-leases/version-lease-1`, { method: "DELETE" });
+      assert.equal(release.status, 200);
+      assert.deepEqual(await release.json(), { released: true });
+      assert.deepEqual(released, ["version-lease-1"]);
     },
     {
       ensureDevServer: async (_projectId, dir, runtimeKey) => {
         const url = `http://127.0.0.1:${6201 + devServers.length}/`;
         devServers.push({ dir, runtimeKey, url });
-        return { url };
+        return { url, leaseId: "version-lease-1", expiresAt: 123_456, release: async () => {} };
+      },
+      previewLeaseManager: {
+        acquire: async () => { throw new Error("not used"); },
+        renew: async () => null,
+        release: async (leaseId) => {
+          released.push(leaseId);
+          return true;
+        },
+        stopScope: async () => {},
+        stopAll: async () => {},
+        activeCount: () => 0,
       },
     },
   );

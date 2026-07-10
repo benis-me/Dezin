@@ -318,14 +318,33 @@ test("variant deletion unregisters a real Git version worktree before removing i
   const conversation = store.createConversation(project.id);
   const run = store.createRun(project.id, conversation.id, variant.id);
   const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-  const supervisor = createRuntimeSupervisor({ store, dataDir });
-  const deps = { store, dataDir, runtimeSupervisor: supervisor } as AppDeps;
+  const previewStopEntered = deferred();
+  const allowPreviewStop = deferred();
+  const previewLeaseManager: NonNullable<AppDeps["previewLeaseManager"]> = {
+    acquire: async () => { throw new Error("not used"); },
+    renew: async () => null,
+    release: async () => false,
+    stopScope: async (scope) => {
+      if (scope.projectId === project.id && scope.runId === run.id) {
+        previewStopEntered.resolve();
+        await allowPreviewStop.promise;
+      }
+    },
+    stopAll: async () => {},
+    activeCount: () => 0,
+  };
+  const supervisor = createRuntimeSupervisor({ store, dataDir, previewLeaseManager });
+  const deps = { store, dataDir, runtimeSupervisor: supervisor, previewLeaseManager } as AppDeps;
 
   const versionDir = await standardVersionArtifactDir(deps, project.id, run.id, commit);
   const before = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: root, encoding: "utf8" });
   assert.match(before, new RegExp(versionDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 
-  await supervisor.releaseVariant(project.id, variant.id);
+  const releasing = supervisor.releaseVariant(project.id, variant.id);
+  await previewStopEntered.promise;
+  assert.equal(existsSync(versionDir), true, "version worktree remains until its preview teardown settles");
+  allowPreviewStop.resolve();
+  await releasing;
 
   const after = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: root, encoding: "utf8" });
   assert.doesNotMatch(after, new RegExp(versionDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -746,6 +765,30 @@ test("standard cover capture endpoint backfills a missing project cover", async 
         released.push(runtimeKey);
         return true;
       },
+    },
+  );
+});
+
+test("standard cover capture releases its preview lease when capture throws", async () => {
+  let releases = 0;
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      store.ensureMainVariant(project.id);
+      mkdirSync(join(dataDir, "projects", project.id), { recursive: true });
+
+      const res = await fetch(`${base}/api/projects/${project.id}/cover/capture`, { method: "POST" });
+      assert.equal(res.status, 409);
+      assert.equal(releases, 1);
+    },
+    {
+      ensureDevServer: async () => ({
+        url: "http://127.0.0.1:6002/",
+        leaseId: "cover-lease",
+        expiresAt: Date.now() + 60_000,
+        release: async () => { releases += 1; },
+      }),
+      captureCoverUrl: async () => { throw new Error("capture failed"); },
     },
   );
 });
