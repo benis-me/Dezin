@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
-import { startCapture, handleSharinganStatus } from "../src/sharingan-handler.ts";
+import { startCapture, handleSharinganStatus, releaseSharinganProject, sharinganCaptureRegistrySizeForTests } from "../src/sharingan-handler.ts";
 import type { SharinganSession } from "../src/sharingan-browser.ts";
 
 test("POST /start begins a capture and GET /status reports progress", { skip: !findChrome() && "no Chrome" }, async () => {
@@ -52,6 +52,23 @@ function statusServer(id: string, dataDir = mkdtempSync(join(tmpdir(), "shar-sta
   });
 }
 
+test("GET /status peeks at an idle project without allocating capture ownership", async () => {
+  const before = sharinganCaptureRegistrySizeForTests();
+  const status = await statusServer(`status-peek-${Date.now()}`);
+  try {
+    const response = await fetch(`${status.base}/status`);
+    assert.equal(response.status, 200);
+    assert.equal(((await response.json()) as { phase: string }).phase, "idle");
+    assert.equal(
+      sharinganCaptureRegistrySizeForTests(),
+      before,
+      "a read-only status request must not create an owned capture scope",
+    );
+  } finally {
+    await status.close();
+  }
+});
+
 test("a failed capture closes the browser session and clears it, so a launched browser cannot leak", async () => {
   // The contract under test is the handler's ERROR-path cleanup, not the browser
   // itself: `open()` launches a real (in production, headful) Chrome that holds a lock
@@ -74,6 +91,34 @@ test("a failed capture closes the browser session and clears it, so a launched b
   } finally {
     await status.close();
   }
+});
+
+test("project release closes an established session exactly once when capture concurrently fails", async () => {
+  let navigationEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { navigationEntered = resolve; });
+  let rejectNavigation!: (error: Error) => void;
+  const navigation = new Promise<never>((_resolve, reject) => { rejectNavigation = reject; });
+  let closes = 0;
+  const session = {
+    navigate: async () => {
+      navigationEntered();
+      return navigation;
+    },
+    close: async () => {
+      closes += 1;
+      if (closes > 1) throw new Error("session close is not idempotent");
+    },
+  } as unknown as SharinganSession;
+  const id = `capture-release-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-release-"));
+
+  const capture = startCapture(id, "http://x.test/", dataDir, "/tmp/unused", async () => session);
+  await entered;
+  const release = releaseSharinganProject(id);
+  rejectNavigation(new Error("capture failed during project deletion"));
+  await Promise.all([capture, release]);
+
+  assert.equal(closes, 1, "capture failure and project deletion share one close owner");
 });
 
 test("a re-start while paused for login does not orphan the open login session", async () => {

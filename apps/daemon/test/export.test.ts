@@ -5,25 +5,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
+import { request } from "node:http";
 import { Store } from "../../../packages/core/src/index.ts";
-import { createApp } from "../src/index.ts";
+import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 import { MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES } from "../src/export-handler.ts";
+import { createZip } from "../src/zip.ts";
 
 interface Ctx {
   base: string;
   dataDir: string;
   store: Store;
+  runtimeSupervisor: ReturnType<typeof createRuntimeSupervisor>;
 }
 
-async function withServer(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
+async function withServer(fn: (ctx: Ctx) => Promise<void>, extraDeps: Partial<AppDeps> = {}): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-export-"));
   const store = new Store(":memory:");
-  const server = createApp({ store, dataDir });
+  const runtimeSupervisor = extraDeps.runtimeSupervisor ?? createRuntimeSupervisor({ store, dataDir });
+  const server = createApp({ ...extraDeps, store, dataDir, runtimeSupervisor });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
-    await fn({ base: `http://127.0.0.1:${port}`, dataDir, store });
+    await fn({ base: `http://127.0.0.1:${port}`, dataDir, store, runtimeSupervisor });
   } finally {
+    await runtimeSupervisor.shutdown();
     await new Promise<void>((r) => server.close(() => r()));
     store.close();
   }
@@ -209,6 +214,122 @@ test("import restores a full project zip as a new project", async () => {
       ["user", "original ask"],
       ["assistant", "original answer"],
     ]);
+  });
+});
+
+test("project deletion owns an import immediately after row creation and removes late Runs and files", async () => {
+  let ctxStore!: Store;
+  let ctxDataDir = "";
+  let importedProjectId = "";
+  let lateRunId = "";
+  let importEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { importEntered = resolve; });
+  let releaseImport!: () => void;
+  const release = new Promise<void>((resolve) => { releaseImport = resolve; });
+
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      ctxStore = store;
+      ctxDataDir = dataDir;
+      const archive = createZip([
+        {
+          path: "dezin-project.json",
+          data: JSON.stringify({
+            format: "dezin-project",
+            version: 2,
+            project: { id: "old-project", name: "Interrupted import", mode: "prototype" },
+          }),
+        },
+        { path: "source/index.html", data: "<main>imported</main>" },
+      ]);
+      const importing = fetch(`${base}/api/projects/import`, {
+        method: "POST",
+        headers: { "content-type": "application/zip" },
+        body: archive,
+      });
+      await entered;
+
+      let deletionSettled = false;
+      const deleting = fetch(`${base}/api/projects/${importedProjectId}`, { method: "DELETE" }).then((response) => {
+        deletionSettled = true;
+        return response;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(deletionSettled, false, "DELETE waits for the registered import continuation");
+
+      releaseImport();
+      const [deleted] = await Promise.all([deleting, importing.catch(() => null)]);
+      assert.equal(deleted.status, 204);
+      assert.equal(store.getProject(importedProjectId), null);
+      assert.equal(store.listVariants(importedProjectId).length, 0);
+      assert.equal(store.listRuns(importedProjectId).length, 0);
+      assert.equal(store.getRun(lateRunId), null);
+      assert.equal(existsSync(join(dataDir, "projects", importedProjectId)), false);
+      assert.equal(existsSync(join(dataDir, ".runs", `${lateRunId}.jsonl`)), false);
+      assert.equal(existsSync(join(dataDir, ".runs", lateRunId)), false);
+    },
+    {
+      importProjectCreated: async (projectId) => {
+        importedProjectId = projectId;
+        importEntered();
+        await release;
+        // Model a continuation that finishes one mutation batch after observing cancellation.
+        const variant = ctxStore.createVariant(projectId, "Late variant");
+        const conversation = ctxStore.createConversation(projectId, "Late conversation");
+        const run = ctxStore.createRun(projectId, conversation.id, variant.id);
+        lateRunId = run.id;
+        const projectRoot = join(ctxDataDir, "projects", projectId);
+        mkdirSync(join(projectRoot, ".variants", variant.id), { recursive: true });
+        writeFileSync(join(projectRoot, ".variants", variant.id, "late.html"), "late");
+        mkdirSync(join(ctxDataDir, ".runs", run.id), { recursive: true });
+        writeFileSync(join(ctxDataDir, ".runs", `${run.id}.jsonl`), "late log\n");
+        writeFileSync(join(ctxDataDir, ".runs", run.id, "bundle.txt"), "late bundle");
+      },
+    },
+  );
+});
+
+test("shutdown aborts a partial import body before it can create a late project", async () => {
+  await withServer(async ({ base, store, runtimeSupervisor }) => {
+    const archive = createZip([
+      {
+        path: "dezin-project.json",
+        data: JSON.stringify({
+          format: "dezin-project",
+          version: 2,
+          project: { id: "late-project", name: "Late import", mode: "prototype" },
+        }),
+      },
+      { path: "source/index.html", data: "<main>late</main>" },
+    ]);
+    const url = new URL("/api/projects/import", base);
+    let upload!: ReturnType<typeof request>;
+    const uploadDone = new Promise<void>((resolve) => {
+      upload = request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          method: "POST",
+          headers: { "content-type": "application/zip", "content-length": String(archive.length) },
+        },
+        (response) => {
+          response.resume();
+          response.once("end", resolve);
+        },
+      );
+      upload.once("error", () => resolve());
+    });
+
+    const midpoint = Math.max(1, Math.floor(archive.length / 2));
+    upload.write(archive.subarray(0, midpoint));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await runtimeSupervisor.shutdown();
+    upload.end(archive.subarray(midpoint));
+    await Promise.race([uploadDone, new Promise((resolve) => setTimeout(resolve, 250))]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.deepEqual(store.listProjects(), [], "a request that outlives shutdown cannot create a project row");
   });
 });
 

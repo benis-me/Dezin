@@ -45,8 +45,8 @@ function matchesScope(run: RuntimeScope, scope: RuntimeScope): boolean {
 
 function matchesOperationScope(operation: RuntimeScope, scope: RuntimeScope): boolean {
   return operation.projectId === scope.projectId
-    && (scope.variantId === undefined || operation.variantId === undefined || operation.variantId === scope.variantId)
-    && (scope.runId === undefined || operation.runId === undefined || operation.runId === scope.runId);
+    && (scope.variantId === undefined || operation.variantId === scope.variantId)
+    && (scope.runId === undefined || operation.runId === scope.runId);
 }
 
 export class RuntimeSupervisor {
@@ -156,10 +156,12 @@ export class RuntimeSupervisor {
   async releaseProject(projectId: string): Promise<void> {
     const scope = { projectId };
     this.blockedProjects.add(projectId);
-    const runIds = this.options.store.listRuns(projectId).map((run) => run.id);
     this.cancelRuns(scope);
     this.cancelOperations(scope);
     await Promise.all([this.waitForRuns(scope), this.waitForOperations(scope)]);
+    // A tracked import may create Runs/log paths while unwinding after abort. Re-read ownership
+    // only after every project operation settles so cleanup cannot use a stale pre-import snapshot.
+    const runIds = this.options.store.listRuns(projectId).map((run) => run.id);
     await this.options.releaseProjectResources?.({ projectId, runIds });
     await Promise.all([
       rm(join(this.options.dataDir, "worktrees", projectId), { recursive: true, force: true }),

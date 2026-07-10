@@ -23,12 +23,26 @@ import {
   variantRuntimeKey,
 } from "./variant-workspaces.ts";
 import { releaseDevServer } from "./project-runtime.ts";
+import { RuntimeScopeUnavailableError } from "./runtime-supervisor.ts";
 
 // Daemon-internal entries that are never part of a branch's artifact.
 const SKIP = new Set([".variants", ".refs", ".versions", ".cover.png", "node_modules", ".git", ".dev"]);
+const VARIANT_BODY_MAX_BYTES = 4 * 1024 * 1024;
 
 function snapDir(dataDir: string, projectId: string, variantId: string): string {
   return join(projectDir(dataDir, projectId), ".variants", variantId);
+}
+
+function withVariantMutation<T>(
+  deps: AppDeps,
+  projectId: string,
+  variantId: string,
+  start: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  if (deps.runtimeSupervisor) {
+    return deps.runtimeSupervisor.trackOperation({ projectId, variantId }, start);
+  }
+  return start(new AbortController().signal);
 }
 
 async function artifactEntries(dir: string): Promise<string[]> {
@@ -54,31 +68,42 @@ export function handleListVariants(res: ServerResponse, params: Record<string, s
   sendJson(res, 200, deps.store.listVariants(id));
 }
 
-export async function handleCreateVariant(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+export async function handleCreateVariant(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+  signal?: AbortSignal,
+): Promise<void> {
   const id = params.id!;
   const project = deps.store.getProject(id);
   if (!project) return sendError(res, 404, "project not found");
-  const body = (await readJsonBody(req)) as { name?: string } | null;
+  const body = (await readJsonBody(req, VARIANT_BODY_MAX_BYTES, signal)) as { name?: string } | null;
+  signal?.throwIfAborted();
   const active = deps.store.ensureMainVariant(id);
   const n = deps.store.listVariants(id).length + 1;
   const v = deps.store.createVariant(id, body?.name?.trim() || `Variant ${n}`);
 
-  if (project.mode === "standard") {
-    try {
+  try {
+    await withVariantMutation(deps, id, v.id, async (variantSignal) => {
+      variantSignal.throwIfAborted();
+      if (project.mode === "standard") {
       await createStandardVariantWorktree(deps, id, active.id, v.id);
-    } catch (err) {
-      await removeStandardVariantWorktree(deps, id, v.id).catch(() => {});
-      deps.store.deleteVariant(v.id);
-      return sendError(res, 409, err instanceof Error ? err.message : "could not create variant worktree");
-    }
-  } else {
-    const root = projectDir(deps.dataDir, id);
-    // Forking: save the current branch, then the new branch starts as a copy of root.
-    await snapshot(root, snapDir(deps.dataDir, id, active.id));
+      } else {
+        const root = projectDir(deps.dataDir, id);
+        // Forking: save the current branch, then the new branch starts as a copy of root.
+        await snapshot(root, snapDir(deps.dataDir, id, active.id));
+      }
+      variantSignal.throwIfAborted();
+      if (project.mode === "standard") (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
+      deps.store.setActiveVariant(id, v.id);
+    });
+  } catch (err) {
+    if (project.mode === "standard") await removeStandardVariantWorktree(deps, id, v.id).catch(() => {});
+    deps.store.deleteVariant(v.id);
+    return sendError(res, 409, err instanceof Error ? err.message : "could not create variant");
   }
 
-  if (project.mode === "standard") (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
-  deps.store.setActiveVariant(id, v.id);
   sendJson(res, 200, deps.store.listVariants(id));
 }
 
@@ -87,25 +112,36 @@ export async function handleCreateVariant(req: IncomingMessage, res: ServerRespo
  * generated as N independent variations. Does NOT activate any — the web runs the brief into each
  * returned variant (existing per-variant run path) and compares via the variant switcher.
  */
-export async function handleVariantFanout(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+export async function handleVariantFanout(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+  signal?: AbortSignal,
+): Promise<void> {
   const id = params.id!;
   const project = deps.store.getProject(id);
   if (!project) return sendError(res, 404, "project not found");
-  const body = (await readJsonBody(req)) as { count?: number } | null;
+  const body = (await readJsonBody(req, VARIANT_BODY_MAX_BYTES, signal)) as { count?: number } | null;
   const plan = planVariantFanout(body?.count ?? 3);
   const active = deps.store.ensureMainVariant(id);
   const created: Variant[] = [];
   try {
     for (const spec of plan.variants) {
+      signal?.throwIfAborted();
       const variant = deps.store.createVariant(id, spec.name);
       created.push(variant);
-      if (project.mode === "standard") {
-        await createStandardVariantWorktree(deps, id, active.id, variant.id);
-      } else {
-        // Seed the new prototype variant with a copy of the current root so activating it later
-        // (to run a variation into it) restores that content instead of a blank snapshot.
-        await snapshot(projectDir(deps.dataDir, id), snapDir(deps.dataDir, id, variant.id));
-      }
+      await withVariantMutation(deps, id, variant.id, async (variantSignal) => {
+        variantSignal.throwIfAborted();
+        if (project.mode === "standard") {
+          await createStandardVariantWorktree(deps, id, active.id, variant.id);
+        } else {
+          // Seed the new prototype variant with a copy of the current root so activating it later
+          // (to run a variation into it) restores that content instead of a blank snapshot.
+          await snapshot(projectDir(deps.dataDir, id), snapDir(deps.dataDir, id, variant.id));
+        }
+        variantSignal.throwIfAborted();
+      });
     }
   } catch (err) {
     for (const c of created) {
@@ -122,7 +158,13 @@ function versionSnapshotPath(dataDir: string, projectId: string, runId: string):
   return join(projectDir(dataDir, projectId), ".versions", `${safe}.html`);
 }
 
-export async function handleForkMessage(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+export async function handleForkMessage(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+  signal?: AbortSignal,
+): Promise<void> {
   const id = params.id!;
   const messageId = params.messageId!;
   const project = deps.store.getProject(id);
@@ -136,29 +178,35 @@ export async function handleForkMessage(req: IncomingMessage, res: ServerRespons
   const run = deps.store.findSucceededRunForAssistantMessage(message.id);
   if (!run || run.projectId !== id) return sendError(res, 409, "no completed design snapshot for this message");
 
-  const body = (await readJsonBody(req)) as { name?: string } | null;
+  const body = (await readJsonBody(req, VARIANT_BODY_MAX_BYTES, signal)) as { name?: string } | null;
+  signal?.throwIfAborted();
   const active = deps.store.ensureMainVariant(id);
   const name = body?.name?.trim() || `Fork ${deps.store.listVariants(id).length + 1}`;
   const variant = deps.store.createVariant(id, name);
 
   try {
-    if (project.mode === "standard") {
-      if (!run.commitHash) throw new Error("this Standard run has no commit snapshot");
-      await createStandardVariantWorktreeFromCommit(deps, id, variant.id, run.commitHash);
-      (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
-    } else {
-      const versionFile = versionSnapshotPath(deps.dataDir, id, run.id);
-      if (!existsSync(versionFile)) throw new Error("this run has no version snapshot");
-      const root = projectDir(deps.dataDir, id);
-      await snapshot(root, snapDir(deps.dataDir, id, active.id));
-      await writeFile(join(root, "index.html"), await readFile(versionFile, "utf8"), "utf8");
-    }
+    const forkConversation = await withVariantMutation(deps, id, variant.id, async (variantSignal) => {
+      variantSignal.throwIfAborted();
+      if (project.mode === "standard") {
+        if (!run.commitHash) throw new Error("this Standard run has no commit snapshot");
+        await createStandardVariantWorktreeFromCommit(deps, id, variant.id, run.commitHash);
+        (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active.id));
+      } else {
+        const versionFile = versionSnapshotPath(deps.dataDir, id, run.id);
+        if (!existsSync(versionFile)) throw new Error("this run has no version snapshot");
+        const root = projectDir(deps.dataDir, id);
+        await snapshot(root, snapDir(deps.dataDir, id, active.id));
+        await writeFile(join(root, "index.html"), await readFile(versionFile, "utf8"), "utf8");
+      }
 
-    const forkConversation = deps.store.createConversation(id, name);
-    for (const prior of deps.store.listMessagesThrough(conversation.id, message.id)) {
-      deps.store.addMessage(forkConversation.id, prior.role, prior.content);
-    }
-    deps.store.setActiveVariant(id, variant.id);
+      variantSignal.throwIfAborted();
+      const createdConversation = deps.store.createConversation(id, name);
+      for (const prior of deps.store.listMessagesThrough(conversation.id, message.id)) {
+        deps.store.addMessage(createdConversation.id, prior.role, prior.content);
+      }
+      deps.store.setActiveVariant(id, variant.id);
+      return createdConversation;
+    });
     sendJson(res, 200, { conversationId: forkConversation.id, variantId: variant.id, variants: deps.store.listVariants(id) });
   } catch (err) {
     if (project.mode === "standard") await removeStandardVariantWorktree(deps, id, variant.id).catch(() => {});
@@ -168,13 +216,20 @@ export async function handleForkMessage(req: IncomingMessage, res: ServerRespons
   }
 }
 
-export async function handleActivateVariant(res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+export async function handleActivateVariant(
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+  signal?: AbortSignal,
+): Promise<void> {
   const id = params.id!;
   const vid = params.vid!;
   const project = deps.store.getProject(id);
   if (!project || deps.store.getVariant(vid)?.projectId !== id) return sendError(res, 404, "not found");
-  const active = deps.store.getActiveVariantId(id);
+  signal?.throwIfAborted();
+  const active = deps.store.getActiveVariantId(id) ?? deps.store.ensureMainVariant(id).id;
   if (active !== vid) {
+    let activatedPrototypeSnapshot: string | undefined;
     if (project.mode === "standard") {
       try {
         await standardVariantArtifactDir(deps, id, vid);
@@ -183,21 +238,46 @@ export async function handleActivateVariant(res: ServerResponse, params: Record<
       }
     } else {
       const root = projectDir(deps.dataDir, id);
-      if (active) await snapshot(root, snapDir(deps.dataDir, id, active));
-      await restore(snapDir(deps.dataDir, id, vid), root);
-      await rm(snapDir(deps.dataDir, id, vid), { recursive: true, force: true });
+      activatedPrototypeSnapshot = snapDir(deps.dataDir, id, vid);
+      const previousSnapshot = snapDir(deps.dataDir, id, active);
+      let previousSaved = false;
+      let rootMutationStarted = false;
+      try {
+        await snapshot(root, previousSnapshot);
+        previousSaved = true;
+        signal?.throwIfAborted();
+        rootMutationStarted = true;
+        await restore(activatedPrototypeSnapshot, root);
+        await deps.prototypeVariantRestored?.(id, vid, signal);
+        signal?.throwIfAborted();
+      } catch (err) {
+        if (rootMutationStarted && previousSaved) await restore(previousSnapshot, root);
+        await rm(previousSnapshot, { recursive: true, force: true }).catch(() => {});
+        if (signal?.aborted) throw new RuntimeScopeUnavailableError({ projectId: id, variantId: vid });
+        throw err;
+      }
     }
+    signal?.throwIfAborted();
     if (project.mode === "standard" && active) (deps.releaseDevServer ?? releaseDevServer)(variantRuntimeKey(id, active));
     deps.store.setActiveVariant(id, vid);
+    if (activatedPrototypeSnapshot) {
+      await rm(activatedPrototypeSnapshot, { recursive: true, force: true });
+    }
   }
   sendJson(res, 200, deps.store.listVariants(id));
 }
 
-export async function handleRenameVariant(req: IncomingMessage, res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {
+export async function handleRenameVariant(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+  signal?: AbortSignal,
+): Promise<void> {
   const id = params.id!;
   const vid = params.vid!;
   if (deps.store.getVariant(vid)?.projectId !== id) return sendError(res, 404, "not found");
-  const body = (await readJsonBody(req)) as { name?: string } | null;
+  const body = (await readJsonBody(req, VARIANT_BODY_MAX_BYTES, signal)) as { name?: string } | null;
   if (!body?.name?.trim()) return sendError(res, 400, "name is required");
   deps.store.renameVariant(vid, body.name.trim());
   sendJson(res, 200, deps.store.listVariants(id));

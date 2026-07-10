@@ -116,6 +116,10 @@ export interface AppDeps {
   captureCover?: (htmlPath: string, outPath: string, signal?: AbortSignal) => Promise<boolean>;
   /** Sharingan browser opener; tests can delay session creation without launching Chrome. */
   sharinganOpen?: SharinganOpen;
+  /** Import continuation checkpoint; tests can pause immediately after project ownership is registered. */
+  importProjectCreated?: (projectId: string, signal?: AbortSignal) => void | Promise<void>;
+  /** Prototype activation checkpoint; tests can pause after the target snapshot reaches the root. */
+  prototypeVariantRestored?: (projectId: string, variantId: string, signal?: AbortSignal) => void | Promise<void>;
   /** Background title generator hook; tests can avoid launching an agent. */
   titleGenerator?: TitleGenerator;
   /** Prompt optimizer hook; tests can avoid launching a real agent. */
@@ -178,6 +182,10 @@ let pendingCapture: PendingCapture | null = null;
 
 function projectPayload(dataDir: string, project: Project): Project & { projectPath: string } {
   return { ...project, projectPath: projectDir(dataDir, project.id) };
+}
+
+function activeVariantId(store: Store, projectId: string): string | undefined {
+  return store.getActiveVariantId(projectId) ?? store.listVariants(projectId)[0]?.id;
 }
 
 export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir">): RuntimeSupervisor {
@@ -848,7 +856,7 @@ const routes: Route[] = [
     pattern: "/api/projects/:id/variants",
     handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
       { projectId: params.id! },
-      () => handleCreateVariant(req, res, params, deps),
+      (signal) => handleCreateVariant(req, res, params, deps, signal),
     ),
   },
   {
@@ -856,7 +864,7 @@ const routes: Route[] = [
     pattern: "/api/projects/:id/variants/fanout",
     handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
       { projectId: params.id! },
-      () => handleVariantFanout(req, res, params, deps),
+      (signal) => handleVariantFanout(req, res, params, deps, signal),
     ),
   },
   {
@@ -864,21 +872,24 @@ const routes: Route[] = [
     pattern: "/api/projects/:id/messages/:messageId/fork",
     handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
       { projectId: params.id! },
-      () => handleForkMessage(req, res, params, deps),
+      (signal) => handleForkMessage(req, res, params, deps, signal),
     ),
   },
   {
     method: "POST",
     pattern: "/api/projects/:id/variants/:vid/activate",
     handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
-      { projectId: params.id! },
-      () => handleActivateVariant(res, params, deps),
+      { projectId: params.id!, variantId: params.vid! },
+      (signal) => handleActivateVariant(res, params, deps, signal),
     ),
   },
   {
     method: "PATCH",
     pattern: "/api/projects/:id/variants/:vid",
-    handler: (req, res, params, deps) => handleRenameVariant(req, res, params, deps),
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id!, variantId: params.vid! },
+      (signal) => handleRenameVariant(req, res, params, deps, signal),
+    ),
   },
   {
     method: "DELETE",
@@ -892,12 +903,14 @@ const routes: Route[] = [
     handler: async (_req, res, { id, vid, rest }, deps) => {
       const project = deps.store.getProject(id!);
       if (!project) return sendError(res, 404, "project not found");
-      const base = await deps.runtimeSupervisor!.trackOperation(
+      return deps.runtimeSupervisor!.trackOperation(
         { projectId: id!, variantId: vid! },
-        () => variantArtifactDir(deps, project, vid!),
+        async () => {
+          const base = await variantArtifactDir(deps, project, vid!);
+          if (!base) return sendError(res, 404, "variant not found");
+          return serveFileFromBase(res, base, rest ?? "");
+        },
       );
-      if (!base) return sendError(res, 404, "variant not found");
-      return serveFileFromBase(res, base, rest ?? "");
     },
   },
   {
@@ -944,7 +957,7 @@ const routes: Route[] = [
     handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
       {
         projectId: params.id!,
-        variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
+        variantId: activeVariantId(deps.store, params.id!),
         runId: params.runId!,
       },
       () => handleRestoreVersion(res, params, deps),
@@ -965,7 +978,10 @@ const routes: Route[] = [
   {
     method: "POST",
     pattern: "/api/projects/:id/refs",
-    handler: (req, res, params, deps) => handleUploadRef(req, res, params, deps),
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      (signal) => handleUploadRef(req, res, params, deps, signal),
+    ),
   },
   {
     // Serve an uploaded reference file (image thumbnails in the chat). safeJoin blocks traversal.
@@ -1049,13 +1065,16 @@ const routes: Route[] = [
     pattern: "/api/sharingan/:id/start",
     handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
       { projectId: p.id! },
-      () => handleSharinganStart(req, res, p.id!, deps.dataDir, deps.sharinganOpen),
+      (signal) => handleSharinganStart(req, res, p.id!, deps.dataDir, deps.sharinganOpen, signal),
     ),
   },
   {
     method: "GET",
     pattern: "/api/sharingan/:id/status",
-    handler: (_req, res, p, deps) => handleSharinganStatus(res, p.id!, deps.dataDir),
+    handler: (_req, res, p, deps) => {
+      if (!deps.store.getProject(p.id!)) return sendError(res, 404, "project not found");
+      handleSharinganStatus(res, p.id!, deps.dataDir);
+    },
   },
   {
     // Serve a captured-page screenshot (publicRead so <img src> works — it cannot send the daemon token header).
@@ -1093,7 +1112,7 @@ const routes: Route[] = [
     pattern: "/api/sharingan/:id/navigate",
     handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
       { projectId: p.id! },
-      () => handleSharinganNavigate(req, res, p.id!, deps.dataDir),
+      (signal) => handleSharinganNavigate(req, res, p.id!, deps.dataDir, signal),
     ),
   },
   {
@@ -1101,7 +1120,7 @@ const routes: Route[] = [
     pattern: "/api/sharingan/:id/capture",
     handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
       { projectId: p.id! },
-      () => handleSharinganCapture(req, res, p.id!, deps.dataDir),
+      (signal) => handleSharinganCapture(req, res, p.id!, deps.dataDir, signal),
     ),
   },
   {
@@ -1133,7 +1152,7 @@ const routes: Route[] = [
     pattern: "/api/sharingan/:id/click",
     handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
       { projectId: p.id! },
-      () => handleSharinganClick(req, res, p.id!, deps.dataDir),
+      (signal) => handleSharinganClick(req, res, p.id!, deps.dataDir, signal),
     ),
   },
   {
@@ -1141,7 +1160,7 @@ const routes: Route[] = [
     pattern: "/api/sharingan/:id/scroll",
     handler: (req, res, p, deps) => deps.runtimeSupervisor!.trackOperation(
       { projectId: p.id! },
-      () => handleSharinganScroll(req, res, p.id!, deps.dataDir),
+      (signal) => handleSharinganScroll(req, res, p.id!, deps.dataDir, signal),
     ),
   },
 ];

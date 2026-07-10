@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { FakeRunner, abortError } from "../../../packages/agent/src/index.ts";
@@ -15,6 +16,15 @@ interface Ctx {
   base: string;
   dataDir: string;
   store: Store;
+  runtimeSupervisor: ReturnType<typeof createRuntimeSupervisor>;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 async function withServer(
@@ -28,13 +38,147 @@ async function withServer(
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
-    await fn({ base: `http://127.0.0.1:${port}`, dataDir, store });
+    await fn({ base: `http://127.0.0.1:${port}`, dataDir, store, runtimeSupervisor });
   } finally {
     await runtimeSupervisor.shutdown();
     await new Promise<void>((r) => server.close(() => r()));
     store.close();
   }
 }
+
+test("variant deletion rejects same-variant activation without disturbing project-scoped work", async () => {
+  await withServer(async ({ base, dataDir, store, runtimeSupervisor }) => {
+    const project = store.createProject({ name: "Prototype deletion race" });
+    const main = store.ensureMainVariant(project.id);
+    const target = store.createVariant(project.id, "Target");
+    store.setActiveVariant(project.id, main.id);
+
+    const root = join(dataDir, "projects", project.id);
+    const targetSnapshot = join(root, ".variants", target.id);
+    mkdirSync(targetSnapshot, { recursive: true });
+    writeFileSync(join(root, "index.html"), "<main>Main stays active</main>");
+    writeFileSync(join(targetSnapshot, "index.html"), "<main>Deleted target</main>");
+
+    const projectGate = deferred();
+    const targetGate = deferred();
+    const targetAborted = deferred();
+    let projectOperationAborted = false;
+    const projectOperation = runtimeSupervisor.trackOperation({ projectId: project.id }, async (signal) => {
+      signal.addEventListener("abort", () => {
+        projectOperationAborted = true;
+      }, { once: true });
+      await projectGate.promise;
+    });
+    const targetOperation = runtimeSupervisor.trackOperation(
+      { projectId: project.id, variantId: target.id },
+      async (signal) => {
+        signal.addEventListener("abort", targetAborted.resolve, { once: true });
+        await targetGate.promise;
+      },
+    );
+
+    const deleting = fetch(`${base}/api/projects/${project.id}/variants/${target.id}`, { method: "DELETE" });
+    await targetAborted.promise;
+
+    const activation = await fetch(`${base}/api/projects/${project.id}/variants/${target.id}/activate`, { method: "POST" });
+    const rootAfterActivation = readFileSync(join(root, "index.html"), "utf8");
+    const activeAfterActivation = store.getActiveVariantId(project.id);
+
+    targetGate.resolve();
+    projectGate.resolve();
+    const deleted = await deleting;
+    await Promise.all([targetOperation, projectOperation]);
+
+    assert.equal(activation.status, 409, "the deleting variant rejects new mutation admission");
+    assert.match(rootAfterActivation, /Main stays active/, "activation never restores the deleting snapshot");
+    assert.equal(activeAfterActivation, main.id, "activation never flips active variant state");
+    assert.equal(projectOperationAborted, false, "variant deletion leaves project-scoped work alone");
+    assert.equal(deleted.status, 200);
+    assert.equal(store.getVariant(target.id), null);
+  });
+});
+
+test("variant deletion rolls back an in-flight Prototype activation", async () => {
+  const restored = deferred();
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Prototype activation rollback", mode: "prototype" });
+      const main = store.ensureMainVariant(project.id);
+      const target = store.createVariant(project.id, "Target");
+      store.setActiveVariant(project.id, main.id);
+
+      const root = join(dataDir, "projects", project.id);
+      const targetSnapshot = join(root, ".variants", target.id);
+      mkdirSync(targetSnapshot, { recursive: true });
+      writeFileSync(join(root, "index.html"), "<main>Main remains active</main>");
+      writeFileSync(join(targetSnapshot, "index.html"), "<main>Target is being deleted</main>");
+
+      const activation = fetch(`${base}/api/projects/${project.id}/variants/${target.id}/activate`, { method: "POST" });
+      await restored.promise;
+      const deletion = fetch(`${base}/api/projects/${project.id}/variants/${target.id}`, { method: "DELETE" });
+      const [activated, deleted] = await Promise.all([activation, deletion]);
+
+      assert.equal(activated.status, 409, "cancellation is reported as a scope conflict");
+      assert.equal(deleted.status, 200);
+      assert.equal(store.getActiveVariantId(project.id), main.id);
+      assert.match(readFileSync(join(root, "index.html"), "utf8"), /Main remains active/);
+      assert.equal(store.getVariant(target.id), null);
+      assert.equal(existsSync(join(root, ".variants", main.id)), false, "rollback does not leave a stale active snapshot");
+    },
+    {
+      prototypeVariantRestored: async (_projectId, _variantId, signal) => {
+        restored.resolve();
+        if (signal?.aborted) return;
+        await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+      },
+    },
+  );
+});
+
+test("variant deletion aborts a partial-body mutation without deadlocking", async () => {
+  await withServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Partial variant mutation" });
+    const main = store.ensureMainVariant(project.id);
+    const target = store.createVariant(project.id, "Target");
+    store.setActiveVariant(project.id, main.id);
+
+    let renameRequest!: ReturnType<typeof request>;
+    const renameOutcome = new Promise<"aborted" | "responded">((resolve) => {
+      renameRequest = request(
+        `${base}/api/projects/${project.id}/variants/${target.id}`,
+        {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/json",
+            "content-length": "128",
+          },
+        },
+        (response) => {
+          response.resume();
+          response.once("end", () => resolve("responded"));
+        },
+      );
+      renameRequest.once("error", () => resolve("aborted"));
+      renameRequest.write('{"name":"still arriving');
+    });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    const deletion = await Promise.race([
+      fetch(`${base}/api/projects/${project.id}/variants/${target.id}`, { method: "DELETE" }),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+    ]);
+    const outcome = await Promise.race([
+      renameOutcome,
+      new Promise<"still-open">((resolve) => setTimeout(() => resolve("still-open"), 100)),
+    ]);
+    if (outcome === "still-open") renameRequest.destroy();
+
+    assert.notEqual(deletion, "timeout", "variant deletion must not deadlock on an incomplete body");
+    assert.equal((deletion as Response).status, 200);
+    assert.equal(outcome, "aborted", "deletion aborts the exact-scope body reader");
+    assert.equal(store.getVariant(target.id), null);
+  });
+});
 
 function commitAll(dir: string, message = "base"): void {
   execFileSync("git", ["add", "-A"], { cwd: dir });

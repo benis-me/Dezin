@@ -89,3 +89,42 @@ The full daemon wildcard was also attempted. Every result emitted before interru
 
 - Closed the review's detached Sharingan continue, idle-close, delayed-open, version-preview, manual-cover, retired-runtime-generation, real cover-abort, and prototype source-variant activation gaps.
 - The three Impeccable `broken-image` findings remain classified as false positives: the flagged source is route code/comments describing HTML image requests, not rendered image elements or placeholder sources.
+
+---
+
+## Final ownership-closure recovery
+
+Recovered the uncommitted final review round on base `e04b3bb0` and closed the six remaining formal findings without changing the excluded Preview TTL/LRU, Standard transaction, Sharingan profile policy, resource-budget, token/env, or symlink topics.
+
+### Implementation
+
+- Made operation matching exact for variant and Run scopes. Every variant mutation now admits its concrete `variantId`; Prototype activation rolls the project root back when same-variant deletion cancels an in-flight switch, returns `409`, and does not leave a stale active snapshot. Variant preview ownership now includes the actual async file read, not only directory resolution.
+- Registered reference uploads before body consumption and passed the operation signal into the abortable JSON reader, preventing partial uploads from blocking deletion or recreating `.refs` after `204`.
+- Registered project-import requests under a daemon-level operation before reading the archive body, then synchronously transferred the post-row continuation into the real project scope. Shutdown now aborts partial import bodies; an abort that wins after row creation rolls the import back through `releaseProject`.
+- Passed cancellation through import file loops and Git clone/branch subprocesses. Project release recomputes imported Run ids only after all tracked project operations settle, so late logs, bundles, version worktrees, and project files are removed.
+- Replaced async-iterator body collection with a signal-aware collector that removes request and signal listeners on every completion path and destroys a canceled request. All tracked variant, reference, and Sharingan body readers receive their operation signal.
+- Made Sharingan status a non-allocating peek and returned `404` for missing projects. Established browser sessions now use atomic claim-before-close ownership across release, capture, continue, probe-idle, and late-open paths.
+
+### Recovery RED evidence
+
+- `shutdown aborts a partial import body before it can create a late project` failed with a persisted `Late import` project after supervisor shutdown completed ahead of the half-sent request.
+- `variant deletion rolls back an in-flight Prototype activation` failed with HTTP `500`; the Store still selected the main variant while the project root contained the deleted target's HTML.
+
+### Recovery GREEN and final verification
+
+- The two new reverse-order race regressions: **2 passed, 0 failed**.
+- Final Task 4 focused files (`http`, `variants`, `runtime-supervisor`, `run-manager`, `sharingan-shutdown`, `export`, `sharingan-continue`, `sharingan-handler`): **81 passed, 0 failed**, exited normally.
+- `project-runtime.test.ts`: **9 passed, 0 failed**.
+- `runs.test.ts` filtered to exactly-once lifecycle, real cancellation, and daemon-start/lock regressions: **9 passed, 0 failed**.
+- `pnpm --filter @dezin/core test`: **24 passed, 0 failed**.
+- `pnpm typecheck`: **TYPECHECK: PASS**.
+- `git diff --check`: pass.
+
+The daemon wildcard was intentionally not run, per the recovery brief. A read-only reviewer independently observed the pre-existing isolated `sharingan-run.test.ts` fixture mismatch (its RecordingRunner writes `src/App.jsx` while current region validation requires `src/sharingan-regions/<id>.jsx`); none of this recovery's changed focused tests failed.
+
+### Recovery self-review
+
+- Verified both race orders for variant deletion versus Prototype activation: delete-first rejects admission; activation-first aborts, rolls back, then permits scoped deletion without touching unrelated project operations.
+- Verified shutdown owns import upload time before a project id exists, and project deletion owns every mutation after row creation.
+- Verified Sharingan status polling cannot recreate registry state during or after release, and non-idempotent fake sessions close exactly once under capture/continue release races.
+- No wildcard daemon run, force-exit workaround, global test-only process kill, or out-of-scope lifecycle policy was added.

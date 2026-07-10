@@ -43,6 +43,7 @@ const IGNORE_DIRS = new Set([
 ]);
 const IGNORE_FILES = new Set([".DS_Store", ".cover.png"]);
 const MANIFEST_PATH = "dezin-project.json";
+const IMPORT_REQUEST_SCOPE_ID = "__daemon_project_import__";
 export const MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES = 128 * 1024 * 1024;
 const MAX_PROJECT_ARCHIVE_ENTRIES = 20_000;
 
@@ -116,16 +117,37 @@ async function entriesFromFiles(prefix: string, files: FileRef[]): Promise<ZipEn
   return Promise.all(files.map(async (f) => ({ path: entryPath(prefix, f.rel), data: await readFile(f.abs) })));
 }
 
-function runCommand(command: string, args: string[], cwd: string): Promise<{ code: number; out: string }> {
-  return new Promise((resolve) => {
+function runCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<{ code: number; out: string }> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: process.env });
     let out = "";
+    let spawnError: Error | undefined;
+    const onAbort = (): void => {
+      child.kill("SIGTERM");
+    };
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (d: string) => (out += d));
     child.stderr?.on("data", (d: string) => (out += d));
-    child.on("error", (err) => resolve({ code: 1, out: err.message }));
-    child.on("close", (code) => resolve({ code: code ?? 1, out }));
+    child.on("error", (err) => {
+      spawnError = err;
+    });
+    child.on("close", (code) => {
+      signal?.removeEventListener("abort", onAbort);
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      resolve({ code: code ?? 1, out: spawnError?.message ?? out });
+    });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 
@@ -405,11 +427,13 @@ function archiveFiles(archive: ZipFileEntry[], prefix: string): Array<{ rel: str
   return files;
 }
 
-async function writeArchiveFiles(root: string, files: Array<{ rel: string; data: Buffer }>): Promise<boolean> {
+async function writeArchiveFiles(root: string, files: Array<{ rel: string; data: Buffer }>, signal?: AbortSignal): Promise<boolean> {
   for (const entry of files) {
+    signal?.throwIfAborted();
     const target = safeJoin(root, entry.rel);
     if (!target) return false;
     await mkdir(dirname(target), { recursive: true });
+    signal?.throwIfAborted();
     await writeFile(target, entry.data);
   }
   return true;
@@ -430,14 +454,17 @@ function splitScopedArchiveFiles(
   return out;
 }
 
-async function restoreGitBundle(root: string, dataDir: string, bundle: Buffer): Promise<boolean> {
+async function restoreGitBundle(root: string, dataDir: string, bundle: Buffer, signal?: AbortSignal): Promise<boolean> {
   const tmp = join(dataDir, ".imports", `${Date.now()}-${Math.random().toString(36).slice(2)}.bundle`);
   try {
+    signal?.throwIfAborted();
     await mkdir(dirname(tmp), { recursive: true });
     await mkdir(dirname(root), { recursive: true });
     await writeFile(tmp, bundle);
+    signal?.throwIfAborted();
     await rm(root, { recursive: true, force: true });
-    const res = await runCommand("git", ["clone", "--quiet", tmp, root], dirname(root));
+    const res = await runCommand("git", ["clone", "--quiet", tmp, root], dirname(root), signal);
+    signal?.throwIfAborted();
     return res.code === 0;
   } finally {
     await rm(tmp, { force: true }).catch(() => {});
@@ -448,17 +475,18 @@ function standardVariantBranch(variantId: string): string {
   return `dezin/variant/${variantId}`;
 }
 
-async function renameStandardVariantBranches(root: string, variantMap: Map<string, string>): Promise<void> {
+async function renameStandardVariantBranches(root: string, variantMap: Map<string, string>, signal?: AbortSignal): Promise<void> {
   if (!existsSync(join(root, ".git"))) return;
   for (const [oldId, newId] of variantMap) {
+    signal?.throwIfAborted();
     if (oldId === newId) continue;
     const oldBranch = standardVariantBranch(oldId);
     const newBranch = standardVariantBranch(newId);
-    const hasOld = (await runCommand("git", ["show-ref", "--verify", "--quiet", `refs/heads/${oldBranch}`], root)).code === 0;
+    const hasOld = (await runCommand("git", ["show-ref", "--verify", "--quiet", `refs/heads/${oldBranch}`], root, signal)).code === 0;
     if (!hasOld) continue;
-    const hasNew = (await runCommand("git", ["show-ref", "--verify", "--quiet", `refs/heads/${newBranch}`], root)).code === 0;
+    const hasNew = (await runCommand("git", ["show-ref", "--verify", "--quiet", `refs/heads/${newBranch}`], root, signal)).code === 0;
     if (hasNew) continue;
-    await runCommand("git", ["branch", "-m", oldBranch, newBranch], root);
+    await runCommand("git", ["branch", "-m", oldBranch, newBranch], root, signal);
   }
 }
 
@@ -514,11 +542,17 @@ function rewriteRunBundleFile(
   }
 }
 
-export async function handleImportProject(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
+async function completeImportRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: AppDeps,
+  requestSignal?: AbortSignal,
+): Promise<void> {
   let archive: ZipFileEntry[];
   try {
-    archive = readZipEntries(await readRawBody(req));
+    archive = readZipEntries(await readRawBody(req, undefined, requestSignal));
   } catch (err) {
+    if (requestSignal?.aborted) throw requestSignal.reason;
     return sendError(res, 422, err instanceof Error ? err.message : "invalid project archive");
   }
   const manifestEntry = archive.find((entry) => entry.path === MANIFEST_PATH);
@@ -557,6 +591,10 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
   });
   const root = projectDir(deps.dataDir, project.id);
 
+  const completeImport = async (signal?: AbortSignal): Promise<void> => {
+    await deps.importProjectCreated?.(project.id, signal);
+    signal?.throwIfAborted();
+
   const projectIdMap = new Map<string, string>();
   if (typeof manifest.project!.id === "string") projectIdMap.set(manifest.project!.id, project.id);
 
@@ -592,20 +630,26 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
   }
 
   const gitBundle = archive.find((entry) => entry.path === "standard/git.bundle");
-  const restoredGit = project.mode === "standard" && gitBundle ? await restoreGitBundle(root, deps.dataDir, gitBundle.data) : false;
-  if (restoredGit) await renameStandardVariantBranches(root, variantMap);
+  const restoredGit = project.mode === "standard" && gitBundle ? await restoreGitBundle(root, deps.dataDir, gitBundle.data, signal) : false;
+  signal?.throwIfAborted();
+  if (restoredGit) await renameStandardVariantBranches(root, variantMap, signal);
 
   let sourceRoot = root;
   const rootVariantId = deps.store.listVariants(project.id)[0]?.id;
   if (project.mode === "standard" && activeImportedVariant && rootVariantId && activeImportedVariant.newId !== rootVariantId) {
     sourceRoot = await standardVariantArtifactDir(deps, project.id, activeImportedVariant.newId).catch(() => root);
   }
-  if (!(await writeArchiveFiles(sourceRoot, sourceFiles))) return sendError(res, 422, "invalid source path");
+  signal?.throwIfAborted();
+  if (!(await writeArchiveFiles(sourceRoot, sourceFiles, signal))) return sendError(res, 422, "invalid source path");
 
-  if (!(await writeArchiveFiles(join(root, ".refs"), refFiles))) return sendError(res, 422, "invalid source path");
+  if (!(await writeArchiveFiles(join(root, ".refs"), refFiles, signal))) return sendError(res, 422, "invalid source path");
   const cover = archive.find((entry) => entry.path === "cover.png");
+  signal?.throwIfAborted();
   await mkdir(root, { recursive: true });
-  if (cover) await writeFile(join(root, ".cover.png"), cover.data);
+  if (cover) {
+    signal?.throwIfAborted();
+    await writeFile(join(root, ".cover.png"), cover.data);
+  }
 
   const groupedVariantFiles = new Map<string, Array<{ rel: string; data: Buffer }>>();
   for (const file of variantFiles.filter((entry) => !shouldSkipArchiveSourcePath(entry.rel))) {
@@ -621,7 +665,7 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
         ? await standardVariantArtifactDir(deps, project.id, variantId).catch(() => null)
         : join(root, ".variants", variantId);
     if (!targetRoot) continue;
-    if (!(await writeArchiveFiles(targetRoot, files))) return sendError(res, 422, "invalid source path");
+    if (!(await writeArchiveFiles(targetRoot, files, signal))) return sendError(res, 422, "invalid source path");
   }
 
   const runMap = new Map<string, string>();
@@ -656,12 +700,14 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
   }
 
   for (const file of versionFiles) {
+    signal?.throwIfAborted();
     const oldRunId = file.rel.endsWith(".html") ? file.rel.slice(0, -".html".length) : file.rel;
     const newRunId = runMap.get(oldRunId);
     if (!newRunId) continue;
     const target = safeJoin(root, join(".versions", `${newRunId}.html`));
     if (!target) return sendError(res, 422, "invalid source path");
     await mkdir(dirname(target), { recursive: true });
+    signal?.throwIfAborted();
     await writeFile(target, file.data);
   }
 
@@ -675,16 +721,19 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
     messageId: messageMap,
   };
   for (const file of runLogFiles) {
+    signal?.throwIfAborted();
     if (file.rel.includes("/") || !file.rel.endsWith(".jsonl")) continue;
     const oldRunId = file.rel.endsWith(".jsonl") ? file.rel.slice(0, -".jsonl".length) : file.rel;
     const newRunId = runMap.get(oldRunId);
     if (!newRunId) continue;
     const target = join(deps.dataDir, ".runs", `${newRunId}.jsonl`);
     await mkdir(dirname(target), { recursive: true });
+    signal?.throwIfAborted();
     await writeFile(target, rewriteRunLog(file.data, rewriteMaps));
   }
 
   for (const file of runLogFiles) {
+    signal?.throwIfAborted();
     const [oldRunId, ...restParts] = file.rel.split("/");
     if (!oldRunId || restParts.length === 0) continue;
     const newRunId = runMap.get(oldRunId);
@@ -693,6 +742,7 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
     const target = safeJoin(join(deps.dataDir, ".runs", newRunId), rel);
     if (!target) return sendError(res, 422, "invalid source path");
     await mkdir(dirname(target), { recursive: true });
+    signal?.throwIfAborted();
     await writeFile(target, rewriteRunBundleFile(rel, file.data, rewriteMaps, join(deps.dataDir, ".runs", newRunId, "moodboards")));
   }
 
@@ -705,5 +755,33 @@ export async function handleImportProject(req: IncomingMessage, res: ServerRespo
       : setupImportedStandardProject(project.id, root);
     void setup.catch(() => {});
   }
-  sendJson(res, 201, project);
+    sendJson(res, 201, project);
+  };
+
+  if (!deps.runtimeSupervisor) {
+    await completeImport();
+    return;
+  }
+
+  try {
+    await deps.runtimeSupervisor.trackOperation(
+      { projectId: project.id },
+      (signal) => completeImport(signal),
+    );
+  } catch (err) {
+    // Shutdown owns the request-level operation before a project id exists. If it wins after the
+    // row is created, roll the just-created project back through the normal ownership boundary.
+    if (requestSignal?.aborted && deps.store.getProject(project.id)) {
+      await deps.runtimeSupervisor.releaseProject(project.id);
+    }
+    throw err;
+  }
+}
+
+export async function handleImportProject(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
+  if (!deps.runtimeSupervisor) return completeImportRequest(req, res, deps);
+  await deps.runtimeSupervisor.trackOperation(
+    { projectId: IMPORT_REQUEST_SCOPE_ID },
+    (signal) => completeImportRequest(req, res, deps, signal),
+  );
 }

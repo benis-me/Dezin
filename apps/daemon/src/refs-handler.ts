@@ -27,15 +27,18 @@ export async function handleUploadRef(
   res: ServerResponse,
   params: Record<string, string>,
   deps: AppDeps,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!deps.store.getProject(params.id!)) return sendError(res, 404, "project not found");
-  const body = (await readJsonBody(req)) as RefBody;
+  const body = (await readJsonBody(req, undefined, signal)) as RefBody;
   if (typeof body.name !== "string" || !body.name) return sendError(res, 400, "name is required");
   if (typeof body.contentBase64 !== "string") return sendError(res, 400, "contentBase64 is required");
 
   const name = safeName(body.name);
   const dir = join(projectDir(deps.dataDir, params.id!), ".refs");
+  signal?.throwIfAborted();
   await mkdir(dir, { recursive: true });
+  signal?.throwIfAborted();
   await writeFile(join(dir, name), Buffer.from(body.contentBase64, "base64"));
   sendJson(res, 200, { name, path: `.refs/${name}` });
 }

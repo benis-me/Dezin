@@ -13,7 +13,7 @@ import type { AppDeps } from "../src/index.ts";
 import { buildMoodboardAgentContext, buildMoodboardAgentPrompt, parseMoodboardAgentOutput } from "../src/moodboard-agent.ts";
 import { injectSelectBridge } from "../src/serve-static.ts";
 import * as extensionAuth from "../src/extension-auth.ts";
-import { ensureProbeSession } from "../src/sharingan-handler.ts";
+import { ensureProbeSession, sharinganCaptureRegistrySizeForTests } from "../src/sharingan-handler.ts";
 
 interface Ctx {
   base: string;
@@ -638,6 +638,87 @@ test("project deletion invalidates a delayed Sharingan open and closes the late 
       },
     },
   );
+});
+
+test("Sharingan status returns 404 after project deletion without recreating capture ownership", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({
+      name: "Deleted Sharingan status",
+      mode: "standard",
+      sharingan: true,
+      sourceUrl: "https://example.test/",
+    });
+    mkdirSync(join(dataDir, "projects", project.id), { recursive: true });
+    const before = sharinganCaptureRegistrySizeForTests();
+    let closes = 0;
+    await ensureProbeSession(
+      project.id,
+      dataDir,
+      async () => ({
+        close: async () => {
+          closes += 1;
+          if (closes > 1) throw new Error("session close is not idempotent");
+        },
+      }) as unknown as import("../src/sharingan-browser.ts").SharinganSession,
+    );
+    assert.equal(sharinganCaptureRegistrySizeForTests(), before + 1);
+
+    const deleted = await fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" });
+    assert.equal(deleted.status, 204);
+    assert.equal(closes, 1);
+    assert.equal(sharinganCaptureRegistrySizeForTests(), before, "deletion releases capture ownership");
+
+    const status = await fetch(`${base}/api/sharingan/${project.id}/status`);
+    assert.equal(status.status, 404, "status respects Store deletion instead of reporting a phantom idle project");
+    assert.equal(
+      sharinganCaptureRegistrySizeForTests(),
+      before,
+      "polling a deleted project must not recreate capture ownership",
+    );
+  });
+});
+
+test("project deletion aborts a partial reference upload before it can recreate .refs", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Slow reference upload" });
+    const root = join(dataDir, "projects", project.id);
+    mkdirSync(root, { recursive: true });
+
+    const url = new URL(`/api/projects/${project.id}/refs`, base);
+    let uploadStatus = 0;
+    const uploadDone = new Promise<void>((resolve) => {
+      const upload = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          method: "POST",
+          headers: { "content-type": "application/json", "transfer-encoding": "chunked" },
+        },
+        (response) => {
+          uploadStatus = response.statusCode ?? 0;
+          response.resume();
+          response.on("end", resolve);
+        },
+      );
+      upload.on("error", () => resolve());
+      upload.write('{"name":"late.txt","contentBase64":"');
+      setTimeout(() => upload.end(`${Buffer.from("late").toString("base64")}\"}`), 100);
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const deleted = await Promise.race([
+      fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" }),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+    ]);
+    assert.notEqual(deleted, "timeout", "DELETE must not wait for the client to finish its body");
+    assert.equal((deleted as Response).status, 204);
+    await uploadDone;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.notEqual(uploadStatus, 200, "the cancelled upload is not accepted");
+    assert.equal(existsSync(root), false, "the partial upload cannot recreate the deleted project tree");
+  });
 });
 
 test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {

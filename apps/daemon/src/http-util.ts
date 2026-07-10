@@ -39,16 +39,60 @@ export function isHttpError(value: unknown): value is HttpError {
   return value instanceof HttpError;
 }
 
-export async function readJsonBody(req: IncomingMessage, max = MAX_BODY): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    size += buf.length;
-    if (size > max) throw new HttpError(413, "request body too large");
-    chunks.push(buf);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8").trim();
+function abortError(signal?: AbortSignal): Error {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error("request body aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function collectBody(req: IncomingMessage, max: number, signal?: AbortSignal): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const cleanup = (): void => {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
+      req.removeListener("aborted", onAborted);
+      signal?.removeEventListener("abort", onSignalAbort);
+    };
+    const finish = (error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve(Buffer.concat(chunks));
+    };
+    const onData = (chunk: Buffer | string): void => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > max) {
+        finish(new HttpError(413, "request body too large"));
+        return;
+      }
+      chunks.push(buffer);
+    };
+    const onEnd = (): void => finish();
+    const onError = (error: Error): void => finish(error);
+    const onAborted = (): void => finish(abortError(signal));
+    const onSignalAbort = (): void => {
+      finish(abortError(signal));
+      req.destroy();
+    };
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("aborted", onAborted);
+    signal?.addEventListener("abort", onSignalAbort, { once: true });
+    if (signal?.aborted) onSignalAbort();
+  });
+}
+
+export async function readJsonBody(req: IncomingMessage, max = MAX_BODY, signal?: AbortSignal): Promise<unknown> {
+  const raw = (await collectBody(req, max, signal)).toString("utf8").trim();
   if (!raw) return {};
   const contentType = req.headers["content-type"];
   const mediaType = (Array.isArray(contentType) ? contentType[0] : contentType)?.split(";")[0]?.trim().toLowerCase() ?? "";
@@ -63,16 +107,8 @@ export async function readJsonBody(req: IncomingMessage, max = MAX_BODY): Promis
 }
 
 /** Read a raw binary request body (for file uploads). Allows larger payloads than JSON. */
-export async function readRawBody(req: IncomingMessage, max = 64 * 1024 * 1024): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    size += buf.length;
-    if (size > max) throw new HttpError(413, "request body too large");
-    chunks.push(buf);
-  }
-  return Buffer.concat(chunks);
+export function readRawBody(req: IncomingMessage, max = 64 * 1024 * 1024, signal?: AbortSignal): Promise<Buffer> {
+  return collectBody(req, max, signal);
 }
 
 const CONTENT_TYPES: Record<string, string> = {

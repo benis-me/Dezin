@@ -41,6 +41,11 @@ export const SHARINGAN_PROBE_IDLE_MS = 300_000;
 const captures = new Map<string, Capture>();
 let nextCaptureGeneration = 1;
 
+/** Test-only observability for proving read-only status requests do not allocate capture ownership. */
+export function sharinganCaptureRegistrySizeForTests(): number {
+  return captures.size;
+}
+
 function get(id: string): Capture {
   let c = captures.get(id);
   if (!c) {
@@ -73,6 +78,18 @@ function retainCaptureOperation<T>(c: Capture, start: () => Promise<T>): Promise
   return operation;
 }
 
+/**
+ * Atomically transfer ownership of an established session out of a capture scope. Every path
+ * that closes `c.session` must claim it first, so release and an in-flight error cannot both
+ * close the same (not necessarily idempotent) browser session.
+ */
+function claimEstablishedSession(c: Capture, expected?: SharinganSession): SharinganSession | undefined {
+  const session = c.session;
+  if (!session || (expected && session !== expected)) return undefined;
+  c.session = undefined;
+  return session;
+}
+
 function emit(c: Capture, step: CaptureStep): void {
   if (c.released) return;
   c.steps.push(step);
@@ -95,7 +112,7 @@ function releaseProbeSession(id: string): Promise<void> {
   return retainCaptureOperation(c, async () => {
     if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
     if (c.phase !== "probing") return;
-    const s = c.session; c.session = undefined; c.phase = "captured";
+    const s = claimEstablishedSession(c); c.phase = "captured";
     if (s) await s.close().catch(() => {});
   });
 }
@@ -156,8 +173,7 @@ async function finishCapturedSession(id: string, dataDir: string, c: Capture, pa
     c.phase = "probing";
     armProbeIdle(id);
   } else {
-    await c.session?.close();
-    c.session = undefined;
+    await claimEstablishedSession(c)?.close();
     c.phase = "captured";
   }
 }
@@ -198,8 +214,7 @@ export function startCapture(
     } catch (err) {
       // Capture threw after open() launched a browser holding the persistent-profile lock.
       // Close it so it cannot leak (and free the lock), then mark the terminal phase.
-      if (c.session === session) c.session = undefined;
-      if (session) await session.close().catch(() => {});
+      await claimEstablishedSession(c, session)?.close().catch(() => {});
       if (!isActive(id, c, generation)) return;
       c.error = err instanceof Error ? err.message : "capture failed";
       emit(c, { at: Date.now(), kind: "done", text: `Capture failed: ${c.error}` });
@@ -254,8 +269,9 @@ export async function handleSharinganStart(
   id: string,
   dataDir: string,
   open: SharinganOpen = SharinganSession.open,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const body = (await readJsonBody(req)) as { url?: string };
+  const body = (await readJsonBody(req, undefined, signal)) as { url?: string };
   const url = typeof body.url === "string" ? body.url.trim() : "";
   if (!/^https?:\/\//i.test(url)) { sendJson(res, 400, { error: "a valid http(s) url is required" }); return; }
   const profileDir = join(dataDir, ".sharingan-profile");
@@ -284,8 +300,7 @@ export function continueCapture(id: string, dataDir: string): Promise<void> {
       await finishCapturedSession(id, dataDir, c, page);
     } catch (err) {
       if (!isActive(id, c, generation)) return;
-      if (c.session === session) c.session = undefined;
-      await session.close().catch(() => {});
+      await claimEstablishedSession(c, session)?.close().catch(() => {});
       c.error = err instanceof Error ? err.message : "capture failed";
       emit(c, { at: Date.now(), kind: "done", text: `Capture failed: ${c.error}` });
       c.phase = "error";
@@ -308,8 +323,8 @@ export function handleSharinganFocus(res: ServerResponse, id: string): void {
 }
 
 /** Drive the (lazily-opened, idle-released) probe session to a URL. Emits a "navigate" step so the Phase-3 tab shows the Agent's activity. */
-export async function handleSharinganNavigate(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
-  const body = (await readJsonBody(req)) as { url?: string };
+export async function handleSharinganNavigate(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string, signal?: AbortSignal): Promise<void> {
+  const body = (await readJsonBody(req, undefined, signal)) as { url?: string };
   const url = typeof body.url === "string" ? body.url.trim() : "";
   if (!/^https?:\/\//i.test(url)) { sendJson(res, 400, { error: "a valid http(s) url is required" }); return; }
   try {
@@ -329,9 +344,9 @@ export async function handleSharinganNavigate(req: IncomingMessage, res: ServerR
  * grow the bundle unbounded. Over budget is a 200 `{ skipped: "budget" }`, not an error —
  * the Agent should treat it as "stop capturing," not a failure to retry.
  */
-export async function handleSharinganCapture(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
+export async function handleSharinganCapture(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string, signal?: AbortSignal): Promise<void> {
   const c = get(id);
-  const body = (await readJsonBody(req)) as { url?: string };
+  const body = (await readJsonBody(req, undefined, signal)) as { url?: string };
   if (c.pages.length >= SHARINGAN_PAGE_BUDGET) {
     // At budget — but re-capturing an ALREADY-captured URL just UPDATES it (upsert), so don't refuse
     // that; only refuse a capture that would grow the bundle past the budget.
@@ -395,8 +410,8 @@ export async function handleSharinganLinks(res: ServerResponse, id: string, data
 }
 
 /** Click a selector on the live probe page. */
-export async function handleSharinganClick(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
-  const body = (await readJsonBody(req)) as { selector?: string };
+export async function handleSharinganClick(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string, signal?: AbortSignal): Promise<void> {
+  const body = (await readJsonBody(req, undefined, signal)) as { selector?: string };
   const selector = typeof body.selector === "string" ? body.selector : "";
   if (!selector) { sendJson(res, 400, { error: "selector required" }); return; }
   const r = await withProbe(id, dataDir, "navigate", `Agent clicking ${selector}`, (s) => s.click(selector));
@@ -404,23 +419,44 @@ export async function handleSharinganClick(req: IncomingMessage, res: ServerResp
 }
 
 /** Scroll the live probe page to a Y offset. */
-export async function handleSharinganScroll(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string): Promise<void> {
-  const body = (await readJsonBody(req)) as { y?: number };
+export async function handleSharinganScroll(req: IncomingMessage, res: ServerResponse, id: string, dataDir: string, signal?: AbortSignal): Promise<void> {
+  const body = (await readJsonBody(req, undefined, signal)) as { y?: number };
   const y = typeof body.y === "number" ? body.y : 0;
   const r = await withProbe(id, dataDir, "navigate", `Agent scrolling to ${y}`, (s) => s.scroll(y));
   r.ok ? sendJson(res, 200, { ok: true }) : sendJson(res, 409, { error: r.error });
 }
 
-export function handleSharinganStatus(res: ServerResponse, id: string, dataDir: string): void {
-  const c = get(id);
-  // After a daemon restart (or an idle-released session) the in-memory map is empty, so c.phase is a
-  // fresh "idle" even though a capture bundle may already be on disk. Recognize the on-disk capture so
-  // the tab doesn't auto-re-capture (re-open Chrome for) an already-captured project.
-  if (c.phase === "idle" && !c.session) {
+export function peekSharinganStatus(id: string, dataDir: string): {
+  phase: Phase;
+  steps: number;
+  pages: Array<Pick<CapturedPage, "url" | "title" | "screenshots">>;
+  error?: string;
+} {
+  const c = captures.get(id);
+  let phase = c?.phase ?? "idle";
+  let pages = c?.pages ?? [];
+
+  // A daemon restart leaves captured evidence on disk without an in-memory owner. Derive the
+  // displayed state from that evidence, but do not allocate or mutate capture ownership just
+  // because a client is polling status.
+  if (phase === "idle" && !c?.session) {
     const persisted = readCapturedPages(projectDir(dataDir, id));
-    if (persisted.length) { c.pages = persisted; c.phase = "captured"; }
+    if (persisted.length) {
+      phase = "captured";
+      pages = persisted;
+    }
   }
-  sendJson(res, 200, { phase: c.phase, steps: c.steps.length, pages: c.pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots })), error: c.error });
+
+  return {
+    phase,
+    steps: c?.steps.length ?? 0,
+    pages: pages.map((p) => ({ url: p.url, title: p.title, screenshots: p.screenshots })),
+    ...(c?.error ? { error: c.error } : {}),
+  };
+}
+
+export function handleSharinganStatus(res: ServerResponse, id: string, dataDir: string): void {
+  sendJson(res, 200, peekSharinganStatus(id, dataDir));
 }
 
 /**
@@ -456,15 +492,13 @@ export async function releaseSharinganProject(id: string): Promise<void> {
     try { listener.end(); } catch { /* best-effort */ }
   }
   c.listeners.clear();
-  const s = c.session;
-  c.session = undefined;
+  const s = claimEstablishedSession(c);
   const operations = [...c.operations];
   await Promise.allSettled([
     ...(s ? [Promise.resolve().then(() => s.close())] : []),
     ...operations,
   ]);
-  const lateSession = c.session as SharinganSession | undefined;
-  c.session = undefined;
+  const lateSession = claimEstablishedSession(c);
   if (lateSession && lateSession !== s) await lateSession.close().catch(() => {});
   if (captures.get(id) === c) captures.delete(id);
 }

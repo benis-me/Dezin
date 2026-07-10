@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { startCapture, continueCapture, handleSharinganStatus, handleSharinganFocus } from "../src/sharingan-handler.ts";
+import { startCapture, continueCapture, handleSharinganStatus, handleSharinganFocus, releaseSharinganProject } from "../src/sharingan-handler.ts";
 import type { SharinganSession } from "../src/sharingan-browser.ts";
 
 function callHandler(fn: (res: import("node:http").ServerResponse) => void): Promise<{ status: number; json: any }> {
@@ -59,4 +59,36 @@ test("continueCapture resumes only from a login pause; focus raises the browser"
   await continueCapture(id, dataDir);
   const s2 = await callHandler((res) => handleSharinganStatus(res, id, dataDir));
   assert.equal(s2.json.phase, "captured", "continue re-runs the capture on the authenticated session");
+});
+
+test("project release closes an established session exactly once when continue concurrently fails", async () => {
+  let navigations = 0;
+  let continuationEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { continuationEntered = resolve; });
+  let rejectContinuation!: (error: Error) => void;
+  const continuation = new Promise<never>((_resolve, reject) => { rejectContinuation = reject; });
+  let closes = 0;
+  const { session } = makeFake({
+    navigate: async () => {
+      navigations += 1;
+      if (navigations === 1) return { status: 401, finalUrl: "http://x.test/login" };
+      continuationEntered();
+      return continuation;
+    },
+    close: async () => {
+      closes += 1;
+      if (closes > 1) throw new Error("session close is not idempotent");
+    },
+  });
+  const id = `continue-release-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-cont-release-"));
+
+  await startCapture(id, "http://x.test/", dataDir, "/tmp/unused", async () => session);
+  const continuing = continueCapture(id, dataDir);
+  await entered;
+  const release = releaseSharinganProject(id);
+  rejectContinuation(new Error("continue failed during project deletion"));
+  await Promise.all([continuing, release]);
+
+  assert.equal(closes, 1, "continue failure and project deletion share one close owner");
 });
