@@ -54,4 +54,25 @@ test("desktop shutdown targets the daemon process group on every platform", () =
 
   assert.match(mainSource, /process\.kill\(-pid,\s*"SIGTERM"\)/);
   assert.match(mainSource, /spawnSync\("taskkill",\s*\["\/pid",\s*String\(pid\),\s*"\/t",\s*"\/f"\]/);
+  assert.match(mainSource, /handleTaskkillResult\(\{\s*result,\s*child/);
+});
+
+test("detached Windows daemon spawning stays hidden", () => {
+  const mainSource = readFileSync(join(__dirname, "..", "main.js"), "utf8");
+  const spawnSource = mainSource.match(/function spawnDaemon\([\s\S]*?\n}\n\nfunction readDaemonPortFile/)?.[0] ?? "";
+
+  assert.match(spawnSource, /detached:\s*true/);
+  assert.match(spawnSource, /windowsHide:\s*true/);
+});
+
+test("native pickers use and update persisted dialog path state", () => {
+  const mainSource = readFileSync(join(__dirname, "..", "main.js"), "utf8");
+
+  assert.match(mainSource, /createDialogPathState\(\{/);
+  assert.match(mainSource, /stateFile:\s*join\(app\.getPath\("userData"\),\s*"dialog-path\.json"\)/);
+  assert.match(mainSource, /fallbackPath:\s*app\.getPath\("documents"\)/);
+  assert.equal((mainSource.match(/defaultPath:\s*dialogPathState\.defaultPath\(\)/g) ?? []).length, 2);
+  assert.equal((mainSource.match(/dialogPathState\.rememberSelection\(r,/g) ?? []).length, 2);
+  assert.match(mainSource, /rememberSelection\(r,\s*\{\s*directory:\s*false\s*\}\)/);
+  assert.match(mainSource, /rememberSelection\(r,\s*\{\s*directory:\s*true\s*\}\)/);
 });

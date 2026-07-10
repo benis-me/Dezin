@@ -179,7 +179,7 @@ test("stop kills the ready daemon process group", async () => {
     readPortFile: () => ({ url: "http://127.0.0.1:7457", pid: child.pid, ownerId }),
     now: () => 1_000,
     schedule: immediateSchedule,
-    killProcessGroup: (pid) => killed.push(pid),
+    killProcessGroup: (pid, targetChild) => killed.push({ pid, child: targetChild }),
   });
 
   await supervisor.ensureStarted();
@@ -187,7 +187,7 @@ test("stop kills the ready daemon process group", async () => {
 
   assert.equal(supervisor.state(), "stopping");
   await stopping;
-  assert.deepEqual(killed, [child.pid]);
+  assert.deepEqual(killed, [{ pid: child.pid, child }]);
   assert.equal(supervisor.state(), "idle");
 });
 

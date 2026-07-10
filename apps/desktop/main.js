@@ -7,7 +7,9 @@ const { spawn, spawnSync } = require("node:child_process");
 const { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync } = require("node:fs");
 const { join, dirname } = require("node:path");
 const { createDaemonSupervisor, loadUrlWithRetry } = require("./daemon-supervisor.js");
+const { createDialogPathState } = require("./dialog-path-state.js");
 const { isAllowedAppNavigation, isSafeExternalUrl } = require("./navigation-policy.js");
+const { handleTaskkillResult } = require("./process-group.js");
 const { readWindowState, writeWindowState } = require("./window-state.js");
 
 const ROOT = join(__dirname, "..", "..");
@@ -23,6 +25,7 @@ const DEV = process.env.DEZIN_DEV === "1";
 
 let win = null;
 let quitting = false;
+let persistedDialogPathState = null;
 
 function openSafeExternal(url) {
   if (!isSafeExternalUrl(url)) return;
@@ -46,6 +49,7 @@ function spawnDaemon({ ownerId }) {
   const child = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
     cwd: join(ROOT, "apps", "daemon"),
     detached: true,
+    windowsHide: true,
     // Fixed default port so the browser extension can reach the daemon at a known address
     // (127.0.0.1:7457); still overridable via env. The portfile records whatever it binds.
     env: {
@@ -90,10 +94,10 @@ function schedule(callback, delay) {
   return () => clearTimeout(timer);
 }
 
-function killProcessGroup(pid) {
+function killProcessGroup(pid, child) {
   if (process.platform === "win32") {
     const result = spawnSync("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" });
-    if (result.error) console.error("[daemon] failed to stop process tree:", result.error.message);
+    handleTaskkillResult({ result, child, logError: (message) => console.error(message) });
     return;
   }
   try {
@@ -103,6 +107,16 @@ function killProcessGroup(pid) {
       console.error("[daemon] failed to stop process group:", error && error.message);
     }
   }
+}
+
+function getDialogPathState() {
+  if (!persistedDialogPathState) {
+    persistedDialogPathState = createDialogPathState({
+      stateFile: join(app.getPath("userData"), "dialog-path.json"),
+      fallbackPath: app.getPath("documents"),
+    });
+  }
+  return persistedDialogPathState;
 }
 
 const daemonSupervisor = createDaemonSupervisor({
@@ -282,12 +296,22 @@ function launchWindow() {
 }
 
 ipcMain.handle("dezin:pickFiles", async () => {
-  const r = await dialog.showOpenDialog(win, { properties: ["openFile", "multiSelections"] });
+  const dialogPathState = getDialogPathState();
+  const r = await dialog.showOpenDialog(win, {
+    defaultPath: dialogPathState.defaultPath(),
+    properties: ["openFile", "multiSelections"],
+  });
+  dialogPathState.rememberSelection(r, { directory: false });
   return r.canceled ? [] : r.filePaths;
 });
 
 ipcMain.handle("dezin:pickFolder", async () => {
-  const r = await dialog.showOpenDialog(win, { properties: ["openDirectory"] });
+  const dialogPathState = getDialogPathState();
+  const r = await dialog.showOpenDialog(win, {
+    defaultPath: dialogPathState.defaultPath(),
+    properties: ["openDirectory"],
+  });
+  dialogPathState.rememberSelection(r, { directory: true });
   return r.canceled ? [] : r.filePaths;
 });
 

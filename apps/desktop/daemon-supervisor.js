@@ -124,7 +124,7 @@ function createDaemonSupervisor({ spawnDaemon, readPortFile, now = Date.now, sch
         throw new Error("Daemon spawn did not return a valid child process");
       }
       if (stopping) {
-        await killProcessGroup(targetChild.pid);
+        await killProcessGroup(targetChild.pid, targetChild);
         throw new Error("Daemon supervisor is stopping");
       }
       child = targetChild;
@@ -139,7 +139,7 @@ function createDaemonSupervisor({ spawnDaemon, readPortFile, now = Date.now, sch
         child = null;
         readyUrl = null;
         try {
-          await killProcessGroup(targetChild.pid);
+          await killProcessGroup(targetChild.pid, targetChild);
         } catch {
           // Preserve the startup error; process termination is best-effort here.
         }
@@ -205,7 +205,7 @@ function createDaemonSupervisor({ spawnDaemon, readPortFile, now = Date.now, sch
     stopPromise = completion;
     void (async () => {
       try {
-        if (targetChild?.pid) await killProcessGroup(targetChild.pid);
+        if (targetChild?.pid) await killProcessGroup(targetChild.pid, targetChild);
         if (pendingStart) {
           try {
             await pendingStart;
