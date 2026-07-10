@@ -725,7 +725,7 @@ const routes: Route[] = [
       if (!project) return sendError(res, 404, "project not found");
       const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
       const released = deps.releaseDevServer
-        ? deps.releaseDevServer(variantRuntimeKey(id!, active))
+        ? await deps.releaseDevServer(variantRuntimeKey(id!, active))
         : await deps.previewLeaseManager!.stopScope({ projectId: id!, variantId: active }).then(() => true);
       sendJson(res, 200, { released });
     },
@@ -1112,7 +1112,7 @@ const routes: Route[] = [
             sendError(res, 409, err instanceof Error ? err.message : "cover capture failed");
           } finally {
             if (lease?.release) await lease.release();
-            else if (releaseAfter) (deps.releaseDevServer ?? releaseDevServer)(runtimeKey);
+            else if (releaseAfter) await (deps.releaseDevServer ?? releaseDevServer)(runtimeKey);
           }
         },
       );

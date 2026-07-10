@@ -146,7 +146,7 @@ setInterval(() => {}, 1000);
     const second = await ensureDevServer("p1", dir, "runtime-test");
     assert.notEqual(await waitForText(second.url), firstPid);
   } finally {
-    stopAllDevServers();
+    await stopAllDevServers();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -189,7 +189,7 @@ setInterval(() => {}, 1000);
     assert.equal(existsSync(postinstallMarker), false);
     assert.equal(await waitForText(url), "dependency-ready");
   } finally {
-    stopAllDevServers();
+    await stopAllDevServers();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -234,7 +234,7 @@ setInterval(() => {}, 1000);
     const second = await ensureDevServer("git-runtime-test", dir, "runtime-git-test");
     assert.equal(await waitForText(second.url), "second");
   } finally {
-    stopAllDevServers();
+    await stopAllDevServers();
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -300,7 +300,7 @@ setInterval(() => {}, 1000);
     assert.equal(getSetup("release-generation", dir).phase, "installing", "the released runtime generation is absent");
   } finally {
     process.env.PATH = originalPath;
-    stopAllDevServers();
+    await stopAllDevServers();
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
@@ -79,6 +80,7 @@ function fakeOptions(overrides: Partial<PreviewLeaseManagerOptions> = {}): {
         return child;
       },
       waitUntilReady: async () => {},
+      isProcessGroupAlive: (child) => child.exitCode === null && child.signalCode === null,
       killProcessGroup: (child, signal) => {
         signals.push({ pid: child.pid ?? -1, signal });
         if (signal === "SIGKILL") (child as FakeChild).exit(0, signal);
@@ -91,6 +93,24 @@ function fakeOptions(overrides: Partial<PreviewLeaseManagerOptions> = {}): {
       ...overrides,
     },
   };
+}
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
+  for (let i = 0; i < 100; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  throw new Error(message);
 }
 
 test("concurrent acquire shares one ready process but returns distinct renewable leases", async () => {
@@ -143,7 +163,10 @@ test("a process that exits before readiness rejects without a registry entry", a
       queueMicrotask(() => child.exit(1));
       return child;
     },
-    waitUntilReady: async () => new Promise<void>(() => {}),
+    waitUntilReady: async (_url, _child, signal) => new Promise<void>((_resolve, reject) => {
+      if (signal.aborted) return reject(signal.reason);
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
   });
   const manager = createPreviewLeaseManager(fixture.options);
 
@@ -183,6 +206,7 @@ test("released processes expire after 60 seconds of idle time", async () => {
   await clock.advance(59_999);
   assert.equal(manager.activeCount(), 1);
   await clock.advance(1);
+  await waitUntil(() => manager.activeCount() === 0, "idle preview teardown did not settle");
   assert.equal(manager.activeCount(), 0);
 });
 
@@ -200,6 +224,7 @@ test("idle LRU keeps four processes and never evicts an active lease", async () 
     await clock.advance(1);
   }
 
+  await waitUntil(() => manager.activeCount() === 5, "idle LRU teardown did not settle");
   assert.equal(manager.activeCount(), 5, "one active process plus four idle processes remain");
   assert.equal(await manager.renew(active.leaseId) !== null, true, "active lease survives idle pressure");
   const spawnedBeforeReuse = fixture.children.length;
@@ -225,6 +250,153 @@ test("stopScope matches only the requested hierarchy and stopAll leaves zero", a
   assert.equal(manager.activeCount(), 0);
 });
 
+test("stopScope is an admission barrier for a fresh readiness flight", async () => {
+  let readinessCalls = 0;
+  const fixture = fakeOptions({
+    waitUntilReady: async (_url, _child, signal) => {
+      readinessCalls += 1;
+      if (readinessCalls > 1) return;
+      await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const scope = { projectId: "barrier-fresh", variantId: "v1" };
+  const acquiring = manager.acquire(scope, "/tmp/barrier-fresh", { fingerprint: "a" });
+  await waitUntil(() => fixture.children.length === 1, "fresh preview never spawned");
+
+  const stopping = manager.stopScope(scope);
+  await assert.rejects(manager.acquire(scope, "/tmp/barrier-fresh", { fingerprint: "a" }), /stopping/i);
+  await assert.rejects(acquiring);
+  await stopping;
+  assert.equal(manager.activeCount(), 0);
+
+  const after = await manager.acquire(scope, "/tmp/barrier-fresh", { fingerprint: "a" });
+  await after.release();
+  await manager.stopAll();
+});
+
+test("stopScope prevents cached readiness from handing out a lease after the barrier", async () => {
+  const cachedReady = deferred<void>();
+  let readinessCalls = 0;
+  const fixture = fakeOptions({
+    waitUntilReady: async () => {
+      readinessCalls += 1;
+      if (readinessCalls === 2) await cachedReady.promise;
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const scope = { projectId: "barrier-cached", variantId: "v1" };
+  const first = await manager.acquire(scope, "/tmp/barrier-cached", { fingerprint: "a" });
+  const cachedAcquire = manager.acquire(scope, "/tmp/barrier-cached", { fingerprint: "a" });
+  await waitUntil(() => readinessCalls === 2, "cached readiness did not begin");
+
+  const stopping = manager.stopScope(scope);
+  cachedReady.resolve();
+  await assert.rejects(cachedAcquire, /stopping/i);
+  await stopping;
+  assert.equal(await manager.renew(first.leaseId), null);
+  assert.equal(manager.activeCount(), 0);
+});
+
+test("stopScope blocks a replacement flight after cached readiness fails", async () => {
+  const cachedFailure = deferred<void>();
+  let readinessCalls = 0;
+  const fixture = fakeOptions({
+    waitUntilReady: async () => {
+      readinessCalls += 1;
+      if (readinessCalls === 2) {
+        await cachedFailure.promise;
+        throw new Error("cached port closed");
+      }
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const scope = { projectId: "barrier-replacement", variantId: "v1" };
+  await manager.acquire(scope, "/tmp/barrier-replacement", { fingerprint: "a" });
+  const replacing = manager.acquire(scope, "/tmp/barrier-replacement", { fingerprint: "a" });
+  await waitUntil(() => readinessCalls === 2, "cached readiness did not begin");
+
+  const stopping = manager.stopScope(scope);
+  cachedFailure.resolve();
+  await assert.rejects(replacing, /stopping/i);
+  await stopping;
+  assert.equal(fixture.children.length, 1, "no replacement child starts after the stop snapshot");
+  assert.equal(manager.activeCount(), 0);
+});
+
+test("stopAll is an admission barrier and drains a concurrent flight", async () => {
+  const fixture = fakeOptions({
+    waitUntilReady: async (_url, _child, signal) => {
+      await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const acquiring = manager.acquire({ projectId: "barrier-all" }, "/tmp/barrier-all", { fingerprint: "a" });
+  await waitUntil(() => fixture.children.length === 1, "global preview never spawned");
+
+  const stopping = manager.stopAll();
+  await assert.rejects(manager.acquire({ projectId: "other" }, "/tmp/other", { fingerprint: "a" }), /stopping/i);
+  await assert.rejects(acquiring);
+  await stopping;
+  assert.equal(manager.activeCount(), 0);
+});
+
+test("ready-to-abort leaves no immortal zero-lease entry", { timeout: 2_000 }, async () => {
+  const checkpointEntered = deferred<void>();
+  const leaveCheckpoint = deferred<void>();
+  const fixture = fakeOptions({
+    readyEntryCheckpoint: async () => {
+      checkpointEntered.resolve();
+      await leaveCheckpoint.promise;
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const controller = new AbortController();
+  const acquiring = manager.acquire(
+    { projectId: "ready-abort" },
+    "/tmp/ready-abort",
+    { fingerprint: "a", signal: controller.signal },
+  );
+  await Promise.race([
+    checkpointEntered.promise,
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("ready-entry checkpoint was not reached")), 100)),
+  ]);
+  controller.abort();
+  leaveCheckpoint.resolve();
+
+  await assert.rejects(acquiring, (error: unknown) => error instanceof Error && error.name === "AbortError");
+  assert.equal(manager.activeCount(), 0);
+  assert.equal(fixture.children[0]?.exitCode !== null || fixture.children[0]?.signalCode !== null, true);
+});
+
+test("early exit aborts and settles the readiness poller loser", async () => {
+  let attempts = 0;
+  let readinessAborted = false;
+  const fixture = fakeOptions({
+    readyTimeoutMs: 500,
+    spawnProcess: () => {
+      const child = new FakeChild(30_001);
+      fixture.children.push(child);
+      queueMicrotask(() => child.exit(1));
+      return child;
+    },
+    waitUntilReady: async (_url, _child, signal) => {
+      while (!signal.aborted) {
+        attempts += 1;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      readinessAborted = true;
+      throw signal.reason;
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  await assert.rejects(manager.acquire({ projectId: "poll-loser" }, "/tmp/poll-loser"), /exited before readiness/i);
+  const attemptsAtSettlement = attempts;
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(readinessAborted, true);
+  assert.equal(attempts, attemptsAtSettlement, "readiness work stops before acquire rejection settles");
+});
+
 function processExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -233,6 +405,101 @@ function processExists(pid: number): boolean {
     return false;
   }
 }
+
+function processGroupExists(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") return reject(new Error("no TCP port"));
+      server.close((error) => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
+test("default readiness rejects 404 and accepts an owned 2xx response", async () => {
+  for (const status of [404, 204]) {
+    const port = await freePort();
+    const manager = createPreviewLeaseManager({
+      allocatePort: async () => port,
+      spawnProcess: ({ port: ownedPort }) => spawn(
+        process.execPath,
+        ["-e", `const http=require('node:http');const s=http.createServer((_q,r)=>{r.statusCode=${status};r.end()});s.listen(${ownedPort},'127.0.0.1');setInterval(()=>{},1000)`],
+        { detached: process.platform !== "win32", stdio: "ignore" },
+      ),
+      readyTimeoutMs: 600,
+      stopGraceMs: 30,
+    });
+    try {
+      if (status === 404) {
+        await assert.rejects(manager.acquire({ projectId: "strict-404" }, `/tmp/strict-${status}`), /timed out/i);
+      } else {
+        const lease = await manager.acquire({ projectId: "strict-204" }, `/tmp/strict-${status}`);
+        assert.match(lease.url, new RegExp(`:${port}/$`));
+      }
+    } finally {
+      await manager.stopAll();
+    }
+  }
+});
+
+test("leader exit triggers cleanup of a TERM-resistant detached descendant", async () => {
+  if (process.platform === "win32") return;
+  const dir = mkdtempSync(join(tmpdir(), "dezin-preview-orphan-group-"));
+  const childPidPath = join(dir, "child.pid");
+  const parentScript = join(dir, "parent.mjs");
+  writeFileSync(
+    parentScript,
+    `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: "ignore" });
+writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));
+setTimeout(() => process.exit(0), 40);
+`,
+  );
+  let leader: ReturnType<typeof spawn> | undefined;
+  const manager = createPreviewLeaseManager({
+    allocatePort: async () => 4331,
+    spawnProcess: () => {
+      leader = spawn(process.execPath, [parentScript], { cwd: dir, detached: true, stdio: "ignore" });
+      return leader;
+    },
+    waitUntilReady: async () => {
+      await waitUntil(() => {
+        try { return Boolean(readFileSync(childPidPath, "utf8")); } catch { return false; }
+      }, "descendant pid was not written");
+    },
+    stopGraceMs: 50,
+  });
+
+  let pgid = 0;
+  try {
+    await manager.acquire({ projectId: "orphan-group" }, dir, { fingerprint: "a" });
+    pgid = leader?.pid ?? 0;
+    const descendantPid = Number(readFileSync(childPidPath, "utf8"));
+    await waitUntil(() => leader?.exitCode !== null, "preview leader did not exit");
+    await waitUntil(() => !processGroupExists(pgid), "preview group survived leader cleanup");
+    assert.equal(processExists(descendantPid), false);
+    await waitUntil(() => manager.activeCount() === 0, "leader cleanup did not retire preview ownership");
+    assert.equal(manager.activeCount(), 0);
+  } finally {
+    if (pgid && processGroupExists(pgid)) {
+      try { process.kill(-pgid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    await manager.stopAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("production process-group teardown removes a real descendant", async () => {
   if (process.platform === "win32") return;
@@ -275,4 +542,24 @@ setInterval(() => {}, 1000);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("SIGKILL teardown has a hard bound and reports a group that never disappears", async () => {
+  const reported: Error[] = [];
+  const fixture = fakeOptions({
+    isProcessGroupAlive: () => true,
+    forceKillWaitMs: 25,
+    onTeardownError: (error) => reported.push(error),
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  await manager.acquire({ projectId: "unkillable" }, "/tmp/unkillable", { fingerprint: "a" });
+
+  const startedAt = Date.now();
+  await assert.rejects(manager.stopAll(), /did not terminate after SIGKILL/i);
+  assert.ok(Date.now() - startedAt < 500, "bounded teardown does not hang shutdown");
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0]?.name, "PreviewTeardownError");
+  assert.equal(manager.activeCount(), 1, "a live failed group remains owned instead of becoming false success");
+  await assert.rejects(manager.stopAll(), /did not terminate after SIGKILL/i);
+  assert.equal(reported.length, 2, "a later stop retries the failed teardown instead of reusing a memoized success");
 });

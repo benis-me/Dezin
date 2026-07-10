@@ -42,12 +42,16 @@ export interface PreviewLeaseManagerOptions {
   spawnProcess?: (input: PreviewSpawnInput) => PreviewChild;
   waitUntilReady?: (url: string, child: PreviewChild, signal: AbortSignal) => Promise<void>;
   killProcessGroup?: (child: PreviewChild, signal: NodeJS.Signals) => void;
+  isProcessGroupAlive?: (child: PreviewChild) => boolean;
+  readyEntryCheckpoint?: (signal: AbortSignal) => void | Promise<void>;
   now?: () => number;
   setTimeout?: (callback: () => void, delayMs: number) => Timer;
   clearTimeout?: (timer: Timer) => void;
   readyTimeoutMs?: number;
   cachedReadyTimeoutMs?: number;
   stopGraceMs?: number;
+  forceKillWaitMs?: number;
+  onTeardownError?: (error: Error, child: PreviewChild) => void;
   leaseTtlMs?: number;
   idleTtlMs?: number;
   maxIdle?: number;
@@ -80,6 +84,7 @@ interface PreviewEntry {
   idleSince?: number;
   idleTimer?: Timer;
   stopping?: Promise<void>;
+  teardownFailed?: boolean;
   onClose: (code: number | null, signal: NodeJS.Signals | null) => void;
   onError: (error: Error) => void;
 }
@@ -92,6 +97,19 @@ interface PreviewFlight {
   controller: AbortController;
   waiters: number;
   promise: Promise<PreviewEntry>;
+}
+
+interface AcquireRecord {
+  id: number;
+  scope: RuntimeScope;
+  controller: AbortController;
+  settled: Promise<void>;
+  resolveSettled: () => void;
+}
+
+interface StopBarrier {
+  id: number;
+  scope?: RuntimeScope;
 }
 
 const DEFAULT_READY_TIMEOUT_MS = 15_000;
@@ -165,7 +183,6 @@ function spawnPreviewProcess(input: PreviewSpawnInput): PreviewChild {
 }
 
 function killPreviewProcessGroup(child: PreviewChild, signal: NodeJS.Signals): void {
-  if (isExited(child)) return;
   if (process.platform !== "win32" && child.pid !== undefined) {
     try {
       process.kill(-child.pid, signal);
@@ -174,10 +191,21 @@ function killPreviewProcessGroup(child: PreviewChild, signal: NodeJS.Signals): v
       if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
     }
   }
+  if (isExited(child)) return;
   try {
     child.kill?.(signal);
   } catch {
     // The process may have exited between the liveness check and kill.
+  }
+}
+
+function previewProcessGroupAlive(child: PreviewChild): boolean {
+  if (process.platform === "win32" || child.pid === undefined) return !isExited(child);
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
@@ -205,7 +233,7 @@ async function waitForHttpReady(url: string, _child: PreviewChild, signal: Abort
       const response = await fetch(url, {
         signal: AbortSignal.any([signal, AbortSignal.timeout(800)]),
       });
-      if (response.ok || response.status === 404) return;
+      if (response.ok) return;
     } catch (error) {
       if (signal.aborted) throw abortError(signal.reason);
       if ((error as Error).name !== "TimeoutError" && (error as Error).name !== "AbortError") {
@@ -221,19 +249,41 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
   const spawnProcess = options.spawnProcess ?? spawnPreviewProcess;
   const waitUntilReady = options.waitUntilReady ?? waitForHttpReady;
   const killProcessGroup = options.killProcessGroup ?? killPreviewProcessGroup;
+  const isProcessGroupAlive = options.isProcessGroupAlive ?? previewProcessGroupAlive;
+  const readyEntryCheckpoint = options.readyEntryCheckpoint;
   const now = options.now ?? Date.now;
   const schedule = options.setTimeout ?? setTimeout;
   const cancelTimer = options.clearTimeout ?? clearTimeout;
   const readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   const cachedReadyTimeoutMs = options.cachedReadyTimeoutMs ?? 1_000;
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  const forceKillWaitMs = options.forceKillWaitMs ?? 2_000;
+  const onTeardownError = options.onTeardownError ?? ((error: Error) => console.error(`[preview] ${error.message}`));
   const leaseTtlMs = options.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
   const idleTtlMs = options.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
   const maxIdle = options.maxIdle ?? DEFAULT_MAX_IDLE;
   const entries = new Map<string, PreviewEntry>();
   const flights = new Map<string, PreviewFlight>();
   const leases = new Map<string, LeaseState>();
+  const acquires = new Map<number, AcquireRecord>();
+  const stopBarriers = new Map<number, StopBarrier>();
   const childStops = new WeakMap<object, Promise<void>>();
+  let nextAcquireId = 1;
+  let nextStopBarrierId = 1;
+
+  function stoppingError(): Error {
+    const error = new Error("Preview scope is stopping");
+    error.name = "AbortError";
+    return error;
+  }
+
+  function barrierMatches(scope: RuntimeScope, barrier: StopBarrier): boolean {
+    return barrier.scope === undefined || matchesScope(scope, barrier.scope);
+  }
+
+  function assertAdmission(scope: RuntimeScope): void {
+    if ([...stopBarriers.values()].some((barrier) => barrierMatches(scope, barrier))) throw stoppingError();
+  }
 
   function clearLeaseTimer(lease: LeaseState): void {
     if (!lease.timer) return;
@@ -247,24 +297,16 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     entry.idleTimer = undefined;
   }
 
-  function waitForExit(child: PreviewChild, timeoutMs: number): Promise<boolean> {
-    if (isExited(child)) return Promise.resolve(true);
+  function waitForGroupGone(child: PreviewChild, timeoutMs: number): Promise<boolean> {
+    if (!isProcessGroupAlive(child)) return Promise.resolve(true);
     return new Promise((resolveExit) => {
-      let settled = false;
-      const finish = (exited: boolean): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        child.off("close", onClose);
-        child.off("error", onError);
-        resolveExit(exited);
+      const deadline = Date.now() + Math.max(0, timeoutMs);
+      const poll = (): void => {
+        if (!isProcessGroupAlive(child)) return resolveExit(true);
+        if (Date.now() >= deadline) return resolveExit(false);
+        setTimeout(poll, Math.min(10, Math.max(1, deadline - Date.now())));
       };
-      const onClose = (): void => finish(true);
-      const onError = (): void => finish(true);
-      const timer = setTimeout(() => finish(isExited(child)), Math.max(0, timeoutMs));
-      unref(timer);
-      child.once("close", onClose);
-      child.once("error", onError);
+      poll();
     });
   }
 
@@ -272,34 +314,58 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     const existing = childStops.get(child as object);
     if (existing) return existing;
     const stopping = (async () => {
-      if (isExited(child)) return;
+      if (!isProcessGroupAlive(child)) return;
       killProcessGroup(child, "SIGTERM");
-      if (await waitForExit(child, stopGraceMs)) return;
-      killProcessGroup(child, "SIGKILL");
-      await waitForExit(child, stopGraceMs);
+      if (await waitForGroupGone(child, stopGraceMs)) return;
+      const forceDeadline = Date.now() + forceKillWaitMs;
+      while (isProcessGroupAlive(child) && Date.now() < forceDeadline) {
+        killProcessGroup(child, "SIGKILL");
+        await waitForGroupGone(child, Math.min(100, Math.max(1, forceDeadline - Date.now())));
+      }
+      if (isProcessGroupAlive(child)) {
+        const error = new Error(`Preview process group ${child.pid ?? "unknown"} did not terminate after SIGKILL`);
+        error.name = "PreviewTeardownError";
+        onTeardownError(error, child);
+        throw error;
+      }
     })();
     childStops.set(child as object, stopping);
+    void stopping.catch(() => {
+      if (childStops.get(child as object) === stopping) childStops.delete(child as object);
+    });
     return stopping;
   }
 
-  function forgetEntry(entry: PreviewEntry): void {
-    if (entries.get(entry.identity) === entry) entries.delete(entry.identity);
+  function clearEntryLeases(entry: PreviewEntry): void {
     clearIdleTimer(entry);
     for (const lease of entry.leases.values()) {
       clearLeaseTimer(lease);
       leases.delete(lease.leaseId);
     }
     entry.leases.clear();
+  }
+
+  function forgetEntry(entry: PreviewEntry): void {
+    if (entries.get(entry.identity) === entry) entries.delete(entry.identity);
+    clearEntryLeases(entry);
     entry.child.off("close", entry.onClose);
     entry.child.off("error", entry.onError);
   }
 
   function stopEntry(entry: PreviewEntry): Promise<void> {
-    entry.stopping ??= (async () => {
-      forgetEntry(entry);
+    if (entry.stopping) return entry.stopping;
+    clearEntryLeases(entry);
+    const stopping = (async () => {
       await stopChild(entry.child);
+      entry.teardownFailed = false;
+      forgetEntry(entry);
     })();
-    return entry.stopping;
+    entry.stopping = stopping;
+    void stopping.catch(() => {
+      entry.teardownFailed = true;
+      if (entry.stopping === stopping) entry.stopping = undefined;
+    });
+    return stopping;
   }
 
   function evictIdleOverflow(): void {
@@ -308,17 +374,17 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
       .sort((a, b) => (a.idleSince! - b.idleSince!) || a.identity.localeCompare(b.identity));
     while (idle.length > maxIdle) {
       const oldest = idle.shift();
-      if (oldest) void stopEntry(oldest);
+      if (oldest) void stopEntry(oldest).catch(() => {});
     }
   }
 
   function markIdle(entry: PreviewEntry): void {
-    if (entry.stopping || entry.leases.size > 0 || entries.get(entry.identity) !== entry) return;
+    if (entry.stopping || entry.teardownFailed || entry.leases.size > 0 || entries.get(entry.identity) !== entry) return;
     clearIdleTimer(entry);
     entry.idleSince = now();
     entry.idleTimer = schedule(() => {
       entry.idleTimer = undefined;
-      if (entry.leases.size === 0) void stopEntry(entry);
+      if (entry.leases.size === 0) void stopEntry(entry).catch(() => {});
     }, idleTtlMs);
     unref(entry.idleTimer);
     evictIdleOverflow();
@@ -370,6 +436,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
 
   async function startFlight(flight: PreviewFlight, onLog?: PreviewSpawnInput["onLog"]): Promise<PreviewEntry> {
     const port = await allocatePort();
+    assertAdmission(flight.scope);
     flight.controller.signal.throwIfAborted();
     const child = spawnProcess({ projectDir: flight.projectDir, port, onLog });
     const url = `http://127.0.0.1:${port}/`;
@@ -382,16 +449,28 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     let closeListener!: (code: number | null, signal: NodeJS.Signals | null) => void;
     let errorListener!: (error: Error) => void;
     const exited = new Promise<never>((_resolve, reject) => {
-      closeListener = (code, signal) => reject(new Error(`Preview process exited before readiness (${signal ?? code ?? "unknown"})`));
-      errorListener = (error) => reject(new Error(`Preview process exited before readiness: ${error.message}`));
+      closeListener = (code, signal) => {
+        const error = new Error(`Preview process exited before readiness (${signal ?? code ?? "unknown"})`);
+        if (!flight.controller.signal.aborted) flight.controller.abort(error);
+        reject(error);
+      };
+      errorListener = (cause) => {
+        const error = new Error(`Preview process exited before readiness: ${cause.message}`);
+        if (!flight.controller.signal.aborted) flight.controller.abort(error);
+        reject(error);
+      };
       child.once("close", closeListener);
       child.once("error", errorListener);
     });
+    const readiness = Promise.resolve().then(() => waitUntilReady(url, child, flight.controller.signal));
     try {
-      await Promise.race([waitUntilReady(url, child, flight.controller.signal), exited]);
+      await Promise.race([readiness, exited]);
       flight.controller.signal.throwIfAborted();
+      assertAdmission(flight.scope);
       if (isExited(child)) throw new Error("Preview process exited before readiness");
     } catch (error) {
+      if (!flight.controller.signal.aborted) flight.controller.abort(error);
+      await readiness.catch(() => {});
       await stopChild(child);
       if (flight.controller.signal.aborted) throw abortError(flight.controller.signal.reason);
       throw error;
@@ -409,12 +488,23 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     entry.child = child;
     entry.url = url;
     entry.leases = new Map();
-    entry.onClose = () => forgetEntry(entry);
-    entry.onError = () => forgetEntry(entry);
+    entry.teardownFailed = false;
+    entry.onClose = () => { void stopEntry(entry).catch(() => {}); };
+    entry.onError = () => { void stopEntry(entry).catch(() => {}); };
     child.once("close", entry.onClose);
     child.once("error", entry.onError);
     entries.set(entry.identity, entry);
-    return entry;
+    markIdle(entry);
+    try {
+      await readyEntryCheckpoint?.(flight.controller.signal);
+      flight.controller.signal.throwIfAborted();
+      assertAdmission(flight.scope);
+      if (entries.get(entry.identity) !== entry || entry.stopping) throw stoppingError();
+      return entry;
+    } catch (error) {
+      await stopEntry(entry);
+      throw error;
+    }
   }
 
   function getOrCreateFlight(
@@ -424,6 +514,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     fingerprint: string,
     onLog?: PreviewSpawnInput["onLog"],
   ): PreviewFlight {
+    assertAdmission(scope);
     const existing = flights.get(identity);
     if (existing) return existing;
     const flight: PreviewFlight = {
@@ -481,47 +572,114 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     });
   }
 
+  function beginAcquire(scope: RuntimeScope): AcquireRecord {
+    assertAdmission(scope);
+    let resolveSettled!: () => void;
+    const settled = new Promise<void>((resolveDone) => {
+      resolveSettled = resolveDone;
+    });
+    const record: AcquireRecord = {
+      id: nextAcquireId++,
+      scope: { ...scope },
+      controller: new AbortController(),
+      settled,
+      resolveSettled,
+    };
+    acquires.set(record.id, record);
+    return record;
+  }
+
+  function finishAcquire(record: AcquireRecord): void {
+    if (acquires.get(record.id) === record) acquires.delete(record.id);
+    record.resolveSettled();
+  }
+
+  async function drainBarrier(barrier: StopBarrier): Promise<void> {
+    while (true) {
+      const matchingAcquires = [...acquires.values()].filter((record) => barrierMatches(record.scope, barrier));
+      const matchingFlights = [...flights.values()].filter((flight) => barrierMatches(flight.scope, barrier));
+      const matchingEntries = [...entries.values()].filter((entry) => barrierMatches(entry.scope, barrier));
+      if (matchingAcquires.length === 0 && matchingFlights.length === 0 && matchingEntries.length === 0) return;
+
+      const reason = stoppingError();
+      for (const record of matchingAcquires) {
+        if (!record.controller.signal.aborted) record.controller.abort(reason);
+      }
+      for (const flight of matchingFlights) {
+        if (!flight.controller.signal.aborted) flight.controller.abort(reason);
+      }
+      const settlements = await Promise.allSettled([
+        ...matchingAcquires.map((record) => record.settled),
+        ...matchingFlights.map((flight) => flight.promise.then(() => {}, () => {})),
+        ...matchingEntries.map((entry) => stopEntry(entry)),
+      ]);
+      const teardownFailure = settlements.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected" && result.reason instanceof Error && result.reason.name === "PreviewTeardownError",
+      );
+      if (teardownFailure) throw teardownFailure.reason;
+    }
+  }
+
   const manager: PreviewLeaseManager = {
     async acquire(scope, projectDir, acquireOptions = {}) {
       acquireOptions.signal?.throwIfAborted();
-      const fingerprint = acquireOptions.fingerprint ?? "";
-      const identity = identityKey(scope, projectDir, fingerprint);
-      const cached = entries.get(identity);
-      if (cached && !cached.stopping && !isExited(cached.child)) {
-        try {
-          await confirmCachedReady(cached, acquireOptions.signal);
-          return addLease(cached);
-        } catch (error) {
-          if (acquireOptions.signal?.aborted) throw error;
-          await stopEntry(cached);
-        }
-      } else if (cached) {
-        await stopEntry(cached);
-      }
-
-      const flight = getOrCreateFlight(identity, scope, projectDir, fingerprint, acquireOptions.onLog);
-      flight.waiters += 1;
+      const record = beginAcquire(scope);
+      const operationSignal = acquireOptions.signal
+        ? AbortSignal.any([acquireOptions.signal, record.controller.signal])
+        : record.controller.signal;
       try {
-        const entry = await waitForFlight(flight, acquireOptions.signal);
-        acquireOptions.signal?.throwIfAborted();
-        return addLease(entry);
-      } catch (error) {
-        if (acquireOptions.signal?.aborted && flight.waiters === 1 && !flight.controller.signal.aborted) {
-          flight.controller.abort(abortError(acquireOptions.signal.reason));
-          await flight.promise.catch(() => {});
+        assertAdmission(scope);
+        const fingerprint = acquireOptions.fingerprint ?? "";
+        const identity = identityKey(scope, projectDir, fingerprint);
+        const cached = entries.get(identity);
+        if (cached && !cached.stopping && !cached.teardownFailed && isProcessGroupAlive(cached.child)) {
+          try {
+            await confirmCachedReady(cached, operationSignal);
+            operationSignal.throwIfAborted();
+            assertAdmission(scope);
+            if (entries.get(identity) === cached && !cached.stopping && !cached.teardownFailed && isProcessGroupAlive(cached.child)) {
+              return addLease(cached);
+            }
+          } catch (error) {
+            if (operationSignal.aborted) throw abortError(operationSignal.reason);
+          }
+          await stopEntry(cached);
+          operationSignal.throwIfAborted();
+          assertAdmission(scope);
+        } else if (cached) {
+          await stopEntry(cached);
+          operationSignal.throwIfAborted();
+          assertAdmission(scope);
         }
-        throw error;
+
+        const flight = getOrCreateFlight(identity, scope, projectDir, fingerprint, acquireOptions.onLog);
+        flight.waiters += 1;
+        try {
+          const entry = await waitForFlight(flight, operationSignal);
+          operationSignal.throwIfAborted();
+          assertAdmission(scope);
+          if (entries.get(identity) !== entry || entry.stopping || entry.teardownFailed || !isProcessGroupAlive(entry.child)) throw stoppingError();
+          return addLease(entry);
+        } catch (error) {
+          if (operationSignal.aborted && flight.waiters === 1 && !flight.controller.signal.aborted) {
+            flight.controller.abort(abortError(operationSignal.reason));
+            await flight.promise.catch(() => {});
+          }
+          throw error;
+        } finally {
+          flight.waiters -= 1;
+          if (flight.waiters === 0 && flights.get(identity) === flight && !flight.controller.signal.aborted) {
+            flight.controller.abort(abortError());
+          }
+        }
       } finally {
-        flight.waiters -= 1;
-        if (flight.waiters === 0 && flights.get(identity) === flight && !flight.controller.signal.aborted) {
-          flight.controller.abort(abortError());
-        }
+        finishAcquire(record);
       }
     },
 
     async renew(leaseId) {
       const lease = leases.get(leaseId);
-      if (!lease || lease.entry.stopping || isExited(lease.entry.child)) return null;
+      if (!lease || lease.entry.stopping || lease.entry.teardownFailed || isExited(lease.entry.child)) return null;
       armLease(lease);
       return publicLease(lease);
     },
@@ -532,23 +690,23 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     },
 
     async stopScope(scope) {
-      const matchingFlights = [...flights.values()].filter((flight) => matchesScope(flight.scope, scope));
-      for (const flight of matchingFlights) flight.controller.abort(abortError());
-      const matchingEntries = [...entries.values()].filter((entry) => matchesScope(entry.scope, scope));
-      await Promise.allSettled([
-        ...matchingEntries.map((entry) => stopEntry(entry)),
-        ...matchingFlights.map((flight) => flight.promise.then(() => {}, () => {})),
-      ]);
+      const barrier: StopBarrier = { id: nextStopBarrierId++, scope: { ...scope } };
+      stopBarriers.set(barrier.id, barrier);
+      try {
+        await drainBarrier(barrier);
+      } finally {
+        stopBarriers.delete(barrier.id);
+      }
     },
 
     async stopAll() {
-      const allFlights = [...flights.values()];
-      for (const flight of allFlights) flight.controller.abort(abortError());
-      const allEntries = [...entries.values()];
-      await Promise.allSettled([
-        ...allEntries.map((entry) => stopEntry(entry)),
-        ...allFlights.map((flight) => flight.promise.then(() => {}, () => {})),
-      ]);
+      const barrier: StopBarrier = { id: nextStopBarrierId++ };
+      stopBarriers.set(barrier.id, barrier);
+      try {
+        await drainBarrier(barrier);
+      } finally {
+        stopBarriers.delete(barrier.id);
+      }
     },
 
     activeCount() {

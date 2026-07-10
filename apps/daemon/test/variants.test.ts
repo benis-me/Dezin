@@ -715,6 +715,8 @@ test("targeted variant deletion aborts its Run and removes only variant-owned re
 
 test("devserver release endpoint targets the active standard variant runtime", async () => {
   const released: string[] = [];
+  const releaseEntered = deferred();
+  const allowRelease = deferred();
   await withServer(
     async ({ base, store }) => {
       const project = store.createProject({ name: "Std", mode: "standard" });
@@ -722,14 +724,25 @@ test("devserver release endpoint targets the active standard variant runtime", a
       const branch = store.createVariant(project.id, "Exploration");
       store.setActiveVariant(project.id, branch.id);
 
-      const res = await fetch(`${base}/api/projects/${project.id}/devserver`, { method: "DELETE" });
+      let responseSettled = false;
+      const response = fetch(`${base}/api/projects/${project.id}/devserver`, { method: "DELETE" }).then((res) => {
+        responseSettled = true;
+        return res;
+      });
+      await releaseEntered.promise;
+      await Promise.resolve();
+      assert.equal(responseSettled, false, "DELETE waits for preview teardown");
+      allowRelease.resolve();
+      const res = await response;
       assert.equal(res.status, 200);
       assert.equal(((await res.json()) as { released: boolean }).released, true);
       assert.deepEqual(released, [`${project.id}:${branch.id}`]);
     },
     {
-      releaseDevServer: (runtimeKey) => {
+      releaseDevServer: async (runtimeKey) => {
         released.push(runtimeKey);
+        releaseEntered.resolve();
+        await allowRelease.promise;
         return true;
       },
     },
@@ -761,7 +774,7 @@ test("standard cover capture endpoint backfills a missing project cover", async 
         captured = { url, outPath };
         return true;
       },
-      releaseDevServer: (runtimeKey) => {
+      releaseDevServer: async (runtimeKey) => {
         released.push(runtimeKey);
         return true;
       },

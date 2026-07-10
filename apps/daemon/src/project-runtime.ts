@@ -366,10 +366,10 @@ export async function ensureDevServer(
 }
 
 /** Compatibility cleanup for legacy callers that only retained the runtime key. */
-export function releaseDevServer(runtimeKey: string): boolean {
+export async function releaseDevServer(runtimeKey: string): Promise<boolean> {
   const projectId = runtimeKey.split(":", 1)[0];
   if (!projectId) return false;
-  void previewLeaseManager.stopScope(previewRuntimeScope(projectId, runtimeKey));
+  await previewLeaseManager.stopScope(previewRuntimeScope(projectId, runtimeKey));
   return true;
 }
 
@@ -470,12 +470,7 @@ export async function stopAllProjectRuntimes(): Promise<void> {
   await previewLeaseManager.stopAll();
 }
 
-/** Stop all dev/setup resources synchronously enough for legacy teardown callers. */
-export function stopAllDevServers(): void {
-  for (const rt of new Set([...runtimes.values(), ...retiredRuntimes])) {
-    void stopRuntime(rt);
-  }
-  runtimes.clear();
-  retiredRuntimes.clear();
-  void previewLeaseManager.stopAll();
+/** Await teardown of every legacy dev/setup resource. */
+export async function stopAllDevServers(): Promise<void> {
+  await stopAllProjectRuntimes();
 }
