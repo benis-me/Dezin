@@ -356,13 +356,22 @@ export function handleSharinganShot(res: ServerResponse, id: string, relPath: st
  * persistent-profile lock, which would block the next clone from opening. Best-effort: never
  * throws, so it's safe to call unconditionally from the shutdown path.
  */
-export async function closeAllSharinganSessions(): Promise<void> {
-  for (const c of captures.values()) {
-    if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
-    const s = c.session;
-    c.session = undefined;
-    if (s) await s.close().catch(() => {});
+export async function releaseSharinganProject(id: string): Promise<void> {
+  const c = captures.get(id);
+  if (!c) return;
+  captures.delete(id);
+  if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
+  for (const listener of c.listeners) {
+    try { listener.end(); } catch { /* best-effort */ }
   }
+  c.listeners.clear();
+  const s = c.session;
+  c.session = undefined;
+  if (s) await s.close().catch(() => {});
+}
+
+export async function closeAllSharinganSessions(): Promise<void> {
+  await Promise.allSettled([...captures.keys()].map((id) => releaseSharinganProject(id)));
 }
 
 export function handleSharinganEvents(res: ServerResponse, id: string): void {

@@ -6,6 +6,61 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createRun, finishRun, pushEvent, readRunLog, subscribe } from "../src/run-manager.ts";
+import { RuntimeSupervisor } from "../src/runtime-supervisor.ts";
+
+test("run-manager registers scoped ownership and settles only after its JSONL queue flushes", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-manager-"));
+  const store = new Store(":memory:");
+  const supervisor = new RuntimeSupervisor({ dataDir, store });
+  const controller = createRun({
+    runId: "r-owned",
+    conversationId: "c-owned",
+    projectId: "p-owned",
+    variantId: "v-owned",
+    dataDir,
+    runtimeSupervisor: supervisor,
+  });
+  pushEvent("r-owned", { type: "owned-event", runId: "r-owned" });
+
+  supervisor.cancelRuns({ projectId: "p-owned", variantId: "v-owned" });
+  assert.equal(controller.signal.aborted, true);
+  finishRun("r-owned");
+  await supervisor.waitForRuns({ projectId: "p-owned", variantId: "v-owned" });
+
+  assert.deepEqual(
+    readRunLog(join(dataDir, ".runs", "r-owned.jsonl")).map((event) => (event as { type?: string }).type),
+    ["owned-event"],
+  );
+  await supervisor.shutdown();
+  store.close();
+});
+
+test("finishRun rejects late broker events before reporting supervisor settlement", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-manager-"));
+  const store = new Store(":memory:");
+  const supervisor = new RuntimeSupervisor({ dataDir, store });
+  createRun({
+    runId: "r-finish-boundary",
+    conversationId: "c-finish-boundary",
+    projectId: "p-finish-boundary",
+    variantId: "v-finish-boundary",
+    dataDir,
+    runtimeSupervisor: supervisor,
+  });
+  pushEvent("r-finish-boundary", { type: "before-finish" });
+
+  finishRun("r-finish-boundary");
+  pushEvent("r-finish-boundary", { type: "after-finish" });
+  await supervisor.waitForRuns({ projectId: "p-finish-boundary" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(
+    readRunLog(join(dataDir, ".runs", "r-finish-boundary.jsonl")).map((event) => (event as { type?: string }).type),
+    ["before-finish"],
+  );
+  await supervisor.shutdown();
+  store.close();
+});
 
 test("subscribe attaches live listener before replay so reattach cannot miss events", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-manager-"));

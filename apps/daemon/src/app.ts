@@ -8,7 +8,6 @@
 import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
 import type { CreateProjectInput, ExtensionScope, Project, Settings } from "../../../packages/core/src/index.ts";
@@ -36,9 +35,18 @@ import {
 } from "./variants-handler.ts";
 import { handleGetVersion, handleGetVersionPreviewUrl, handleGetVersionDiff, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
-import { setupStandardProject, getSetup, ensureDevServer, releaseDevServer } from "./project-runtime.ts";
-import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture } from "./sharingan-handler.ts";
-import { activeArtifactDir, variantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
+import {
+  setupStandardProject,
+  getSetup,
+  ensureDevServer,
+  releaseDevServer,
+  releaseProjectRuntime,
+  releaseVariantRuntime,
+  stopAllProjectRuntimes,
+} from "./project-runtime.ts";
+import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject } from "./sharingan-handler.ts";
+import { activeArtifactDir, variantArtifactDir, variantRuntimeKey, isStandardRootVariant, removeStandardVariantWorktree } from "./variant-workspaces.ts";
+import { RuntimeSupervisor } from "./runtime-supervisor.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
 import { handleCreateEffect, handleGetEffect, handleListEffects, handleUpdateEffect } from "./effects-handler.ts";
 import { handleListAgents, handleRescanAgents, handleScanAgentsStream, warmAgents, type AgentProber } from "./agents-handler.ts";
@@ -126,6 +134,8 @@ export interface AppDeps {
   imageAnalyzer?: typeof analyzeImage;
   /** Unique owner id for this daemon process; persisted on newly-created runs. */
   daemonOwnerId?: string;
+  /** Daemon-owned scoped runtime lifecycle; createApp supplies the production instance by default. */
+  runtimeSupervisor?: RuntimeSupervisor;
 }
 
 type Handler = (
@@ -166,6 +176,36 @@ let pendingCapture: PendingCapture | null = null;
 
 function projectPayload(dataDir: string, project: Project): Project & { projectPath: string } {
   return { ...project, projectPath: projectDir(dataDir, project.id) };
+}
+
+export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir">): RuntimeSupervisor {
+  const cleanupDeps = deps as AppDeps;
+  return new RuntimeSupervisor({
+    dataDir: deps.dataDir,
+    store: deps.store,
+    releaseProjectResources: async ({ projectId }) => {
+      await releaseProjectRuntime(projectId);
+      await releaseSharinganProject(projectId);
+      const project = deps.store.getProject(projectId);
+      if (project?.mode === "standard") {
+        for (const variant of deps.store.listVariants(projectId)) {
+          if (!isStandardRootVariant(cleanupDeps, projectId, variant.id)) {
+            await removeStandardVariantWorktree(cleanupDeps, projectId, variant.id);
+          }
+        }
+      }
+    },
+    releaseVariantResources: async ({ projectId, variantId, runIds }) => {
+      await releaseVariantRuntime(projectId, variantId, runIds);
+      const project = deps.store.getProject(projectId);
+      if (project?.mode === "standard" && !isStandardRootVariant(cleanupDeps, projectId, variantId)) {
+        await removeStandardVariantWorktree(cleanupDeps, projectId, variantId);
+      }
+    },
+    shutdownResources: async () => {
+      await Promise.allSettled([stopAllProjectRuntimes(), closeAllSharinganSessions()]);
+    },
+  });
 }
 
 function validateRouteParams(params: Record<string, string>): void {
@@ -617,9 +657,8 @@ const routes: Route[] = [
   {
     method: "DELETE",
     pattern: "/api/projects/:id",
-    handler: async (_req, res, { id }, { store, dataDir }) => {
-      store.deleteProject(id!);
-      await rm(projectDir(dataDir, id!), { recursive: true, force: true });
+    handler: async (_req, res, { id }, deps) => {
+      await deps.runtimeSupervisor!.releaseProject(id!);
       res.writeHead(204);
       res.end();
     },
@@ -997,10 +1036,11 @@ const routes: Route[] = [
 ];
 
 export function createApp(deps: AppDeps): http.Server {
-  const webDir = deps.webDir ?? defaultWebDir();
+  const appDeps: AppDeps = { ...deps, runtimeSupervisor: deps.runtimeSupervisor ?? createRuntimeSupervisor(deps) };
+  const webDir = appDeps.webDir ?? defaultWebDir();
   const hasWeb = existsSync(webDir);
-  const extensionPairing = deps.extensionPairing ?? new StoreExtensionPairingService(deps.store);
-  warmAgents(deps.agentProber, deps.dataDir); // reload the persisted scan (or probe once) at startup
+  const extensionPairing = appDeps.extensionPairing ?? new StoreExtensionPairingService(appDeps.store);
+  warmAgents(appDeps.agentProber, appDeps.dataDir); // reload the persisted scan (or probe once) at startup
   return http.createServer(async (req, res) => {
     const method = req.method ?? "GET";
     let pathname = "/";
@@ -1021,20 +1061,20 @@ export function createApp(deps: AppDeps): http.Server {
         }
         validateRouteParams(m.params);
         if (route.extensionPairing) requireExtensionPairingRequest(req);
-        else requireDaemonRequest(req, { ...deps.security, allowMissingToken: route.publicRead === true }, extensionPairing, route.extensionScope);
-        await route.handler(req, res, m.params, deps, extensionPairing);
+        else requireDaemonRequest(req, { ...appDeps.security, allowMissingToken: route.publicRead === true }, extensionPairing, route.extensionScope);
+        await route.handler(req, res, m.params, appDeps, extensionPairing);
         return;
       }
       if (matchedPathButNotMethod) {
-        requireDaemonRequest(req, deps.security);
+        requireDaemonRequest(req, appDeps.security);
         return sendError(res, 405, "method not allowed");
       }
       // Unmatched GET → serve the built web app (SPA) when present (Electron / prod).
       if (method === "GET" && hasWeb && !pathname.startsWith("/api/")) {
-        requireDaemonRequest(req, { ...deps.security, allowMissingToken: true });
-        return serveWeb(res, webDir, pathname, { daemonToken: deps.security?.token });
+        requireDaemonRequest(req, { ...appDeps.security, allowMissingToken: true });
+        return serveWeb(res, webDir, pathname, { daemonToken: appDeps.security?.token });
       }
-      requireDaemonRequest(req, deps.security);
+      requireDaemonRequest(req, appDeps.security);
       sendError(res, 404, "not found");
     } catch (err) {
       if (isHttpError(err)) {

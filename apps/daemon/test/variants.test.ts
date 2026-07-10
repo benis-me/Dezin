@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
-import { FakeRunner } from "../../../packages/agent/src/index.ts";
+import { FakeRunner, abortError } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner, AgentTurnInput } from "../../../packages/agent/src/index.ts";
-import { createApp, type AppDeps } from "../src/index.ts";
+import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 
 interface Ctx {
   base: string;
@@ -22,12 +22,14 @@ async function withServer(
 ): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-variants-"));
   const store = new Store(":memory:");
-  const server = createApp({ store, dataDir, ...extraDeps });
+  const runtimeSupervisor = extraDeps.runtimeSupervisor ?? createRuntimeSupervisor({ store, dataDir });
+  const server = createApp({ store, dataDir, ...extraDeps, runtimeSupervisor });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
     await fn({ base: `http://127.0.0.1:${port}`, dataDir, store });
   } finally {
+    await runtimeSupervisor.shutdown();
     await new Promise<void>((r) => server.close(() => r()));
     store.close();
   }
@@ -209,6 +211,78 @@ test("standard variants use git worktrees for preview, files, and targeted runs"
 
       const stillMainPreview = await fetch(`${base}/projects/${project.id}/preview/`);
       assert.match(await stillMainPreview.text(), /Root main/, "targeted run does not switch the active variant");
+    },
+    { runner, visualQa: async () => [] },
+  );
+});
+
+test("targeted variant deletion aborts its Run and removes only variant-owned resources", async () => {
+  let entered!: () => void;
+  const runEntered = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let abortObserved = false;
+  const runner: AgentRunner = {
+    id: "blocked-variant-delete",
+    async runTurn(input) {
+      entered();
+      return await new Promise((resolve, reject) => {
+        const fallback = setTimeout(() => reject(new Error("blocked runner test fallback")), 500);
+        input.signal?.addEventListener("abort", () => {
+          abortObserved = true;
+          clearTimeout(fallback);
+          setTimeout(() => {
+            if (existsSync(input.projectDir)) writeFileSync(join(input.projectDir, "post-abort.txt"), "late write");
+          }, 5);
+          setTimeout(() => reject(abortError()), 15);
+        }, { once: true });
+      });
+    },
+  };
+
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Std", mode: "standard" });
+      const root = initStandardProject(dataDir, project.id);
+      const main = store.ensureMainVariant(project.id);
+      const target = await createVariant(base, project.id);
+      const worktree = join(dataDir, "worktrees", project.id, target.id);
+      assert.ok(existsSync(worktree));
+      const activated = await fetch(`${base}/api/projects/${project.id}/variants/${main.id}/activate`, { method: "POST" });
+      assert.equal(activated.status, 200);
+
+      const runResponsePromise = fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, variantId: target.id, brief: "stay blocked" }),
+      });
+      await runEntered;
+      const run = store.listRuns(project.id).find((candidate) => candidate.variantId === target.id)!;
+      const ownedPaths = [
+        join(dataDir, ".runs", `${run.id}.jsonl`),
+        join(dataDir, ".runs", run.id, "bundle.txt"),
+        worktree,
+        join(dataDir, "version-worktrees", project.id, run.id, "artifact.txt"),
+      ];
+      for (const path of [ownedPaths[1]!, ownedPaths[3]!]) {
+        mkdirSync(join(path, ".."), { recursive: true });
+        writeFileSync(path, "owned");
+      }
+
+      const deleted = await fetch(`${base}/api/projects/${project.id}/variants/${target.id}`, { method: "DELETE" });
+      const runResponse = await runResponsePromise;
+      await runResponse.text();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      assert.equal(deleted.status, 200);
+      assert.equal(abortObserved, true, "the targeted Run observes abort before DELETE resolves");
+      assert.equal(store.getVariant(target.id), null);
+      assert.equal(store.getRun(run.id), null);
+      assert.ok(ownedPaths.every((path) => !existsSync(path)), "target Run logs and worktrees stay absent");
+      assert.ok(store.getProject(project.id));
+      assert.ok(store.getVariant(main.id));
+      assert.ok(existsSync(root), "the project root remains");
+      assert.equal(existsSync(join(worktree, "post-abort.txt")), false, "no write lands after deletion");
     },
     { runner, visualQa: async () => [] },
   );

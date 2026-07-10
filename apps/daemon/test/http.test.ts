@@ -7,11 +7,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
-import { createApp, matchPath, safeJoin } from "../src/index.ts";
+import { abortError, type AgentRunner } from "../../../packages/agent/src/index.ts";
+import { createApp, createRuntimeSupervisor, matchPath, safeJoin } from "../src/index.ts";
 import type { AppDeps } from "../src/index.ts";
 import { buildMoodboardAgentContext, buildMoodboardAgentPrompt, parseMoodboardAgentOutput } from "../src/moodboard-agent.ts";
 import { injectSelectBridge } from "../src/serve-static.ts";
 import * as extensionAuth from "../src/extension-auth.ts";
+import { ensureProbeSession } from "../src/sharingan-handler.ts";
 
 interface Ctx {
   base: string;
@@ -34,12 +36,14 @@ type BudgetedMoodboardAgentContext = {
 async function withServer(fn: (ctx: Ctx) => Promise<void>, extraDeps: Partial<AppDeps> = {}): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-test-"));
   const store = new Store(":memory:");
-  const server = createApp({ ...extraDeps, store, dataDir, version: extraDeps.version ?? "9.9.9" });
+  const runtimeSupervisor = extraDeps.runtimeSupervisor ?? createRuntimeSupervisor({ dataDir, store });
+  const server = createApp({ ...extraDeps, store, dataDir, version: extraDeps.version ?? "9.9.9", runtimeSupervisor });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
     await fn({ base: `http://127.0.0.1:${port}`, dataDir, store });
   } finally {
+    await runtimeSupervisor.shutdown();
     await new Promise<void>((r) => server.close(() => r()));
     store.close();
   }
@@ -419,6 +423,76 @@ test("project CRUD over HTTP", async () => {
     assert.equal((await fetch(`${base}/api/projects/${project.id}`)).status, 404);
     assert.equal(existsSync(diskDir), false);
   });
+});
+
+test("project deletion aborts its active Run before removing every daemon-owned resource", async () => {
+  let entered!: () => void;
+  const runEntered = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let abortObserved = false;
+  const runner: AgentRunner = {
+    id: "blocked-project-delete",
+    async runTurn(input) {
+      entered();
+      return await new Promise((resolve, reject) => {
+        const fallback = setTimeout(() => reject(new Error("blocked runner test fallback")), 500);
+        input.signal?.addEventListener("abort", () => {
+          abortObserved = true;
+          clearTimeout(fallback);
+          setTimeout(() => {
+            if (existsSync(input.projectDir)) writeFileSync(join(input.projectDir, "post-abort.txt"), "late write");
+          }, 5);
+          setTimeout(() => reject(abortError()), 15);
+        }, { once: true });
+      });
+    },
+  };
+
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Delete while running" });
+    const projectPath = join(dataDir, "projects", project.id);
+    mkdirSync(projectPath, { recursive: true });
+    writeFileSync(join(projectPath, "index.html"), "<main>working</main>");
+    let sharinganClosed = 0;
+    await ensureProbeSession(
+      project.id,
+      dataDir,
+      async () => ({ close: async () => { sharinganClosed += 1; } }) as unknown as import("../src/sharingan-browser.ts").SharinganSession,
+    );
+
+    const runResponsePromise = fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "stay blocked" }),
+    });
+    await runEntered;
+    const run = store.listRuns(project.id)[0]!;
+    const ownedPaths = [
+      join(dataDir, ".runs", `${run.id}.jsonl`),
+      join(dataDir, ".runs", run.id, "bundle.txt"),
+      join(dataDir, "worktrees", project.id, "branch", "artifact.txt"),
+      join(dataDir, "version-worktrees", project.id, run.id, "artifact.txt"),
+      projectPath,
+    ];
+    for (const path of ownedPaths.slice(1, -1)) {
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, "owned");
+    }
+
+    const deleted = await fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" });
+    const runResponse = await runResponsePromise;
+    await runResponse.text();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    assert.equal(deleted.status, 204);
+    assert.equal(abortObserved, true, "the active Run observes abort before DELETE resolves");
+    assert.equal(sharinganClosed, 1, "the project Sharingan session closes before DELETE resolves");
+    assert.equal(store.getProject(project.id), null);
+    assert.equal(store.getRun(run.id), null);
+    assert.ok(ownedPaths.every((path) => !existsSync(path)), "project paths, Run logs, and worktrees stay absent");
+    assert.equal(existsSync(join(projectPath, "post-abort.txt")), false, "no write lands after deletion");
+  }, { runner, visualQa: async () => [] });
 });
 
 test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {

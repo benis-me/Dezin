@@ -1099,6 +1099,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       if (!res.writableEnded) res.end();
     },
   });
+  ctrl = createRun({
+    runId: run.id,
+    conversationId: conversation.id,
+    projectId: project.id,
+    variantId: targetVariantId,
+    dataDir: deps.dataDir,
+    runtimeSupervisor: deps.runtimeSupervisor,
+  });
+  brokerRegistered = true;
 
   // Workspace preparation is post-record work: failures become a durable failed Run.
   dir = project.mode === "standard" ? await standardVariantArtifactDir(deps, project.id, targetVariantId) : projectDir(deps.dataDir, project.id);
@@ -1136,8 +1145,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // replay what the run reached. The run continues regardless of THIS client's connection — it
   // ends only on completion, an explicit cancel, or the daemon exiting.
   openStream();
-  ctrl = createRun({ runId: run.id, conversationId: conversation.id, dataDir: deps.dataDir });
-  brokerRegistered = true;
   unsubscribe = subscribe(
     run.id,
     deps.dataDir,

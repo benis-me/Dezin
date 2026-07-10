@@ -27,6 +27,7 @@ interface Runtime {
   phase: SetupPhase;
   error?: string;
   logs: RuntimeLog[];
+  children: Set<ChildProcess>;
   dev?: { proc: ChildProcess; port: number; url: string; projectDir: string; fingerprint: string; releaseTimer?: ReturnType<typeof setTimeout> };
 }
 
@@ -51,6 +52,37 @@ function stopDev(dev: Runtime["dev"]): void {
   if (!dev) return;
   clearDevReleaseTimer(dev);
   if (!dev.proc.killed) dev.proc.kill();
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs = 1_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      child.off("close", finish);
+      child.off("error", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    child.once("close", finish);
+    child.once("error", finish);
+  });
+}
+
+async function stopRuntime(rt: Runtime): Promise<void> {
+  const children = new Set(rt.children);
+  if (rt.dev?.proc) children.add(rt.dev.proc);
+  const exits = [...children].map((child) => waitForChildExit(child));
+  stopDev(rt.dev);
+  rt.dev = undefined;
+  for (const child of rt.children) {
+    if (!child.killed && child.exitCode === null && child.signalCode === null) child.kill();
+  }
+  rt.children.clear();
+  await Promise.allSettled(exits);
 }
 
 export async function ensureProjectPickerBridge(projectDir: string): Promise<boolean> {
@@ -99,17 +131,20 @@ function appendLog(rt: Runtime, message: string, level: RuntimeLog["level"] = "i
 
 function run(command: string, args: string[], cwd: string, rt?: Runtime, label = `${command} ${args.join(" ")}`): Promise<number> {
   return new Promise((resolve) => {
-    appendLog(rt ?? { phase: "ready", logs: [] }, `$ ${label}`);
+    appendLog(rt ?? { phase: "ready", logs: [], children: new Set() }, `$ ${label}`);
     const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv() });
+    rt?.children.add(child);
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (data: string) => rt && appendLog(rt, data, "info"));
     child.stderr?.on("data", (data: string) => rt && appendLog(rt, data, "error"));
     child.on("error", (err) => {
+      rt?.children.delete(child);
       if (rt) appendLog(rt, err.message, "error");
       resolve(1);
     });
     child.on("close", (code) => {
+      rt?.children.delete(child);
       if (rt) appendLog(rt, `${label} exited ${code ?? 1}`, code === 0 ? "info" : "error");
       resolve(code ?? 1);
     });
@@ -133,7 +168,7 @@ const GIT_IDENTITY = ["-c", "user.name=Dezin", "-c", "user.email=dezin@local"];
 
 /** Copy the template, git init + initial commit, then npm install (the slow part). */
 export async function setupStandardProject(projectId: string, projectDir: string): Promise<void> {
-  const rt: Runtime = { phase: "scaffolding", logs: [] };
+  const rt: Runtime = { phase: "scaffolding", logs: [], children: new Set() };
   runtimes.set(projectId, rt);
   try {
     appendLog(rt, "Scaffolding standard project");
@@ -158,7 +193,7 @@ export async function setupStandardProject(projectId: string, projectDir: string
 
 /** Prepare an imported Standard project without copying the template over its source. */
 export async function setupImportedStandardProject(projectId: string, projectDir: string): Promise<void> {
-  const rt: Runtime = { phase: "installing", logs: [] };
+  const rt: Runtime = { phase: "installing", logs: [], children: new Set() };
   runtimes.set(projectId, rt);
   try {
     appendLog(rt, "Preparing imported standard project");
@@ -241,7 +276,7 @@ function freePort(): Promise<number> {
 export async function ensureDevServer(projectId: string, projectDir: string, runtimeKey = projectId): Promise<{ url: string }> {
   let rt = runtimes.get(runtimeKey);
   if (!rt) {
-    rt = { phase: existsSync(join(projectDir, "node_modules")) ? "ready" : "installing", logs: [] };
+    rt = { phase: existsSync(join(projectDir, "node_modules")) ? "ready" : "installing", logs: [], children: new Set() };
     runtimes.set(runtimeKey, rt);
   }
   const statusBeforeBridgeUpdate = existsSync(join(projectDir, ".git")) ? await workingTreeFingerprint(projectDir) : "";
@@ -383,10 +418,37 @@ export async function gitRestoreTree(projectDir: string, commitHash: string, mes
   return { committed: res.committed, commitHash: res.commitHash };
 }
 
-/** Stop all dev servers (called on daemon shutdown). */
+/** Stop and forget every runtime owned by one project, including setup children. */
+export async function releaseProjectRuntime(projectId: string): Promise<void> {
+  const entries = [...runtimes.entries()].filter(([key]) => key === projectId || key.startsWith(`${projectId}:`));
+  await Promise.allSettled(entries.map(([, rt]) => stopRuntime(rt)));
+  for (const [key] of entries) runtimes.delete(key);
+}
+
+/** Stop and forget one variant runtime plus version previews owned by its Runs. */
+export async function releaseVariantRuntime(projectId: string, variantId: string, runIds: string[] = []): Promise<void> {
+  const keys = new Set([`${projectId}:${variantId}`, ...runIds.map((runId) => `${projectId}:version:${runId}`)]);
+  const entries = [...runtimes.entries()].filter(([key]) => keys.has(key));
+  await Promise.allSettled(entries.map(([, rt]) => stopRuntime(rt)));
+  for (const [key] of entries) runtimes.delete(key);
+}
+
+/** Stop all runtime resources and await bounded child settlement. */
+export async function stopAllProjectRuntimes(): Promise<void> {
+  const entries = [...runtimes.values()];
+  await Promise.allSettled(entries.map((rt) => stopRuntime(rt)));
+  runtimes.clear();
+}
+
+/** Stop all dev/setup resources synchronously enough for legacy teardown callers. */
 export function stopAllDevServers(): void {
   for (const rt of runtimes.values()) {
     stopDev(rt.dev);
     rt.dev = undefined;
+    for (const child of rt.children) {
+      if (!child.killed && child.exitCode === null && child.signalCode === null) child.kill();
+    }
+    rt.children.clear();
   }
+  runtimes.clear();
 }

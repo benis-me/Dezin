@@ -13,9 +13,7 @@ import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDir } from "../../../packages/design/src/index.ts";
-import { stopAllDevServers } from "./project-runtime.ts";
-import { closeAllSharinganSessions } from "./sharingan-handler.ts";
-import { createApp } from "./app.ts";
+import { createApp, createRuntimeSupervisor } from "./app.ts";
 
 const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
 // 0 = ephemeral (portless). Set DEZIN_PORT to pin a fixed port.
@@ -87,6 +85,7 @@ function main(): void {
   if (process.env.DEZIN_AGENT_CMD) store.updateSettings({ agentCommand: process.env.DEZIN_AGENT_CMD });
   // One shared registry: bundled systems + any the user has imported (persisted to disk).
   const designRegistry = new DesignRegistry([...BUNDLED_DESIGN_SYSTEMS, ...loadDesignSystems(userDesignDir(DATA_DIR))]);
+  const runtimeSupervisor = createRuntimeSupervisor({ store, dataDir: DATA_DIR });
   const server = createApp({
     store,
     dataDir: DATA_DIR,
@@ -94,6 +93,7 @@ function main(): void {
     designRegistry,
     security: { token: DAEMON_TOKEN },
     daemonOwnerId: DAEMON_OWNER_ID,
+    runtimeSupervisor,
   });
   server.on("error", (err) => {
     try {
@@ -116,27 +116,26 @@ function main(): void {
     console.log(`Dezin daemon listening on ${url}  (data: ${DATA_DIR})`);
   });
 
+  let shuttingDown = false;
   const shutdown = (signal: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`\n${signal} — shutting down`);
     try {
       rmSync(PORT_FILE, { force: true });
       releaseLock();
-      stopAllDevServers();
     } catch {
       // ignore
     }
-    // Close any live Sharingan sessions (entry capture + probe) before exiting, so a
-    // shutdown/crash can't orphan a headful Chrome holding the persistent-profile lock
-    // (which would block the next clone). Best-effort: closeAllSharinganSessions never
-    // throws, but guard anyway so a shutdown signal always reaches process.exit.
-    closeAllSharinganSessions()
-      .catch(() => {})
-      .then(() => {
-        server.close(() => {
-          store.close();
-          process.exit(0);
-        });
+    void (async () => {
+      await runtimeSupervisor.shutdown().catch(() => false);
+      await new Promise<void>((resolve) => {
+        if (!server.listening) return resolve();
+        server.close(() => resolve());
       });
+      store.close();
+      process.exit(0);
+    })();
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

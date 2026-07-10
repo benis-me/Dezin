@@ -10,6 +10,7 @@ import { EventEmitter } from "node:events";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { RuntimeSupervisor } from "./runtime-supervisor.ts";
 
 interface RunEntry {
   runId: string;
@@ -20,6 +21,9 @@ interface RunEntry {
   emitter: EventEmitter;
   ctrl: AbortController;
   writeQueue: Promise<void>;
+  settled: Promise<void>;
+  resolveSettled: () => void;
+  finishPromise?: Promise<void>;
   done: boolean;
 }
 
@@ -30,7 +34,14 @@ export function runLogPath(dataDir: string, runId: string): string {
 }
 
 /** Register a starting run + its abort controller. Call before emitting any events. */
-export function createRun(meta: { runId: string; conversationId: string; dataDir: string }): AbortController {
+export function createRun(meta: {
+  runId: string;
+  conversationId: string;
+  dataDir: string;
+  projectId?: string;
+  variantId?: string;
+  runtimeSupervisor?: RuntimeSupervisor;
+}): AbortController {
   const logPath = runLogPath(meta.dataDir, meta.runId);
   try {
     mkdirSync(join(meta.dataDir, ".runs"), { recursive: true });
@@ -39,6 +50,10 @@ export function createRun(meta: { runId: string; conversationId: string; dataDir
   }
   const emitter = new EventEmitter();
   emitter.setMaxListeners(64);
+  let resolveSettled!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
   const entry: RunEntry = {
     runId: meta.runId,
     conversationId: meta.conversationId,
@@ -48,9 +63,26 @@ export function createRun(meta: { runId: string; conversationId: string; dataDir
     emitter,
     ctrl: new AbortController(),
     writeQueue: Promise.resolve(),
+    settled,
+    resolveSettled,
     done: false,
   };
   runs.set(meta.runId, entry);
+  if (meta.runtimeSupervisor && meta.projectId) {
+    try {
+      meta.runtimeSupervisor.registerRun({
+        projectId: meta.projectId,
+        ...(meta.variantId ? { variantId: meta.variantId } : {}),
+        runId: meta.runId,
+        controller: entry.ctrl,
+        settled,
+      });
+    } catch (error) {
+      runs.delete(meta.runId);
+      resolveSettled();
+      throw error;
+    }
+  }
   return entry.ctrl;
 }
 
@@ -68,7 +100,7 @@ function withSeq(ev: unknown, seq: number): unknown {
 /** Buffer + persist + broadcast one event. */
 export function pushEvent(runId: string, ev: unknown): void {
   const e = runs.get(runId);
-  if (!e) return;
+  if (!e || e.done) return;
   const event = withSeq(ev, e.nextSeq++);
   e.buffer.push(event);
   let line = "";
@@ -82,15 +114,23 @@ export function pushEvent(runId: string, ev: unknown): void {
 }
 
 /** Mark the run finished; late subscribers fall back to the persisted log. */
-export function finishRun(runId: string): void {
+export function finishRun(runId: string): Promise<void> {
   const e = runs.get(runId);
-  if (!e) return;
-  void e.writeQueue.finally(() => {
-    if (runs.get(runId) !== e) return;
-    e.done = true;
-    e.emitter.emit("done");
-    runs.delete(runId);
-  });
+  if (!e) return Promise.resolve();
+  e.done = true;
+  e.finishPromise ??= e.writeQueue
+    .catch(() => {})
+    .then(() => {
+      if (runs.get(runId) !== e) return;
+      try {
+        e.emitter.emit("done");
+      } finally {
+        if (runs.get(runId) === e) runs.delete(runId);
+      }
+    })
+    .catch(() => {})
+    .finally(e.resolveSettled);
+  return e.finishPromise;
 }
 
 export function cancelRun(runId: string): boolean {

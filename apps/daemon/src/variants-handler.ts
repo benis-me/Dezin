@@ -210,12 +210,9 @@ export async function handleDeleteVariant(res: ServerResponse, params: Record<st
   if (!project || deps.store.getVariant(vid)?.projectId !== id) return sendError(res, 404, "not found");
   if (deps.store.getActiveVariantId(id) === vid) return sendError(res, 409, "switch to another branch before deleting this one");
   if (deps.store.listVariants(id).length <= 1) return sendError(res, 409, "a project needs at least one branch");
-  if (project.mode === "standard") {
-    if (isStandardRootVariant(deps, id, vid)) return sendError(res, 409, "the root branch cannot be deleted");
-    await removeStandardVariantWorktree(deps, id, vid);
-  } else {
-    await rm(snapDir(deps.dataDir, id, vid), { recursive: true, force: true });
+  if (project.mode === "standard" && isStandardRootVariant(deps, id, vid)) {
+    return sendError(res, 409, "the root branch cannot be deleted");
   }
-  deps.store.deleteVariant(vid);
+  await deps.runtimeSupervisor!.releaseVariant(id, vid);
   sendJson(res, 200, deps.store.listVariants(id));
 }
