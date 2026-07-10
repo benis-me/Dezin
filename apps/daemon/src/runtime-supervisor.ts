@@ -108,6 +108,28 @@ export class RuntimeSupervisor {
     return operation;
   }
 
+  acquireOperationLease(scope: RuntimeScope): { release: () => void } {
+    this.assertAdmission(scope);
+    const id = this.nextOperationId++;
+    const controller = new AbortController();
+    let resolveSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
+    const entry: RegisteredOperation = { ...scope, id, controller, settled };
+    this.operations.set(id, entry);
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      resolveSettled();
+    };
+    void settled.finally(() => {
+      if (this.operations.get(id) === entry) this.operations.delete(id);
+    });
+    return { release };
+  }
+
   cancelRuns(scope: RuntimeScope): void {
     for (const run of this.runs.values()) {
       if (matchesScope(run, scope)) run.controller.abort();
@@ -133,13 +155,13 @@ export class RuntimeSupervisor {
   async releaseVariant(projectId: string, variantId: string): Promise<void> {
     const scope = { projectId, variantId };
     this.blockedVariants.add(this.variantKey(projectId, variantId));
+    this.cancelRuns(scope);
+    this.cancelOperations(scope);
+    await Promise.all([this.waitForRuns(scope), this.waitForOperations(scope)]);
     const runIds = this.options.store
       .listRuns(projectId)
       .filter((run) => run.variantId === variantId)
       .map((run) => run.id);
-    this.cancelRuns(scope);
-    this.cancelOperations(scope);
-    await Promise.all([this.waitForRuns(scope), this.waitForOperations(scope)]);
     await this.options.releaseVariantResources?.({ projectId, variantId, runIds });
     await Promise.all([
       rm(join(this.options.dataDir, "worktrees", projectId, variantId), { recursive: true, force: true }),
@@ -148,6 +170,16 @@ export class RuntimeSupervisor {
         rm(join(this.options.dataDir, ".runs", `${runId}.jsonl`), { recursive: true, force: true }),
         rm(join(this.options.dataDir, ".runs", runId), { recursive: true, force: true }),
         rm(join(this.options.dataDir, "version-worktrees", projectId, runId), { recursive: true, force: true }),
+        rm(
+          join(
+            this.options.dataDir,
+            "projects",
+            projectId,
+            ".versions",
+            `${runId.replace(/[^a-zA-Z0-9-]/g, "")}.html`,
+          ),
+          { recursive: true, force: true },
+        ),
       ]),
     ]);
     this.options.store.deleteVariant(variantId);

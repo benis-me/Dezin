@@ -128,3 +128,46 @@ The daemon wildcard was intentionally not run, per the recovery brief. A read-on
 - Verified shutdown owns import upload time before a project id exists, and project deletion owns every mutation after row creation.
 - Verified Sharingan status polling cannot recreate registry state during or after release, and non-idempotent fake sessions close exactly once under capture/continue release races.
 - No wildcard daemon run, force-exit workaround, global test-only process kill, or out-of-scope lifecycle policy was added.
+
+---
+
+## Final runtime-ownership coverage
+
+Completed the seven remaining formal findings on base `3889bd62` without changing Preview TTL/LRU, Standard Run transactions, resource budgets, Sharingan profile policy, or the excluded token/env/symlink topics.
+
+### Implementation
+
+- Imported variants acquire a passive exact-scope operation lease immediately after each row is created. The lease spans the complete import continuation, so targeted deletion waits for all variant files, Runs, Prototype versions, JSONL logs, and bundles to settle before exact cleanup. `releaseVariant` now recomputes target Run ids only after matching Runs/operations settle.
+- Targeted Prototype release removes only each target Run's sanitized `.versions/<runId>.html` snapshot while preserving unrelated snapshots.
+- Prototype message-fork rollback now restores the saved root and prior active variant before returning `409`. A second exact-scope lease spans the rollback itself, so targeted DELETE cannot respond before restoration completes; both deletion-before-overwrite and deletion-after-overwrite orders are covered.
+- Electron cover IPC now accepts cancellation, removes pending entries/listeners/timers, rejects `AbortError`, and sends exact-id `capture-cancel`. The desktop uses an injectable id-to-task/window controller, destroys only the matching hidden window, checks cancellation before PNG write, and performs cleanup exactly once.
+- Direct project cover uploads enter project ownership before body consumption and pass the operation signal into the abortable body collector. Partial uploads are destroyed and settled before project deletion returns.
+- Sharingan retained operations carry AbortControllers into browser open. Release uses a bounded grace only for an opener that has not yielded a session; established capture/continue work still fully settles before deletion. Released generations remain tombstones that close late sessions without touching a fresh generation or recreating registry state.
+- Standard variant removal retries branch deletion after `git worktree prune` when the worktree directory vanished but Git retained stale registration.
+
+### RED evidence
+
+- Import/variant focused tests initially left the target snapshot, used stale pre-settlement Run ids, retained Prototype version HTML, and retained a stale `dezin/variant/*` branch: **4 failures**.
+- Direct-cover partial upload returned DELETE while the upload reader remained live (`false !== true`).
+- Prototype message-fork cancellation first left the historical fork HTML at the project root; the stronger sequencing regression then proved DELETE resolved while rollback was deliberately blocked (`resolved !== pending`).
+- Electron IPC abort coverage failed before `captureViaElectron` was abort-aware; both desktop controller tests failed before the injectable exact-id controller existed.
+- Sharingan release exceeded the stuck-opener deadline. Self-review additionally proved a global 250 ms grace incorrectly detached established capture work (`true !== false`).
+
+### Final GREEN evidence
+
+- Broad focused Task 4 daemon surface (`export`, `http`, `variants`, `runtime-supervisor`, cover, and Sharingan files): **92 passed, 0 failed**.
+- Final post-review affected daemon surface after opener-only grace and rollback-lease fixes: **52 passed, 0 failed**.
+- `project-runtime.test.ts`: **9 passed, 0 failed**.
+- `runs.test.ts` filtered to exactly-once lifecycle, real cancellation, post-success cover deletion, and daemon start/lock, run from `apps/daemon`: **10 passed, 0 failed**.
+- `pnpm --filter @dezin/core test`: **24 passed, 0 failed**.
+- Desktop no-GUI cover controller: **2 passed, 0 failed**; `node --check` passed for `main.js` and `cover-capture.js`.
+- `pnpm typecheck`: **TYPECHECK: PASS**.
+- `git diff --check`: pass.
+
+The two daemon-start tests initially failed only when invoked from the repository root: their fixture intentionally starts relative `src/start.ts` from `process.cwd()`. Running the same command from its package cwd (`apps/daemon`) produced the recorded **10/10** result; no production change was made for that invocation error. The wildcard daemon suite was not run, per the task constraint.
+
+### Final self-review
+
+- Verified every changed writer boundary: imported variant files/Runs/logs, Prototype root/snapshots, direct cover file, Electron PNG output, Sharingan capture/session state, and Git worktree branches.
+- A fresh read-only reviewer found the rollback lease gap; the deterministic blocked-rollback regression failed before the fix and passes afterward.
+- Sharingan release preserves earlier exact cleanup: only a pre-session opener may detach after the bounded grace; any operation capable of writing project data remains awaited.

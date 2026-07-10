@@ -109,6 +109,53 @@ test("releaseVariant rejects new matching Runs before waiting for active settlem
   store.close();
 });
 
+test("releaseVariant recomputes owned Run ids after matching operations settle", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-"));
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "Project" });
+  store.ensureMainVariant(project.id);
+  const target = store.createVariant(project.id, "Target");
+  const conversation = store.createConversation(project.id);
+  const entered = deferred();
+  let lateRunId = "";
+  const releasedRunIds: string[][] = [];
+  const supervisor = new RuntimeSupervisor({
+    dataDir,
+    store,
+    releaseVariantResources: ({ runIds }) => {
+      releasedRunIds.push(runIds);
+    },
+  });
+
+  const operation = supervisor.trackOperation(
+    { projectId: project.id, variantId: target.id },
+    async (signal) => {
+      entered.resolve();
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      const lateRun = store.createRun(project.id, conversation.id, target.id);
+      lateRunId = lateRun.id;
+      const latePaths = [
+        join(dataDir, ".runs", `${lateRun.id}.jsonl`),
+        join(dataDir, ".runs", lateRun.id, "bundle.txt"),
+      ];
+      for (const path of latePaths) {
+        mkdirSync(join(path, ".."), { recursive: true });
+        writeFileSync(path, "late");
+      }
+    },
+  );
+  await entered.promise;
+
+  await Promise.all([supervisor.releaseVariant(project.id, target.id), operation]);
+
+  assert.ok(lateRunId, "the matching operation creates a Run while settling after abort");
+  assert.deepEqual(releasedRunIds, [[lateRunId]], "resource cleanup receives post-settlement ownership");
+  assert.equal(existsSync(join(dataDir, ".runs", `${lateRunId}.jsonl`)), false);
+  assert.equal(existsSync(join(dataDir, ".runs", lateRunId)), false);
+  await supervisor.shutdown();
+  store.close();
+});
+
 test("releaseVariant stops resources and removes only variant-owned paths before deleting rows", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-"));
   const store = new Store(":memory:");
@@ -124,11 +171,13 @@ test("releaseVariant stops resources and removes only variant-owned paths before
     join(dataDir, "worktrees", project.id, target.id, "artifact.txt"),
     join(dataDir, "version-worktrees", project.id, targetRun.id, "artifact.txt"),
     join(dataDir, "projects", project.id, ".variants", target.id, "index.html"),
+    join(dataDir, "projects", project.id, ".versions", `${targetRun.id.replace(/[^a-zA-Z0-9-]/g, "")}.html`),
   ];
   const retainedPaths = [
     join(dataDir, ".runs", `${mainRun.id}.jsonl`),
     join(dataDir, "version-worktrees", project.id, mainRun.id, "artifact.txt"),
     join(dataDir, "projects", project.id, "index.html"),
+    join(dataDir, "projects", project.id, ".versions", `${mainRun.id.replace(/[^a-zA-Z0-9-]/g, "")}.html`),
   ];
   for (const path of [...targetPaths, ...retainedPaths]) {
     mkdirSync(join(path, ".."), { recursive: true });

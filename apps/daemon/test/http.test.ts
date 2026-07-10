@@ -721,6 +721,61 @@ test("project deletion aborts a partial reference upload before it can recreate 
   });
 });
 
+test("project deletion aborts and settles a partial direct-cover upload before returning", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Slow direct cover upload" });
+    const root = join(dataDir, "projects", project.id);
+    mkdirSync(root, { recursive: true });
+
+    const url = new URL(`/api/projects/${project.id}/cover`, base);
+    let uploadSettled = false;
+    let uploadStatus = 0;
+    let upload!: ReturnType<typeof http.request>;
+    const uploadDone = new Promise<void>((resolve) => {
+      upload = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          method: "POST",
+          headers: { "content-type": "application/json", "transfer-encoding": "chunked" },
+        },
+        (response) => {
+          uploadStatus = response.statusCode ?? 0;
+          response.resume();
+          response.once("end", () => {
+            uploadSettled = true;
+            resolve();
+          });
+        },
+      );
+      upload.once("error", () => {
+        uploadSettled = true;
+        resolve();
+      });
+      upload.write('{"dataUrl":"data:image/png;base64,');
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const deleted = await Promise.race([
+      fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" }),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+    ]);
+    assert.notEqual(deleted, "timeout", "DELETE is bounded while the client withholds the body tail");
+    assert.equal((deleted as Response).status, 204);
+    const uploadOutcome = await Promise.race([
+      uploadDone.then(() => "settled" as const),
+      new Promise<"still-open">((resolve) => setTimeout(() => resolve("still-open"), 50)),
+    ]);
+    if (uploadOutcome === "still-open") upload.destroy();
+
+    assert.equal(uploadSettled, true, "the owned body reader is gone when DELETE returns");
+    assert.notEqual(uploadStatus, 200, "the cancelled upload is not accepted");
+    assert.equal(existsSync(join(root, ".cover.png")), false);
+    assert.equal(existsSync(root), false);
+  });
+});
+
 test("moodboard CRUD, nodes, and uploaded assets over HTTP", async () => {
   await withServer(async ({ base, dataDir }) => {
     assert.deepEqual(await (await fetch(`${base}/api/moodboards`)).json(), []);

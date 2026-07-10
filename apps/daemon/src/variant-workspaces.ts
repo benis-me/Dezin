@@ -172,7 +172,12 @@ export async function removeStandardVariantWorktree(deps: AppDeps, projectId: st
     const res = await captureGit(root, ["worktree", "remove", "--force", dir]);
     if (res.code !== 0) await rm(dir, { recursive: true, force: true });
   }
-  await captureGit(root, ["branch", "-D", variantBranchName(variantId)]);
+  const branch = variantBranchName(variantId);
+  const removed = await captureGit(root, ["branch", "-D", branch]);
+  if (removed.code !== 0) {
+    await captureGit(root, ["worktree", "prune"]);
+    await captureGit(root, ["branch", "-D", branch]);
+  }
   await captureGit(root, ["worktree", "prune"]);
 }
 

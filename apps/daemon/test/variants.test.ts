@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -10,7 +10,7 @@ import { Store } from "../../../packages/core/src/index.ts";
 import { FakeRunner, abortError } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner, AgentTurnInput } from "../../../packages/agent/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
-import { standardVersionArtifactDir } from "../src/variant-workspaces.ts";
+import { removeStandardVariantWorktree, standardVersionArtifactDir, standardWorktreeDir } from "../src/variant-workspaces.ts";
 
 interface Ctx {
   base: string;
@@ -223,6 +223,25 @@ test("variant deletion unregisters a real Git version worktree before removing i
   store.close();
 });
 
+test("Standard variant cleanup prunes stale worktree metadata and retries branch deletion", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-stale-variant-worktree-delete-"));
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "Stale Git cleanup", mode: "standard" });
+  const root = initStandardProject(dataDir, project.id);
+  const variant = store.createVariant(project.id, "Branch");
+  const worktree = standardWorktreeDir(dataDir, project.id, variant.id);
+  const branch = `dezin/variant/${variant.id}`;
+  execFileSync("git", ["worktree", "add", "-b", branch, worktree, "HEAD"], { cwd: root });
+  rmSync(worktree, { recursive: true, force: true });
+
+  assert.match(execFileSync("git", ["branch", "--list", branch], { cwd: root, encoding: "utf8" }), /dezin\/variant\//);
+  await removeStandardVariantWorktree({ store, dataDir } as AppDeps, project.id, variant.id);
+
+  assert.equal(execFileSync("git", ["branch", "--list", branch], { cwd: root, encoding: "utf8" }).trim(), "");
+  assert.doesNotMatch(execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: root, encoding: "utf8" }), new RegExp(worktree));
+  store.close();
+});
+
 async function createVariant(base: string, projectId: string): Promise<{ id: string; active?: boolean }> {
   const res = await fetch(`${base}/api/projects/${projectId}/variants`, {
     method: "POST",
@@ -263,6 +282,88 @@ async function forkMessage(base: string, projectId: string, messageId: string, n
   assert.equal(res.status, 200);
   return (await res.json()) as { conversationId: string; variantId: string };
 }
+
+async function assertPrototypeMessageForkDeletionRace(
+  checkpointPhase: "before-root-overwrite" | "after-root-overwrite",
+): Promise<void> {
+  const firstHtml = "<main><h1>First snapshot</h1><p>Fork target.</p></main>";
+  const secondHtml = "<main><h1>Current snapshot</h1><p>Must survive cancellation.</p></main>";
+  const checkpointReached = deferred();
+  const rollbackReached = deferred();
+  const allowRollback = deferred();
+  const runner = new FakeRunner({ artifacts: [firstHtml, secondHtml], texts: ["first answer", "second answer"] });
+
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: `Prototype fork ${checkpointPhase}` });
+      const main = store.ensureMainVariant(project.id);
+      const firstEvents = await runProject(base, { projectId: project.id, brief: "first" });
+      const conversationId = firstEvents.find((event) => event.type === "run-start")!.conversationId as string;
+      await runProject(base, { projectId: project.id, conversationId, brief: "second" });
+      const firstAssistant = store.listMessages(conversationId).filter((message) => message.role === "assistant")[0]!;
+
+      const forkResponsePromise = fetch(`${base}/api/projects/${project.id}/messages/${firstAssistant.id}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Delete racing fork" }),
+      });
+      await checkpointReached.promise;
+      const target = store.listVariants(project.id).find((variant) => variant.id !== main.id)!;
+      assert.ok(target, "fork row is externally visible while the exact-scope operation owns it");
+
+      const deleteResponsePromise = fetch(`${base}/api/projects/${project.id}/variants/${target.id}`, { method: "DELETE" });
+      let deletionWhileRollbackBlocked: "pending" | "resolved" = "pending";
+      if (checkpointPhase === "after-root-overwrite") {
+        await rollbackReached.promise;
+        deletionWhileRollbackBlocked = await Promise.race([
+          deleteResponsePromise.then(() => "resolved" as const),
+          new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 50)),
+        ]);
+        allowRollback.resolve();
+      }
+      const [forkResponse, deleteResponse] = await Promise.all([forkResponsePromise, deleteResponsePromise]);
+
+      assert.equal(deletionWhileRollbackBlocked, "pending", "DELETE waits for exact-scope root rollback");
+      assert.equal(forkResponse.status, 409, "the cancelled fork reports an ownership conflict");
+      assert.equal(deleteResponse.status, 200, "target deletion finishes after fork rollback");
+      assert.equal(store.getActiveVariantId(project.id), main.id, "the previous variant remains active");
+      assert.equal(store.getVariant(target.id), null);
+      assert.match(
+        readFileSync(join(dataDir, "projects", project.id, "index.html"), "utf8"),
+        /Current snapshot/,
+        "root content is restored even when deletion aborts after the fork overwrite",
+      );
+      assert.equal(
+        existsSync(join(dataDir, "projects", project.id, ".variants", main.id)),
+        false,
+        "rollback consumes the temporary active snapshot",
+      );
+    },
+    {
+      runner,
+      visualQa: async () => [],
+      prototypeMessageForkCheckpoint: async (_projectId, _variantId, phase, signal) => {
+        if (phase === "before-rollback" && checkpointPhase === "after-root-overwrite") {
+          rollbackReached.resolve();
+          await allowRollback.promise;
+          return;
+        }
+        if (phase !== checkpointPhase) return;
+        checkpointReached.resolve();
+        if (signal?.aborted) return;
+        await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+      },
+    },
+  );
+}
+
+test("Prototype message fork leaves root unchanged when deletion wins before overwrite", async () => {
+  await assertPrototypeMessageForkDeletionRace("before-root-overwrite");
+});
+
+test("Prototype message fork restores root when target deletion aborts after overwrite", async () => {
+  await assertPrototypeMessageForkDeletionRace("after-root-overwrite");
+});
 
 test("prototype branch can fork from a specific assistant message snapshot", async () => {
   const firstHtml = "<main><h1>First snapshot</h1><p>Keep this version.</p></main>";

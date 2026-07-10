@@ -183,8 +183,15 @@ export async function handleForkMessage(
   const active = deps.store.ensureMainVariant(id);
   const name = body?.name?.trim() || `Fork ${deps.store.listVariants(id).length + 1}`;
   const variant = deps.store.createVariant(id, name);
+  let prototypeRollback: {
+    root: string;
+    activeSnapshot: string;
+    rootMutationStarted: boolean;
+  } | undefined;
+  let mutationLease: { release: () => void } | undefined;
 
   try {
+    mutationLease = deps.runtimeSupervisor?.acquireOperationLease({ projectId: id, variantId: variant.id });
     const forkConversation = await withVariantMutation(deps, id, variant.id, async (variantSignal) => {
       variantSignal.throwIfAborted();
       if (project.mode === "standard") {
@@ -195,8 +202,14 @@ export async function handleForkMessage(
         const versionFile = versionSnapshotPath(deps.dataDir, id, run.id);
         if (!existsSync(versionFile)) throw new Error("this run has no version snapshot");
         const root = projectDir(deps.dataDir, id);
-        await snapshot(root, snapDir(deps.dataDir, id, active.id));
+        const activeSnapshot = snapDir(deps.dataDir, id, active.id);
+        prototypeRollback = { root, activeSnapshot, rootMutationStarted: false };
+        await snapshot(root, activeSnapshot);
+        await deps.prototypeMessageForkCheckpoint?.(id, variant.id, "before-root-overwrite", variantSignal);
+        variantSignal.throwIfAborted();
+        prototypeRollback.rootMutationStarted = true;
         await writeFile(join(root, "index.html"), await readFile(versionFile, "utf8"), "utf8");
+        await deps.prototypeMessageForkCheckpoint?.(id, variant.id, "after-root-overwrite", variantSignal);
       }
 
       variantSignal.throwIfAborted();
@@ -209,10 +222,34 @@ export async function handleForkMessage(
     });
     sendJson(res, 200, { conversationId: forkConversation.id, variantId: variant.id, variants: deps.store.listVariants(id) });
   } catch (err) {
+    let rollbackError: unknown;
     if (project.mode === "standard") await removeStandardVariantWorktree(deps, id, variant.id).catch(() => {});
-    else await rm(snapDir(deps.dataDir, id, variant.id), { recursive: true, force: true }).catch(() => {});
+    else {
+      if (prototypeRollback?.rootMutationStarted) {
+        try {
+          await deps.prototypeMessageForkCheckpoint?.(id, variant.id, "before-rollback");
+          await restore(prototypeRollback.activeSnapshot, prototypeRollback.root);
+        } catch (restoreError) {
+          rollbackError = restoreError;
+        }
+      }
+      if (!rollbackError && deps.store.getVariant(active.id)) deps.store.setActiveVariant(id, active.id);
+      await Promise.all([
+        prototypeRollback && !rollbackError
+          ? rm(prototypeRollback.activeSnapshot, { recursive: true, force: true })
+          : Promise.resolve(),
+        rm(snapDir(deps.dataDir, id, variant.id), { recursive: true, force: true }),
+      ]).catch(() => {});
+    }
     deps.store.deleteVariant(variant.id);
-    sendError(res, 409, err instanceof Error ? err.message : "could not fork from this message");
+    const responseError = rollbackError ?? err;
+    sendError(
+      res,
+      rollbackError ? 500 : 409,
+      responseError instanceof Error ? responseError.message : "could not fork from this message",
+    );
+  } finally {
+    mutationLease?.release();
   }
 }
 

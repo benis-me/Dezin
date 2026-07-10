@@ -11,6 +11,7 @@ const { createDialogPathState } = require("./dialog-path-state.js");
 const { isAllowedAppNavigation, isSafeExternalUrl } = require("./navigation-policy.js");
 const { handleTaskkillResult } = require("./process-group.js");
 const { readWindowState, writeWindowState } = require("./window-state.js");
+const { createCoverCaptureController } = require("./cover-capture.js");
 
 const ROOT = join(__dirname, "..", "..");
 const DATA_DIR = process.env.DEZIN_DATA_DIR || join(ROOT, ".dezin", "data");
@@ -66,17 +67,35 @@ function spawnDaemon({ ownerId }) {
   child.stdout.on("data", (d) => process.stdout.write(`[daemon] ${d}`));
   child.stderr.on("data", (d) => process.stderr.write(`[daemon] ${d}`));
   child.on("error", (e) => console.error("[daemon] failed to spawn:", e.message));
+  const coverCaptures = createCoverCaptureController({
+    BrowserWindow,
+    existsSync,
+    writeFileSync,
+    wait: (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
+    logError: (error) => console.error("[capture] failed:", error && error.message),
+  });
   child.on("message", (msg) => {
-    if (msg && msg.type === "capture") {
-      captureCover(msg.htmlPath, msg.outPath).then((ok) => {
+    if (!msg || !Number.isSafeInteger(msg.id)) return;
+    if (msg.type === "capture") {
+      coverCaptures.capture(msg.id, msg.htmlPath, msg.outPath).then((ok) => {
         try {
           child.send({ type: "capture-result", id: msg.id, ok });
         } catch {
           /* daemon gone */
         }
+      }).catch(() => {
+        try {
+          child.send({ type: "capture-result", id: msg.id, ok: false });
+        } catch {
+          /* daemon gone */
+        }
       });
+    } else if (msg.type === "capture-cancel") {
+      coverCaptures.cancel(msg.id);
     }
   });
+  child.on("disconnect", () => coverCaptures.cancelAll());
+  child.on("exit", () => coverCaptures.cancelAll());
   return child;
 }
 
@@ -126,39 +145,6 @@ const daemonSupervisor = createDaemonSupervisor({
   schedule,
   killProcessGroup,
 });
-
-// Render a self-contained HTML into a 1280×800 PNG using a hidden Chromium window —
-// no external Chrome, no puppeteer. paintWhenInitiallyHidden makes the offscreen
-// surface paint so capturePage returns real pixels.
-async function captureCover(htmlPath, outPath) {
-  if (!existsSync(htmlPath)) return false;
-  let view = null;
-  try {
-    view = new BrowserWindow({
-      show: false,
-      width: 1280,
-      height: 800,
-      useContentSize: true,
-      webPreferences: { sandbox: true, paintWhenInitiallyHidden: true, backgroundThrottling: false, offscreen: false },
-    });
-    await view.loadFile(htmlPath);
-    await new Promise((r) => setTimeout(r, 500)); // fonts + first paint
-    const image = await view.webContents.capturePage({ x: 0, y: 0, width: 1280, height: 800 });
-    const png = image.toPNG();
-    if (!png || png.length < 256) return false;
-    writeFileSync(outPath, png);
-    return true;
-  } catch (e) {
-    console.error("[capture] failed:", e && e.message);
-    return false;
-  } finally {
-    try {
-      view && view.destroy();
-    } catch {
-      /* ignore */
-    }
-  }
-}
 
 // Dev: poll for the Vite portfile (.dezin/web.json), written by webPortfilePlugin
 // with whatever port Vite actually bound — so a port-conflict fallback stays in sync.

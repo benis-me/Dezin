@@ -8,7 +8,13 @@ import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
-import { startCapture, handleSharinganStatus, releaseSharinganProject, sharinganCaptureRegistrySizeForTests } from "../src/sharingan-handler.ts";
+import {
+  SHARINGAN_RELEASE_GRACE_MS,
+  startCapture,
+  handleSharinganStatus,
+  releaseSharinganProject,
+  sharinganCaptureRegistrySizeForTests,
+} from "../src/sharingan-handler.ts";
 import type { SharinganSession } from "../src/sharingan-browser.ts";
 
 test("POST /start begins a capture and GET /status reports progress", { skip: !findChrome() && "no Chrome" }, async () => {
@@ -119,6 +125,32 @@ test("project release closes an established session exactly once when capture co
   await Promise.all([capture, release]);
 
   assert.equal(closes, 1, "capture failure and project deletion share one close owner");
+});
+
+test("project release still awaits established capture work after the opener has settled", async () => {
+  let navigationEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { navigationEntered = resolve; });
+  let rejectNavigation!: (error: Error) => void;
+  const navigation = new Promise<never>((_resolve, reject) => { rejectNavigation = reject; });
+  const session = {
+    navigate: async () => {
+      navigationEntered();
+      return navigation;
+    },
+    close: async () => {},
+  } as unknown as SharinganSession;
+  const id = `capture-established-release-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-established-release-"));
+
+  const capture = startCapture(id, "http://x.test/", dataDir, "/tmp/unused", async () => session);
+  await entered;
+  let releaseSettled = false;
+  const release = releaseSharinganProject(id).then(() => { releaseSettled = true; });
+  await new Promise((resolve) => setTimeout(resolve, SHARINGAN_RELEASE_GRACE_MS + 25));
+
+  assert.equal(releaseSettled, false, "the opener-only grace must not detach established work that can still write files");
+  rejectNavigation(new Error("capture stopped during project deletion"));
+  await Promise.all([capture, release]);
 });
 
 test("a re-start while paused for login does not orphan the open login session", async () => {

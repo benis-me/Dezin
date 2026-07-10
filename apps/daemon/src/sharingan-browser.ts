@@ -117,22 +117,37 @@ export class SharinganSession {
     this.origin = origin;
   }
 
-  static async open(url: string, opts: { userDataDir?: string; headless?: boolean } = {}): Promise<SharinganSession> {
+  static async open(url: string, opts: { userDataDir?: string; headless?: boolean; signal?: AbortSignal } = {}): Promise<SharinganSession> {
+    opts.signal?.throwIfAborted();
     const executablePath = findChrome();
     if (!executablePath) throw new Error("Chrome not found (required for Sharingan capture)");
-    const browser = await puppeteer.launch(sharinganLaunchOptions(executablePath, opts));
-    const page = await browser.newPage();
-    // Strip "HeadlessChrome" from the UA the automated browser advertises (headful already says
-    // "Chrome"; this covers the headless test/CI path and is belt-and-suspenders in production).
-    const userAgent = (await browser.userAgent()).replace(/Headless/g, "");
-    await applyStealth(page, userAgent);
-    // Auto-dismiss alert/confirm/prompt — a blocking dialog freezes the page's JS thread, which would
-    // hang settle()'s in-page waits (their timers never fire) and wedge the whole capture.
-    page.on("dialog", (d) => void d.dismiss().catch(() => {}));
-    const origin = new URL(url).origin;
-    const session = new SharinganSession(browser, page, origin);
-    await session.navigate(url);
-    return session;
+    let browser: Browser | undefined;
+    const closeOnAbort = (): void => { void browser?.close().catch(() => {}); };
+    opts.signal?.addEventListener("abort", closeOnAbort, { once: true });
+    try {
+      browser = await puppeteer.launch(sharinganLaunchOptions(executablePath, opts));
+      opts.signal?.throwIfAborted();
+      const page = await browser.newPage();
+      opts.signal?.throwIfAborted();
+      // Strip "HeadlessChrome" from the UA the automated browser advertises (headful already says
+      // "Chrome"; this covers the headless test/CI path and is belt-and-suspenders in production).
+      const userAgent = (await browser.userAgent()).replace(/Headless/g, "");
+      await applyStealth(page, userAgent);
+      opts.signal?.throwIfAborted();
+      // Auto-dismiss alert/confirm/prompt — a blocking dialog freezes the page's JS thread, which would
+      // hang settle()'s in-page waits (their timers never fire) and wedge the whole capture.
+      page.on("dialog", (d) => void d.dismiss().catch(() => {}));
+      const origin = new URL(url).origin;
+      const session = new SharinganSession(browser, page, origin);
+      await session.navigate(url);
+      opts.signal?.throwIfAborted();
+      return session;
+    } catch (error) {
+      await browser?.close().catch(() => {});
+      throw error;
+    } finally {
+      opts.signal?.removeEventListener("abort", closeOnAbort);
+    }
   }
 
   currentUrl(): string { return this.page.url(); }

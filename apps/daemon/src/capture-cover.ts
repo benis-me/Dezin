@@ -4,7 +4,8 @@
  * When running inside the Electron desktop app (DEZIN_ELECTRON + an IPC channel), the
  * capture is delegated to Electron's own Chromium via a hidden window — no external
  * Chrome, no puppeteer process. Otherwise (dev/headless) it falls back to the system
- * Chrome via puppeteer-core. Best-effort: returns false (never throws) on failure.
+ * Chrome via puppeteer-core. Best-effort failures return false; explicit cancellation rejects
+ * with AbortError so the owning Run can stop promptly.
  */
 
 import { existsSync } from "node:fs";
@@ -32,35 +33,79 @@ interface CaptureResultMsg {
   id: number;
   ok: boolean;
 }
+
+interface PendingCapture {
+  finish(ok: boolean): void;
+}
+
 let ipcSeq = 0;
-const pending = new Map<number, (ok: boolean) => void>();
+const pending = new Map<number, PendingCapture>();
 let ipcWired = false;
+
+function coverCaptureAbortError(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  const error = new Error(reason instanceof Error ? reason.message : "cover capture aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function sendCaptureIpc(message: { type: "capture"; id: number; htmlPath: string; outPath: string } | { type: "capture-cancel"; id: number }): boolean {
+  if (typeof process.send !== "function") return false;
+  try {
+    process.send(message);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function wireIpc(): void {
   if (ipcWired || typeof process.send !== "function") return;
   ipcWired = true;
   process.on("message", (msg: unknown) => {
     const m = msg as CaptureResultMsg;
-    if (m && m.type === "capture-result" && pending.has(m.id)) {
-      pending.get(m.id)!(Boolean(m.ok));
-      pending.delete(m.id);
-    }
+    if (m && m.type === "capture-result") pending.get(m.id)?.finish(Boolean(m.ok));
   });
 }
 
-function captureViaElectron(htmlPath: string, outPath: string): Promise<boolean> {
-  return new Promise((resolve) => {
+export function captureViaElectron(htmlPath: string, outPath: string, signal?: AbortSignal): Promise<boolean> {
+  return new Promise((resolve, reject) => {
     if (typeof process.send !== "function") return resolve(false);
+    if (signal?.aborted) return reject(coverCaptureAbortError(signal));
     wireIpc();
     const id = ++ipcSeq;
-    const timer = setTimeout(() => {
-      if (pending.delete(id)) resolve(false);
-    }, 15000);
-    pending.set(id, (ok) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = (): void => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (pending.get(id) === entry) pending.delete(id);
+    };
+    const finish = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve(ok);
-    });
-    process.send({ type: "capture", id, htmlPath, outPath });
+    };
+    const onAbort = (): void => {
+      if (settled || !signal) return;
+      settled = true;
+      cleanup();
+      sendCaptureIpc({ type: "capture-cancel", id });
+      reject(coverCaptureAbortError(signal));
+    };
+    const entry: PendingCapture = { finish };
+
+    pending.set(id, entry);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      if (settled) return;
+      sendCaptureIpc({ type: "capture-cancel", id });
+      finish(false);
+    }, 15000);
+    timer.unref?.();
+    if (!sendCaptureIpc({ type: "capture", id, htmlPath, outPath })) finish(false);
   });
 }
 
@@ -106,7 +151,7 @@ function captureViaPuppeteer(htmlPath: string, outPath: string, signal?: AbortSi
 export async function captureCover(htmlPath: string, outPath: string, signal?: AbortSignal): Promise<boolean> {
   if (!existsSync(htmlPath) || signal?.aborted) return false;
   if (process.env.DEZIN_ELECTRON && typeof process.send === "function") {
-    if (await captureViaElectron(htmlPath, outPath)) return true;
+    if (await captureViaElectron(htmlPath, outPath, signal)) return true;
     if (signal?.aborted) return false;
     // fall through to puppeteer if the Electron capture failed
   }

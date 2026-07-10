@@ -591,25 +591,38 @@ async function completeImportRequest(
   });
   const root = projectDir(deps.dataDir, project.id);
 
-  const completeImport = async (signal?: AbortSignal): Promise<void> => {
-    await deps.importProjectCreated?.(project.id, signal);
-    signal?.throwIfAborted();
+  const completeImport = async (projectSignal?: AbortSignal): Promise<void> => {
+    await deps.importProjectCreated?.(project.id, projectSignal);
+    projectSignal?.throwIfAborted();
 
   const projectIdMap = new Map<string, string>();
   if (typeof manifest.project!.id === "string") projectIdMap.set(manifest.project!.id, project.id);
 
   const variantMap = new Map<string, string>();
   const importedVariants: Array<{ oldId: string; newId: string; active: boolean }> = [];
-  for (const importedVariant of Array.isArray(manifest.variants) ? manifest.variants : []) {
-    const oldId = typeof importedVariant.id === "string" ? importedVariant.id : null;
-    if (!oldId) continue;
-    const name = typeof importedVariant.name === "string" && importedVariant.name.trim() ? importedVariant.name.trim() : "Variant";
-    const variant = deps.store.createImportedVariant(project.id, { name, createdAt: asOptionalNumber(importedVariant.createdAt) });
-    variantMap.set(oldId, variant.id);
-    importedVariants.push({ oldId, newId: variant.id, active: importedVariant.active === true });
-  }
-  const activeImportedVariant = importedVariants.find((variant) => variant.active) ?? importedVariants[0];
-  if (activeImportedVariant) deps.store.setActiveVariant(project.id, activeImportedVariant.newId);
+  const variantLeases: Array<{ release: () => void }> = [];
+  try {
+    for (const importedVariant of Array.isArray(manifest.variants) ? manifest.variants : []) {
+      const oldId = typeof importedVariant.id === "string" ? importedVariant.id : null;
+      if (!oldId) continue;
+      const name = typeof importedVariant.name === "string" && importedVariant.name.trim() ? importedVariant.name.trim() : "Variant";
+      const variant = deps.store.createImportedVariant(project.id, { name, createdAt: asOptionalNumber(importedVariant.createdAt) });
+      variantMap.set(oldId, variant.id);
+      importedVariants.push({ oldId, newId: variant.id, active: importedVariant.active === true });
+      if (deps.runtimeSupervisor) {
+        variantLeases.push(deps.runtimeSupervisor.acquireOperationLease({
+          projectId: project.id,
+          variantId: variant.id,
+        }));
+      }
+    }
+    const activeImportedVariant = importedVariants.find((variant) => variant.active) ?? importedVariants[0];
+    // Variant deletion waits on these ownership leases, but only project/request cancellation
+    // aborts the indivisible import continuation. Once import settles, deletion recomputes and
+    // removes the exact variant-owned Runs and files without leaving a partial project behind.
+    const signal = projectSignal;
+
+    if (activeImportedVariant) deps.store.setActiveVariant(project.id, activeImportedVariant.newId);
 
   const conversationMap = new Map<string, string>();
   const messageMap = new Map<string, string>();
@@ -756,6 +769,9 @@ async function completeImportRequest(
     void setup.catch(() => {});
   }
     sendJson(res, 201, project);
+  } finally {
+    for (const lease of variantLeases) lease.release();
+  }
   };
 
   if (!deps.runtimeSupervisor) {

@@ -289,6 +289,130 @@ test("project deletion owns an import immediately after row creation and removes
   );
 });
 
+test("variant deletion owns an imported variant through the full import continuation", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const targetBundleFillers = Array.from({ length: 1_000 }, (_, index) => ({
+      path: `runs/old-target-run/fillers/file-${index}.txt`,
+      data: `target-${index}`,
+    }));
+    const archive = createZip([
+      {
+        path: "dezin-project.json",
+        data: JSON.stringify({
+          format: "dezin-project",
+          version: 2,
+          project: { id: "old-project", name: "Variant import race", mode: "prototype" },
+          variants: [
+            { id: "old-main", name: "Main", active: true },
+            { id: "old-target", name: "Target", active: false },
+          ],
+          conversations: [{
+            id: "old-conversation",
+            title: "Imported conversation",
+            messages: [
+              { id: "old-user", role: "user", content: "import this" },
+              { id: "old-assistant", role: "assistant", content: "imported" },
+            ],
+          }],
+          runs: [
+            {
+              id: "old-target-run",
+              conversationId: "old-conversation",
+              variantId: "old-target",
+              userMessageId: "old-user",
+              assistantMessageId: "old-assistant",
+              status: "succeeded",
+            },
+            {
+              id: "old-main-run",
+              conversationId: "old-conversation",
+              variantId: "old-main",
+              userMessageId: "old-user",
+              assistantMessageId: "old-assistant",
+              status: "succeeded",
+            },
+          ],
+        }),
+      },
+      { path: "source/index.html", data: "<main>importing</main>" },
+      { path: "variants/old-target/index.html", data: "<main>must not return after deletion</main>" },
+      { path: "versions/old-main-run.html", data: "<main>keep main version</main>" },
+      { path: "versions/old-target-run.html", data: "<main>remove target version</main>" },
+      { path: "runs/old-main-run.jsonl", data: '{"runId":"old-main-run"}\n' },
+      { path: "runs/old-target-run.jsonl", data: '{"runId":"old-target-run"}\n' },
+      { path: "runs/old-main-run/bundle.txt", data: "keep main bundle" },
+      { path: "runs/old-target-run/bundle.txt", data: "remove target bundle" },
+      ...targetBundleFillers,
+    ]);
+
+    let importSettled = false;
+    const importing = fetch(`${base}/api/projects/import`, {
+      method: "POST",
+      headers: { "content-type": "application/zip" },
+      body: archive,
+    }).then((response) => {
+      importSettled = true;
+      return response;
+    }, (error: unknown) => {
+      importSettled = true;
+      throw error;
+    });
+
+    let importedProjectId = "";
+    let mainVariantId = "";
+    let targetVariantId = "";
+    let mainRunId = "";
+    let targetRunId = "";
+    for (let attempt = 0; attempt < 4_000; attempt++) {
+      const importedProject = store.listProjects().find((project) => project.name === "Variant import race");
+      if (importedProject) {
+        importedProjectId = importedProject.id;
+        const variants = store.listVariants(importedProject.id);
+        mainVariantId = variants.find((variant) => variant.name === "Main")?.id ?? "";
+        targetVariantId = variants.find((variant) => variant.name === "Target")?.id ?? "";
+        const runs = store.listRuns(importedProject.id);
+        mainRunId = runs.find((run) => run.variantId === mainVariantId)?.id ?? "";
+        targetRunId = runs.find((run) => run.variantId === targetVariantId)?.id ?? "";
+      }
+      const mainBundle = mainRunId ? join(dataDir, ".runs", mainRunId, "bundle.txt") : "";
+      const targetBundle = targetRunId ? join(dataDir, ".runs", targetRunId, "bundle.txt") : "";
+      if (mainBundle && targetBundle && existsSync(mainBundle) && existsSync(targetBundle)) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    assert.ok(importedProjectId && mainVariantId && targetVariantId && mainRunId && targetRunId, "both imported Runs become visible during import");
+    assert.equal(importSettled, false, "the fixture keeps the import continuation in flight");
+    const root = join(dataDir, "projects", importedProjectId);
+    const targetPaths = [
+      join(root, ".variants", targetVariantId),
+      join(root, ".versions", `${targetRunId.replace(/[^a-zA-Z0-9-]/g, "")}.html`),
+      join(dataDir, ".runs", `${targetRunId}.jsonl`),
+      join(dataDir, ".runs", targetRunId),
+    ];
+    const retainedPaths = [
+      join(root, "index.html"),
+      join(root, ".versions", `${mainRunId.replace(/[^a-zA-Z0-9-]/g, "")}.html`),
+      join(dataDir, ".runs", `${mainRunId}.jsonl`),
+      join(dataDir, ".runs", mainRunId, "bundle.txt"),
+    ];
+    assert.ok(targetPaths.every(existsSync), "the fixture materializes every target-owned artifact before deletion");
+    assert.ok(retainedPaths.every(existsSync), "the fixture materializes unrelated main artifacts before deletion");
+
+    const deleting = fetch(`${base}/api/projects/${importedProjectId}/variants/${targetVariantId}`, { method: "DELETE" });
+    const [deleted, imported] = await Promise.all([deleting, importing]);
+
+    assert.equal(imported.status, 201, "variant deletion waits without aborting the project import");
+    assert.equal(deleted.status, 200);
+    assert.equal(store.getVariant(targetVariantId), null);
+    assert.equal(store.getRun(targetRunId), null);
+    assert.ok(targetPaths.every((path) => !existsSync(path)), "target rows, snapshot, version, log, and bundle are removed");
+    assert.ok(store.getProject(importedProjectId));
+    assert.ok(store.getVariant(mainVariantId));
+    assert.ok(store.getRun(mainRunId));
+    assert.ok(retainedPaths.every(existsSync), "the root and unrelated main Run artifacts remain intact");
+  });
+});
+
 test("shutdown aborts a partial import body before it can create a late project", async () => {
   await withServer(async ({ base, store, runtimeSupervisor }) => {
     const archive = createZip([

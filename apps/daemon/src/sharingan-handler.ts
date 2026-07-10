@@ -22,7 +22,7 @@ interface Capture {
   pages: CapturedPage[];
   session?: SharinganSession;
   opening?: Promise<SharinganSession>;
-  operations: Set<Promise<unknown>>;
+  operations: Set<CaptureOperation>;
   listeners: Set<ServerResponse>;
   url?: string;
   error?: string;
@@ -30,13 +30,21 @@ interface Capture {
   keepForProbe?: boolean;
 }
 
+interface CaptureOperation {
+  controller: AbortController;
+  promise: Promise<unknown>;
+  /** Safe to detach only while an opener has not yielded a session that could write project data. */
+  detachIfStuck: boolean;
+}
+
 export type SharinganOpen = (
   url: string,
-  opts: { userDataDir?: string; headless?: boolean },
+  opts: { userDataDir?: string; headless?: boolean; signal?: AbortSignal },
 ) => Promise<SharinganSession>;
 
 /** Idle-release window for a lazily-opened (or build-reused) probe session. */
 export const SHARINGAN_PROBE_IDLE_MS = 300_000;
+export const SHARINGAN_RELEASE_GRACE_MS = 250;
 
 const captures = new Map<string, Capture>();
 let nextCaptureGeneration = 1;
@@ -67,15 +75,27 @@ function isActive(id: string, c: Capture, generation: number): boolean {
   return !c.released && c.generation === generation && captures.get(id) === c;
 }
 
-function retainCaptureOperation<T>(c: Capture, start: () => Promise<T>): Promise<T> {
+function captureScopeAbortError(): Error {
+  const error = new Error("capture scope released");
+  error.name = "AbortError";
+  return error;
+}
+
+function retainCaptureOperation<T>(
+  c: Capture,
+  start: (signal: AbortSignal, operation: CaptureOperation) => Promise<T>,
+): Promise<T> {
   if (c.released) return Promise.reject(new Error("capture scope released"));
-  const operation = (async () => start())();
+  const controller = new AbortController();
+  let operation!: CaptureOperation;
+  const promise = Promise.resolve().then(() => start(controller.signal, operation));
+  operation = { controller, promise, detachIfStuck: false };
   c.operations.add(operation);
-  void operation.then(
+  void promise.then(
     () => c.operations.delete(operation),
     () => c.operations.delete(operation),
   );
-  return operation;
+  return promise;
 }
 
 /**
@@ -132,7 +152,7 @@ export function ensureProbeSession(
   const c = get(id);
   if (c.phase === "capturing" || c.phase === "login-required") throw new Error("capture in progress");
   const generation = c.generation;
-  return retainCaptureOperation(c, async () => {
+  return retainCaptureOperation(c, async (signal, operation) => {
     // Seed from the on-disk manifest so re-captures dedup against what's already there (e.g. after a
     // daemon restart, when the in-memory page list is empty but the entry page is on disk).
     if (!c.pages.length) c.pages = readCapturedPages(projectDir(dataDir, id));
@@ -143,6 +163,7 @@ export function ensureProbeSession(
         opening = open(c.url ?? "about:blank", {
           userDataDir: profileDir,
           headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1",
+          signal,
         }).then(async (session) => {
           if (!isActive(id, c, generation)) {
             await session.close().catch(() => {});
@@ -156,7 +177,12 @@ export function ensureProbeSession(
         });
         c.opening = opening;
       }
-      await c.opening;
+      operation.detachIfStuck = true;
+      try {
+        await c.opening;
+      } finally {
+        operation.detachIfStuck = false;
+      }
     }
     if (!isActive(id, c, generation) || !c.session) throw new Error("capture scope released");
     armProbeIdle(id);
@@ -197,10 +223,19 @@ export function startCapture(
   // The entry capture then upserts into this, preserving them.
   c.phase = "capturing"; c.steps = []; c.pages = readCapturedPages(projectDir(dataDir, id)); c.error = undefined;
   const generation = c.generation;
-  return retainCaptureOperation(c, async () => {
+  return retainCaptureOperation(c, async (signal, operation) => {
     let session: SharinganSession | undefined;
     try {
-      session = await open(url, { userDataDir: profileDir, headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1" });
+      operation.detachIfStuck = true;
+      try {
+        session = await open(url, {
+          userDataDir: profileDir,
+          headless: process.env.DEZIN_SHARINGAN_HEADLESS === "1",
+          signal,
+        });
+      } finally {
+        operation.detachIfStuck = false;
+      }
       if (!isActive(id, c, generation)) {
         await session.close().catch(() => {});
         return;
@@ -494,12 +529,28 @@ export async function releaseSharinganProject(id: string): Promise<void> {
   c.listeners.clear();
   const s = claimEstablishedSession(c);
   const operations = [...c.operations];
-  await Promise.allSettled([
+  const reason = captureScopeAbortError();
+  for (const operation of operations) operation.controller.abort(reason);
+  const requiredSettling = Promise.allSettled([
     ...(s ? [Promise.resolve().then(() => s.close())] : []),
-    ...operations,
+    ...operations.filter((operation) => !operation.detachIfStuck).map((operation) => operation.promise),
   ]);
+  const detachable = operations.filter((operation) => operation.detachIfStuck);
+  let detachDeadline: ReturnType<typeof setTimeout> | undefined;
+  const detachableSettling = detachable.length === 0
+    ? Promise.resolve()
+    : Promise.race([
+        Promise.allSettled(detachable.map((operation) => operation.promise)).then(() => {}),
+        new Promise<void>((resolve) => {
+          detachDeadline = setTimeout(resolve, SHARINGAN_RELEASE_GRACE_MS);
+        }),
+      ]);
+  await Promise.all([requiredSettling, detachableSettling]);
+  if (detachDeadline) clearTimeout(detachDeadline);
   const lateSession = claimEstablishedSession(c);
   if (lateSession && lateSession !== s) await lateSession.close().catch(() => {});
+  // Removing the registry entry permits a fresh generation for this id. The released `c` remains
+  // a tombstone captured by any in-flight opener, whose isActive() check closes a late session.
   if (captures.get(id) === c) captures.delete(id);
 }
 

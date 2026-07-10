@@ -120,6 +120,13 @@ export interface AppDeps {
   importProjectCreated?: (projectId: string, signal?: AbortSignal) => void | Promise<void>;
   /** Prototype activation checkpoint; tests can pause after the target snapshot reaches the root. */
   prototypeVariantRestored?: (projectId: string, variantId: string, signal?: AbortSignal) => void | Promise<void>;
+  /** Prototype message-fork checkpoint used to coordinate ownership around the root-file handoff. */
+  prototypeMessageForkCheckpoint?: (
+    projectId: string,
+    variantId: string,
+    phase: "before-root-overwrite" | "after-root-overwrite" | "before-rollback",
+    signal?: AbortSignal,
+  ) => void | Promise<void>;
   /** Background title generator hook; tests can avoid launching an agent. */
   titleGenerator?: TitleGenerator;
   /** Prompt optimizer hook; tests can avoid launching a real agent. */
@@ -1040,15 +1047,21 @@ const routes: Route[] = [
   {
     method: "POST",
     pattern: "/api/projects/:id/cover",
-    handler: async (req, res, { id }, { dataDir }) => {
-      const body = (await readJsonBody(req)) as { dataUrl?: string } | null;
-      const m = body?.dataUrl?.match(/^data:image\/png;base64,(.+)$/);
-      if (!m) return sendError(res, 400, "dataUrl must be a base64 png");
-      const dir = projectDir(dataDir, id!);
-      if (!existsSync(dir)) return sendError(res, 404, "project not found");
-      writeFileSync(join(dir, ".cover.png"), Buffer.from(m[1]!, "base64"));
-      sendJson(res, 200, { ok: true });
-    },
+    handler: (req, res, { id }, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: id! },
+      async (signal) => {
+        if (!deps.store.getProject(id!)) return sendError(res, 404, "project not found");
+        const body = (await readJsonBody(req, undefined, signal)) as { dataUrl?: string } | null;
+        signal.throwIfAborted();
+        const m = body?.dataUrl?.match(/^data:image\/png;base64,(.+)$/);
+        if (!m) return sendError(res, 400, "dataUrl must be a base64 png");
+        const dir = projectDir(deps.dataDir, id!);
+        if (!deps.store.getProject(id!) || !existsSync(dir)) return sendError(res, 404, "project not found");
+        signal.throwIfAborted();
+        writeFileSync(join(dir, ".cover.png"), Buffer.from(m[1]!, "base64"));
+        sendJson(res, 200, { ok: true });
+      },
+    ),
   },
   {
     method: "GET",
