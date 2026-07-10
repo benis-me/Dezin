@@ -81,6 +81,7 @@ interface PreviewEntry {
   child: PreviewChild;
   url: string;
   leases: Map<string, LeaseState>;
+  pendingHandoffs: number;
   idleSince?: number;
   idleTimer?: Timer;
   stopping?: Promise<void>;
@@ -96,6 +97,7 @@ interface PreviewFlight {
   fingerprint: string;
   controller: AbortController;
   waiters: number;
+  entry?: PreviewEntry;
   promise: Promise<PreviewEntry>;
 }
 
@@ -267,6 +269,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
   const leases = new Map<string, LeaseState>();
   const acquires = new Map<number, AcquireRecord>();
   const stopBarriers = new Map<number, StopBarrier>();
+  const quarantines = new Map<number, StopBarrier>();
   const childStops = new WeakMap<object, Promise<void>>();
   let nextAcquireId = 1;
   let nextStopBarrierId = 1;
@@ -282,7 +285,28 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
   }
 
   function assertAdmission(scope: RuntimeScope): void {
-    if ([...stopBarriers.values()].some((barrier) => barrierMatches(scope, barrier))) throw stoppingError();
+    if ([...stopBarriers.values(), ...quarantines.values()].some((barrier) => barrierMatches(scope, barrier))) {
+      throw stoppingError();
+    }
+  }
+
+  function barrierCovers(covering: StopBarrier, covered: StopBarrier): boolean {
+    return covering.scope === undefined
+      || (covered.scope !== undefined && matchesScope(covered.scope, covering.scope));
+  }
+
+  function rememberQuarantine(barrier: StopBarrier): void {
+    if ([...quarantines.values()].some((existing) => barrierCovers(existing, barrier))) return;
+    for (const [id, existing] of quarantines) {
+      if (barrierCovers(barrier, existing)) quarantines.delete(id);
+    }
+    quarantines.set(barrier.id, barrier);
+  }
+
+  function clearCoveredQuarantines(barrier: StopBarrier): void {
+    for (const [id, existing] of quarantines) {
+      if (barrierCovers(barrier, existing)) quarantines.delete(id);
+    }
   }
 
   function clearLeaseTimer(lease: LeaseState): void {
@@ -370,7 +394,10 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
 
   function evictIdleOverflow(): void {
     const idle = [...entries.values()]
-      .filter((entry) => entry.leases.size === 0 && entry.idleSince !== undefined && !entry.stopping)
+      .filter((entry) => entry.leases.size === 0
+        && entry.pendingHandoffs === 0
+        && entry.idleSince !== undefined
+        && !entry.stopping)
       .sort((a, b) => (a.idleSince! - b.idleSince!) || a.identity.localeCompare(b.identity));
     while (idle.length > maxIdle) {
       const oldest = idle.shift();
@@ -380,13 +407,14 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
 
   function markIdle(entry: PreviewEntry): void {
     if (entry.stopping || entry.teardownFailed || entry.leases.size > 0 || entries.get(entry.identity) !== entry) return;
-    clearIdleTimer(entry);
-    entry.idleSince = now();
-    entry.idleTimer = schedule(() => {
-      entry.idleTimer = undefined;
-      if (entry.leases.size === 0) void stopEntry(entry).catch(() => {});
-    }, idleTtlMs);
-    unref(entry.idleTimer);
+    if (!entry.idleTimer) {
+      entry.idleSince = now();
+      entry.idleTimer = schedule(() => {
+        entry.idleTimer = undefined;
+        if (entry.leases.size === 0) void stopEntry(entry).catch(() => {});
+      }, idleTtlMs);
+      unref(entry.idleTimer);
+    }
     evictIdleOverflow();
   }
 
@@ -488,11 +516,13 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     entry.child = child;
     entry.url = url;
     entry.leases = new Map();
+    entry.pendingHandoffs = flight.waiters;
     entry.teardownFailed = false;
     entry.onClose = () => { void stopEntry(entry).catch(() => {}); };
     entry.onError = () => { void stopEntry(entry).catch(() => {}); };
     child.once("close", entry.onClose);
     child.once("error", entry.onError);
+    flight.entry = entry;
     entries.set(entry.identity, entry);
     markIdle(entry);
     try {
@@ -654,6 +684,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
 
         const flight = getOrCreateFlight(identity, scope, projectDir, fingerprint, acquireOptions.onLog);
         flight.waiters += 1;
+        if (flight.entry) flight.entry.pendingHandoffs += 1;
         try {
           const entry = await waitForFlight(flight, operationSignal);
           operationSignal.throwIfAborted();
@@ -668,6 +699,10 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
           throw error;
         } finally {
           flight.waiters -= 1;
+          if (flight.entry) {
+            flight.entry.pendingHandoffs = Math.max(0, flight.entry.pendingHandoffs - 1);
+            if (flight.entry.pendingHandoffs === 0 && flight.entry.leases.size === 0) markIdle(flight.entry);
+          }
           if (flight.waiters === 0 && flights.get(identity) === flight && !flight.controller.signal.aborted) {
             flight.controller.abort(abortError());
           }
@@ -694,6 +729,10 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
       stopBarriers.set(barrier.id, barrier);
       try {
         await drainBarrier(barrier);
+        clearCoveredQuarantines(barrier);
+      } catch (error) {
+        rememberQuarantine(barrier);
+        throw error;
       } finally {
         stopBarriers.delete(barrier.id);
       }
@@ -704,6 +743,10 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
       stopBarriers.set(barrier.id, barrier);
       try {
         await drainBarrier(barrier);
+        clearCoveredQuarantines(barrier);
+      } catch (error) {
+        rememberQuarantine(barrier);
+        throw error;
       } finally {
         stopBarriers.delete(barrier.id);
       }

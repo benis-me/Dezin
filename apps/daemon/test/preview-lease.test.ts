@@ -235,6 +235,45 @@ test("idle LRU keeps four processes and never evicts an active lease", async () 
   await manager.stopAll();
 });
 
+test("five ready pending handoffs all receive leases before idle LRU eviction", async () => {
+  const clock = new FakeClock();
+  const releaseReadyEntries = deferred<void>();
+  let readyEntries = 0;
+  const fixture = fakeOptions({
+    now: () => clock.now,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    maxIdle: 4,
+    readyEntryCheckpoint: async () => {
+      readyEntries += 1;
+      await releaseReadyEntries.promise;
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const pending = Array.from({ length: 5 }, (_, index) => manager.acquire(
+    { projectId: `handoff-${index}` },
+    `/tmp/handoff-${index}`,
+    { fingerprint: "a" },
+  ));
+  await waitUntil(() => readyEntries === 5, "five preview entries did not reach the ready handoff");
+  assert.equal(manager.activeCount(), 5, "pending handoffs are retained even above the idle LRU cap");
+  releaseReadyEntries.resolve();
+  const leases = await Promise.all(pending);
+  assert.equal(new Set(leases.map((lease) => lease.leaseId)).size, 5);
+
+  for (const lease of leases) {
+    await lease.release();
+    await clock.advance(1);
+  }
+  await waitUntil(() => manager.activeCount() === 4, "post-handoff idle LRU did not settle");
+  const spawnedBeforeReuse = fixture.children.length;
+  await manager.acquire({ projectId: "handoff-4" }, "/tmp/handoff-4", { fingerprint: "a" });
+  assert.equal(fixture.children.length, spawnedBeforeReuse, "newest released identity remains cached");
+  await manager.acquire({ projectId: "handoff-0" }, "/tmp/handoff-0", { fingerprint: "a" });
+  assert.equal(fixture.children.length, spawnedBeforeReuse + 1, "true oldest released identity was evicted");
+  await manager.stopAll();
+});
+
 test("stopScope matches only the requested hierarchy and stopAll leaves zero", async () => {
   const fixture = fakeOptions();
   const manager = createPreviewLeaseManager(fixture.options);
@@ -339,6 +378,124 @@ test("stopAll is an admission barrier and drains a concurrent flight", async () 
   await assert.rejects(acquiring);
   await stopping;
   assert.equal(manager.activeCount(), 0);
+});
+
+test("failed stopScope quarantines its hierarchy until a successful broad-enough retry", async () => {
+  let failedChild: FakeChild | undefined;
+  let teardownFails = true;
+  const fixture = fakeOptions({
+    stopGraceMs: 5,
+    forceKillWaitMs: 20,
+    onTeardownError: () => {},
+    isProcessGroupAlive: (child) => child === failedChild && teardownFails
+      ? true
+      : child.exitCode === null && child.signalCode === null,
+    killProcessGroup: (child, signal) => {
+      fixture.signals.push({ pid: child.pid ?? -1, signal });
+      if (child === failedChild && teardownFails) return;
+      (child as FakeChild).exit(0, signal);
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const projectScope = { projectId: "quarantine-project" };
+  await manager.acquire(
+    { ...projectScope, variantId: "failed-variant" },
+    "/tmp/quarantine-project-failed",
+    { fingerprint: "a" },
+  );
+  failedChild = fixture.children[0];
+
+  await assert.rejects(
+    manager.stopScope(projectScope),
+    (error: unknown) => error instanceof Error && error.name === "PreviewTeardownError",
+  );
+  const spawnedAtFailure = fixture.children.length;
+  await assert.rejects(
+    manager.acquire(
+      { ...projectScope, variantId: "new-variant" },
+      "/tmp/quarantine-project-new",
+      { fingerprint: "b" },
+    ),
+    /stopping/i,
+  );
+  assert.equal(fixture.children.length, spawnedAtFailure, "quarantine rejects before spawning");
+
+  await manager.stopScope({ ...projectScope, variantId: "unrelated-variant" });
+  await assert.rejects(
+    manager.acquire(
+      { ...projectScope, variantId: "new-variant" },
+      "/tmp/quarantine-project-new",
+      { fingerprint: "b" },
+    ),
+    /stopping/i,
+    "a narrower successful stop cannot clear a broader quarantine",
+  );
+  const unrelated = await manager.acquire(
+    { projectId: "quarantine-unrelated" },
+    "/tmp/quarantine-unrelated",
+    { fingerprint: "a" },
+  );
+  await unrelated.release();
+  await manager.stopScope({ projectId: "quarantine-unrelated" });
+
+  teardownFails = false;
+  await manager.stopScope(projectScope);
+  const resumed = await manager.acquire(
+    { ...projectScope, variantId: "new-variant" },
+    "/tmp/quarantine-project-new",
+    { fingerprint: "b" },
+  );
+  await resumed.release();
+  await manager.stopAll();
+});
+
+test("failed stopAll keeps global admission quarantined until a successful retry", async () => {
+  let failedChild: FakeChild | undefined;
+  let teardownFails = true;
+  const fixture = fakeOptions({
+    stopGraceMs: 5,
+    forceKillWaitMs: 20,
+    onTeardownError: () => {},
+    isProcessGroupAlive: (child) => child === failedChild && teardownFails
+      ? true
+      : child.exitCode === null && child.signalCode === null,
+    killProcessGroup: (child, signal) => {
+      fixture.signals.push({ pid: child.pid ?? -1, signal });
+      if (child === failedChild && teardownFails) return;
+      (child as FakeChild).exit(0, signal);
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  await manager.acquire({ projectId: "global-failure" }, "/tmp/global-failure", { fingerprint: "a" });
+  failedChild = fixture.children[0];
+
+  await assert.rejects(
+    manager.stopAll(),
+    (error: unknown) => error instanceof Error && error.name === "PreviewTeardownError",
+  );
+  const spawnedAtFailure = fixture.children.length;
+  await assert.rejects(
+    manager.acquire({ projectId: "global-blocked" }, "/tmp/global-blocked", { fingerprint: "b" }),
+    /stopping/i,
+  );
+  assert.equal(fixture.children.length, spawnedAtFailure, "global quarantine rejects before spawning");
+
+  await manager.stopScope({ projectId: "unrelated-empty-scope" });
+  await assert.rejects(
+    manager.acquire({ projectId: "global-still-blocked" }, "/tmp/global-still-blocked", { fingerprint: "c" }),
+    /stopping/i,
+    "a scoped success cannot clear a global quarantine",
+  );
+
+  teardownFails = false;
+  await manager.stopAll();
+  const resumed = await manager.acquire(
+    { projectId: "global-resumed" },
+    "/tmp/global-resumed",
+    { fingerprint: "d" },
+  );
+  await resumed.release();
+  await manager.stopAll();
 });
 
 test("ready-to-abort leaves no immortal zero-lease entry", { timeout: 2_000 }, async () => {
