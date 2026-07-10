@@ -9,5 +9,6 @@ dist/
 .impeccable/
 .codegraph/
 .worktrees/
+.superpowers/
 
 .env*
