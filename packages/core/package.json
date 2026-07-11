@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --experimental-sqlite --no-warnings --test 'test/*.test.ts'"
+    "test": "node --experimental-strip-types --experimental-sqlite --no-warnings --test 'test/*.test.ts'",
+    "test:coverage": "node --experimental-strip-types --experimental-sqlite --no-warnings --experimental-test-coverage --test-coverage-exclude='**/*.test.*' --test-coverage-lines=84 --test-coverage-branches=63 --test-coverage-functions=74 --test 'test/*.test.ts'"
   }
 }

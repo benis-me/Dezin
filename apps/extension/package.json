@@ -1,0 +1,10 @@
+{
+  "name": "dezin-extension",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
+    "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-exclude='**/*.test.*' --test-coverage-lines=93 --test-coverage-branches=65 --test-coverage-functions=56 --test 'test/*.test.ts'"
+  }
+}

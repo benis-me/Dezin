@@ -5,7 +5,9 @@
   "description": "Dezin desktop shell (Electron) — wraps the daemon + web app, adds native file access.",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.*'",
+    "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-exclude='**/*.test.*' --test-coverage-lines=93 --test-coverage-branches=76 --test-coverage-functions=93 --test 'test/*.test.*'"
   },
   "devDependencies": {
     "electron": "^43.1.0"

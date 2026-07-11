@@ -3254,11 +3254,16 @@ test("auto-fix stops dispatching once the per-conversation cap is reached", asyn
   // so we waitFor each streamRun call to register before firing the next distinct fatal.
   const distinctFatals = ["crash one", "crash two", "crash three", "crash four", "crash five"];
   for (let i = 0; i < distinctFatals.length; i++) {
-    dispatchPreviewMessage({ type: "runtime-error", kind: "fatal", errorType: "error", message: distinctFatals[i], count: 1, at: i + 1 });
+    act(() => {
+      dispatchPreviewMessage({ type: "runtime-error", kind: "fatal", errorType: "error", message: distinctFatals[i], count: 1, at: i + 1 });
+    });
     if (i < AUTO_FIX_MAX_PER_CONVERSATION) {
       await waitFor(() => expect(streamRun).toHaveBeenCalledTimes(i + 1));
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument());
     } else {
-      await new Promise((r) => setTimeout(r, 0));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
     }
   }
 

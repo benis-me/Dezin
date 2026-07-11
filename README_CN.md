@@ -80,7 +80,7 @@ Dezin 的各个界面并不是彼此孤立的孤岛 —— 它们相互喂养。
 
 ## 快速开始
 
-前置要求：**Node ≥ 22.12**、**pnpm 11**，以及至少一个位于 **PATH 上、且已登录的编码 Agent CLI**（例如 `claude`），用于真实生成。
+前置要求：**Node ≥ 22.13**、**pnpm 11**，以及至少一个位于 **PATH 上、且已登录的编码 Agent CLI**（例如 `claude`），用于真实生成。
 
 ```sh
 pnpm install      # 安装工作区依赖
@@ -138,12 +138,14 @@ content/
 ## 测试
 
 ```sh
-pnpm test                      # 跨各 package + daemon 的 node 测试套件
-pnpm --filter @dezin/web test  # Web 测试套件（vitest）
-pnpm typecheck                 # 对每个 package 做类型检查
+pnpm test           # 全部套件：scripts、packages、daemon、desktop、extension、Leafer、Web
+pnpm test:coverage  # 同一批套件，并执行实测的 Node/V8 覆盖率下限
+pnpm typecheck      # Node 程序、Web 与 Leafer 类型检查
+pnpm build:check    # Web 生产构建、首屏与总 JS 预算，以及懒加载边界守卫
+pnpm run ci         # 执行上述全部本地门禁，并审计生产依赖
 ```
 
-node 测试套件在每个 package 上使用 `node --experimental-strip-types --experimental-sqlite --test`，无需任何依赖。
+Node 套件使用 `node --experimental-strip-types --experimental-sqlite --test`，Web 使用带 V8 覆盖率的 Vitest。根编排器显式列出每个套件，设置有界超时，并在失败时终止自己拥有的进程组。CI 固定使用 Node 22.14 / pnpm 11.9，并对生产依赖执行 high 级别审计。
 
 ## 文档
 

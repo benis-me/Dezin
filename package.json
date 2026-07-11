@@ -9,7 +9,7 @@
     "apps/*"
   ],
   "engines": {
-    "node": ">=22.12"
+    "node": ">=22.13"
   },
   "scripts": {
     "dev": "bash scripts/dev.sh",
@@ -17,8 +17,12 @@
     "desktop": "pnpm --filter ./apps/web build && pnpm --filter ./apps/desktop start",
     "desktop:dev": "bash scripts/desktop-dev.sh",
     "test": "bash scripts/test-all.sh",
+    "test:coverage": "bash scripts/test-all.sh --coverage",
     "test:quality": "pnpm --filter @dezin/quality test",
     "typecheck": "bash scripts/typecheck.sh",
+    "build:check": "pnpm --filter @dezin/web build && node scripts/check-bundle-size.mjs",
+    "test:leaks": "node scripts/check-process-leaks.mjs -- pnpm test",
+    "ci": "pnpm typecheck && node scripts/check-process-leaks.mjs -- pnpm test:coverage && pnpm build:check && pnpm audit --prod --audit-level high",
     "benchmark": "node --experimental-strip-types --experimental-sqlite --no-warnings scripts/benchmark.ts"
   },
   "packageManager": "pnpm@11.9.0",

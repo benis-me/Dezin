@@ -31,9 +31,13 @@ faithful recreation.
 3. Chrome → `chrome://extensions` → enable **Developer mode** → **Load unpacked**. Chrome's
    dialog has no path field, but you can press **Cmd+Shift+G** (Go to Folder), paste the
    path, Enter, then open the `apps/extension` folder.
-4. Click the extension icon and confirm the **Dezin daemon URL**:
+4. In Dezin, open **Settings → Browser extension** and click **Generate pairing code**. The code is one-time and expires after five minutes.
+5. Click the extension icon, confirm the **Dezin daemon URL**, enter the six-digit code, and click **Pair**:
    - Desktop app or `pnpm dev`: `http://127.0.0.1:7457` by default
    - If you override `DEZIN_PORT`, use that daemon URL instead. This is not the Vite web UI URL.
+6. To disconnect only this browser, click **Forget** in the extension popup. To invalidate a credential at the daemon, use **Revoke** beside that extension in **Settings → Browser extension**; the next protected request also clears a rejected local credential automatically.
+
+The issued credential is stored only in `chrome.storage.local`; the daemon URL remains in synced Chrome settings. Dezin stores a SHA-256 token hash and displays only the extension id and lifecycle metadata.
 
 The handoff is one-shot: the extension `POST`s to `/api/capture`; the Dezin home explicitly
 consumes it on load **and whenever the window regains focus**, so an already-open app picks

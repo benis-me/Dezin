@@ -9,6 +9,7 @@
   },
   "scripts": {
     "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
+    "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-exclude='**/*.test.*' --test-coverage-lines=97 --test-coverage-branches=82 --test-coverage-functions=95 --test 'test/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json"
   }
 }

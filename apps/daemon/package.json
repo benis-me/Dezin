@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node --experimental-strip-types --experimental-sqlite --no-warnings src/start.ts",
-    "test": "node --experimental-strip-types --experimental-sqlite --no-warnings --test 'test/*.test.ts'"
+    "test": "node --experimental-strip-types --experimental-sqlite --no-warnings --test 'test/*.test.ts'",
+    "test:coverage": "node --experimental-strip-types --experimental-sqlite --no-warnings --experimental-test-coverage --test-coverage-exclude='**/*.test.*' --test-coverage-lines=79 --test-coverage-branches=67 --test-coverage-functions=35 --test 'test/*.test.ts'"
   },
   "dependencies": {
     "@ai-sdk/azure": "^4.0.5",

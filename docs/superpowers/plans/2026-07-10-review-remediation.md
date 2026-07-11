@@ -6,7 +6,7 @@
 
 **Architecture:** Add narrow ownership boundaries instead of extending the existing large handlers: scoped extension principals, an Electron daemon supervisor, an exactly-once `RunExecution`, a Standard Run transaction, a daemon `RuntimeSupervisor`, preview leases, bounded journals, and explicit UI resource/capability state. Perform behavior fixes first and mechanical file extraction afterward so refactoring cannot hide behavioral regressions.
 
-**Tech Stack:** Node.js 22.12+, TypeScript, `node:test`, SQLite, React 19, Vitest, Vite, Chrome MV3, Electron 43.1.0, pnpm 11.9.
+**Tech Stack:** Node.js 22.13+, TypeScript, `node:test`, SQLite, React 19, Vitest, Vite, Chrome MV3, Electron 43.1.0, pnpm 11.9.
 
 ## Global Constraints
 
@@ -769,11 +769,11 @@ Run workspace test scripts explicitly rather than guessing directories. Add Leaf
 
 - [ ] **Step 4: Implement bundle and process gates**
 
-Build with a manifest. Check gzip budgets from actual output. The leak checker records descendant PIDs before/after the test command and fails if an owned `vite`, `npm run dev`, or preview child survives.
+Build with a manifest. Check gzip budgets from actual output and enforce lazy boundaries against the final chunk module graph. Each suite owns a process group; timeout or a surviving descendant is killed and reported as a failed gate.
 
 - [ ] **Step 5: Add CI**
 
-Use Node 22.12 and pnpm 11.9 with frozen lockfile. Run typecheck, all tests with coverage, Web build/budget, process leak check, and `pnpm audit --prod --audit-level high`.
+Use Node 22.14 and pnpm 11.9 with frozen lockfile. Run typecheck, all tests with coverage, Web build/budget, process leak check, and `pnpm audit --prod --audit-level high`.
 
 - [ ] **Step 6: Update documentation to current behavior**
 
@@ -790,7 +790,7 @@ pnpm test:coverage
 pnpm --filter @dezin/web build
 pnpm build:check
 pnpm audit --prod --audit-level high
-pnpm ci
+pnpm run ci
 ```
 
 Expected: every command exits 0, root tests terminate, and no owned preview process remains.

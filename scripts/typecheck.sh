@@ -11,4 +11,7 @@ pnpm exec tsc -p tsconfig.check.json --noEmit
 echo "── apps/web ──"
 ( cd apps/web && pnpm exec tsc --noEmit -p tsconfig.json )
 
+echo "── packages/leafer-react ──"
+pnpm --dir packages/leafer-react typecheck
+
 echo "TYPECHECK: PASS"

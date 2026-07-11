@@ -24,14 +24,20 @@ async function waitUntilGone(options: OwnedProcessGroupOptions, timeoutMs: numbe
   const pollMs = Math.max(1, options.pollMs ?? 10);
   while (options.isAlive() && Date.now() < deadline) {
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now())));
-      timer.unref?.();
+      // This bounded wait is part of the caller's cleanup contract. Keeping it
+      // referenced prevents Node from exiting after the child closes while the
+      // caller is still awaiting confirmation that its process group is gone.
+      setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now())));
     });
   }
   return !options.isAlive();
 }
 
 async function waitUntilEventuallyGone(options: OwnedProcessGroupOptions): Promise<void> {
+  // Let the caller observe the cleanup error before this becomes a background,
+  // unref'ed reaper. This keeps immediate `whenGone` consumers deterministic
+  // without making a permanently stuck process group hold the daemon open.
+  await new Promise<void>((resolve) => setImmediate(resolve));
   const pollMs = Math.max(50, options.pollMs ?? 100);
   while (options.isAlive()) {
     await new Promise<void>((resolve) => {

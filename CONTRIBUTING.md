@@ -4,7 +4,7 @@ Thanks for taking a look. Dezin is small and opinionated by design — contribut
 
 ## Setup
 
-Prerequisites: **Node ≥ 22.12**, **pnpm 11**. For real generation you also need a coding-agent CLI on your PATH (Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, or Hermes), authenticated.
+Prerequisites: **Node ≥ 22.13**, **pnpm 11**. For real generation you also need a coding-agent CLI on your PATH (Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, or Hermes), authenticated.
 
 ```sh
 pnpm install
@@ -16,12 +16,14 @@ You can develop and run the whole test suite **without any agent installed** —
 ## Checks before you push
 
 ```sh
-pnpm typecheck                 # type-check every package
-pnpm test                      # node suite across packages + daemon
-pnpm --filter @dezin/web test  # web suite (vitest)
+pnpm test           # every script, package, app, and Web suite
+pnpm test:coverage  # the same suites with implementation-only coverage floors
+pnpm typecheck      # Node program, Web, and Leafer type checks
+pnpm build:check    # production build, bundle budgets, and lazy-boundary guards
+pnpm run ci         # all CI gates above plus the production dependency audit
 ```
 
-All three must pass. There is no CI yet, so these are the gate.
+The GitHub workflow runs the same gates on Node 22.14 and pnpm 11.9.
 
 ## How it's laid out
 

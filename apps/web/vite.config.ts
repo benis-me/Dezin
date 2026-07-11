@@ -1,9 +1,11 @@
 import { defineConfig } from "vitest/config";
+import type { Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { assertLazyEditorModulesStayLazy } from "../../scripts/bundle-module-policy.mjs";
 
 /**
  * Portless dev: discover the daemon's URL from the discovery file the daemon
@@ -75,12 +77,30 @@ function webPortfilePlugin() {
     },
   };
 }
+
+function bundleModuleGuardPlugin(): Plugin {
+  return {
+    name: "dezin-bundle-module-guard",
+    apply: "build",
+    generateBundle(_options, bundle) {
+      const chunks = Object.values(bundle).flatMap((item) => item.type === "chunk"
+        ? [{
+            file: item.fileName,
+            isEntry: item.isEntry,
+            imports: item.imports,
+            modules: Object.keys(item.modules),
+          }]
+        : []);
+      assertLazyEditorModulesStayLazy(chunks);
+    },
+  };
+}
 // Re-read the discovery file per request so a daemon restart (e.g. `node --watch`
 // rebinding a new ephemeral port) is picked up without restarting Vite.
 const router = () => daemonTarget();
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), webPortfilePlugin()],
+  plugins: [react(), tailwindcss(), webPortfilePlugin(), bundleModuleGuardPlugin()],
   resolve: {
     alias: {
       "@": join(import.meta.dirname, "src"),
@@ -108,9 +128,22 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    manifest: true,
+  },
   test: {
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test-setup.ts"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary"],
+      thresholds: {
+        statements: 61,
+        branches: 59,
+        functions: 59,
+        lines: 64,
+      },
+    },
   },
 });

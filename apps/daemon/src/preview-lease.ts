@@ -215,7 +215,8 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolveDelay, reject) => {
     if (signal.aborted) return reject(abortError(signal.reason));
     const timer = setTimeout(finish, ms);
-    unref(timer);
+    // Readiness polling is awaited work; keep its delay referenced so a
+    // one-shot caller cannot exit with the acquisition promise still pending.
     function finish(): void {
       signal.removeEventListener("abort", onAbort);
       resolveDelay();
@@ -472,7 +473,8 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     const timeout = new Error(`Preview readiness timed out after ${readyTimeoutMs}ms`);
     timeout.name = "TimeoutError";
     readyTimer = schedule(() => flight.controller.abort(timeout), readyTimeoutMs);
-    unref(readyTimer);
+    // This timeout settles the caller-visible acquisition promise. Unlike idle
+    // and lease-expiry timers, it must keep an otherwise idle process alive.
 
     let closeListener!: (code: number | null, signal: NodeJS.Signals | null) => void;
     let errorListener!: (error: Error) => void;
@@ -568,7 +570,6 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     const timeout = new Error(`Cached preview readiness timed out after ${cachedReadyTimeoutMs}ms`);
     timeout.name = "TimeoutError";
     const timer = schedule(() => controller.abort(timeout), cachedReadyTimeoutMs);
-    unref(timer);
     const onAbort = (): void => controller.abort(abortError(callerSignal?.reason));
     callerSignal?.addEventListener("abort", onAbort, { once: true });
     if (callerSignal?.aborted) onAbort();
