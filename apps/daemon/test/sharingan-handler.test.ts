@@ -241,7 +241,15 @@ test("POST /cancel releases capture resources and exposes a resource-free cancel
       rejectNavigation(Object.assign(new Error("capture cancelled"), { name: "AbortError" }));
     },
   } as unknown as SharinganSession;
-  const app = createApp({ store, dataDir, sharinganOpen: async () => session });
+  let opens = 0;
+  const app = createApp({
+    store,
+    dataDir,
+    sharinganOpen: async () => {
+      opens += 1;
+      return session;
+    },
+  });
   await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
 
@@ -259,6 +267,12 @@ test("POST /cancel releases capture resources and exposes a resource-free cancel
     const status = await (await fetch(`${base}/api/sharingan/${project.id}/status`)).json() as { phase: string; steps: number; pages: unknown[] };
     assert.deepEqual(status, { phase: "cancelled", steps: 0, pages: [] });
     assert.equal(closes, 1);
+
+    const probe = await fetch(`${base}/api/sharingan/${project.id}/read-dom`);
+    assert.equal(probe.status, 409, "cancelled captures cannot be revived by a probe endpoint");
+    const afterProbe = await (await fetch(`${base}/api/sharingan/${project.id}/status`)).json() as { phase: string; steps: number; pages: unknown[] };
+    assert.deepEqual(afterProbe, { phase: "cancelled", steps: 0, pages: [] });
+    assert.equal(opens, 1, "only an explicit Retry may open another browser session");
   } finally {
     await releaseSharinganProject(project.id);
     await new Promise<void>((resolve) => app.close(() => resolve()));

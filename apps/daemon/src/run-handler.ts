@@ -68,7 +68,7 @@ import {
 } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
-import { ensureCaptured, capturedPageCount, releaseSharinganProject, sharinganRunCaptureId } from "./sharingan-handler.ts";
+import { ensureCaptured, capturedPageCount, releaseSharinganProject, removeSharinganProfile, sharinganRunCaptureId } from "./sharingan-handler.ts";
 import { buildSharinganContext, buildSharinganSystemPrompt } from "./sharingan-context.ts";
 import { writeProbeCli } from "./sharingan-probe-cli.ts";
 import { sharinganReviewReference } from "./sharingan-capture.ts";
@@ -1462,14 +1462,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   }
   if (project.sharingan && project.sourceUrl) {
     sharinganCaptureId = sharinganRunCaptureId(project.id, run.id);
+    const sharinganSignal = ctrl.signal;
     // Best-effort: never fail the build on a capture hiccup — the agent can still probe live.
     await ensureCaptured(sharinganCaptureId, deps.dataDir, project.sourceUrl, {
-      signal: ctrl.signal,
+      signal: sharinganSignal,
       keepSessionForProbe: true,
       artifactDir: dir,
       open: deps.sharinganOpen,
     }).catch((error) => {
-      if (isAbortError(error)) throw error;
+      if (sharinganSignal.aborted || isAbortError(error)) throw error;
     });
     // Write the dezin-probe CLI into .sharingan/ so the agent drives capture with a real tool, not curl.
     const probeBase = `${(origin ?? "").replace(/\/+$/, "")}/api/sharingan/${project.id}`;
@@ -2274,7 +2275,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     startingRuns.delete(startKey);
     try {
       stopPoll?.();
-      if (sharinganCaptureId) await releaseSharinganProject(sharinganCaptureId).catch(() => {});
+      if (sharinganCaptureId) {
+        await releaseSharinganProject(sharinganCaptureId).catch(() => {});
+        await removeSharinganProfile(sharinganCaptureId, deps.dataDir).catch(() => {});
+      }
       if (standardTransaction) {
         if (dir === standardTransaction.dir) {
           await releaseVariantRuntime(project.id, targetVariantId, durableRun ? [durableRun.id] : []);

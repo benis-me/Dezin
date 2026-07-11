@@ -108,16 +108,17 @@ test("ensureCaptured aborts promptly instead of waiting for its polling interval
     else opts.signal?.addEventListener("abort", rejectAbort, { once: true });
   });
   const startedAt = performance.now();
+  const abortReason = new Error("run cancelled with a plain Error reason");
   const capture = ensureCaptured(id, dataDir, "http://x.test/", {
     maxWaitMs: 250,
     pollMs: 250,
     signal: controller.signal,
     open,
   });
-  setTimeout(() => controller.abort(Object.assign(new Error("run cancelled"), { name: "AbortError" })), 20);
+  setTimeout(() => controller.abort(abortReason), 20);
 
   try {
-    await assert.rejects(capture, (error: unknown) => error instanceof Error && error.name === "AbortError");
+    await assert.rejects(capture, (error: unknown) => error === abortReason, "the caller's exact abort reason propagates");
     assert.ok(performance.now() - startedAt < 150, "abort must wake ensureCaptured before the 250 ms polling interval");
   } finally {
     await releaseSharinganProject(id);

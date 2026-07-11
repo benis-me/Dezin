@@ -44,7 +44,7 @@ import {
   releaseVariantRuntime,
   stopAllProjectRuntimes,
 } from "./project-runtime.ts";
-import { handleSharinganStart, handleSharinganCancel, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, sharinganRunCaptureId, type SharinganOpen } from "./sharingan-handler.ts";
+import { handleSharinganStart, handleSharinganCancel, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, removeSharinganProfile, removeSharinganProjectProfiles, sharinganRunCaptureId, type SharinganOpen } from "./sharingan-handler.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey, isStandardRootVariant, removeStandardVariantWorktree, removeStandardVersionWorktree } from "./variant-workspaces.ts";
 import { RuntimeScopeUnavailableError, RuntimeSupervisor } from "./runtime-supervisor.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
@@ -245,6 +245,7 @@ export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir" 
       await releaseProjectRuntime(projectId);
       await releaseSharinganProject(projectId);
       await Promise.all(runIds.map((runId) => releaseSharinganProject(sharinganRunCaptureId(projectId, runId))));
+      await removeSharinganProjectProfiles(projectId, deps.dataDir);
       const project = deps.store.getProject(projectId);
       if (project?.mode === "standard") {
         for (const runId of runIds) {
@@ -260,6 +261,11 @@ export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir" 
     },
     releaseVariantResources: async ({ projectId, variantId, runIds }) => {
       await releaseVariantRuntime(projectId, variantId, runIds);
+      await Promise.all(runIds.map(async (runId) => {
+        const captureId = sharinganRunCaptureId(projectId, runId);
+        await releaseSharinganProject(captureId);
+        await removeSharinganProfile(captureId, deps.dataDir);
+      }));
       const project = deps.store.getProject(projectId);
       if (project?.mode === "standard") {
         for (const runId of runIds) {
@@ -272,7 +278,7 @@ export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir" 
       }
     },
     shutdownResources: async () => {
-      await Promise.allSettled([stopAllProjectRuntimes(), closeAllSharinganSessions()]);
+      await Promise.allSettled([stopAllProjectRuntimes(), closeAllSharinganSessions(deps.dataDir)]);
     },
   });
 }

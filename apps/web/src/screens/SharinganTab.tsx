@@ -22,12 +22,14 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<"starting" | "cancelling" | null>(null);
   const [streamGeneration, setStreamGeneration] = useState(0);
+  const [streamFailed, setStreamFailed] = useState(false);
   const started = useRef(false);
 
   const applyStatus = useCallback((status: SharinganStatus) => {
     setPhase(status.phase);
     setPages(status.pages);
     setError(status.error ?? (status.phase === "error" ? "Capture failed." : null));
+    if (status.phase === "captured" || status.phase === "cancelled" || status.phase === "error") setStreamFailed(false);
   }, []);
 
   useEffect(() => {
@@ -66,12 +68,14 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
       try {
         for await (const step of api.streamSharinganEvents(projectId, ac.signal)) {
           if (!alive) return;
+          setStreamFailed(false);
           setLog((current) => [...current, step].slice(-SHARINGAN_LOG_LIMIT));
           if (step.kind === "login-required") setPhase("login-required");
           if (step.kind === "done") await refreshStatus();
         }
       } catch (streamError) {
         if (alive && !ac.signal.aborted && !isAbortError(streamError)) {
+          setStreamFailed(true);
           setError(errorMessage(streamError, "Capture event stream failed."));
         }
       }
@@ -83,6 +87,7 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
     if (pendingAction) return;
     started.current = true;
     setPendingAction("starting");
+    setStreamFailed(false);
     setError(null);
     setLog([]);
     setPages([]);
@@ -102,6 +107,7 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
   const cancel = async () => {
     if (pendingAction) return;
     setPendingAction("cancelling");
+    setStreamFailed(false);
     setError(null);
     try {
       await api.cancelSharingan(projectId);
@@ -116,14 +122,23 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
     }
   };
 
+  const reconnect = () => {
+    if (pendingAction) return;
+    setError(null);
+    setStreamFailed(false);
+    setStreamGeneration((generation) => generation + 1);
+  };
+
   const captureIsActive = phase === "capturing" || phase === "login-required" || phase === "probing";
   const action = pendingAction === "cancelling"
     ? <button type="button" disabled className="ml-auto rounded-md border px-2 py-1 text-xs disabled:opacity-60">Cancelling…</button>
     : pendingAction === "starting"
       ? <button type="button" disabled className="ml-auto rounded-md border px-2 py-1 text-xs disabled:opacity-60">Starting…</button>
-      : captureIsActive
-        ? <button type="button" onClick={() => void cancel()} className="ml-auto rounded-md border px-2 py-1 text-xs">Cancel</button>
-        : <button type="button" onClick={() => void recapture()} className="ml-auto rounded-md border px-2 py-1 text-xs">{phase === "error" || phase === "cancelled" ? "Retry" : "Re-capture"}</button>;
+      : streamFailed
+        ? <button type="button" onClick={reconnect} className="ml-auto rounded-md border px-2 py-1 text-xs">Reconnect</button>
+        : captureIsActive
+          ? <button type="button" onClick={() => void cancel()} className="ml-auto rounded-md border px-2 py-1 text-xs">Cancel</button>
+          : <button type="button" onClick={() => void recapture()} className="ml-auto rounded-md border px-2 py-1 text-xs">{phase === "error" || phase === "cancelled" ? "Retry" : "Re-capture"}</button>;
 
   return (
     <div className="flex h-full flex-col p-4">

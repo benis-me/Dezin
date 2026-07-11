@@ -651,21 +651,29 @@ test("Sharingan status returns 404 after project deletion without recreating cap
     mkdirSync(join(dataDir, "projects", project.id), { recursive: true });
     const before = sharinganCaptureRegistrySizeForTests();
     let closes = 0;
+    let profileDir = "";
     await ensureProbeSession(
       project.id,
       dataDir,
-      async () => ({
-        close: async () => {
-          closes += 1;
-          if (closes > 1) throw new Error("session close is not idempotent");
-        },
-      }) as unknown as import("../src/sharingan-browser.ts").SharinganSession,
+      async (_url, options) => {
+        profileDir = options.userDataDir ?? "";
+        mkdirSync(profileDir, { recursive: true });
+        writeFileSync(join(profileDir, "profile-marker"), "project-owned");
+        return ({
+          close: async () => {
+            closes += 1;
+            if (closes > 1) throw new Error("session close is not idempotent");
+          },
+        }) as unknown as import("../src/sharingan-browser.ts").SharinganSession;
+      },
     );
     assert.equal(sharinganCaptureRegistrySizeForTests(), before + 1);
 
     const deleted = await fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" });
     assert.equal(deleted.status, 204);
     assert.equal(closes, 1);
+    assert.ok(profileDir, "the project capture received an isolated profile directory");
+    assert.equal(existsSync(profileDir), false, "project deletion removes its persistent browser-profile ownership tree");
     assert.equal(sharinganCaptureRegistrySizeForTests(), before, "deletion releases capture ownership");
 
     const status = await fetch(`${base}/api/sharingan/${project.id}/status`);

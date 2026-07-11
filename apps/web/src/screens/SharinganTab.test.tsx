@@ -75,12 +75,22 @@ describe("SharinganTab", () => {
   });
 
   it("surfaces non-abort event-stream failures instead of swallowing them", async () => {
+    let attempts = 0;
+    const streamSharinganEvents = vi.fn(async function* () {
+      attempts += 1;
+      if (attempts === 1) throw new Error("capture stream disconnected");
+      yield { at: 2, kind: "dom" as const, text: "stream reconnected" };
+    });
     renderTab({
       sharinganStatus: async () => ({ phase: "capturing", steps: 0, pages: [] }),
-      streamSharinganEvents: async function* () { throw new Error("capture stream disconnected"); },
+      streamSharinganEvents,
     });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("capture stream disconnected");
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    expect(await screen.findByText("stream reconnected")).toBeInTheDocument();
+    expect(streamSharinganEvents).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("waits for cancel acknowledgement and refreshed status before showing cancelled", async () => {

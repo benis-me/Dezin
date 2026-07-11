@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto";
 import { join, sep } from "node:path";
 import { createReadStream, existsSync, statSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { SharinganSession, SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
 import { capturePage, captureCurrentPage, writePagesManifest, upsertPage, readCapturedPages, captureUrlKey, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
@@ -52,6 +53,7 @@ export const SHARINGAN_STEP_LIMIT = 500;
 
 const captures = new Map<string, Capture>();
 let nextCaptureGeneration = 1;
+const SHARINGAN_RUN_CAPTURE_SEPARATOR = "--run-";
 
 /** Test-only observability for proving read-only status requests do not allocate capture ownership. */
 export function sharinganCaptureRegistrySizeForTests(): number {
@@ -80,12 +82,35 @@ function captureArtifactDir(id: string, dataDir: string): string {
 }
 
 function sharinganProfileDir(id: string, dataDir: string): string {
+  const owner = sharinganProfileOwnerDir(sharinganProjectCaptureId(id), dataDir);
   const scope = createHash("sha256").update(id).digest("hex");
-  return join(dataDir, ".sharingan-profiles", scope);
+  return join(owner, scope);
+}
+
+function sharinganProjectCaptureId(id: string): string {
+  const separator = id.indexOf(SHARINGAN_RUN_CAPTURE_SEPARATOR);
+  return separator > 0 ? id.slice(0, separator) : id;
+}
+
+function sharinganProfileOwnerDir(projectId: string, dataDir: string): string {
+  const owner = createHash("sha256").update(projectId).digest("hex");
+  return join(dataDir, ".sharingan-profiles", owner);
+}
+
+function isSharinganRunCaptureId(id: string): boolean {
+  return id.indexOf(SHARINGAN_RUN_CAPTURE_SEPARATOR) > 0;
+}
+
+export async function removeSharinganProfile(id: string, dataDir: string): Promise<void> {
+  await rm(sharinganProfileDir(id, dataDir), { recursive: true, force: true });
+}
+
+export async function removeSharinganProjectProfiles(projectId: string, dataDir: string): Promise<void> {
+  await rm(sharinganProfileOwnerDir(projectId, dataDir), { recursive: true, force: true });
 }
 
 export function sharinganRunCaptureId(projectId: string, runId: string): string {
-  return `${projectId}--run-${runId}`;
+  return `${projectId}${SHARINGAN_RUN_CAPTURE_SEPARATOR}${runId}`;
 }
 
 function isActive(id: string, c: Capture, generation: number): boolean {
@@ -196,6 +221,7 @@ export function ensureProbeSession(
   open: SharinganOpen = SharinganSession.open,
 ): Promise<SharinganSession> {
   const c = get(id);
+  if (c.phase === "cancelled") throw new Error("capture cancelled; retry before probing");
   if (c.phase === "capturing" || c.phase === "login-required") throw new Error("capture in progress");
   const generation = c.generation;
   return retainCaptureOperation(c, async (signal, operation) => {
@@ -623,8 +649,12 @@ export async function handleSharinganCancel(res: ServerResponse, id: string): Pr
   sendJson(res, 200, { ok: true });
 }
 
-export async function closeAllSharinganSessions(): Promise<void> {
-  await Promise.allSettled([...captures.keys()].map((id) => releaseSharinganProject(id)));
+export async function closeAllSharinganSessions(dataDir?: string): Promise<void> {
+  const ids = [...captures.keys()];
+  await Promise.allSettled(ids.map((id) => releaseSharinganProject(id)));
+  if (dataDir) {
+    await Promise.allSettled(ids.filter(isSharinganRunCaptureId).map((id) => removeSharinganProfile(id, dataDir)));
+  }
 }
 
 export function handleSharinganEvents(res: ServerResponse, id: string): void {

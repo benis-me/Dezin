@@ -1522,6 +1522,7 @@ test("fresh Sharingan capture and agent probe writes stay transactional until a 
   let sourceDir = "";
   let mainTurns = 0;
   let visualReferencePath = "";
+  let runProfileDir = "";
   const runner: AgentRunner = {
     id: "fresh-sharingan-transaction-success",
     async runTurn(input) {
@@ -1577,9 +1578,16 @@ test("fresh Sharingan capture and agent probe writes stay transactional until a 
       assert.match(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), /published Sharingan clone/);
       assert.notEqual(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), initialized.head);
       assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceDir, encoding: "utf8" }), "");
+      assert.ok(runProfileDir, "the Run capture received an isolated profile directory");
+      assert.equal(existsSync(runProfileDir), false, "terminal Run cleanup removes its one-use browser profile");
     },
     {
-      sharinganOpen: async () => fakeFreshSharinganSession(),
+      sharinganOpen: async (_url, options) => {
+        runProfileDir = options.userDataDir ?? "";
+        mkdirSync(runProfileDir, { recursive: true });
+        writeFileSync(join(runProfileDir, "profile-marker"), "run-owned");
+        return fakeFreshSharinganSession();
+      },
       ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
       captureCoverUrl: async () => true,
       visualQa: async (input) => {
