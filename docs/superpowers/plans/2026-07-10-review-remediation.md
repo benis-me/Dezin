@@ -1,6 +1,8 @@
 # Review Remediation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status (2026-07-11): Completed.** All 12 non-deferred remediation tasks below were implemented and verified by both `pnpm run ci` and the GitHub CI quality job. The two user-deferred findings remain explicitly out of scope under Global Constraints.
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Checked steps record the completed execution history.
 
 **Goal:** Close every non-deferred finding from the 2026-07-10 review while preserving Dezin's local-first workflows and proving each behavior with automated tests.
 
@@ -72,7 +74,7 @@
 - Produces: `Store.createExtensionCredential`, `listExtensionCredentials`, `touchExtensionCredential`, and `revokeExtensionCredential`; only token hashes cross this boundary.
 - Produces extension scopes `capture:write` and `image:analyze`.
 
-- [ ] **Step 1: Write failing authorization and persistence tests**
+- [x] **Step 1: Write failing authorization and persistence tests**
 
 Add a table-driven daemon test with these rows:
 
@@ -88,13 +90,13 @@ const cases = [
 
 Cover code expiry, single-use races, extension-origin binding, revocation, wrong scope, malformed credentials, and continued full access for the daemon token. In Store tests, assert only the SHA-256 token hash is persisted and migration works on an existing database.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `pnpm --filter @dezin/daemon test && pnpm --filter @dezin/core test`
 
 Expected: FAIL because pairing routes, credential persistence, and scoped principals do not exist.
 
-- [ ] **Step 3: Implement the daemon and Store boundary**
+- [x] **Step 3: Implement the daemon and Store boundary**
 
 Use these public shapes:
 
@@ -114,15 +116,15 @@ export interface ExtensionPairingService {
 
 Add authenticated create/list/revoke routes and the local-host, `chrome-extension:` pair exchange route. Compare token hashes with `timingSafeEqual`; consume the code before returning a credential.
 
-- [ ] **Step 4: Add the Settings and extension flow with failing UI/client tests**
+- [x] **Step 4: Add the Settings and extension flow with failing UI/client tests**
 
 Tests must prove the popup stores credentials in `chrome.storage.local`, attaches `Authorization: Bearer`, clears a rejected credential on `401`, and never stores a token in sync storage. Settings tests must prove code generation, expiration display, revocation, and retryable errors.
 
-- [ ] **Step 5: Implement the extension client and Settings controls**
+- [x] **Step 5: Implement the extension client and Settings controls**
 
 `dezin-client.js` exposes `pair`, `capture`, `analyze`, and `forget`; URL remains in sync storage while credentials remain local. Update MV3 background to module mode and make popup state explicit: unpaired, pairing, paired, error.
 
-- [ ] **Step 6: Verify GREEN and commit**
+- [x] **Step 6: Verify GREEN and commit**
 
 Run:
 
@@ -152,17 +154,17 @@ Commit: `feat: pair extension with scoped daemon access`
 - Produces: `createDaemonSupervisor({ spawnDaemon, readPortFile, now, schedule, killProcessGroup })`.
 - Consumes: one supervisor instance for the Electron application lifetime.
 
-- [ ] **Step 1: Write failing supervisor tests**
+- [x] **Step 1: Write failing supervisor tests**
 
 Tests assert concurrent `ensureStarted()` calls spawn once, a stale portfile with a different PID is ignored, window recreation reuses the child, unexpected exit schedules one bounded restart, `stop()` cancels restart and kills the process group, and load retry stops after one retry.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `node --experimental-strip-types --no-warnings --test 'apps/desktop/test/*.test.ts'`
 
 Expected: FAIL because `daemon-supervisor.js` does not exist.
 
-- [ ] **Step 3: Implement and integrate the supervisor**
+- [x] **Step 3: Implement and integrate the supervisor**
 
 Use an idempotent API:
 
@@ -175,7 +177,7 @@ supervisor.state(); // "idle" | "starting" | "ready" | "backoff" | "stopping"
 
 Move spawn/readiness/restart out of `createWindow()`. Set `sandbox: true`, preserve `contextIsolation: true`, and keep preload IPC limited to existing allowlisted handlers. On app quit, set the stopping state before killing the child.
 
-- [ ] **Step 4: Upgrade Electron and verify the audit delta**
+- [x] **Step 4: Upgrade Electron and verify the audit delta**
 
 Run: `pnpm --filter dezin-desktop add -D electron@^43.1.0`
 
@@ -183,7 +185,7 @@ Then run: `pnpm audit --prod --audit-level high`
 
 Expected: no high-severity Electron advisory remains.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run:
 
@@ -212,17 +214,17 @@ Commit: `fix: supervise one desktop daemon process`
 - Produces: `Store.terminalizeRun(id, status, patch): { changed: boolean; run: Run }`.
 - Produces: `RunExecution.settle(status, patch)` and `RunExecution.dispose()`.
 
-- [ ] **Step 1: Add the lifecycle RED matrix**
+- [x] **Step 1: Add the lifecycle RED matrix**
 
 Cover a registry throw before `createRun`, a research throw after `createRun`, broker creation/subscription failure, cancellation racing success, direction/question early return, and a retry immediately after every failure. Assert one terminal DB transition, one terminal event, a closed stream, and a released start key.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `pnpm --filter @dezin/daemon test`
 
 Expected: FAIL with a Run remaining `running` or a second request receiving `409`.
 
-- [ ] **Step 3: Implement conditional Store terminalization**
+- [x] **Step 3: Implement conditional Store terminalization**
 
 The SQL update must contain:
 
@@ -232,11 +234,11 @@ WHERE id = ? AND status IN ('pending', 'running')
 
 Return `changed: false` for an already terminal Run and never replace its first terminal status.
 
-- [ ] **Step 4: Wrap every fallible post-record operation**
+- [x] **Step 4: Wrap every fallible post-record operation**
 
 Instantiate one `RunExecution` immediately after the durable row is created. Move research, broker/SSE registration, Sharingan preparation, Standard setup, agent execution, quality review, and persistence under one outer `try/catch/finally`. Delete `startingRuns` in the outermost `finally`, including errors before row creation.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run:
 
@@ -268,17 +270,17 @@ Commit: `fix: terminalize every accepted run exactly once`
 **Interfaces:**
 - Produces: `registerRun`, `cancelRuns(scope)`, `waitForRuns(scope)`, `releaseProject`, `releaseVariant`, `cancelAll`, and `shutdown`.
 
-- [ ] **Step 1: Write failing ownership and cleanup tests**
+- [x] **Step 1: Write failing ownership and cleanup tests**
 
 Use a blocked real runner. Delete its project and assert abort is observed before `204`, no subsequent write occurs, and `.runs`, `worktrees`, `version-worktrees`, project files, sessions, and runtime entries are absent. Repeat for a targeted variant. Test shutdown waits for active Runs and children before closing Store.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `pnpm --filter @dezin/daemon test`
 
 Expected: FAIL because deletion and shutdown currently leave owned resources.
 
-- [ ] **Step 3: Implement explicit ownership**
+- [x] **Step 3: Implement explicit ownership**
 
 Use scope metadata:
 
@@ -289,11 +291,11 @@ type RegisteredRun = RuntimeScope & { controller: AbortController; settled: Prom
 
 Deletion order is reject new work, abort, await settlement, stop scoped resources, remove daemon-owned paths/logs, then delete database rows. Shutdown performs `cancelAll()` and bounded waiting before closing the server and Store.
 
-- [ ] **Step 4: Verify test teardown owns all dev resources**
+- [x] **Step 4: Verify test teardown owns all dev resources**
 
 Update daemon test harnesses to construct and close a `RuntimeSupervisor`; do not add a test-only global kill that production does not call.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run: `pnpm --filter @dezin/daemon test`
 
@@ -327,21 +329,21 @@ interface StandardRunTransaction {
 }
 ```
 
-- [ ] **Step 1: Replace destructive-behavior tests with transaction RED tests**
+- [x] **Step 1: Replace destructive-behavior tests with transaction RED tests**
 
 Fixtures include tracked edits and untracked files. Assert dirty start returns `409` without byte or HEAD changes; runner throw and abort preserve the source; success promotes only agent changes; a concurrent user edit causes a safe conflict and preserves a recovery branch; disposal removes the temporary worktree.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `pnpm --filter @dezin/daemon test`
 
 Expected: FAIL because the active project root is currently used and cleaned.
 
-- [ ] **Step 3: Implement the isolated transaction**
+- [x] **Step 3: Implement the isolated transaction**
 
 Create `dezin/run/<runId>` from the selected variant SHA. Run agent, preview, lint, screenshots, restore, and commits only in `transaction.dir`. Publish only when the expected variant SHA still matches; use an explicit ref update or fast-forward and never `git add -A`, `reset --hard`, or `clean -fd` in the active checkout.
 
-- [ ] **Step 4: Remove destructive failure cleanup and verify GREEN**
+- [x] **Step 4: Remove destructive failure cleanup and verify GREEN**
 
 Run:
 
@@ -378,21 +380,21 @@ interface PreviewLease {
 }
 ```
 
-- [ ] **Step 1: Write failing lease tests**
+- [x] **Step 1: Write failing lease tests**
 
 Cover a process that never listens, early exit, concurrent acquire single-flight, explicit release, 60-second TTL, LRU eviction after four idle processes, version-worktree removal, process-group SIGTERM/SIGKILL, and `stopAll()` leaving `activeCount === 0`.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `pnpm --filter @dezin/daemon test`
 
 Expected: FAIL because readiness timeout currently returns an unready URL and leases do not exist.
 
-- [ ] **Step 3: Implement leases and update consumers**
+- [x] **Step 3: Implement leases and update consumers**
 
 Resolve `acquire()` only after an HTTP readiness probe succeeds. On timeout or exit, reject and kill the process group. Version-preview responses include a lease id, and every QA/cover temporary consumer uses `try/finally` release.
 
-- [ ] **Step 4: Prove the root hang reproduction is gone**
+- [x] **Step 4: Prove the root hang reproduction is gone**
 
 Run daemon tests and inspect for children:
 
@@ -401,7 +403,7 @@ pnpm --filter @dezin/daemon test
 pgrep -fal 'npm run dev -- --port|vite.*--port' | grep '/all-review-fixes/' && exit 1 || true
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit: `fix: lease and reap preview processes`
 
@@ -428,11 +430,11 @@ Commit: `fix: lease and reap preview processes`
 - Produces bounded event/text buffers with byte counts and one stable truncation marker.
 - Produces an `ExportBudget` shared by source, refs, variants, versions, Run logs, and Git bundle.
 
-- [ ] **Step 1: Add failing limit tests**
+- [x] **Step 1: Add failing limit tests**
 
 Generate 10,000 Run events, oversized stderr/stdout, a 64 MiB-plus file, more than 10,000 export entries, a combined 512 MiB-plus export, and an aborted request. Assert bounded memory/file size, preserved terminal event/sequence, killed overflowing agent process, `413` before headers, and no temporary export artifact.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -443,15 +445,15 @@ pnpm --filter @dezin/daemon test
 
 Expected: FAIL because all affected buffers and export aggregation are unbounded.
 
-- [ ] **Step 3: Implement byte-aware buffers and incremental research persistence**
+- [x] **Step 3: Implement byte-aware buffers and incremental research persistence**
 
 The Run ring enforces 2,000 events and 2 MiB. Stderr uses a 1 MiB tail. Structured stdout terminates at 32 MiB with `AGENT_OUTPUT_LIMIT`. Research activity clamps text, batches at 250 ms, appends JSONL, and force-flushes before terminal events.
 
-- [ ] **Step 4: Implement shared export budgets and cancellation**
+- [x] **Step 4: Implement shared export budgets and cancellation**
 
 Stat and budget entries before writing headers. Check the request abort signal between reads and while creating Git bundles; kill the subprocess group and delete temporary files on abort. Replace aggregate `Buffer.concat` ZIP creation with an async streaming ZIP writer so source data, compressed entries, and the final archive are never all resident at once.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run:
 
@@ -485,25 +487,25 @@ Commit: `fix: bound run output and export resources`
 - Produces: `ensureCaptured(id, dataDir, options: { signal?: AbortSignal; maxWaitMs?: number })`.
 - Produces: `releaseSharinganProject(id)` and `POST /api/sharingan/:id/cancel`.
 
-- [ ] **Step 1: Add failing backend cancellation/isolation tests**
+- [x] **Step 1: Add failing backend cancellation/isolation tests**
 
 Abort during polling and assert completion within one poll interval, not 300 seconds. Assert different projects receive different profile directories, release clears status/session/steps, large step streams stay bounded, and reversed subagent completion still produces source-plan region order.
 
-- [ ] **Step 2: Verify backend RED**
+- [x] **Step 2: Verify backend RED**
 
 Run: `pnpm --filter @dezin/daemon test`
 
 Expected: FAIL because `ensureCaptured` ignores Run cancellation and state is shared/unbounded.
 
-- [ ] **Step 3: Implement abort propagation and project release**
+- [x] **Step 3: Implement abort propagation and project release**
 
 Use project profile paths, an abortable wait, a bounded step ring, and one release function called by cancel, project deletion, and shutdown. Pass the Run controller signal into `ensureCaptured`. Fix flaky tests to key calls by region id instead of completion index.
 
-- [ ] **Step 4: Add failing Sharingan UI tests and implement explicit states**
+- [x] **Step 4: Add failing Sharingan UI tests and implement explicit states**
 
 Tests assert `status.error` and non-abort SSE failures render `role="alert"`, Cancel waits for daemon ACK/status, cancelled and failed states are distinct, and Retry is available. Implement `cancelSharingan` in the real/fake API clients and never swallow a non-abort error.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 Run:
 
@@ -539,15 +541,15 @@ Commit: `fix: cancel and isolate sharingan sessions`
 - Produces `flushPendingNodes({ applyResult, notify })`.
 - Produces atomic `POST /api/moodboards/start` with compensating cleanup.
 
-- [ ] **Step 1: Add failing Moodboard persistence tests**
+- [x] **Step 1: Add failing Moodboard persistence tests**
 
 With fake timers, mutate nodes and unmount before 350 ms; assert one save with the latest nodes and original board id. Switch board ids before flush and assert each pending save targets its own board. Assert atomic Moodboard start removes the database row/files on upload, node-save, message, or generation failure while preserving UI prompt/inputs for retry.
 
-- [ ] **Step 2: Add failing Stop, Settings, Home, and refresh tests**
+- [x] **Step 2: Add failing Stop, Settings, Home, and refresh tests**
 
 Assert cancel rejection keeps SSE alive and does not show Stopped; ACK shows Stopping until `run-cancelled`. Assert Settings write failure rolls back only that mutation's keys and out-of-order responses cannot overwrite newer edits. Assert first Home load failure displays an alert/Retry, background failure retains cards, pure refs enable Design, Moodboard refresh retains rows, and preview/run events do not force the active Workspace tab.
 
-- [ ] **Step 3: Verify RED**
+- [x] **Step 3: Verify RED**
 
 Run:
 
@@ -558,7 +560,7 @@ pnpm --filter @dezin/daemon test
 
 Expected: FAIL in each newly described state transition.
 
-- [ ] **Step 4: Implement shared resource and mutation semantics**
+- [x] **Step 4: Implement shared resource and mutation semantics**
 
 Use a per-key mutation version and before snapshot:
 
@@ -571,11 +573,11 @@ type ResourceState<T> =
 
 Flush pending Moodboard saves on unmount/navigation/send without setting state after unmount. Do not abort Run SSE until cancel is acknowledged and terminalized. Keep last-good list data during refresh. Remove unsolicited `setTab("Preview")` calls.
 
-- [ ] **Step 5: Implement atomic Moodboard start and retry preservation**
+- [x] **Step 5: Implement atomic Moodboard start and retry preservation**
 
 The daemon executes create/assets/nodes/message/generation as a saga and deletes owned records/files on any exception. The Web clears prompt/images only after the complete response succeeds.
 
-- [ ] **Step 6: Verify GREEN and commit**
+- [x] **Step 6: Verify GREEN and commit**
 
 Run:
 
@@ -635,29 +637,29 @@ export const MOODBOARD_REVIEW_CAPABILITIES = {
 } satisfies MoodboardCapabilities;
 ```
 
-- [ ] **Step 1: Write failing keyboard and capability tests**
+- [x] **Step 1: Write failing keyboard and capability tests**
 
 Assert IME Enter never submits, ARIA tabs support ArrowLeft/Right/Home/End and roving tab index, canvas shortcuts ignore inputs/buttons/links/interactive roles, review mode invokes no mutation callbacks and hides authoring UI, while fit/pan/zoom remain available.
 
-- [ ] **Step 2: Write failing routing/responsive/semantic-card tests**
+- [x] **Step 2: Write failing routing/responsive/semantic-card tests**
 
 Direct `/settings` must render Settings. At mocked 390 px, Shell reports mobile layout, has no resizable separator/fixed sidebar, and exposes main actions. Project/Moodboard cards must be reachable and activated by keyboard with visible focus. Sharingan must have a visible labeled entry. Lazy import tests prove Home does not load Workspace/Settings/canvas route chunks before navigation.
 
-- [ ] **Step 3: Verify RED**
+- [x] **Step 3: Verify RED**
 
 Run: `pnpm --filter @dezin/web test`
 
 Expected: FAIL for missing primitives, capabilities, settings rendering, mobile layout, semantics, and lazy route boundaries.
 
-- [ ] **Step 4: Implement primitives and capability gates**
+- [x] **Step 4: Implement primitives and capability gates**
 
 Gate mutation entry points, paste/delete/undo/nudge/drop/double-click, toolbars, panels, context menus, and editable labels. Remove no-op authoring callbacks from Visual Research. Use shared Tabs for Research.
 
-- [ ] **Step 5: Implement mobile Shell, route-driven Settings, semantic cards, and lazy screens**
+- [x] **Step 5: Implement mobile Shell, route-driven Settings, semantic cards, and lazy screens**
 
 Home stays eager. Lazy-load Workspace, Moodboards, Moodboard detail, Design Systems, Design System detail, Effects, Effect detail, Settings, and Onboarding behind one `RouteLoading`/error boundary. Settings open/close navigates to/from `/settings` instead of separate hidden state.
 
-- [ ] **Step 6: Verify GREEN, build, and browser-check 390 px**
+- [x] **Step 6: Verify GREEN, build, and browser-check 390 px**
 
 Run:
 
@@ -695,11 +697,11 @@ Commit: `fix: make navigation responsive and accessible`
 - Preserves all existing public exports from `run-handler.ts`, `WorkspaceScreen.tsx`, and `Store`.
 - New module imports are the only intentional behavior visible to tests.
 
-- [ ] **Step 1: Add failing import-boundary characterization tests**
+- [x] **Step 1: Add failing import-boundary characterization tests**
 
 Import pure policy/region helpers, transcript rendering/version selectors/markup parsers, schema/migration functions, and row codecs from their new module paths. Run existing ordering, migration, fake-clock, cascade, rollback, prompt, and Workspace behavior fixtures unchanged.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -711,15 +713,15 @@ pnpm --filter @dezin/web test
 
 Expected: FAIL because the new modules do not exist.
 
-- [ ] **Step 3: Move daemon code without changing bodies**
+- [x] **Step 3: Move daemon code without changing bodies**
 
 Move Run policy/prompt helpers first, then Sharingan region orchestration. Preserve re-exports so callers remain stable. Do not alter control flow, error strings, defaults, or sequencing in this commit.
 
-- [ ] **Step 4: Move Workspace and Store domains without changing behavior**
+- [x] **Step 4: Move Workspace and Store domains without changing behavior**
 
 Move transcript, version, and markup domains; then schema/migrations and codecs. Keep `Store` as the public facade and preserve transaction/order/cascade semantics.
 
-- [ ] **Step 5: Verify GREEN and commit each domain separately**
+- [x] **Step 5: Verify GREEN and commit each domain separately**
 
 Run the full targeted commands after each move, plus `pnpm typecheck`. Use commits:
 
@@ -753,33 +755,33 @@ refactor: extract store schema and codecs
 **Interfaces:**
 - Produces root scripts `test`, `test:coverage`, `typecheck`, `build:check`, and `ci`.
 
-- [ ] **Step 1: Add failing orchestration and budget tests**
+- [x] **Step 1: Add failing orchestration and budget tests**
 
 Assert the test orchestrator enumerates Node packages, daemon, desktop, extension, Leafer, and Web exactly once; propagates failure; enforces a bounded duration; and leaves no child process. Assert the bundle checker rejects any initial static JS chunk over 500 KiB minified or 180 KiB gzip, or total JS gzip above the measured post-lazy baseline plus 5%. Lazy editor/canvas chunks are reported separately and must not occur in the Home or Settings initial import graph.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `node --test 'scripts/*.test.mjs'`
 
 Expected: FAIL because the orchestration/leak/budget tools do not exist and current root tests omit suites/hang.
 
-- [ ] **Step 3: Implement explicit root scripts and typecheck coverage**
+- [x] **Step 3: Implement explicit root scripts and typecheck coverage**
 
 Run workspace test scripts explicitly rather than guessing directories. Add Leafer typecheck. Add Web V8 coverage and Node experimental coverage floors equal to freshly measured baselines; record the exact thresholds in package configuration so regressions fail.
 
-- [ ] **Step 4: Implement bundle and process gates**
+- [x] **Step 4: Implement bundle and process gates**
 
 Build with a manifest. Check gzip budgets from actual output and enforce lazy boundaries against the final chunk module graph. Each suite owns a process group; timeout or a surviving descendant is killed and reported as a failed gate.
 
-- [ ] **Step 5: Add CI**
+- [x] **Step 5: Add CI**
 
 Use Node 22.14 and pnpm 11.9 with frozen lockfile. Run typecheck, all tests with coverage, Web build/budget, process leak check, and `pnpm audit --prod --audit-level high`.
 
-- [ ] **Step 6: Update documentation to current behavior**
+- [x] **Step 6: Update documentation to current behavior**
 
 Move variant fanout and CI to shipped in `ROADMAP.md`; describe model discovery as implemented with live discovery plus seed fallback. Update English/Chinese test instructions and extension pairing/revocation steps.
 
-- [ ] **Step 7: Run fresh final verification and commit**
+- [x] **Step 7: Run fresh final verification and commit**
 
 Run:
 
