@@ -2451,7 +2451,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const runningRef = useRef(false);
   const queueRef = useRef<QueuedPrompt[]>(queue);
   const activeRunIdRef = useRef<string | null>(null);
-  const stopRequestRef = useRef<Promise<void> | null>(null);
+  const stopRequestRef = useRef<{ runId: string; request: Promise<void> } | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
   const turnStartedAtRef = useRef<number | null>(null);
   // On unmount (project switch via the key= in App.tsx, or navigating away), abort the in-flight run
@@ -3264,6 +3264,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "run-done": {
         terminalEventRef.current = true;
         activeRunIdRef.current = null;
+        stopRequestRef.current = null;
         const rounds = typeof ev.rounds === "number" ? ev.rounds : 0;
         const s = typeof ev.score === "number" ? ev.score : null;
         const finalFindings = Array.isArray(ev.findings) ? normalizeFindings(ev.findings) : lintFindings;
@@ -3302,6 +3303,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "run-error":
         terminalEventRef.current = true;
         activeRunIdRef.current = null;
+        stopRequestRef.current = null;
         setLiveStatus(null);
         materializeLive();
         setLiveItems([]);
@@ -3407,6 +3409,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "run-cancelled":
         terminalEventRef.current = true;
         activeRunIdRef.current = null;
+        stopRequestRef.current = null;
         setLiveStatus(null);
         if (ev.reason === "question" || ev.reason === "direction") {
           liveItemsRef.current = [];
@@ -3458,6 +3461,29 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       runningRef.current = false;
       if (abortRef.current === ctrl) abortRef.current = null;
       setRunning(false);
+    }
+  };
+
+  const continueRunAfterUnexpectedEof = async (runId: string, ctrl: AbortController): Promise<void> => {
+    setLiveStatus(stopRequestRef.current?.runId === runId ? "Stopping…" : "Reconnecting…");
+    try {
+      for await (const ev of api.reattachRun(runId, ctrl.signal, { afterSeq: lastSeqByRunRef.current.get(runId) ?? 0 })) {
+        handleEvent(ev, projectId);
+      }
+      if (!terminalEventRef.current && !ctrl.signal.aborted) {
+        setLiveStatus(null);
+        materializeLive();
+        pushResult("Disconnected.", {});
+      }
+    } catch (error) {
+      if (ctrl.signal.aborted) return;
+      setLiveStatus(null);
+      setLiveItems([]);
+      liveItemsRef.current = [];
+      currentTurnTextRef.current = "";
+      finalSummaryTextRef.current = "";
+      summaryBoundaryRef.current = false;
+      pushResult(`Couldn't reconnect: ${error instanceof Error ? error.message : "stream unavailable"}`, { error: true });
     }
   };
 
@@ -3515,6 +3541,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       if (ctrl.signal.aborted && !terminalEventRef.current) {
         materializeLive();
         pushResult("Stopped", { status: "stopped" });
+      } else if (!terminalEventRef.current) {
+        const runId = activeRunIdRef.current;
+        if (runId) await continueRunAfterUnexpectedEof(runId, ctrl);
+        else {
+          setLiveStatus(null);
+          materializeLive();
+          pushResult("Disconnected.", {});
+        }
       }
     } catch (err) {
       setLiveStatus(null);
@@ -3537,8 +3571,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         if (directionSlug) setResearch((prev) => (prev && prev.chosenSlug === directionSlug ? { ...prev, chosenSlug: undefined } : prev));
       }
     } finally {
+      const unfinishedRunId = activeRunIdRef.current;
       runningRef.current = false;
       activeRunIdRef.current = null;
+      if (unfinishedRunId && stopRequestRef.current?.runId === unfinishedRunId) stopRequestRef.current = null;
       abortRef.current = null;
       setRunning(false);
     }
@@ -3615,23 +3651,21 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const stop = (): void => {
     const runId = activeRunIdRef.current;
-    if (!runId || stopRequestRef.current) return;
-    let request!: Promise<void>;
-    request = api
+    if (!runId || stopRequestRef.current?.runId === runId) return;
+    const marker = { runId, request: Promise.resolve() };
+    stopRequestRef.current = marker;
+    marker.request = api
       .cancelRun(runId)
       .then((result) => {
         if (!result.cancelled) throw new Error("The daemon did not accept the stop request.");
         if (!terminalEventRef.current && activeRunIdRef.current === runId) setLiveStatus("Stopping…");
       })
       .catch((error) => {
+        if (stopRequestRef.current === marker) stopRequestRef.current = null;
         if (!workspaceDisposedRef.current) {
           toast(error instanceof Error && error.message ? error.message : "Couldn't stop the run.", { variant: "error" });
         }
-      })
-      .finally(() => {
-        if (stopRequestRef.current === request) stopRequestRef.current = null;
       });
-    stopRequestRef.current = request;
   };
 
   // Keep the transcript pinned to the newest content as it streams — unless the user scrolled

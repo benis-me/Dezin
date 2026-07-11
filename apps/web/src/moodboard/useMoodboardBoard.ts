@@ -68,6 +68,7 @@ interface PendingNodeSave {
   inputs: SaveMoodboardNodeInput[];
   version: number;
   timer: number | null;
+  retryCount: number;
 }
 
 interface FlushPendingNodesOptions {
@@ -107,6 +108,10 @@ export function useMoodboardBoard(boardId: string) {
   const inFlightSavesRef = useRef(new Map<string, Promise<boolean>>());
   const saveVersionsRef = useRef(new Map<string, number>());
   currentBoardIdRef.current = boardId;
+  const isCurrentBoard = useCallback(
+    (targetBoardId: string) => mountedRef.current && currentBoardIdRef.current === targetBoardId,
+    [],
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -118,6 +123,15 @@ export function useMoodboardBoard(boardId: string) {
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setDetail(null);
+    setNodes([]);
+    setAssets([]);
+    setConversations([]);
+    setConversationId("");
+    setMessages([]);
+    setSelectedIds([]);
+    setAgentBusy(false);
+    setImageBusy(false);
     void api
       .getMoodboard(boardId)
       .then((next) => {
@@ -209,11 +223,27 @@ export function useMoodboardBoard(boardId: string) {
 
   const flushBoardNodes = useCallback(
     async (targetBoardId: string, options: FlushPendingNodesOptions): Promise<boolean> => {
+      const scheduleRetry = (pending: PendingNodeSave): void => {
+        if (pending.timer !== null) return;
+        const retryCount = pending.retryCount + 1;
+        const delay = Math.min(30_000, 1_000 * 2 ** Math.min(retryCount - 1, 5));
+        const retry: PendingNodeSave = { ...pending, retryCount, timer: null };
+        retry.timer = window.setTimeout(() => {
+          retry.timer = null;
+          void flushBoardNodes(targetBoardId, { applyResult: true, notify: false });
+        }, delay);
+        pendingSavesRef.current.set(targetBoardId, retry);
+      };
       const inFlight = inFlightSavesRef.current.get(targetBoardId);
       if (inFlight) {
         const succeeded = await inFlight;
-        if (!succeeded) return false;
-        return pendingSavesRef.current.has(targetBoardId) ? flushBoardNodes(targetBoardId, options) : true;
+        const queued = pendingSavesRef.current.get(targetBoardId);
+        if (!queued) return succeeded;
+        if (!succeeded) {
+          scheduleRetry(queued);
+          return false;
+        }
+        return flushBoardNodes(targetBoardId, options);
       }
 
       const pending = pendingSavesRef.current.get(targetBoardId);
@@ -228,7 +258,9 @@ export function useMoodboardBoard(boardId: string) {
           if (options.applyResult && mountedRef.current && currentBoardIdRef.current === targetBoardId && isLatest) setNodes(saved);
           return true;
         } catch {
-          if (!pendingSavesRef.current.has(targetBoardId)) pendingSavesRef.current.set(targetBoardId, { ...pending, timer: null });
+          const queued = pendingSavesRef.current.get(targetBoardId);
+          if (!queued || queued.version <= pending.version) scheduleRetry({ ...pending, timer: null });
+          else scheduleRetry(queued);
           if (options.notify && mountedRef.current) toast("Couldn't save the board.", { variant: "error" });
           return false;
         } finally {
@@ -262,7 +294,7 @@ export function useMoodboardBoard(boardId: string) {
       if (previous?.timer !== null && previous?.timer !== undefined) window.clearTimeout(previous.timer);
       const version = (saveVersionsRef.current.get(targetBoardId) ?? 0) + 1;
       saveVersionsRef.current.set(targetBoardId, version);
-      const pending: PendingNodeSave = { inputs, version, timer: null };
+      const pending: PendingNodeSave = { inputs, version, timer: null, retryCount: 0 };
       pending.timer = window.setTimeout(() => {
         pending.timer = null;
         void flushBoardNodes(targetBoardId, { applyResult: true, notify: true });
@@ -321,34 +353,37 @@ export function useMoodboardBoard(boardId: string) {
   const uploadFiles = useCallback(
     async (files: FileList | File[] | null, point?: { x: number; y: number }) => {
       if (!files?.length) return;
+      const targetBoardId = boardId;
       setImageBusy(true);
       try {
         const nextNodes: SaveMoodboardNodeInput[] = [];
         for (const [index, file] of Array.from(files).entries()) {
           if (!file.type.startsWith("image/")) continue;
           const [contentBase64, size] = await Promise.all([fileToBase64(file), imageSize(file)]);
-          const asset = await api.uploadMoodboardAsset(boardId, {
+          const asset = await api.uploadMoodboardAsset(targetBoardId, {
             name: file.name,
             contentBase64,
             mimeType: file.type,
             width: size.width,
             height: size.height,
           });
+          if (!isCurrentBoard(targetBoardId)) return;
           nextNodes.push(createImageNode(asset, nodes.length, index, size, point));
         }
-        if (nextNodes.length) appendNodes(nextNodes);
+        if (nextNodes.length && isCurrentBoard(targetBoardId)) appendNodes(nextNodes);
       } catch {
-        toast("Couldn't upload those images.", { variant: "error" });
+        if (isCurrentBoard(targetBoardId)) toast("Couldn't upload those images.", { variant: "error" });
       } finally {
-        setImageBusy(false);
+        if (isCurrentBoard(targetBoardId)) setImageBusy(false);
       }
     },
-    [api, appendNodes, boardId, nodes.length, toast],
+    [api, appendNodes, boardId, isCurrentBoard, nodes.length, toast],
   );
 
   const uploadReferenceFiles = useCallback(
     async (files: FileList | File[] | null): Promise<MoodboardAsset[]> => {
       if (!files?.length) return [];
+      const targetBoardId = boardId;
       setImageBusy(true);
       try {
         const assets: MoodboardAsset[] = [];
@@ -356,7 +391,7 @@ export function useMoodboardBoard(boardId: string) {
           if (!file.type.startsWith("image/")) continue;
           const [contentBase64, size] = await Promise.all([fileToBase64(file), imageSize(file)]);
           assets.push(
-            await api.uploadMoodboardAsset(boardId, {
+            await api.uploadMoodboardAsset(targetBoardId, {
               name: file.name,
               contentBase64,
               mimeType: file.type,
@@ -364,17 +399,18 @@ export function useMoodboardBoard(boardId: string) {
               height: size.height,
             }),
           );
+          if (!isCurrentBoard(targetBoardId)) return [];
         }
-        if (assets.length) setAssets((current) => mergeAssets(current, assets));
+        if (assets.length && isCurrentBoard(targetBoardId)) setAssets((current) => mergeAssets(current, assets));
         return assets;
       } catch {
-        toast("Couldn't upload those reference images.", { variant: "error" });
+        if (isCurrentBoard(targetBoardId)) toast("Couldn't upload those reference images.", { variant: "error" });
         return [];
       } finally {
-        setImageBusy(false);
+        if (isCurrentBoard(targetBoardId)) setImageBusy(false);
       }
     },
-    [api, boardId, toast],
+    [api, boardId, isCurrentBoard, toast],
   );
 
   const generateImage = useCallback(
@@ -383,6 +419,7 @@ export function useMoodboardBoard(boardId: string) {
       prompt: string,
       options: { sourceAssetId?: string; referenceAssetIds?: string[]; params?: ImageGenerationParams } = {},
     ) => {
+      const targetBoardId = boardId;
       const selectedModel = generatorModel(node) || imageModel;
       const generationParams = options.params ?? imageGenerationParamsFromNode(node);
       const imageReferenceAssetIds = options.referenceAssetIds ?? referenceAssetIds(node);
@@ -409,7 +446,7 @@ export function useMoodboardBoard(boardId: string) {
         ),
       );
       try {
-        const result = await api.generateMoodboardImage(boardId, prompt, {
+        const result = await api.generateMoodboardImage(targetBoardId, prompt, {
           generatorId: node.id,
           model: selectedModel || undefined,
           conversationId: agentConversationId || undefined,
@@ -419,57 +456,64 @@ export function useMoodboardBoard(boardId: string) {
           x: node.x + node.width + 24,
           y: node.y,
         });
+        if (!isCurrentBoard(targetBoardId)) return;
         setNodes(result.nodes);
         setAssets((current) => mergeAssets(current, [result.asset]));
         if (agentConversationId && agentConversationId === conversationId && result.messages.length) {
           setMessages((current) => appendUniqueMessages(current, result.messages));
         }
       } catch {
+        if (!isCurrentBoard(targetBoardId)) return;
         setNodes((prev) =>
           prev.map((item) => (item.id === node.id ? { ...item, data: { ...item.data, generatorStatus: "error" } } : item)),
         );
         toast("Couldn't generate an image. Check Models settings.", { variant: "error" });
       } finally {
-        setImageBusy(false);
+        if (isCurrentBoard(targetBoardId)) setImageBusy(false);
       }
     },
-    [api, boardId, conversationId, imageModel, toast],
+    [api, boardId, conversationId, imageModel, isCurrentBoard, toast],
   );
 
   const setCoverImage = useCallback(
     async (node: MoodboardNode) => {
+      const targetBoardId = boardId;
       const assetId = imageNodeAssetId(node);
       if (!assetId) {
         toast("That image is missing an asset reference.", { variant: "error" });
         return;
       }
       try {
-        const updated = await api.patchMoodboard(boardId, { coverAssetId: assetId });
+        const updated = await api.patchMoodboard(targetBoardId, { coverAssetId: assetId });
+        if (!isCurrentBoard(targetBoardId)) return;
         setDetail((current) => (current ? { ...current, ...updated } : current));
         toast("Moodboard cover updated.");
       } catch {
-        toast("Couldn't set the cover image.", { variant: "error" });
+        if (isCurrentBoard(targetBoardId)) toast("Couldn't set the cover image.", { variant: "error" });
       }
     },
-    [api, boardId, toast],
+    [api, boardId, isCurrentBoard, toast],
   );
 
   const sendMessage = useCallback(
     async (content: string) => {
+      const targetBoardId = boardId;
       const activeConversationId = conversationId;
-      const optimistic = optimisticMoodboardMessage(boardId, activeConversationId, content);
+      const optimistic = optimisticMoodboardMessage(targetBoardId, activeConversationId, content);
       setAgentBusy(true);
       setMessages((cur) => [...cur, optimistic]);
       try {
         if (!(await flushPendingNodes({ applyResult: true, notify: true }))) {
-          setMessages((cur) => cur.filter((message) => message.id !== optimistic.id));
+          if (isCurrentBoard(targetBoardId)) setMessages((cur) => cur.filter((message) => message.id !== optimistic.id));
           return;
         }
-        const result = await api.postMoodboardMessage(boardId, content, {
+        if (!isCurrentBoard(targetBoardId)) return;
+        const result = await api.postMoodboardMessage(targetBoardId, content, {
           agentCommand: runAgent || undefined,
           model: runModel || undefined,
           conversationId: activeConversationId || undefined,
         });
+        if (!isCurrentBoard(targetBoardId)) return;
         if (result.nodes) setNodes(result.nodes);
         setMessages((cur) => {
           const withoutOptimistic = cur.filter((message) => message.id !== optimistic.id);
@@ -478,67 +522,78 @@ export function useMoodboardBoard(boardId: string) {
           return appendUniqueMessages(withoutOptimistic, replacementMessages);
         });
       } catch {
-        setMessages((cur) => cur.filter((message) => message.id !== optimistic.id));
-        toast("Couldn't send that message.", { variant: "error" });
+        if (isCurrentBoard(targetBoardId)) {
+          setMessages((cur) => cur.filter((message) => message.id !== optimistic.id));
+          toast("Couldn't send that message.", { variant: "error" });
+        }
       } finally {
-        setAgentBusy(false);
+        if (isCurrentBoard(targetBoardId)) setAgentBusy(false);
       }
     },
-    [api, boardId, conversationId, flushPendingNodes, runAgent, runModel, toast],
+    [api, boardId, conversationId, flushPendingNodes, isCurrentBoard, runAgent, runModel, toast],
   );
 
   const switchConversation = useCallback(
     async (nextConversationId: string) => {
       if (!nextConversationId || nextConversationId === conversationId) return;
+      const targetBoardId = boardId;
       try {
-        const nextMessages = await api.listMoodboardMessages(boardId, nextConversationId);
+        const nextMessages = await api.listMoodboardMessages(targetBoardId, nextConversationId);
+        if (!isCurrentBoard(targetBoardId)) return;
         setConversationId(nextConversationId);
         setMessages(nextMessages);
       } catch {
-        toast("Couldn't load that conversation.", { variant: "error" });
+        if (isCurrentBoard(targetBoardId)) toast("Couldn't load that conversation.", { variant: "error" });
       }
     },
-    [api, boardId, conversationId, toast],
+    [api, boardId, conversationId, isCurrentBoard, toast],
   );
 
   const createConversation = useCallback(async () => {
+    const targetBoardId = boardId;
     try {
-      const conversation = await api.createMoodboardConversation(boardId, `Conversation ${conversations.length + 1}`);
+      const conversation = await api.createMoodboardConversation(targetBoardId, `Conversation ${conversations.length + 1}`);
+      if (!isCurrentBoard(targetBoardId)) return;
       setConversations((current) => [...current, conversation]);
       setConversationId(conversation.id);
       setMessages([]);
     } catch {
-      toast("Couldn't create a conversation.", { variant: "error" });
+      if (isCurrentBoard(targetBoardId)) toast("Couldn't create a conversation.", { variant: "error" });
     }
-  }, [api, boardId, conversations.length, toast]);
+  }, [api, boardId, conversations.length, isCurrentBoard, toast]);
 
   const renameConversation = useCallback(
     async (id: string, title: string) => {
+      const targetBoardId = boardId;
       try {
-        const conversation = await api.renameMoodboardConversation(boardId, id, title);
+        const conversation = await api.renameMoodboardConversation(targetBoardId, id, title);
+        if (!isCurrentBoard(targetBoardId)) return;
         setConversations((current) => current.map((item) => (item.id === id ? { ...item, ...conversation } : item)));
       } catch {
-        toast("Couldn't rename that conversation.", { variant: "error" });
+        if (isCurrentBoard(targetBoardId)) toast("Couldn't rename that conversation.", { variant: "error" });
       }
     },
-    [api, boardId, toast],
+    [api, boardId, isCurrentBoard, toast],
   );
 
   const deleteConversation = useCallback(
     async (id: string) => {
+      const targetBoardId = boardId;
       try {
-        const result = await api.deleteMoodboardConversation(boardId, id);
+        const result = await api.deleteMoodboardConversation(targetBoardId, id);
+        if (!isCurrentBoard(targetBoardId)) return;
         setConversations(result.conversations);
         if (id === conversationId) {
           const next = result.conversations[0]?.id ?? "";
           setConversationId(next);
-          setMessages(next ? await api.listMoodboardMessages(boardId, next) : []);
+          const nextMessages = next ? await api.listMoodboardMessages(targetBoardId, next) : [];
+          if (isCurrentBoard(targetBoardId)) setMessages(nextMessages);
         }
       } catch {
-        toast("Couldn't delete that conversation.", { variant: "error" });
+        if (isCurrentBoard(targetBoardId)) toast("Couldn't delete that conversation.", { variant: "error" });
       }
     },
-    [api, boardId, conversationId, toast],
+    [api, boardId, conversationId, isCurrentBoard, toast],
   );
 
   const rescanAgents = useCallback(async () => {

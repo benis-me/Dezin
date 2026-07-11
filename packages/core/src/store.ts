@@ -142,7 +142,8 @@ CREATE TABLE IF NOT EXISTS moodboards (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   archived_at INTEGER,
-  cover_asset_id TEXT
+  cover_asset_id TEXT,
+  status TEXT NOT NULL DEFAULT 'ready'
 );
 CREATE TABLE IF NOT EXISTS moodboard_nodes (
   id TEXT PRIMARY KEY,
@@ -567,6 +568,7 @@ export class Store {
     ensureColumn("settings", "research_model", "research_model TEXT");
     ensureColumn("projects", "archived_at", "archived_at INTEGER");
     ensureColumn("projects", "active_variant_id", "active_variant_id TEXT");
+    ensureColumn("moodboards", "status", "status TEXT NOT NULL DEFAULT 'ready'");
     ensureColumn("runs", "variant_id", "variant_id TEXT");
     ensureColumn("runs", "user_message_id", "user_message_id TEXT");
     ensureColumn("runs", "assistant_message_id", "assistant_message_id TEXT");
@@ -721,12 +723,12 @@ export class Store {
   }
 
   // ── moodboards ────────────────────────────────────────────────────────────
-  createMoodboard(input: CreateMoodboardInput): Moodboard {
+  createMoodboard(input: CreateMoodboardInput, options: { status?: "starting" | "ready" } = {}): Moodboard {
     const id = this.clock.id();
     const now = this.clock.now();
     this.db
-      .prepare(`INSERT INTO moodboards (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`)
-      .run(id, input.name, now, now);
+      .prepare(`INSERT INTO moodboards (id, name, created_at, updated_at, status) VALUES (?, ?, ?, ?, ?)`)
+      .run(id, input.name, now, now, options.status ?? "ready");
     return this.getMoodboard(id)!;
   }
 
@@ -735,9 +737,25 @@ export class Store {
     return r ? asMoodboard(r) : null;
   }
 
+  getPublishedMoodboard(id: string): Moodboard | null {
+    const r = this.db.prepare(`SELECT * FROM moodboards WHERE id = ? AND status = 'ready'`).get(id) as Row | undefined;
+    return r ? asMoodboard(r) : null;
+  }
+
   listMoodboards(): Moodboard[] {
-    const rows = this.db.prepare(`SELECT * FROM moodboards ORDER BY updated_at DESC, rowid DESC`).all() as Row[];
+    const rows = this.db.prepare(`SELECT * FROM moodboards WHERE status = 'ready' ORDER BY updated_at DESC, rowid DESC`).all() as Row[];
     return rows.map(asMoodboard);
+  }
+
+  listStartingMoodboards(): Moodboard[] {
+    const rows = this.db.prepare(`SELECT * FROM moodboards WHERE status = 'starting' ORDER BY created_at ASC, rowid ASC`).all() as Row[];
+    return rows.map(asMoodboard);
+  }
+
+  publishMoodboard(id: string): Moodboard {
+    const result = this.db.prepare(`UPDATE moodboards SET status = 'ready', updated_at = ? WHERE id = ? AND status = 'starting'`).run(this.clock.now(), id);
+    if (Number(result.changes) === 0) throw new Error(`starting moodboard not found: ${id}`);
+    return this.getMoodboard(id)!;
   }
 
   updateMoodboard(

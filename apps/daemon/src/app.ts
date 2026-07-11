@@ -73,6 +73,7 @@ import {
   handlePostMoodboardMessage,
   handlePutMoodboardNodes,
   handleRenameMoodboardConversation,
+  recoverIncompleteMoodboards,
   handleServeMoodboardAsset,
   handleStartMoodboard,
   handleUploadMoodboardAsset,
@@ -1316,6 +1317,7 @@ export function createApp(deps: AppDeps): http.Server {
   const webDir = appDeps.webDir ?? defaultWebDir();
   const hasWeb = existsSync(webDir);
   const extensionPairing = appDeps.extensionPairing ?? new StoreExtensionPairingService(appDeps.store);
+  recoverIncompleteMoodboards(appDeps);
   warmAgents(appDeps.agentProber, appDeps.dataDir); // reload the persisted scan (or probe once) at startup
   return http.createServer(async (req, res) => {
     const method = req.method ?? "GET";

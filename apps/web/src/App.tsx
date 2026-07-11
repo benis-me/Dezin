@@ -39,7 +39,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
     case "moodboard":
       return (
         <Suspense fallback={<RouteLoading label="Loading moodboard..." />}>
-          <MoodboardScreen boardId={route.id} onBack={() => navigate("/moodboards")} onOpenSettings={onOpenSettings} />
+          <MoodboardScreen key={route.id} boardId={route.id} onBack={() => navigate("/moodboards")} onOpenSettings={onOpenSettings} />
         </Suspense>
       );
     case "design-systems":

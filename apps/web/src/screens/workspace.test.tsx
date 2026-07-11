@@ -1115,6 +1115,41 @@ test("an acknowledged Stop stays in Stopping until the run-cancelled event", asy
   expect(await screen.findByText("Stopped")).toBeInTheDocument();
 });
 
+test("a clean initial stream EOF reattaches until the acknowledged cancellation reaches a terminal event", async () => {
+  let closeInitialStream!: () => void;
+  const cancelRun = vi.fn(async () => ({ cancelled: true }));
+  const reattachRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {
+    yield { type: "run-cancelled", runId: "r-eof", reason: "user" };
+  });
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-eof", conversationId: "c1" };
+      await new Promise<void>((resolve) => {
+        closeInitialStream = resolve;
+      });
+    },
+    cancelRun,
+    reattachRun,
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "stop across eof" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  fireEvent.click(await screen.findByLabelText("Stop"));
+  expect(await screen.findByText("Stopping…")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByLabelText("Stop"));
+  expect(cancelRun).toHaveBeenCalledTimes(1);
+  act(() => closeInitialStream());
+
+  expect(await screen.findByText("Stopped")).toBeInTheDocument();
+  expect(reattachRun).toHaveBeenCalledWith("r-eof", expect.any(AbortSignal), expect.objectContaining({ afterSeq: expect.any(Number) }));
+});
+
 test("queued prompts survive remount and drain on the next workspace entry", async () => {
   localStorage.setItem("dezin.workspace.queue.p1", JSON.stringify(["queued follow-up"]));
   const streamRun = vi.fn(() =>

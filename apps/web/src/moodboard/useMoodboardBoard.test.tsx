@@ -9,6 +9,8 @@ import { imageModelOptions, useMoodboardBoard } from "./useMoodboardBoard.ts";
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function settings(overrides: Partial<Settings> = {}): Settings {
@@ -440,6 +442,244 @@ test("useMoodboardBoard keeps pending saves isolated when the board id changes",
 
   expect(saveMoodboardNodes).toHaveBeenCalledWith("board-1", [expect.objectContaining({ id: "note-board-1", x: 11 })]);
   expect(saveMoodboardNodes).toHaveBeenCalledWith("board-2", [expect.objectContaining({ id: "note-board-2", x: 22 })]);
+});
+
+test("useMoodboardBoard ignores an image generation result after switching boards", async () => {
+  const node = (boardId: string): MoodboardNode => ({
+    id: `generator-${boardId}`,
+    boardId,
+    type: "image-generator",
+    x: 0,
+    y: 0,
+    width: 240,
+    height: 180,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: boardId },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  let resolveGeneration!: (value: Awaited<ReturnType<ReturnType<typeof makeFakeApi>["generateMoodboardImage"]>>) => void;
+  function Probe({ boardId }: { boardId: string }) {
+    board = useMoodboardBoard(boardId);
+    return null;
+  }
+  const api = makeFakeApi({
+    getMoodboard: async (boardId: string) => ({
+      id: boardId,
+      name: boardId,
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [node(boardId)],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+    generateMoodboardImage: async () =>
+      new Promise((resolve) => {
+        resolveGeneration = resolve;
+      }),
+  });
+  const view = render(
+    <ApiProvider client={api}>
+      <Probe boardId="board-1" />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.detail?.id).toBe("board-1"));
+
+  let generation!: Promise<void>;
+  await act(async () => {
+    generation = board.generateImage(node("board-1"), "board one");
+  });
+  view.rerender(
+    <ApiProvider client={api}>
+      <Probe boardId="board-2" />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.detail?.id).toBe("board-2"));
+
+  await act(async () => {
+    resolveGeneration({
+      asset: {
+        id: "asset-board-1",
+        boardId: "board-1",
+        kind: "image",
+        fileName: "board-1.png",
+        mimeType: "image/png",
+        width: 1024,
+        height: 1024,
+        source: "generated",
+        createdAt: 2,
+        url: "/api/moodboards/board-1/assets/asset-board-1",
+      },
+      nodes: [{ ...node("board-1"), type: "image", data: { assetId: "asset-board-1" } }],
+      messages: [],
+    });
+    await generation;
+  });
+
+  expect(board.detail?.id).toBe("board-2");
+  expect(board.nodes).toEqual([expect.objectContaining({ boardId: "board-2", id: "generator-board-2" })]);
+  expect(board.assets).toEqual([]);
+});
+
+test("useMoodboardBoard never appends a completed upload to a different board", async () => {
+  const node = (boardId: string): MoodboardNode => ({
+    id: `note-${boardId}`,
+    boardId,
+    type: "note",
+    x: 0,
+    y: 0,
+    width: 160,
+    height: 120,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: boardId },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  let resolveUpload!: (asset: Awaited<ReturnType<ReturnType<typeof makeFakeApi>["uploadMoodboardAsset"]>>) => void;
+  function Probe({ boardId }: { boardId: string }) {
+    board = useMoodboardBoard(boardId);
+    return null;
+  }
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:pending-upload");
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  vi.stubGlobal(
+    "Image",
+    class {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(_value: string) {
+        queueMicrotask(() => this.onerror?.());
+      }
+    },
+  );
+  const uploadMoodboardAsset = vi.fn(
+    async () =>
+      new Promise<Awaited<ReturnType<ReturnType<typeof makeFakeApi>["uploadMoodboardAsset"]>>>((resolve) => {
+        resolveUpload = resolve;
+      }),
+  );
+  const saveMoodboardNodes = vi.fn();
+  const api = makeFakeApi({
+    getMoodboard: async (boardId: string) => ({
+      id: boardId,
+      name: boardId,
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [node(boardId)],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+    uploadMoodboardAsset,
+    saveMoodboardNodes,
+  });
+  const view = render(
+    <ApiProvider client={api}>
+      <Probe boardId="board-1" />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.detail?.id).toBe("board-1"));
+
+  let upload!: Promise<void>;
+  await act(async () => {
+    upload = board.uploadFiles([new File(["image"], "board-1.png", { type: "image/png" })]);
+  });
+  await waitFor(() => expect(uploadMoodboardAsset).toHaveBeenCalledWith("board-1", expect.any(Object)));
+  view.rerender(
+    <ApiProvider client={api}>
+      <Probe boardId="board-2" />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.detail?.id).toBe("board-2"));
+  await act(async () => {
+    resolveUpload({
+      id: "asset-board-1",
+      boardId: "board-1",
+      kind: "image",
+      fileName: "board-1.png",
+      mimeType: "image/png",
+      width: null,
+      height: null,
+      source: "upload",
+      createdAt: 2,
+      url: "/api/moodboards/board-1/assets/asset-board-1",
+    });
+    await upload;
+  });
+
+  expect(board.nodes).toEqual([expect.objectContaining({ boardId: "board-2", id: "note-board-2" })]);
+  expect(saveMoodboardNodes).not.toHaveBeenCalled();
+});
+
+test("useMoodboardBoard retries a failed unmount flush instead of stranding a timerless save", async () => {
+  const initialNode: MoodboardNode = {
+    id: "note-retry",
+    boardId: "board-retry",
+    type: "note",
+    x: 0,
+    y: 0,
+    width: 160,
+    height: 120,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "retry me" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-retry");
+    return null;
+  }
+  const saveMoodboardNodes = vi
+    .fn<ReturnType<typeof makeFakeApi>["saveMoodboardNodes"]>()
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockImplementation(async (boardId, inputs) => inputs.map((input) => ({ ...initialNode, ...input, boardId })));
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-retry",
+      name: "Retry",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [initialNode],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+    saveMoodboardNodes,
+  });
+  const view = render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+  vi.useFakeTimers();
+
+  act(() => board.updateNodes([{ ...initialNode, x: 91 }]));
+  view.unmount();
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(saveMoodboardNodes).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1_000);
+  });
+  expect(saveMoodboardNodes).toHaveBeenCalledTimes(2);
+  expect(saveMoodboardNodes).toHaveBeenLastCalledWith("board-retry", [expect.objectContaining({ id: "note-retry", x: 91 })]);
 });
 
 test("useMoodboardBoard sets an image node as the current board cover", async () => {

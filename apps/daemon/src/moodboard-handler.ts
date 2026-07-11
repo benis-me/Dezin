@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { Moodboard, MoodboardAsset, MoodboardConversation, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
@@ -35,6 +35,66 @@ function moodboardDir(dataDir: string, boardId: string): string {
 
 function moodboardAssetsDir(dataDir: string, boardId: string): string {
   return join(moodboardDir(dataDir, boardId), "assets");
+}
+
+async function retryMoodboardCleanup(operation: () => void | Promise<void>): Promise<Error | null> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await operation();
+      return null;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < 2) await new Promise<void>((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+  return lastError;
+}
+
+export async function compensateMoodboardStart(
+  boardId: string,
+  deps: Pick<AppDeps, "store" | "dataDir">,
+  removeDirectory: (path: string) => Promise<void> = (path) => rm(path, { recursive: true, force: true }),
+): Promise<void> {
+  const directoryError = await retryMoodboardCleanup(() => removeDirectory(moodboardDir(deps.dataDir, boardId)));
+  if (directoryError) {
+    console.warn("[dezin:moodboard-start] compensation incomplete; keeping hidden staging row for startup recovery", {
+      boardId,
+      stage: "filesystem",
+      error: directoryError.message,
+    });
+    return;
+  }
+  const databaseError = await retryMoodboardCleanup(() => deps.store.deleteMoodboard(boardId));
+  if (databaseError) {
+    console.warn("[dezin:moodboard-start] compensation incomplete; hidden staging row will be retried at startup", {
+      boardId,
+      stage: "database",
+      error: databaseError.message,
+    });
+  }
+}
+
+export function recoverIncompleteMoodboards({ store, dataDir }: Pick<AppDeps, "store" | "dataDir">): void {
+  for (const board of store.listStartingMoodboards()) {
+    try {
+      rmSync(moodboardDir(dataDir, board.id), { recursive: true, force: true, maxRetries: 2, retryDelay: 25 });
+    } catch (error) {
+      console.warn("[dezin:moodboard-start] startup recovery could not remove staging files", {
+        boardId: board.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    try {
+      store.deleteMoodboard(board.id);
+    } catch (error) {
+      console.warn("[dezin:moodboard-start] startup recovery could not remove staging row", {
+        boardId: board.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 function assetUrl(boardId: string, assetId: string): string {
@@ -425,7 +485,7 @@ export async function handleStartMoodboard(req: IncomingMessage, res: ServerResp
   if (!mode) return sendError(res, 400, "mode must be agent or generate");
   const prompt = stringValue(body.prompt);
   const images = startImages(body.images);
-  const board = deps.store.createMoodboard({ name });
+  const board = deps.store.createMoodboard({ name }, { status: "starting" });
   try {
     const assets = images.map((image) => createUploadedMoodboardAsset(board.id, image, deps));
     if (assets.length) deps.store.replaceMoodboardNodes(board.id, assets.map(initialImageNode));
@@ -444,22 +504,16 @@ export async function handleStartMoodboard(req: IncomingMessage, res: ServerResp
         );
       }
     }
-    const saved = deps.store.getMoodboard(board.id);
-    if (!saved) throw new Error("moodboard disappeared during start");
+    const saved = deps.store.publishMoodboard(board.id);
     sendJson(res, 201, withCover(saved, deps.store.listMoodboardAssets(board.id)));
   } catch (error) {
-    try {
-      deps.store.deleteMoodboard(board.id);
-    } catch {
-      // Preserve the original stage failure; the filesystem compensation still runs below.
-    }
-    await rm(moodboardDir(deps.dataDir, board.id), { recursive: true, force: true }).catch(() => {});
+    await compensateMoodboardStart(board.id, deps);
     throw error;
   }
 }
 
 export function handleGetMoodboard(res: ServerResponse, { id }: Record<string, string>, { store }: AppDeps): void {
-  const board = store.getMoodboard(id!);
+  const board = store.getPublishedMoodboard(id!);
   if (!board) return sendError(res, 404, "moodboard not found");
   const assets = store.listMoodboardAssets(id!);
   const conversations = store.listMoodboardConversations(id!);

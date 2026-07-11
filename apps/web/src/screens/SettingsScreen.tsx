@@ -115,7 +115,8 @@ export function SettingsScreen({
   const [defaultsFocusTarget, setDefaultsFocusTarget] = useState<ImageActionModelField | null>(initialTarget.focusTarget);
   const [settings, setSettings] = useState<Settings | null>(null);
   const confirmedSettingsRef = useRef<Settings | null>(null);
-  const mutationVersionsRef = useRef(new Map<keyof Settings, number>());
+  const editEpochsRef = useRef(new Map<keyof Settings, number>());
+  const mutationQueuesRef = useRef(new Map<keyof Settings, Promise<void>>());
   const { agents, loading: agentsInitial, scanning, status: scanStatus, rescan } = useAgents();
   const agentsLoading = agentsInitial || scanning;
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
@@ -181,50 +182,69 @@ export function SettingsScreen({
     control.scrollIntoView?.({ block: "center", behavior: "smooth" });
   }, [defaultsFocusTarget, section, settings]);
 
-  const setLocal = (key: keyof Settings, value: string | boolean | number) =>
-    setSettings((s) => {
-      if (!s) return s;
-      const next = { ...s, [key]: value };
-      publishSettingsUpdated(next);
-      return next;
-    });
-  const setLocalPatch = (patch: Partial<Settings>) =>
+  const applyLocalPatch = (patch: Partial<Settings>): Map<keyof Settings, number> => {
+    const epochs = new Map<keyof Settings, number>();
+    for (const key of Object.keys(patch) as Array<keyof Settings>) {
+      const epoch = (editEpochsRef.current.get(key) ?? 0) + 1;
+      editEpochsRef.current.set(key, epoch);
+      epochs.set(key, epoch);
+    }
     setSettings((s) => {
       if (!s) return s;
       const next = { ...s, ...patch };
       publishSettingsUpdated(next);
       return next;
     });
+    return epochs;
+  };
+  const setLocal = (key: keyof Settings, value: string | boolean | number) => {
+    applyLocalPatch({ [key]: value } as Partial<Settings>);
+  };
+  const setLocalPatch = (patch: Partial<Settings>) => {
+    applyLocalPatch(patch);
+  };
   const mutateSettings = (patch: Partial<Settings>) => {
     const keys = Object.keys(patch) as Array<keyof Settings>;
     if (!keys.length) return;
-    const versions = new Map<keyof Settings, number>();
-    const before = new Map<keyof Settings, Settings[keyof Settings]>();
-    const confirmed = confirmedSettingsRef.current;
-    for (const key of keys) {
-      const version = (mutationVersionsRef.current.get(key) ?? 0) + 1;
-      mutationVersionsRef.current.set(key, version);
-      versions.set(key, version);
-      if (confirmed) before.set(key, confirmed[key]);
+    const savedEpochs = applyLocalPatch(patch);
+    const predecessors = [
+      ...new Set(keys.map((key) => mutationQueuesRef.current.get(key)).filter((pending): pending is Promise<void> => Boolean(pending))),
+    ];
+    let request: Promise<Settings>;
+    try {
+      request = predecessors.length ? Promise.all(predecessors).then(() => api.updateSettings(patch)) : Promise.resolve(api.updateSettings(patch));
+    } catch (error) {
+      request = Promise.reject(error);
     }
-    setLocalPatch(patch);
-    void api
-      .updateSettings(patch)
+    const tail = request.then(
+      () => undefined,
+      () => undefined,
+    );
+    for (const key of keys) mutationQueuesRef.current.set(key, tail);
+    void tail.then(() => {
+      for (const key of keys) {
+        if (mutationQueuesRef.current.get(key) === tail) mutationQueuesRef.current.delete(key);
+      }
+    });
+    void request
       .then((next) => {
+        const nextConfirmed = { ...(confirmedSettingsRef.current ?? next) };
+        for (const key of keys) {
+          const value = SECRET_SETTING_KEYS.includes(key as (typeof SECRET_SETTING_KEYS)[number]) ? patch[key] : next[key];
+          if (value !== undefined) assignSetting(nextConfirmed, key, value);
+        }
+        confirmedSettingsRef.current = nextConfirmed;
         setSettings((current) => {
           if (!current) return current;
           const merged = { ...current };
-          const nextConfirmed = { ...(confirmedSettingsRef.current ?? current) };
           let changed = false;
           for (const key of keys) {
-            if (mutationVersionsRef.current.get(key) !== versions.get(key)) continue;
-            const value = SECRET_SETTING_KEYS.includes(key as (typeof SECRET_SETTING_KEYS)[number]) ? current[key] : next[key];
+            if (editEpochsRef.current.get(key) !== savedEpochs.get(key)) continue;
+            const value = SECRET_SETTING_KEYS.includes(key as (typeof SECRET_SETTING_KEYS)[number]) ? current[key] : nextConfirmed[key];
             assignSetting(merged, key, value);
-            assignSetting(nextConfirmed, key, value);
             changed = true;
           }
           if (!changed) return current;
-          confirmedSettingsRef.current = nextConfirmed;
           publishSettingsUpdated(merged);
           return merged;
         });
@@ -235,8 +255,8 @@ export function SettingsScreen({
           const rolledBack = { ...current };
           let changed = false;
           for (const key of keys) {
-            if (mutationVersionsRef.current.get(key) !== versions.get(key) || !before.has(key)) continue;
-            assignSetting(rolledBack, key, before.get(key)!);
+            if (editEpochsRef.current.get(key) !== savedEpochs.get(key) || !confirmedSettingsRef.current) continue;
+            assignSetting(rolledBack, key, confirmedSettingsRef.current[key]);
             changed = true;
           }
           if (!changed) return current;

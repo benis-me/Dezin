@@ -1212,6 +1212,45 @@ test("SettingsScreen ignores stale full responses that arrive after a newer edit
   await waitFor(() => expect(visualSwitch).toBeChecked());
 });
 
+test("SettingsScreen does not replace a newer unsaved draft with an older save response", async () => {
+  const firstSave = deferred<Settings>();
+  const updateSettings = vi.fn(() => firstSave.promise);
+  renderSettings({ getSettings: async () => settingsFixture({ customInstructions: "initial" }), updateSettings });
+  fireEvent.click(screen.getByRole("button", { name: "Custom instructions" }));
+  const input = await screen.findByLabelText("Custom instructions");
+
+  fireEvent.change(input, { target: { value: "first draft" } });
+  fireEvent.blur(input);
+  fireEvent.change(input, { target: { value: "newer unsaved draft" } });
+  await act(async () => firstSave.resolve(settingsFixture({ customInstructions: "first draft" })));
+
+  expect(input).toHaveValue("newer unsaved draft");
+});
+
+test("SettingsScreen serializes same-key saves and rolls a failed save back to the latest acknowledged value", async () => {
+  const firstSave = deferred<Settings>();
+  const secondSave = deferred<Settings>();
+  const updateSettings = vi
+    .fn<(patch: Partial<Settings>) => Promise<Settings>>()
+    .mockImplementationOnce(() => firstSave.promise)
+    .mockImplementationOnce(() => secondSave.promise);
+  renderSettings({ getSettings: async () => settingsFixture({ customInstructions: "initial" }), updateSettings });
+  fireEvent.click(screen.getByRole("button", { name: "Custom instructions" }));
+  const input = await screen.findByLabelText("Custom instructions");
+
+  fireEvent.change(input, { target: { value: "first saved" } });
+  fireEvent.blur(input);
+  fireEvent.change(input, { target: { value: "second failed" } });
+  fireEvent.blur(input);
+  expect(updateSettings).toHaveBeenCalledTimes(1);
+
+  await act(async () => firstSave.resolve(settingsFixture({ customInstructions: "first saved" })));
+  await waitFor(() => expect(updateSettings).toHaveBeenCalledTimes(2));
+  await act(async () => secondSave.reject(new Error("write failed")));
+
+  await waitFor(() => expect(input).toHaveValue("first saved"));
+});
+
 test("SettingsScreen keeps model API key drafts after redacted settings saves", async () => {
   const user = userEvent.setup();
   const updateSettings = vi.fn(async (p: Partial<Settings>) => {
