@@ -6,6 +6,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store, type StoreClock } from "../src/store.ts";
+import { asProject } from "../src/store-codecs.ts";
+import { STORE_SCHEMA, migrateStoreSchema } from "../src/store-schema.ts";
 
 /** Deterministic clock so tests don't depend on wall time / random uuids. */
 function fakeClock(): StoreClock {
@@ -20,6 +22,41 @@ function fakeClock(): StoreClock {
 function freshStore(): Store {
   return new Store(":memory:", fakeClock());
 }
+
+test("store schema and codecs are independently reusable", () => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(STORE_SCHEMA);
+  migrateStoreSchema(db);
+  const runColumns = db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
+  assert.ok(runColumns.some((column) => column.name === "owner_id"));
+  assert.deepEqual(
+    asProject({
+      id: "p1",
+      name: "Project",
+      skill_id: null,
+      design_system_id: "modern-minimal",
+      mode: "standard",
+      sharingan: 1,
+      source_url: "https://example.com",
+      created_at: 1,
+      updated_at: 2,
+      archived_at: null,
+    }),
+    {
+      id: "p1",
+      name: "Project",
+      skillId: null,
+      designSystemId: "modern-minimal",
+      mode: "standard",
+      sharingan: true,
+      sourceUrl: "https://example.com",
+      createdAt: 1,
+      updatedAt: 2,
+      archivedAt: null,
+    },
+  );
+  db.close();
+});
 
 test("project CRUD round-trips", () => {
   const s = freshStore();
