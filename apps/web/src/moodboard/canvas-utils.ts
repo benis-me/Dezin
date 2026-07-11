@@ -3,6 +3,30 @@ import type { MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../l
 export type MoodboardCanvasTool = "select" | "hand" | "note" | "section";
 export type MoodboardAlignType = "left" | "center-v" | "right" | "top" | "center-h" | "bottom";
 
+export interface MoodboardCapabilities {
+  panZoom: boolean;
+  select: boolean;
+  mutate: boolean;
+  upload: boolean;
+  generate: boolean;
+}
+
+export const MOODBOARD_AUTHORING_CAPABILITIES: Readonly<MoodboardCapabilities> = Object.freeze({
+  panZoom: true,
+  select: true,
+  mutate: true,
+  upload: true,
+  generate: true,
+});
+
+export const MOODBOARD_REVIEW_CAPABILITIES: Readonly<MoodboardCapabilities> = Object.freeze({
+  panZoom: true,
+  select: false,
+  mutate: false,
+  upload: false,
+  generate: false,
+});
+
 export interface ContextMenuState {
   x: number;
   y: number;

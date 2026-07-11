@@ -38,7 +38,7 @@ describe("HomeScreen Sharingan mode", () => {
     expect(screen.getByPlaceholderText("Paste a URL to clone…")).toBeInTheDocument();
     expect(screen.queryByText("Design Research")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Design system" })).not.toBeInTheDocument();
-    expect(screen.getByText(/Sharingan/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Sharingan" })).toBeInTheDocument();
   });
 
   it("submitting a valid URL calls onNewProject with the sourceUrl and standard mode", async () => {

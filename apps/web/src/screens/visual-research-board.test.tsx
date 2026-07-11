@@ -4,11 +4,17 @@ import type { MoodboardDetail } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { VisualResearchBoard } from "./VisualResearchBoard.tsx";
+import { MOODBOARD_REVIEW_CAPABILITIES } from "../moodboard/canvas-utils.ts";
 
 afterEach(cleanup);
 
+const capturedCanvas = vi.hoisted(() => ({ props: null as Record<string, unknown> | null }));
+
 vi.mock("../moodboard/MoodboardCanvas.tsx", () => ({
-  MoodboardCanvas: (props: { nodes: unknown[] }) => <div data-testid="visual-moodboard" data-nodes={props.nodes.length} />,
+  MoodboardCanvas: (props: { nodes: unknown[] } & Record<string, unknown>) => {
+    capturedCanvas.props = props;
+    return <div data-testid="visual-moodboard" data-nodes={props.nodes.length} />;
+  },
 }));
 
 function board(overrides: Partial<MoodboardDetail> = {}): MoodboardDetail {
@@ -64,4 +70,8 @@ test("VisualResearchBoard loads the board and mounts the canvas", async () => {
   const el = await findByTestId("visual-moodboard");
   expect(el).toBeTruthy();
   expect(el.getAttribute("data-nodes")).toBe("1");
+  expect(capturedCanvas.props?.capabilities).toBe(MOODBOARD_REVIEW_CAPABILITIES);
+  for (const callback of ["onNodesChange", "onAddNote", "onAddSection", "onAddImageGenerator", "onUploadFiles", "onGenerateImage"]) {
+    expect(capturedCanvas.props).not.toHaveProperty(callback);
+  }
 });

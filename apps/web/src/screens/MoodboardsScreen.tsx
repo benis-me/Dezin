@@ -487,8 +487,16 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
               {visible.map((board) => (
                 <StaggerItem as="li" key={board.id}>
                   <Card
-                    className="group cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open ${board.name}`}
+                    className="group cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                     onClick={() => onOpenBoard(board.id)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+                      event.preventDefault();
+                      onOpenBoard(board.id);
+                    }}
                   >
                     <BoardThumb coverUrl={board.coverUrl} />
                     <div className="p-3">
@@ -510,7 +518,18 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
             <Stagger as="ul" className="mt-5 overflow-hidden rounded-xl border border-border">
               {visible.map((board) => (
                 <StaggerItem as="li" key={board.id} className="border-b border-border last:border-0">
-                  <div onClick={() => onOpenBoard(board.id)} className="group flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-2/50">
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open ${board.name}`}
+                    onClick={() => onOpenBoard(board.id)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+                      event.preventDefault();
+                      onOpenBoard(board.id);
+                    }}
+                    className="group flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-2/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+                  >
                     <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
                       {board.coverUrl ? <img src={board.coverUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : <div className="dz-canvas h-full w-full" />}
                     </div>

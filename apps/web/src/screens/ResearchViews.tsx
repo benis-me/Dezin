@@ -12,6 +12,7 @@ import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from 
 import { motion } from "motion/react";
 import { Check, ChevronDown, ChevronRight, Download, FileCode2, Globe, Search, Sparkles } from "lucide-react";
 import { Markdown } from "../components/Markdown.tsx";
+import { Tabs } from "../components/ui/segmented.tsx";
 import { cn } from "../lib/utils.ts";
 import type { ResearchDetail } from "../lib/api.ts";
 
@@ -310,32 +311,12 @@ export function ResearchPanel({
     <div className="h-full overflow-auto bg-surface">
       <div className="mx-auto max-w-3xl space-y-6 p-4">
         {hasVisual ? (
-          <div role="tablist" aria-label="Research track" className="inline-flex items-center gap-1 rounded-lg border border-border bg-card p-1">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={subTab === "product"}
-              onClick={() => setSubTab("product")}
-              className={cn(
-                "rounded-md px-3 py-1 text-xs font-medium transition-colors",
-                subTab === "product" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              Product
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={subTab === "visual"}
-              onClick={() => setSubTab("visual")}
-              className={cn(
-                "rounded-md px-3 py-1 text-xs font-medium transition-colors",
-                subTab === "visual" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              Visual
-            </button>
-          </div>
+          <Tabs
+            aria-label="Research track"
+            items={[{ value: "product", label: "Product" }, { value: "visual", label: "Visual" }]}
+            value={subTab}
+            onChange={(value) => setSubTab(value as "product" | "visual")}
+          />
         ) : null}
         {subTab === "visual" && hasVisual ? (
           <>

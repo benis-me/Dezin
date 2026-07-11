@@ -1,5 +1,6 @@
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { test, expect, afterEach, vi } from "vitest";
 import { Button, Badge, Tabs, Dialog, Card, Picker } from "./index.ts";
 
@@ -32,6 +33,41 @@ test("Tabs reports the chosen value", () => {
   expect(screen.getByRole("tab", { name: "Alpha" })).toHaveAttribute("aria-selected", "true");
   fireEvent.click(screen.getByRole("tab", { name: "Beta" }));
   expect(onChange).toHaveBeenCalledWith("b");
+});
+
+test("Tabs uses roving focus for ArrowLeft/Right/Home/End", () => {
+  function Harness() {
+    const [value, setValue] = useState("a");
+    return (
+      <Tabs
+        aria-label="Views"
+        value={value}
+        onChange={setValue}
+        items={[
+          { value: "a", label: "Alpha" },
+          { value: "b", label: "Beta" },
+          { value: "c", label: "Gamma" },
+        ]}
+      />
+    );
+  }
+  render(<Harness />);
+  const alpha = screen.getByRole("tab", { name: "Alpha" });
+  const beta = screen.getByRole("tab", { name: "Beta" });
+  const gamma = screen.getByRole("tab", { name: "Gamma" });
+  expect(alpha).toHaveAttribute("tabindex", "0");
+  expect(beta).toHaveAttribute("tabindex", "-1");
+
+  alpha.focus();
+  fireEvent.keyDown(alpha, { key: "ArrowRight" });
+  expect(beta).toHaveFocus();
+  expect(beta).toHaveAttribute("aria-selected", "true");
+  fireEvent.keyDown(beta, { key: "End" });
+  expect(gamma).toHaveFocus();
+  fireEvent.keyDown(gamma, { key: "Home" });
+  expect(alpha).toHaveFocus();
+  fireEvent.keyDown(alpha, { key: "ArrowLeft" });
+  expect(gamma).toHaveFocus();
 });
 
 test("Badge renders its content", () => {

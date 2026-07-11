@@ -4,6 +4,7 @@ import { Eclipse, Images, Moon, Palette, Shapes, Settings, Sun, type LucideIcon 
 import { useRoute, navigate, type Route } from "../router.tsx";
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
+import { useMediaQuery } from "../hooks/useMediaQuery.ts";
 import { readPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { IconButton } from "./ui/index.ts";
 
@@ -42,10 +43,71 @@ export function Shell({
 }) {
   const route = useRoute();
   const inProject = route.name === "project" || route.name === "moodboard";
+  const mobile = useMediaQuery("(max-width: 639px)");
   const sidebarPercent = readPanelPercent(SHELL_SIDEBAR_WIDTH_KEY, 18, 12, 28);
 
+  if (!inProject && mobile) {
+    return (
+      <div data-testid="app-shell" data-shell-layout="mobile" className="flex h-screen min-w-0 flex-col bg-background text-foreground">
+        <header className="app-drag titlebar-pad-top flex shrink-0 items-center justify-between border-b border-border bg-sidebar px-3 py-2">
+          <button
+            type="button"
+            onClick={() => navigate("/")}
+            className="app-no-drag rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            <span className="font-brand text-lg text-foreground">Dezin</span>
+          </button>
+          <IconButton
+            aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
+            title={dark ? "Light mode" : "Dark mode"}
+            onClick={onToggleDark}
+            className="app-no-drag"
+          >
+            {dark ? <Sun size={16} strokeWidth={1.75} /> : <Moon size={16} strokeWidth={1.75} />}
+          </IconButton>
+        </header>
+        <main className="relative min-h-0 min-w-0 flex-1 overflow-hidden">{children}</main>
+        <nav aria-label="Primary" className="grid shrink-0 grid-cols-5 border-t border-border bg-sidebar px-1 pb-[max(0.25rem,env(safe-area-inset-bottom))] pt-1">
+          {NAV.map((link) => {
+            const active = link.match(route);
+            const Icon = link.icon;
+            return (
+              <button
+                key={link.path}
+                type="button"
+                aria-label={link.label}
+                aria-current={active ? "page" : undefined}
+                onClick={() => navigate(link.path)}
+                className={cn(
+                  "flex min-w-0 flex-col items-center gap-0.5 rounded-md px-1 py-1.5 text-[10px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                  active ? "bg-background text-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <Icon size={16} strokeWidth={1.75} />
+                <span className="max-w-full truncate">{link.label === "Design Systems" ? "Systems" : link.label}</span>
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            aria-label="Settings"
+            aria-current={route.name === "settings" ? "page" : undefined}
+            onClick={() => onOpenSettings()}
+            className={cn(
+              "flex min-w-0 flex-col items-center gap-0.5 rounded-md px-1 py-1.5 text-[10px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+              route.name === "settings" ? "bg-background text-foreground" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Settings size={16} strokeWidth={1.75} />
+            <span>Settings</span>
+          </button>
+        </nav>
+      </div>
+    );
+  }
+
   return (
-    <div className="h-screen bg-background text-foreground">
+    <div data-testid="app-shell" data-shell-layout={inProject ? "project" : "desktop"} className="h-screen bg-background text-foreground">
       {!inProject ? (
         <Group
           id="dezin-shell-layout"

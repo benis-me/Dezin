@@ -28,12 +28,12 @@ function renderHome(onNewProject = vi.fn()) {
 
 describe("HomeScreen Sharingan red entry theme", () => {
   it("double-clicking the heading enters Sharingan mode: red theme, 'Sharingan' label, no mode badge", () => {
-    const { getByText, queryByText, container } = renderHome();
+    const { getByRole, getByText, queryByRole, queryByText, container } = renderHome();
 
     const heading = getByText("Start a design");
     fireEvent.doubleClick(heading);
 
-    expect(queryByText("Sharingan")).toBeInTheDocument();
+    expect(queryByRole("heading", { name: "Sharingan" })).toBeInTheDocument();
     expect(queryByText("Start a design")).not.toBeInTheDocument();
     // mode badge gone
     expect(queryByText("Sharingan ✕")).not.toBeInTheDocument();
@@ -41,7 +41,7 @@ describe("HomeScreen Sharingan red entry theme", () => {
     expect(container.querySelector("[data-sharingan='true']")).toBeTruthy();
 
     // exit by double-clicking the heading again
-    fireEvent.doubleClick(getByText("Sharingan"));
+    fireEvent.doubleClick(getByRole("heading", { name: "Sharingan" }));
     expect(queryByText("Start a design")).toBeInTheDocument();
   });
 });

@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { useId, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { motion } from "motion/react";
 import { cn } from "@/lib/utils.ts";
 
@@ -28,7 +28,20 @@ export function Tabs({
   "aria-label"?: string;
 }) {
   const layoutId = useId();
+  const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const plain = variant === "plain";
+  const activateFromKeyboard = (event: KeyboardEvent<HTMLButtonElement>, index: number): void => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % items.length;
+    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + items.length) % items.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = items.length - 1;
+    if (nextIndex === null || !items[nextIndex]) return;
+    event.preventDefault();
+    const next = items[nextIndex];
+    onChange(next.value);
+    tabRefs.current.get(next.value)?.focus();
+  };
   return (
     <div
       role="tablist"
@@ -40,7 +53,7 @@ export function Tabs({
         className,
       )}
     >
-      {items.map((item) => {
+      {items.map((item, index) => {
         const active = item.value === value;
         return (
           <button
@@ -48,7 +61,13 @@ export function Tabs({
             type="button"
             role="tab"
             aria-selected={active}
+            tabIndex={active ? 0 : -1}
+            ref={(element) => {
+              if (element) tabRefs.current.set(item.value, element);
+              else tabRefs.current.delete(item.value);
+            }}
             onClick={() => onChange(item.value)}
+            onKeyDown={(event) => activateFromKeyboard(event, index)}
             className={cn(
               "relative inline-flex h-full flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 [&_svg]:size-3.5",
               plain ? "px-2" : "px-2.5",

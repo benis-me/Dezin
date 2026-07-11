@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import type { ImageGenerationParams, MoodboardAsset, MoodboardNode, SaveMoodboardNodeInput } from "../lib/api.ts";
 import type { ImageActionModelField } from "../lib/image-action-defaults.ts";
+import { isReservedShortcutTarget } from "../lib/keyboard.ts";
 import {
   allMoodboardNodeIds,
   buildLayerTree,
   isNodeLocked,
   isNodeVisible,
-  isEditableShortcutTarget,
   isResetZoomShortcut,
   isTemporaryHandShortcut,
   localId,
+  MOODBOARD_AUTHORING_CAPABILITIES,
   MOODBOARD_LAYERS_OPEN_KEY,
   moveContainedNodesWithSections,
   nudgeNodeInputs,
@@ -19,6 +20,7 @@ import {
   type ContextMenuState,
   type MoodboardAlignType,
   type MoodboardCanvasTool,
+  type MoodboardCapabilities,
 } from "./canvas-utils.ts";
 import type { MoodboardCanvasTopbarControls } from "./MoodboardCanvasTopbar.tsx";
 import {
@@ -46,18 +48,19 @@ export interface MoodboardCanvasProps {
   imageProviderId?: string;
   imageActionModels?: Partial<Record<ImageActionModelField, string>>;
   moodboardAssets?: MoodboardAsset[];
+  capabilities?: Readonly<MoodboardCapabilities>;
   onImageModelChange?: (model: string) => void;
   onConfigureImageActionModel?: (action: string) => void;
-  onSelectIds: (ids: string[]) => void;
-  onNodesChange: (nodes: SaveMoodboardNodeInput[]) => void;
-  onAddNote: (point?: { x: number; y: number }) => void;
-  onAddSection: (point?: { x: number; y: number; width?: number; height?: number }) => void;
-  onAddImageGenerator: (point?: { x: number; y: number }, data?: Record<string, unknown>) => string | void;
-  onUploadFiles: (files: FileList | File[] | null, point?: { x: number; y: number }) => void;
+  onSelectIds?: (ids: string[]) => void;
+  onNodesChange?: (nodes: SaveMoodboardNodeInput[]) => void;
+  onAddNote?: (point?: { x: number; y: number }) => void;
+  onAddSection?: (point?: { x: number; y: number; width?: number; height?: number }) => void;
+  onAddImageGenerator?: (point?: { x: number; y: number }, data?: Record<string, unknown>) => string | void;
+  onUploadFiles?: (files: FileList | File[] | null, point?: { x: number; y: number }) => void;
   onUploadReferenceFiles?: (files: FileList | File[] | null) => Promise<MoodboardAsset[]>;
   referencePickActive?: boolean;
   onReferenceNodePick?: (node: MoodboardNode) => void;
-  onGenerateImage: (
+  onGenerateImage?: (
     node: MoodboardNode,
     prompt: string,
     options?: { sourceAssetId?: string; referenceAssetIds?: string[]; params?: ImageGenerationParams },
@@ -67,20 +70,29 @@ export interface MoodboardCanvasProps {
   onTopbarControlsChange?: (controls: MoodboardCanvasTopbarControls | null) => void;
 }
 
+const noopSelectIds = (_ids: string[]): void => {};
+const noopNodesChange = (_nodes: SaveMoodboardNodeInput[]): void => {};
+const noopAddNote = (_point?: { x: number; y: number }): void => {};
+const noopAddSection = (_point?: { x: number; y: number; width?: number; height?: number }): void => {};
+const noopAddImageGenerator = (_point?: { x: number; y: number }, _data?: Record<string, unknown>): void => {};
+const noopUploadFiles = (_files: FileList | File[] | null, _point?: { x: number; y: number }): void => {};
+
 export function useMoodboardCanvasController({
   nodes,
   selectedIds,
-  onSelectIds,
-  onNodesChange,
-  onAddNote,
-  onAddSection,
-  onAddImageGenerator,
-  onUploadFiles,
+  capabilities = MOODBOARD_AUTHORING_CAPABILITIES,
+  onSelectIds = noopSelectIds,
+  onNodesChange = noopNodesChange,
+  onAddNote = noopAddNote,
+  onAddSection = noopAddSection,
+  onAddImageGenerator = noopAddImageGenerator,
+  onUploadFiles = noopUploadFiles,
   referencePickActive = false,
   onReferenceNodePick,
   viewKey,
 }: MoodboardCanvasProps) {
-  const [tool, setTool] = useState<MoodboardCanvasTool>("select");
+  const effectiveSelectedIds = capabilities.select ? selectedIds : [];
+  const [tool, setTool] = useState<MoodboardCanvasTool>(() => (capabilities.select ? "select" : "hand"));
   const [layersOpen, setLayersOpen] = useState(() => readInitialLayersOpen());
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [collapsedLayerIds, setCollapsedLayerIds] = useState<Set<string>>(() => new Set());
@@ -88,7 +100,7 @@ export function useMoodboardCanvasController({
   const inputRef = useRef<HTMLInputElement>(null);
   const nodesRef = useRef(nodes);
   const currentInputsRef = useRef(nodes.map(toInput));
-  const selectedIdsRef = useRef(selectedIds);
+  const selectedIdsRef = useRef(effectiveSelectedIds);
   const toolRef = useRef(tool);
   const onSelectIdsRef = useRef(onSelectIds);
   const onNodesChangeRef = useRef(onNodesChange);
@@ -113,8 +125,16 @@ export function useMoodboardCanvasController({
   }, [nodes]);
 
   useEffect(() => {
-    selectedIdsRef.current = selectedIds;
-  }, [selectedIds]);
+    selectedIdsRef.current = effectiveSelectedIds;
+  }, [effectiveSelectedIds]);
+
+  useEffect(() => {
+    if (capabilities.select) return;
+    setTool("hand");
+    setLayersOpen(false);
+    setContextMenu(null);
+    selectedIdsRef.current = [];
+  }, [capabilities.select]);
 
   useEffect(() => {
     toolRef.current = tool;
@@ -135,13 +155,13 @@ export function useMoodboardCanvasController({
     onReferenceNodePickRef.current = onReferenceNodePick;
   }, [onAddImageGenerator, onAddNote, onAddSection, onNodesChange, onReferenceNodePick, onSelectIds, onUploadFiles, referencePickActive]);
 
-  const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
+  const selectedId = effectiveSelectedIds.length === 1 ? effectiveSelectedIds[0] : null;
   const displayNodes = useMemo(() => mergeDraftMoodboardNodes(nodes, draftInputs), [draftInputs, nodes]);
   const selected = useMemo(() => (selectedId ? displayNodes.find((node) => node.id === selectedId) ?? null : null), [displayNodes, selectedId]);
   const selectedNodes = useMemo(() => {
     const byId = new Map(displayNodes.map((node) => [node.id, node]));
-    return selectedIds.map((id) => byId.get(id)).filter((node): node is MoodboardNode => Boolean(node));
-  }, [displayNodes, selectedIds]);
+    return effectiveSelectedIds.map((id) => byId.get(id)).filter((node): node is MoodboardNode => Boolean(node));
+  }, [displayNodes, effectiveSelectedIds]);
   const layerTree = useMemo(() => buildLayerTree(nodes), [nodes]);
 
   const currentSnapshot = useCallback(
@@ -150,18 +170,21 @@ export function useMoodboardCanvasController({
   );
 
   const recordHistory = useCallback(() => {
+    if (!capabilities.mutate) return;
     historyRef.current = pushMoodboardUndo(historyRef.current, currentSnapshot());
-  }, [currentSnapshot]);
+  }, [capabilities.mutate, currentSnapshot]);
 
   const commitSelectionIds = useCallback((ids: string[], existingIds?: Array<string | undefined>) => {
+    if (!capabilities.select) return selectedIdsRef.current;
     const nextIds = uniqueExistingIds(ids, existingIds ?? nodesRef.current.map((node) => node.id));
     setContextMenu(null);
     selectedIdsRef.current = nextIds;
     onSelectIdsRef.current(nextIds);
     return nextIds;
-  }, []);
+  }, [capabilities.select]);
 
   const restoreHistorySnapshot = useCallback((snapshot: MoodboardHistorySnapshot) => {
+    if (!capabilities.mutate) return;
     const nextSnapshot = cloneMoodboardSnapshot(snapshot);
     const nextInputs = cloneMoodboardNodeInputs(nextSnapshot.nodes);
     const nextSelectedIds = commitSelectionIds(
@@ -173,7 +196,7 @@ export function useMoodboardCanvasController({
     onNodesChangeRef.current(nextInputs);
     syncNodeInputsInRuntimeRef.current(nextInputs, nextSelectedIds);
     window.requestAnimationFrame(() => syncNodeInputsInRuntimeRef.current(nextInputs, nextSelectedIds));
-  }, [commitSelectionIds]);
+  }, [capabilities.mutate, commitSelectionIds]);
 
   const undoCanvas = useCallback(() => {
     const result = undoMoodboardHistory(historyRef.current, currentSnapshot());
@@ -192,6 +215,7 @@ export function useMoodboardCanvasController({
   }, [currentSnapshot, restoreHistorySnapshot]);
 
   const saveInputs = useCallback((next: SaveMoodboardNodeInput[], options: { recordHistory?: boolean } = {}) => {
+    if (!capabilities.mutate) return;
     const current = currentInputsRef.current;
     if (options.recordHistory !== false && !sameMoodboardNodeInputs(current, next)) {
       historyRef.current = pushMoodboardUndo(historyRef.current, createMoodboardHistorySnapshot(current, selectedIdsRef.current));
@@ -200,7 +224,7 @@ export function useMoodboardCanvasController({
     currentInputsRef.current = nextInputs;
     nodesRef.current = moodboardNodesFromInputs(nodesRef.current, nextInputs);
     onNodesChangeRef.current(nextInputs);
-  }, []);
+  }, [capabilities.mutate]);
 
   const syncInputsAndSelectionInRuntime = useCallback((inputs: SaveMoodboardNodeInput[], idsToReselect: string[]) => {
     syncNodeInputsInRuntimeRef.current(inputs, idsToReselect);
@@ -239,6 +263,7 @@ export function useMoodboardCanvasController({
   );
 
   const handleSelectIds = useCallback((ids: string[]) => {
+    if (!capabilities.select) return selectedIdsRef.current;
     if (referencePickActiveRef.current) {
       setContextMenu(null);
       const candidateId = ids.length === 1 ? ids[0] : null;
@@ -248,7 +273,7 @@ export function useMoodboardCanvasController({
       return selectedIdsRef.current;
     }
     return commitSelectionIds(ids);
-  }, [commitSelectionIds]);
+  }, [capabilities.select, commitSelectionIds]);
 
   const handleSelect = useCallback(
     (id: string | null) => {
@@ -559,24 +584,27 @@ export function useMoodboardCanvasController({
 
   const addNoteAt = useCallback(
     (point?: { x: number; y: number }) => {
+      if (!capabilities.mutate) return;
       recordHistory();
       onAddNoteRef.current(point);
       setContextMenu(null);
     },
-    [recordHistory],
+    [capabilities.mutate, recordHistory],
   );
 
   const addSectionAt = useCallback(
     (point?: { x: number; y: number; width?: number; height?: number }) => {
+      if (!capabilities.mutate) return;
       recordHistory();
       onAddSectionRef.current(point);
       setContextMenu(null);
     },
-    [recordHistory],
+    [capabilities.mutate, recordHistory],
   );
 
   const addImageGeneratorAt = useCallback(
     (point?: { x: number; y: number }, data?: Record<string, unknown>) => {
+      if (!capabilities.mutate || !capabilities.generate) return;
       recordHistory();
       const createdId = onAddImageGeneratorRef.current(point, data);
       if (typeof createdId === "string" && createdId.trim()) {
@@ -586,19 +614,21 @@ export function useMoodboardCanvasController({
       }
       setContextMenu(null);
     },
-    [commitSelectionIds, recordHistory],
+    [capabilities.generate, capabilities.mutate, commitSelectionIds, recordHistory],
   );
 
   const uploadFiles = useCallback(
     (files: FileList | File[] | null, point?: { x: number; y: number }) => {
+      if (!capabilities.upload) return;
       if (files?.length) recordHistory();
       onUploadFilesRef.current(files, point);
     },
-    [recordHistory],
+    [capabilities.upload, recordHistory],
   );
 
   const pasteNodeInputs = useCallback(
     (inputs: SaveMoodboardNodeInput[], point?: { x: number; y: number }) => {
+      if (!capabilities.mutate) return false;
       if (inputs.length === 0) return false;
       const current = nodesRef.current;
       const startZIndex = Math.max(0, ...current.map((node) => node.zIndex ?? 0)) + 1;
@@ -608,7 +638,7 @@ export function useMoodboardCanvasController({
       setContextMenu(null);
       return true;
     },
-    [handleSelectIds, saveInputs],
+    [capabilities.mutate, handleSelectIds, saveInputs],
   );
 
   const pasteCopiedNodes = useCallback(
@@ -619,15 +649,15 @@ export function useMoodboardCanvasController({
   const applyClipboardPaste = useCallback(
     (content: { text?: string | null; files?: File[] | null }, point?: { x: number; y: number }) => {
       const result = classifyClipboardPaste(content);
-      if (result.kind === "nodes") return pasteNodeInputs(result.nodes, point);
-      if (result.kind === "images") {
+      if (result.kind === "nodes" && capabilities.mutate) return pasteNodeInputs(result.nodes, point);
+      if (result.kind === "images" && capabilities.upload) {
         uploadFiles(result.files, point);
         setContextMenu(null);
         return true;
       }
       return false;
     },
-    [pasteNodeInputs, uploadFiles],
+    [capabilities.mutate, capabilities.upload, pasteNodeInputs, uploadFiles],
   );
 
   const pasteFromSystemClipboard = useCallback(
@@ -641,6 +671,7 @@ export function useMoodboardCanvasController({
 
   const handleBlankTap = useCallback((point: { x: number; y: number }) => {
     setContextMenu(null);
+    if (!capabilities.select && !capabilities.mutate) return;
     if (referencePickActiveRef.current) {
       window.requestAnimationFrame(() => refreshSelectionInRuntimeRef.current(selectedIdsRef.current));
       return;
@@ -656,11 +687,11 @@ export function useMoodboardCanvasController({
       return;
     }
     handleSelectIds([]);
-  }, [addNoteAt, addSectionAt, handleSelectIds]);
+  }, [addNoteAt, addSectionAt, capabilities.mutate, capabilities.select, handleSelectIds]);
 
   const runtime = useLeaferMoodboardRuntime({
     nodes,
-    selectedIds,
+    selectedIds: effectiveSelectedIds,
     tool,
     onSelectIds: handleSelectIds,
     onBlankTap: handleBlankTap,
@@ -668,10 +699,17 @@ export function useMoodboardCanvasController({
       addSectionAt(rect);
       setTool("select");
     },
-    onDoubleTap: (point) => addImageGeneratorAt(point),
-    onContextMenu: setContextMenu,
+    onDoubleTap: (point) => {
+      if (capabilities.generate && capabilities.mutate) addImageGeneratorAt(point);
+    },
+    onContextMenu: (menu) => {
+      if (capabilities.mutate) setContextMenu(menu);
+    },
     onFrameStateChange: saveInputs,
-    onFrameStateDraftChange: setDraftInputs,
+    onFrameStateDraftChange: (inputs) => {
+      if (capabilities.mutate) setDraftInputs(inputs);
+    },
+    editable: capabilities.select && capabilities.mutate,
   });
   syncNodeInputsInRuntimeRef.current = runtime.syncNodeInputsInRuntime;
   refreshSelectionInRuntimeRef.current = runtime.refreshSelectionInRuntime;
@@ -726,9 +764,10 @@ export function useMoodboardCanvasController({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (isEditableShortcutTarget(event.target)) return;
+      if (isReservedShortcutTarget(event.target)) return;
 
       if (isTemporaryHandShortcut(event)) {
+        if (!capabilities.panZoom) return;
         event.preventDefault();
         if (!event.repeat && temporaryHandToolRef.current == null) {
           temporaryHandToolRef.current = toolRef.current;
@@ -738,6 +777,7 @@ export function useMoodboardCanvasController({
       }
 
       if (event.shiftKey && event.key === "1") {
+        if (!capabilities.panZoom) return;
         event.preventDefault();
         fitView();
         return;
@@ -745,22 +785,26 @@ export function useMoodboardCanvasController({
       if (event.metaKey || event.ctrlKey) {
         const key = event.key.toLowerCase();
         if (key === "z") {
+          if (!capabilities.mutate) return;
           event.preventDefault();
           if (event.shiftKey) redoCanvas();
           else undoCanvas();
           return;
         }
         if (key === "y") {
+          if (!capabilities.mutate) return;
           event.preventDefault();
           redoCanvas();
           return;
         }
         if (key === "a") {
+          if (!capabilities.select) return;
           event.preventDefault();
           selectLayers(allMoodboardNodeIds(nodesRef.current));
           return;
         }
         if (key === "c") {
+          if (!capabilities.select) return;
           if (selectedIdsRef.current.length === 0) return;
           event.preventDefault();
           copySelectedNodes();
@@ -769,32 +813,38 @@ export function useMoodboardCanvasController({
         // Paste (Cmd/Ctrl+V) is handled by the document "paste" listener below so it can
         // also read images and node payloads copied from other apps.
         if (key === "d") {
+          if (!capabilities.mutate) return;
           if (selectedIdsRef.current.length === 0) return;
           event.preventDefault();
           duplicateNodes(selectedIdsRef.current);
           return;
         }
         if (isResetZoomShortcut(event)) {
+          if (!capabilities.panZoom) return;
           event.preventDefault();
           changeZoom(1);
           return;
         }
         if (event.key === "=" || event.key === "+") {
+          if (!capabilities.panZoom) return;
           event.preventDefault();
           changeZoom(zoom * 1.14);
           return;
         }
         if (event.key === "-") {
+          if (!capabilities.panZoom) return;
           event.preventDefault();
           changeZoom(zoom * 0.88);
           return;
         }
         if (event.key === "ArrowUp") {
+          if (!capabilities.mutate) return;
           event.preventDefault();
           moveNodesLayerStep(selectedIdsRef.current, "up");
           return;
         }
         if (event.key === "ArrowDown") {
+          if (!capabilities.mutate) return;
           event.preventDefault();
           moveNodesLayerStep(selectedIdsRef.current, "down");
           return;
@@ -804,17 +854,17 @@ export function useMoodboardCanvasController({
       if (event.key === "Escape") {
         if (contextMenu) {
           setContextMenu(null);
-        } else if (toolRef.current !== "select") {
+        } else if (capabilities.select && toolRef.current !== "select") {
           setTool("select");
-        } else {
+        } else if (capabilities.select) {
           selectLayers([]);
         }
       }
-      if ((event.key === "Backspace" || event.key === "Delete") && selectedIdsRef.current.length > 0) {
+      if (capabilities.mutate && (event.key === "Backspace" || event.key === "Delete") && selectedIdsRef.current.length > 0) {
         event.preventDefault();
         deleteNodes(selectedIdsRef.current);
       }
-      if (!event.metaKey && !event.ctrlKey && !event.altKey && event.key.startsWith("Arrow") && selectedIdsRef.current.length > 0) {
+      if (capabilities.mutate && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.startsWith("Arrow") && selectedIdsRef.current.length > 0) {
         const step = event.shiftKey ? 10 : 1;
         const delta =
           event.key === "ArrowLeft"
@@ -830,13 +880,13 @@ export function useMoodboardCanvasController({
       }
       if (!event.metaKey && !event.ctrlKey && !event.altKey) {
         const key = event.key.toLowerCase();
-        if (key === "v") setTool("select");
-        if (key === "h") setTool("hand");
-        if (key === "n" || key === "s") setTool("note");
-        if (key === "f") setTool("section");
-        if (key === "l") setLayersOpen((value) => !value);
-        if (key === "]") bringNodesToFront(selectedIdsRef.current);
-        if (key === "[") sendNodesToBack(selectedIdsRef.current);
+        if (key === "v" && capabilities.select) setTool("select");
+        if (key === "h" && capabilities.panZoom) setTool("hand");
+        if ((key === "n" || key === "s") && capabilities.mutate) setTool("note");
+        if (key === "f" && capabilities.mutate) setTool("section");
+        if (key === "l" && capabilities.select) setLayersOpen((value) => !value);
+        if (key === "]" && capabilities.mutate) bringNodesToFront(selectedIdsRef.current);
+        if (key === "[" && capabilities.mutate) sendNodesToBack(selectedIdsRef.current);
       }
     };
     const releaseTemporaryHand = () => {
@@ -846,7 +896,7 @@ export function useMoodboardCanvasController({
       if (toolRef.current === "hand") setTool(restoreTool);
     };
     const onKeyUp = (event: KeyboardEvent) => {
-      if (!isTemporaryHandShortcut(event) || temporaryHandToolRef.current == null) return;
+      if (!capabilities.panZoom || !isTemporaryHandShortcut(event) || temporaryHandToolRef.current == null) return;
       event.preventDefault();
       releaseTemporaryHand();
     };
@@ -854,7 +904,7 @@ export function useMoodboardCanvasController({
       if (document.visibilityState === "hidden") releaseTemporaryHand();
     };
     const onPaste = (event: ClipboardEvent) => {
-      if (isEditableShortcutTarget(event.target)) return;
+      if (isReservedShortcutTarget(event.target)) return;
       const data = event.clipboardData;
       if (!data) return;
       const files = Array.from(data.files ?? []);
@@ -881,7 +931,7 @@ export function useMoodboardCanvasController({
       document.removeEventListener("visibilitychange", onVisibilityChange);
       document.removeEventListener("paste", onPaste);
     };
-  }, [applyClipboardPaste, bringNodesToFront, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, getLastCanvasPoint, moveNodesLayerStep, nudgeNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
+  }, [applyClipboardPaste, bringNodesToFront, capabilities.mutate, capabilities.panZoom, capabilities.select, changeZoom, contextMenu, copySelectedNodes, deleteNodes, duplicateNodes, fitView, getLastCanvasPoint, moveNodesLayerStep, nudgeNodes, redoCanvas, selectLayers, sendNodesToBack, undoCanvas, zoom]);
 
   const contextTargetId = contextMenu?.targetId ?? null;
 
@@ -891,7 +941,7 @@ export function useMoodboardCanvasController({
     layersOpen,
     contextMenu,
     contextTargetId,
-    selectedIds,
+    selectedIds: effectiveSelectedIds,
     selected,
     selectedNodes,
     layerTree,

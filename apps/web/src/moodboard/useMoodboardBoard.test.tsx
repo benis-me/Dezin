@@ -565,7 +565,18 @@ test("useMoodboardBoard never appends a completed upload to a different board", 
         resolveUpload = resolve;
       }),
   );
-  const saveMoodboardNodes = vi.fn();
+  const saveMoodboardNodes = vi.fn(async (boardId: string, inputs: SaveMoodboardNodeInput[]) =>
+    inputs.map((input, index) => ({
+      ...input,
+      id: input.id ?? `saved-${index}`,
+      boardId,
+      rotation: input.rotation ?? 0,
+      zIndex: input.zIndex ?? index,
+      data: input.data ?? {},
+      createdAt: 1,
+      updatedAt: 2,
+    })),
+  );
   const api = makeFakeApi({
     getMoodboard: async (boardId: string) => ({
       id: boardId,
@@ -617,7 +628,10 @@ test("useMoodboardBoard never appends a completed upload to a different board", 
   });
 
   expect(board.nodes).toEqual([expect.objectContaining({ boardId: "board-2", id: "note-board-2" })]);
-  expect(saveMoodboardNodes).not.toHaveBeenCalled();
+  expect(saveMoodboardNodes).toHaveBeenCalledWith(
+    "board-1",
+    expect.arrayContaining([expect.objectContaining({ type: "image", data: expect.objectContaining({ assetId: "asset-board-1" }) })]),
+  );
 });
 
 test("useMoodboardBoard retries a failed unmount flush instead of stranding a timerless save", async () => {
@@ -680,6 +694,83 @@ test("useMoodboardBoard retries a failed unmount flush instead of stranding a ti
   });
   expect(saveMoodboardNodes).toHaveBeenCalledTimes(2);
   expect(saveMoodboardNodes).toHaveBeenLastCalledWith("board-retry", [expect.objectContaining({ id: "note-retry", x: 91 })]);
+});
+
+test("a remounted board supersedes the detached instance's failed-save retry", async () => {
+  const initialNode: MoodboardNode = {
+    id: "note-shared",
+    boardId: "board-shared",
+    type: "note",
+    x: 0,
+    y: 0,
+    width: 160,
+    height: 120,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "shared" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-shared");
+    return null;
+  }
+  const saveMoodboardNodes = vi
+    .fn<ReturnType<typeof makeFakeApi>["saveMoodboardNodes"]>()
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockImplementation(async (boardId, inputs) => inputs.map((input) => ({ ...initialNode, ...input, boardId, updatedAt: 2 })));
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-shared",
+      name: "Shared",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [initialNode],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+    saveMoodboardNodes,
+  });
+  const first = render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+  vi.useFakeTimers();
+  act(() => board.updateNodes([{ ...initialNode, x: 91 }]));
+  first.unmount();
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(saveMoodboardNodes).toHaveBeenCalledTimes(1);
+
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(board.nodes[0]?.x).toBe(91);
+  act(() => board.updateNodes([{ ...initialNode, x: 222 }]));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(350);
+  });
+  expect(saveMoodboardNodes).toHaveBeenCalledTimes(2);
+  expect(saveMoodboardNodes).toHaveBeenLastCalledWith("board-shared", [expect.objectContaining({ id: "note-shared", x: 222 })]);
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_000);
+  });
+  expect(saveMoodboardNodes).toHaveBeenCalledTimes(2);
 });
 
 test("useMoodboardBoard sets an image node as the current board cover", async () => {

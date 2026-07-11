@@ -6,11 +6,13 @@ import type { Frame } from "leafer-editor";
 import { useToast } from "../components/Toast.tsx";
 import type { MoodboardNode } from "../lib/api.ts";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
+import { isReservedShortcutTarget } from "../lib/keyboard.ts";
 import { imageActionDefaultForField, imageActionModelField } from "../lib/image-action-defaults.ts";
 import { cn } from "../lib/utils.ts";
 import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
 import {
   CanvasActionBar,
+  CanvasZoomBar,
   GeneratorPromptToolbar,
   MultiSelectionToolbar,
   QuickEditPromptToolbar,
@@ -26,7 +28,7 @@ import {
   collectFloatingOccluderRects,
   generatorModel,
   generatorPrompt,
-  isEditableShortcutTarget,
+  MOODBOARD_AUTHORING_CAPABILITIES,
   originalContentSizeForNode,
   referenceAssetIds,
   rectFromBounds,
@@ -41,6 +43,8 @@ import { MOODBOARD_LEAFER_EDITOR_CONFIG } from "./moodboard-canvas-config.ts";
 import { useMoodboardCanvasController, type MoodboardCanvasProps } from "./useMoodboardCanvasController.ts";
 
 type ReferencePickTarget = { kind: "node" | "quick-edit"; id: string };
+
+const noopGenerateImage: NonNullable<MoodboardCanvasProps["onGenerateImage"]> = async () => {};
 
 function moodboardAssetPreviewUrl(boardId: string, assetId: string): string {
   return `/api/moodboards/${encodeURIComponent(boardId)}/assets/${encodeURIComponent(assetId)}`;
@@ -59,9 +63,10 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     imageProviderId = "",
     imageActionModels = {},
     moodboardAssets = [],
+    capabilities = MOODBOARD_AUTHORING_CAPABILITIES,
     onImageModelChange = () => {},
     onConfigureImageActionModel,
-    onGenerateImage,
+    onGenerateImage = noopGenerateImage,
     onSendToAgent,
     onSetCoverImage,
     onUploadReferenceFiles,
@@ -69,7 +74,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   } = props;
   const { toast } = useToast();
   const [referencePickTarget, setReferencePickTarget] = useState<ReferencePickTarget | null>(null);
-  const referencePickActive = Boolean(referencePickTarget);
+  const referencePickActive = capabilities.select && capabilities.generate && Boolean(referencePickTarget);
   const referenceNodePickRef = useRef<((node: MoodboardNode) => void) | null>(null);
   const canvas = useMoodboardCanvasController({
     ...props,
@@ -78,7 +83,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   });
   const selectedGeneratorPrompt = canvas.selected ? generatorPrompt(canvas.selected) : "";
   const selectedGeneratorModel = canvas.selected ? generatorModel(canvas.selected) : "";
-  const cursor = canvas.tool === "hand" ? "grab" : canvas.tool === "note" || canvas.tool === "section" ? "crosshair" : "default";
+  const cursor = !capabilities.select || canvas.tool === "hand" ? "grab" : canvas.tool === "note" || canvas.tool === "section" ? "crosshair" : "default";
   const [presentationMode, setPresentationMode] = useState(false);
   const [quickEditOpen, setQuickEditOpen] = useState(false);
   const [quickEditReferenceAssetIds, setQuickEditReferenceAssetIds] = useState<string[]>([]);
@@ -259,7 +264,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Tab" || event.metaKey || event.ctrlKey || event.altKey || presentationMode || !quickEditNode || !canvas.runtimeReady) return;
-      if (isEditableShortcutTarget(event.target)) return;
+      if (isReservedShortcutTarget(event.target)) return;
       event.preventDefault();
       openQuickEdit();
     };
@@ -272,7 +277,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Enter" || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       if (presentationMode || quickEditOpen || referencePickActive || !canvas.runtimeReady || canvas.selectedNodes.length === 0) return;
-      if (isEditableShortcutTarget(event.target) || isInteractiveSendShortcutTarget(event.target)) return;
+      if (isReservedShortcutTarget(event.target) || isInteractiveSendShortcutTarget(event.target)) return;
       event.preventDefault();
       sendNodesToAgent(canvas.selectedNodes);
     };
@@ -281,23 +286,23 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   }, [canvas.runtimeReady, canvas.selectedNodes, onSendToAgent, presentationMode, quickEditOpen, referencePickActive, sendNodesToAgent]);
 
   const handleExternalDragEnter = (event: ReactDragEvent<HTMLDivElement>): void => {
-    if (!hasDraggedFiles(event)) return;
+    if (!capabilities.upload || !hasDraggedFiles(event)) return;
     event.preventDefault();
   };
 
   const handleExternalDragOver = (event: ReactDragEvent<HTMLDivElement>): void => {
-    if (!hasDraggedFiles(event)) return;
+    if (!capabilities.upload || !hasDraggedFiles(event)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
   };
 
   const handleExternalDragLeave = (event: ReactDragEvent<HTMLDivElement>): void => {
-    if (!hasDraggedFiles(event)) return;
+    if (!capabilities.upload || !hasDraggedFiles(event)) return;
     event.preventDefault();
   };
 
   const handleExternalDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
-    if (!hasDraggedFiles(event)) return;
+    if (!capabilities.upload || !hasDraggedFiles(event)) return;
     event.preventDefault();
     const dataTransfer = event.dataTransfer;
     const containerRect = canvas.hostRef.current?.getBoundingClientRect();
@@ -390,7 +395,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         onDrop={handleExternalDrop}
       >
         <AnimatePresence initial={false}>
-          {canvas.layersOpen && !presentationMode && !referencePickActive ? (
+          {capabilities.select && canvas.layersOpen && !presentationMode && !referencePickActive ? (
             <MoodboardLayerPanel
               items={canvas.layerTree}
               selectedIds={canvas.selectedIds}
@@ -413,7 +418,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             fill="#f7f7f5"
             editor={MOODBOARD_LEAFER_EDITOR_CONFIG}
             wheel={{ preventDefault: true }}
-            move={{ dragEmpty: false }}
+            move={{ dragEmpty: canvas.tool === "hand" && capabilities.panZoom }}
             zoom={{ min: 0.1, max: 4 }}
             onAppReady={canvas.handleAppReady}
             className={cn("h-full w-full overflow-hidden", canvas.tool === "hand" && "active:cursor-grabbing")}
@@ -423,7 +428,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           </Leafer>
         </div>
 
-        <MoodboardSectionLabels nodes={nodes} appRef={canvas.appRef} onSelect={canvas.selectLayer} onRename={canvas.renameNode} />
+        {capabilities.select ? <MoodboardSectionLabels nodes={nodes} appRef={canvas.appRef} onSelect={canvas.selectLayer} onRename={canvas.renameNode} /> : null}
 
         <AnimatePresence initial={false}>
           {referencePickTarget ? <ReferencePickBanner onCancel={() => setReferencePickTarget(null)} /> : null}
@@ -467,14 +472,16 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
               </span>
               <div>
                 <p className="text-sm font-medium text-foreground">Start collecting direction</p>
-                <p className="mt-1 text-xs text-muted-foreground">Drop images here, add notes, or double-click the canvas to add a generator.</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {capabilities.mutate ? "Drop images here, add notes, or double-click the canvas to add a generator." : "No visual references are available yet."}
+                </p>
               </div>
             </div>
           </div>
         ) : null}
 
         <AnimatePresence initial={false}>
-          {canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen && !referencePickActive ? (
+          {capabilities.mutate && capabilities.select && canvas.selected && canvas.selectedIds.length === 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen && !referencePickActive ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -498,7 +505,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selectedNodes.length > 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen && !referencePickActive ? (
+          {capabilities.mutate && capabilities.select && canvas.selectedNodes.length > 1 && canvas.runtimeReady && !presentationMode && !quickEditOpen && !referencePickActive ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -522,7 +529,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {canvas.selected?.type === "image-generator" && canvas.runtimeReady && !presentationMode && !referencePickActive ? (
+          {capabilities.generate && capabilities.mutate && canvas.selected?.type === "image-generator" && canvas.runtimeReady && !presentationMode && !referencePickActive ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -561,7 +568,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         </AnimatePresence>
 
         <AnimatePresence initial={false}>
-          {quickEditOpen && quickEditNode && canvas.runtimeReady && !presentationMode && !referencePickActive ? (
+          {capabilities.generate && capabilities.mutate && quickEditOpen && quickEditNode && canvas.runtimeReady && !presentationMode && !referencePickActive ? (
             <FloatingCanvasSurface
               appRef={canvas.appRef}
               hostRef={canvas.hostRef}
@@ -596,11 +603,11 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
           ) : null}
         </AnimatePresence>
 
-        {!presentationMode && !referencePickActive ? (
+        {capabilities.mutate && !presentationMode && !referencePickActive ? (
           <CanvasActionBar tool={canvas.tool} onToolChange={canvas.setTool} onAddImageGenerator={() => canvas.addImageGeneratorAt()} />
         ) : null}
 
-        {canvas.contextMenu && !presentationMode && !referencePickActive ? (
+        {capabilities.mutate && canvas.contextMenu && !presentationMode && !referencePickActive ? (
           <MoodboardContextMenu
             menu={canvas.contextMenu}
             targetId={canvas.contextTargetId}
@@ -661,7 +668,7 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
         ) : null}
 
         <AnimatePresence initial={false}>
-          {canvas.selected && !presentationMode && !referencePickActive ? (
+          {capabilities.mutate && canvas.selected && !presentationMode && !referencePickActive ? (
             <MoodboardPropertiesPanel
               node={canvas.selected}
               onPatch={(patch) => canvas.selected && canvas.patchNode(canvas.selected.id, patch)}
@@ -686,6 +693,9 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
             />
           ) : null}
         </AnimatePresence>
+        {capabilities.panZoom && !onTopbarControlsChange ? (
+          <CanvasZoomBar zoom={canvas.zoom} onChangeZoom={canvas.changeZoom} onFitView={canvas.fitView} />
+        ) : null}
       </div>
     </div>
   );

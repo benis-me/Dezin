@@ -56,6 +56,21 @@ test("workspace loading state preserves the project split layout", () => {
   expect(screen.queryByLabelText("Message")).toBeNull();
 });
 
+test("the project composer does not submit Enter while an IME composition is active", async () => {
+  const streamRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {});
+  render(
+    <ApiProvider client={makeFakeApi({ streamRun })}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  const composer = await screen.findByLabelText("Message");
+  fireEvent.change(composer, { target: { value: "正在输入" } });
+  fireEvent.keyDown(composer, { key: "Enter", shiftKey: false, isComposing: true });
+  await Promise.resolve();
+  expect(streamRun).not.toHaveBeenCalled();
+  expect(composer).toHaveValue("正在输入");
+});
+
 test("workspace conversation panel defaults to 400px before the user resizes it", async () => {
   const innerWidth = vi.spyOn(window, "innerWidth", "get").mockReturnValue(1000);
   try {
@@ -1148,6 +1163,40 @@ test("a clean initial stream EOF reattaches until the acknowledged cancellation 
 
   expect(await screen.findByText("Stopped")).toBeInTheDocument();
   expect(reattachRun).toHaveBeenCalledWith("r-eof", expect.any(AbortSignal), expect.objectContaining({ afterSeq: expect.any(Number) }));
+});
+
+test("a rejected initial stream reattaches instead of declaring an acknowledged cancellation failed", async () => {
+  let rejectInitialStream!: () => void;
+  const cancelRun = vi.fn(async () => ({ cancelled: true }));
+  const reattachRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {
+    yield { type: "run-cancelled", runId: "r-reject", reason: "user" };
+  });
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-reject", conversationId: "c1" };
+      await new Promise<void>((resolve) => {
+        rejectInitialStream = resolve;
+      });
+      throw new Error("network disconnected");
+    },
+    cancelRun,
+    reattachRun,
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "stop across reject" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  fireEvent.click(await screen.findByLabelText("Stop"));
+  expect(await screen.findByText("Stopping…")).toBeInTheDocument();
+  act(() => rejectInitialStream());
+
+  expect(await screen.findByText("Stopped")).toBeInTheDocument();
+  expect(screen.queryByText(/The run failed: network disconnected/)).toBeNull();
+  expect(reattachRun).toHaveBeenCalledWith("r-reject", expect.any(AbortSignal), expect.objectContaining({ afterSeq: expect.any(Number) }));
 });
 
 test("queued prompts survive remount and drain on the next workspace entry", async () => {

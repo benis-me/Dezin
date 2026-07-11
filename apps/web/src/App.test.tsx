@@ -36,22 +36,33 @@ test("renders the shell and the Home screen by default", () => {
 test("routes to each screen", async () => {
   window.history.pushState({}, "", "/design-systems");
   renderApp();
-  expect(screen.getByRole("heading", { name: "Design systems" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Design systems" })).toBeInTheDocument();
   expect(await screen.findByText("Modern Minimal")).toBeInTheDocument();
   cleanup();
 
   window.history.pushState({}, "", "/projects/new");
   renderApp();
-  expect(screen.getByText("Preview")).toBeInTheDocument();
-  expect(screen.getByLabelText("Conversation")).toBeInTheDocument();
+  expect(await screen.findByText("Preview")).toBeInTheDocument();
+  expect(await screen.findByLabelText("Conversation")).toBeInTheDocument();
 });
 
-test("the gear opens the Settings dialog", () => {
+test("the gear navigates to route-driven Settings and close returns to the prior route", async () => {
   renderApp();
   expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
   fireEvent.click(screen.getByLabelText("Settings"));
-  expect(screen.getByRole("dialog", { name: "Settings" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Appearance" })).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/settings");
+  expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Appearance" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(window.location.pathname).toBe("/");
+});
+
+test("direct /settings renders Settings instead of falling back to Home", async () => {
+  window.history.pushState({}, "", "/settings");
+  renderApp();
+  expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Appearance" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Start a design" })).toBeNull();
 });
 
 test("the theme toggle flips the .dark class", () => {

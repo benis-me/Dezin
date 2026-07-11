@@ -211,7 +211,10 @@ test("ResearchPanel shows Product and Visual sub-tabs; Visual renders the collec
     <ResearchPanel research={research as any} assetUrl={(p) => `/a/${p}`} visualAssetUrl={(p) => `/v/${p}`} />,
   );
   getByText(/Users skim/);                         // Product visible by default
-  getByRole("tab", { name: /visual/i }).click();   // switch to Visual
+  const productTab = getByRole("tab", { name: /product/i });
+  productTab.focus();
+  fireEvent.keyDown(productTab, { key: "ArrowRight" });
+  expect(getByRole("tab", { name: /visual/i })).toHaveFocus();
   await findByText(/Mono palette/);
   getByText(/dribbble/i);
   getByText(/Jane/);

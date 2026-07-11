@@ -8,6 +8,7 @@ import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardAgentPanel } from "./MoodboardAgentPanel.tsx";
 import { CanvasActionBar, CanvasViewBar, GeneratorPromptToolbar, MultiSelectionToolbar, QuickEditPromptToolbar, SelectionToolbar } from "./MoodboardCanvasToolbars.tsx";
 import { MoodboardCanvasNode } from "./MoodboardCanvasNode.tsx";
+import { MoodboardCanvas } from "./MoodboardCanvas.tsx";
 import { MoodboardContextMenu } from "./MoodboardContextMenu.tsx";
 import { MoodboardLayerPanel } from "./MoodboardLayerPanel.tsx";
 import { MoodboardMultiPropertiesPanel, MoodboardPropertiesPanel } from "./MoodboardPropertiesPanel.tsx";
@@ -24,6 +25,7 @@ import {
   isEditableShortcutTarget,
   isResetZoomShortcut,
   isTemporaryHandShortcut,
+  MOODBOARD_REVIEW_CAPABILITIES,
   readInitialLayersOpen,
   moveContainedNodesWithSections,
   normalizeCanvasRect,
@@ -178,6 +180,65 @@ test("MoodboardContextMenu clamps to the visible viewport after measuring itself
   expect(screen.getByText("Shift 1")).toBeInTheDocument();
   expect(screen.getByText("Reset zoom")).toBeInTheDocument();
   expect(screen.getByText("Cmd 0")).toBeInTheDocument();
+});
+
+test("MoodboardCanvas review capabilities keep navigation but invoke no authoring callbacks", () => {
+  const node: MoodboardNode = {
+    id: "n-review",
+    boardId: "b1",
+    type: "note",
+    x: 0,
+    y: 0,
+    width: 180,
+    height: 120,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "Read only" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const onSelectIds = vi.fn();
+  const onNodesChange = vi.fn();
+  const onAddNote = vi.fn();
+  const onAddSection = vi.fn();
+  const onAddImageGenerator = vi.fn();
+  const onUploadFiles = vi.fn();
+  const onGenerateImage = vi.fn().mockResolvedValue(undefined);
+  const { container } = render(
+    <MoodboardCanvas
+      nodes={[node]}
+      selectedIds={[node.id]}
+      capabilities={MOODBOARD_REVIEW_CAPABILITIES}
+      onSelectIds={onSelectIds}
+      onNodesChange={onNodesChange}
+      onAddNote={onAddNote}
+      onAddSection={onAddSection}
+      onAddImageGenerator={onAddImageGenerator}
+      onUploadFiles={onUploadFiles}
+      onGenerateImage={onGenerateImage}
+    />,
+  );
+
+  fireEvent.keyDown(window, { key: "Delete" });
+  fireEvent.keyDown(window, { key: "d", metaKey: true });
+  const root = container.querySelector("[data-moodboard-canvas-root]")!;
+  fireEvent.drop(root, {
+    dataTransfer: { types: ["Files"], items: [], files: [new File(["x"], "reference.png", { type: "image/png" })] },
+  });
+
+  expect(onSelectIds).not.toHaveBeenCalled();
+  expect(onNodesChange).not.toHaveBeenCalled();
+  expect(onAddNote).not.toHaveBeenCalled();
+  expect(onAddSection).not.toHaveBeenCalled();
+  expect(onAddImageGenerator).not.toHaveBeenCalled();
+  expect(onUploadFiles).not.toHaveBeenCalled();
+  expect(onGenerateImage).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Add note" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Image generator" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Zoom out" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Zoom in" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Canvas zoom options" })).toBeInTheDocument();
+  expect(container.querySelector('[style*="cursor: grab"]')).not.toBeNull();
 });
 
 test("MoodboardContextMenu clamps inside the canvas host bounds", async () => {
@@ -1801,6 +1862,33 @@ test("MoodboardAgentPanel renders project-style messages with copy actions", () 
 
   fireEvent.click(copyButtons[1]!);
   expect(writeText).toHaveBeenCalledWith("**Bold direction**\n\nUse warmer texture.");
+});
+
+test("MoodboardAgentPanel does not submit Enter while an IME composition is active", async () => {
+  const onSend = vi.fn().mockResolvedValue(undefined);
+  render(
+    <ApiProvider client={makeFakeApi()}>
+      <MoodboardAgentPanel
+        boardName="Material board"
+        messages={[]}
+        busy={false}
+        agents={[]}
+        agent=""
+        model=""
+        onBack={() => {}}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => {}}
+        onSend={onSend}
+      />
+    </ApiProvider>,
+  );
+  const composer = screen.getByLabelText("Message");
+  fireEvent.change(composer, { target: { value: "正在输入" } });
+  fireEvent.keyDown(composer, { key: "Enter", shiftKey: false, isComposing: true });
+  await Promise.resolve();
+  expect(onSend).not.toHaveBeenCalled();
+  expect(composer).toHaveValue("正在输入");
 });
 
 test("MoodboardAgentPanel renders canvas insertion as a removable sendable context card", async () => {

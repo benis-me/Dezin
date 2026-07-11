@@ -202,6 +202,37 @@ test("Shell sidebar can be resized outside project pages", () => {
   expect(screen.queryByRole("button", { name: "Browser extension" })).toBeNull();
 });
 
+test("Shell uses a mobile navigation layout at 390px without a resizable sidebar", () => {
+  const previous = window.matchMedia;
+  window.matchMedia = vi.fn((query: string) => ({
+    matches: query.includes("max-width: 639px"),
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })) as typeof window.matchMedia;
+  window.history.pushState({}, "", "/");
+  try {
+    render(
+      <Shell dark={false} onToggleDark={() => {}} onOpenSettings={() => {}}>
+        <div>Mobile content</div>
+      </Shell>,
+    );
+    expect(screen.getByTestId("app-shell")).toHaveAttribute("data-shell-layout", "mobile");
+    expect(screen.queryByRole("separator", { name: "Resize app sidebar" })).toBeNull();
+    expect(document.querySelector("aside")).toBeNull();
+    expect(screen.getByRole("button", { name: "Design" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Moodboard" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByText("Mobile content")).toBeInTheDocument();
+  } finally {
+    window.matchMedia = previous;
+  }
+});
+
 test("HomeScreen lists projects and opens them", () => {
   const onOpenProject = vi.fn();
   renderWithApi(<HomeScreen projects={[project("p1", "Pricing page")]} onOpenProject={onOpenProject} />, {
@@ -209,6 +240,24 @@ test("HomeScreen lists projects and opens them", () => {
   });
   fireEvent.click(screen.getByText("Pricing page"));
   expect(onOpenProject).toHaveBeenCalledWith("p1");
+});
+
+test("HomeScreen project cards are keyboard reachable and activate on Enter", () => {
+  const onOpenProject = vi.fn();
+  renderWithApi(<HomeScreen projects={[project("p-keyboard", "Keyboard project")]} onOpenProject={onOpenProject} />, {
+    listSkills: async () => SKILLS,
+  });
+  const card = screen.getByRole("button", { name: "Open Keyboard project" });
+  expect(card).toHaveAttribute("tabindex", "0");
+  expect(card.className).toContain("focus-visible:ring");
+  card.focus();
+  fireEvent.keyDown(card, { key: "Enter" });
+  expect(onOpenProject).toHaveBeenCalledWith("p-keyboard");
+});
+
+test("HomeScreen exposes a visible labeled Sharingan entry", () => {
+  renderWithApi(<HomeScreen projects={[]} />, { listSkills: async () => SKILLS });
+  expect(screen.getByRole("button", { name: "Sharingan clone from URL" })).toBeVisible();
 });
 
 test("HomeScreen marks projects with an active generation", () => {
@@ -482,6 +531,19 @@ test("MoodboardsScreen homepage prompt textarea auto-sizes with a capped height"
 
   const prompt = await screen.findByLabelText("Describe moodboard direction");
   expect(prompt).toHaveClass("field-sizing-content", "max-h-64", "min-h-[92px]");
+});
+
+test("MoodboardsScreen board cards are keyboard reachable and activate on Space", async () => {
+  const onOpenBoard = vi.fn();
+  renderWithApi(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
+    listMoodboards: async () => [moodboard("b-keyboard", "Keyboard board")],
+  });
+  const card = await screen.findByRole("button", { name: "Open Keyboard board" });
+  expect(card).toHaveAttribute("tabindex", "0");
+  expect(card.className).toContain("focus-visible:ring");
+  card.focus();
+  fireEvent.keyDown(card, { key: " " });
+  expect(onOpenBoard).toHaveBeenCalledWith("b-keyboard");
 });
 
 test("MoodboardsScreen generate mode starts a board with an image model instead of an agent message", async () => {

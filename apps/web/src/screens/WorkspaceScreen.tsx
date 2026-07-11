@@ -62,6 +62,7 @@ import { usePreviewRuntimeErrors, buildRuntimeErrorRepairPrompt, type RuntimeErr
 import { PreviewRuntimeErrorOverlay } from "../components/PreviewRuntimeErrorOverlay.tsx";
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
+import { isImeComposing } from "../lib/keyboard.ts";
 
 const TABS = ["Preview", "Sharingan", "Research", "Files", "Quality"] as const;
 type Tab = (typeof TABS)[number];
@@ -3559,16 +3560,21 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           pushResult("Stopped", { status: "stopped" });
         }
       } else {
-        setLiveItems([]);
-        liveItemsRef.current = [];
-        currentTurnTextRef.current = "";
-        finalSummaryTextRef.current = "";
-        summaryBoundaryRef.current = false;
-        pushResult(`The run failed: ${err instanceof Error ? err.message : "run failed"}`, { error: true });
-        toast("The run failed.", { variant: "error" });
-        // A failed direction-pick run must not leave the gate optimistically locked as "chosen" —
-        // revert so the user can pick a direction again.
-        if (directionSlug) setResearch((prev) => (prev && prev.chosenSlug === directionSlug ? { ...prev, chosenSlug: undefined } : prev));
+        const runId = activeRunIdRef.current;
+        if (runId) {
+          await continueRunAfterUnexpectedEof(runId, ctrl);
+        } else {
+          setLiveItems([]);
+          liveItemsRef.current = [];
+          currentTurnTextRef.current = "";
+          finalSummaryTextRef.current = "";
+          summaryBoundaryRef.current = false;
+          pushResult(`The run failed: ${err instanceof Error ? err.message : "run failed"}`, { error: true });
+          toast("The run failed.", { variant: "error" });
+          // A failed direction-pick run must not leave the gate optimistically locked as "chosen" —
+          // revert so the user can pick a direction again.
+          if (directionSlug) setResearch((prev) => (prev && prev.chosenSlug === directionSlug ? { ...prev, chosenSlug: undefined } : prev));
+        }
       }
     } finally {
       const unfinishedRunId = activeRunIdRef.current;
@@ -4887,7 +4893,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !isImeComposing(e)) {
                   e.preventDefault();
                   send();
                 }

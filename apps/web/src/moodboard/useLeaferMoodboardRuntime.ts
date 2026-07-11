@@ -44,6 +44,7 @@ interface UseLeaferMoodboardRuntimeOptions {
   onContextMenu: (menu: ContextMenuState) => void;
   onFrameStateChange: (nodes: SaveMoodboardNodeInput[]) => void;
   onFrameStateDraftChange: (nodes: SaveMoodboardNodeInput[] | null) => void;
+  editable?: boolean;
 }
 
 const FLOATING_TRACK_MS = 420;
@@ -60,6 +61,7 @@ export function useLeaferMoodboardRuntime({
   onContextMenu,
   onFrameStateChange,
   onFrameStateDraftChange,
+  editable = true,
 }: UseLeaferMoodboardRuntimeOptions) {
   const [runtimeReady, setRuntimeReady] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -428,7 +430,7 @@ export function useLeaferMoodboardRuntime({
     (layer: any) => {
       layerRef.current = layer;
       const app = appRef.current;
-      if (app) {
+      if (app && editable) {
         try {
           snapRef.current?.enable(false);
           snapRef.current?.destroy();
@@ -443,10 +445,10 @@ export function useLeaferMoodboardRuntime({
         }
       }
       setRuntimeReady(true);
-      selectIdsInRuntime(selectedIdsRef.current);
+      selectIdsInRuntime(editable ? selectedIdsRef.current : []);
       scheduleFloatingSelection();
     },
-    [scheduleFloatingSelection, selectIdsInRuntime],
+    [editable, scheduleFloatingSelection, selectIdsInRuntime],
   );
 
   useEffect(() => {
@@ -485,6 +487,10 @@ export function useLeaferMoodboardRuntime({
     if (!runtimeReady || !app || !editor) return;
 
     const syncSelectedFromEditor = (event?: any) => {
+      if (!editable) {
+        selectIdsInRuntime([]);
+        return;
+      }
       const ids = nodeIdsFromTarget(event?.value ?? editor.target);
       commitSelectedIdsFromRuntime(ids);
       scheduleFloatingSelection();
@@ -511,6 +517,7 @@ export function useLeaferMoodboardRuntime({
       trackFloatingSelection();
     };
     const selectFromTarget = (target: unknown, event?: any) => {
+      if (!editable) return false;
       const targetId = nodeIdFromTarget(target);
       if (!targetId) return false;
       const current = selectedIdsRef.current;
@@ -557,6 +564,7 @@ export function useLeaferMoodboardRuntime({
       callbacksRef.current.onBlankTap(point);
     };
     const handleDoubleTap = (event: any) => {
+      if (!editable) return;
       const point = eventCanvasPoint(event);
       setLastCanvasPoint(point);
       if (nodeIdFromTarget(event?.target)) return;
@@ -564,6 +572,7 @@ export function useLeaferMoodboardRuntime({
     };
     const handleMenu = (event: any) => {
       event?.preventDefault?.();
+      if (!editable) return;
       const containerRect = hostRef.current?.getBoundingClientRect();
       const client = eventClientPoint(
         event,
@@ -587,6 +596,7 @@ export function useLeaferMoodboardRuntime({
         setSectionDraftRect(rect.width >= 4 && rect.height >= 4 ? toViewportDraftRect(rect) : null);
         return;
       }
+      if (!editable) return;
       startTransforming();
       syncSectionChildrenDuringDrag();
       publishFrameStateDraft();
@@ -606,10 +616,11 @@ export function useLeaferMoodboardRuntime({
         }
         return;
       }
-      syncAfterNodeTransform();
+      if (editable) syncAfterNodeTransform();
       sectionChildrenDragRef.current = null;
     };
     const handleDragStart = (event: any) => {
+      if (!editable) return;
       if (toolRef.current === "section" && sectionDragStartRef.current) return;
       beginSectionChildrenDrag(event);
       startTransforming();
@@ -663,11 +674,11 @@ export function useLeaferMoodboardRuntime({
       editor.off(EditorScaleEvent.SCALE, handleEditorTransform);
       editor.off(EditorRotateEvent.ROTATE, handleEditorTransform);
     };
-  }, [beginSectionChildrenDrag, commitSelectedIdsFromRuntime, finishTransforming, flushFrameState, publishFrameStateDraft, runtimeReady, scheduleFloatingSelection, selectIdsInRuntime, startTransforming, syncSectionChildrenDuringDrag, toViewportDraftRect, trackFloatingSelection]);
+  }, [beginSectionChildrenDrag, commitSelectedIdsFromRuntime, editable, finishTransforming, flushFrameState, publishFrameStateDraft, runtimeReady, scheduleFloatingSelection, selectIdsInRuntime, startTransforming, syncSectionChildrenDuringDrag, toViewportDraftRect, trackFloatingSelection]);
 
   useEffect(() => {
-    selectIdsInRuntime(selectedIds);
-  }, [selectedIds, selectIdsInRuntime]);
+    selectIdsInRuntime(editable ? selectedIds : []);
+  }, [editable, selectedIds, selectIdsInRuntime]);
 
   useEffect(() => {
     const app: any = appRef.current;
@@ -676,6 +687,15 @@ export function useLeaferMoodboardRuntime({
     try {
       if (app.config) app.config.move = { ...(app.config.move ?? {}), dragEmpty: tool === "hand" };
       if (editor.config) {
+        if (!editable) {
+          editor.config.boxSelect = false;
+          editor.config.moveable = false;
+          editor.target = undefined;
+          selectedIdsRef.current = [];
+          callbacksRef.current.onSelectIds([]);
+          scheduleFloatingSelection();
+          return;
+        }
         const drawing = tool === "note" || tool === "section";
         editor.config.boxSelect = !drawing;
         editor.config.moveable = !drawing;
@@ -698,7 +718,7 @@ export function useLeaferMoodboardRuntime({
     } catch {
       /* Leafer config shape can vary by version. */
     }
-  }, [runtimeReady, scheduleFloatingSelection, tool]);
+  }, [editable, runtimeReady, scheduleFloatingSelection, tool]);
 
   const changeZoom = useCallback(
     (next: number) => {

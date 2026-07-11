@@ -711,8 +711,8 @@ export function HomeScreen({
       <div className="relative w-full px-7 pb-20 pt-10">
         <div className="mx-auto max-w-5xl">
           {/* Compact tool header — feature toggles ride the far right of the sub-line. */}
-          <div className="flex items-end justify-between gap-4">
-            <div className="max-w-2xl">
+          <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <div className="w-full max-w-2xl">
               <div className="flex items-center gap-2.5">
                 {sharingan && (
                   <span
@@ -736,7 +736,7 @@ export function HomeScreen({
               </p>
             </div>
             <TooltipProvider>
-              <div className="flex shrink-0 items-center gap-2 pb-0.5">
+              <div className="flex flex-wrap items-center gap-2 pb-0.5 sm:shrink-0">
                 {!sharingan && (
                   <PillToggle
                     on={researchOn}
@@ -897,6 +897,23 @@ export function HomeScreen({
               </div>
               <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 px-1 pt-3">
                 <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    aria-label="Sharingan clone from URL"
+                    aria-pressed={sharingan}
+                    onClick={toggleSharingan}
+                    className={cn(
+                      "inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                      sharingan ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    <span
+                      aria-hidden
+                      className="sharingan-eye size-3.5 shrink-0"
+                      style={{ WebkitMaskImage: `url(${sharinganEyeUrl})`, maskImage: `url(${sharinganEyeUrl})` }}
+                    />
+                    Sharingan
+                  </button>
                   <AttachMenu
                     onAttachFile={() => imgInputRef.current?.click()}
                     onPickPaths={(paths) => setBrief((b) => `${b}${b.trim() ? "\n\n" : ""}Use these local paths as reference: ${paths.join(", ")}`)}
@@ -1078,8 +1095,16 @@ export function HomeScreen({
             {visible.map((p) => (
               <StaggerItem as="li" key={p.id}>
                 <Card
-                  className="group cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`Open ${p.name}`}
+                  className="group cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                   onClick={() => onOpenProject?.(p.id)}
+                  onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+                    event.preventDefault();
+                    onOpenProject?.(p.id);
+                  }}
                 >
                   <ProjectThumb coverUrl={p.coverUrl} runStatus={p.runStatus} />
                   <div className="p-3">
@@ -1114,8 +1139,16 @@ export function HomeScreen({
               {visible.map((p) => (
                 <StaggerItem as="li" key={p.id} className="border-b border-border last:border-0">
                   <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open ${p.name}`}
                     onClick={() => onOpenProject?.(p.id)}
-                    className="group flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-2/50"
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+                      event.preventDefault();
+                      onOpenProject?.(p.id);
+                    }}
+                    className="group flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-2/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
                   >
                     <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
                       {p.coverUrl ? (

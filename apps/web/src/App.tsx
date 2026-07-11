@@ -1,21 +1,24 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { Shell } from "./components/Shell.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
-import { Dialog, Loading } from "./components/ui/index.ts";
+import { Button, Dialog, Loading } from "./components/ui/index.ts";
 import { useToast } from "./components/Toast.tsx";
-import { useRoute, navigate, type Route } from "./router.tsx";
+import { useRoute, navigate, routeToPath, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
 import { setPendingBrief } from "./lib/pending-brief.ts";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
-import { WorkspaceScreen } from "./screens/WorkspaceScreen.tsx";
-import { DesignSystemsScreen } from "./screens/DesignSystemsScreen.tsx";
-import { DesignSystemDetailScreen } from "./screens/DesignSystemDetailScreen.tsx";
-import { DesignSystemNewScreen } from "./screens/DesignSystemNewScreen.tsx";
-import { EffectsScreen } from "./screens/EffectsScreen.tsx";
-import { EffectScreen } from "./screens/EffectScreen.tsx";
-import { SettingsScreen } from "./screens/SettingsScreen.tsx";
-import { OnboardingScreen } from "./screens/OnboardingScreen.tsx";
-import { MoodboardsScreen } from "./screens/MoodboardsScreen.tsx";
+
+const WorkspaceScreen = lazy(() => import("./screens/WorkspaceScreen.tsx").then((module) => ({ default: module.WorkspaceScreen })));
+const DesignSystemsScreen = lazy(() => import("./screens/DesignSystemsScreen.tsx").then((module) => ({ default: module.DesignSystemsScreen })));
+const DesignSystemDetailScreen = lazy(() =>
+  import("./screens/DesignSystemDetailScreen.tsx").then((module) => ({ default: module.DesignSystemDetailScreen })),
+);
+const DesignSystemNewScreen = lazy(() => import("./screens/DesignSystemNewScreen.tsx").then((module) => ({ default: module.DesignSystemNewScreen })));
+const EffectsScreen = lazy(() => import("./screens/EffectsScreen.tsx").then((module) => ({ default: module.EffectsScreen })));
+const EffectScreen = lazy(() => import("./screens/EffectScreen.tsx").then((module) => ({ default: module.EffectScreen })));
+const SettingsScreen = lazy(() => import("./screens/SettingsScreen.tsx").then((module) => ({ default: module.SettingsScreen })));
+const OnboardingScreen = lazy(() => import("./screens/OnboardingScreen.tsx").then((module) => ({ default: module.OnboardingScreen })));
+const MoodboardsScreen = lazy(() => import("./screens/MoodboardsScreen.tsx").then((module) => ({ default: module.MoodboardsScreen })));
 
 const MoodboardScreen = lazy(() =>
   import("./screens/MoodboardScreen.tsx").then((module) => ({ default: module.MoodboardScreen })),
@@ -37,11 +40,7 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
     case "moodboards":
       return <MoodboardsScreen onOpenBoard={(id) => navigate(`/moodboards/${id}`)} />;
     case "moodboard":
-      return (
-        <Suspense fallback={<RouteLoading label="Loading moodboard..." />}>
-          <MoodboardScreen key={route.id} boardId={route.id} onBack={() => navigate("/moodboards")} onOpenSettings={onOpenSettings} />
-        </Suspense>
-      );
+      return <MoodboardScreen key={route.id} boardId={route.id} onBack={() => navigate("/moodboards")} onOpenSettings={onOpenSettings} />;
     case "design-systems":
       return <DesignSystemsScreen />;
     case "design-system":
@@ -54,6 +53,8 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
       return <EffectsScreen startNew />;
     case "effect":
       return <EffectScreen effectId={route.id} onBack={() => navigate("/effects")} />;
+    case "settings":
+      return null;
     case "home":
     default:
       return (
@@ -84,6 +85,32 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
   }
 }
 
+class RouteErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error("Route failed to render", error, info.componentStack);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div role="alert" className="grid h-full min-h-0 w-full place-items-center p-6 text-center">
+        <div>
+          <p className="text-sm font-medium">Couldn't open this screen.</p>
+          <Button className="mt-3" variant="outline" onClick={() => window.location.reload()}>
+            Reload
+          </Button>
+        </div>
+      </div>
+    );
+  }
+}
+
 function RouteLoading({ label }: { label: string }) {
   return (
     <div className="grid h-full min-h-0 w-full place-items-center">
@@ -103,12 +130,17 @@ export default function App() {
   });
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
-  const openSettings = (section?: string) => {
+  const settingsReturnPathRef = useRef(route.name === "settings" ? "/" : routeToPath(route));
+  const openSettings = useCallback((section?: string) => {
+    if (route.name !== "settings") settingsReturnPathRef.current = routeToPath(route);
     setSettingsSection(section);
-    setSettingsOpen(true);
-  };
+    navigate("/settings");
+  }, [route]);
+  const closeSettings = useCallback(() => {
+    setSettingsSection(undefined);
+    navigate(settingsReturnPathRef.current || "/");
+  }, []);
   const onToggleDark = () =>
     setDark((d) => {
       const next = !d;
@@ -129,41 +161,50 @@ export default function App() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
-        setSettingsOpen((o) => !o);
+        if (route.name === "settings") closeSettings();
+        else openSettings();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [closeSettings, openSettings, route.name]);
 
   if (!onboarded) {
     return (
-      <OnboardingScreen
-        onDone={() => {
-          try {
-            localStorage.setItem("dezin.onboarded", "1");
-          } catch {
-            /* ignore */
-          }
-          setOnboarded(true);
-        }}
-      />
+      <RouteErrorBoundary>
+        <Suspense fallback={<RouteLoading label="Loading Dezin..." />}>
+          <OnboardingScreen
+            onDone={() => {
+              try {
+                localStorage.setItem("dezin.onboarded", "1");
+              } catch {
+                /* ignore */
+              }
+              setOnboarded(true);
+            }}
+          />
+        </Suspense>
+      </RouteErrorBoundary>
     );
   }
 
   return (
     <Shell dark={dark} onToggleDark={onToggleDark} onOpenSettings={openSettings}>
-      <Screen route={route} onOpenSettings={openSettings} />
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-        dark={dark}
-        onToggleTheme={onToggleDark}
-        onOpenSettings={() => openSettings()}
-      />
-      <Dialog open={settingsOpen} onClose={() => setSettingsOpen(false)} label="Settings" className="sm:max-w-5xl" showClose>
-        <SettingsScreen dark={dark} onToggleDark={onToggleDark} initialSection={settingsSection} />
-      </Dialog>
+      <RouteErrorBoundary key={routeToPath(route)}>
+        <Suspense fallback={<RouteLoading label="Loading screen..." />}>
+          <Screen route={route} onOpenSettings={openSettings} />
+          <CommandPalette
+            open={paletteOpen}
+            onClose={() => setPaletteOpen(false)}
+            dark={dark}
+            onToggleTheme={onToggleDark}
+            onOpenSettings={() => openSettings()}
+          />
+          <Dialog open={route.name === "settings"} onClose={closeSettings} label="Settings" className="sm:max-w-5xl" showClose>
+            {route.name === "settings" ? <SettingsScreen dark={dark} onToggleDark={onToggleDark} initialSection={settingsSection} /> : null}
+          </Dialog>
+        </Suspense>
+      </RouteErrorBoundary>
     </Shell>
   );
 }
