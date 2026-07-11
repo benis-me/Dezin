@@ -14,6 +14,7 @@ import { parseClaudeStream, parseClaudeLine } from "./claude-stream.ts";
 import { agentSpawnEnv } from "./providers/cli.ts";
 import { assertSuccessfulExit, readArtifactSnapshot, readUpdatedArtifactHtml } from "./runner-utils.ts";
 import { BoundedTextBuffer } from "./bounded-text-buffer.ts";
+import { terminateOwnedProcessGroup } from "./process-group.ts";
 
 /**
  * A compact transcript of earlier turns, prepended to a turn's message so the agent has the
@@ -138,24 +139,16 @@ export class NodeSpawner implements ProcessSpawner {
           return (error as NodeJS.ErrnoException).code === "EPERM";
         }
       };
-      const waitForGroup = async (timeoutMs: number): Promise<boolean> => {
-        const deadline = Date.now() + Math.max(0, timeoutMs);
-        while (groupAlive() && Date.now() < deadline) {
-          await new Promise<void>((resolveDelay) => {
-            const timer = setTimeout(resolveDelay, Math.min(10, Math.max(1, deadline - Date.now())));
-            timer.unref?.();
-          });
-        }
-        return !groupAlive();
-      };
       const terminate = (): Promise<void> => {
         if (terminationPromise) return terminationPromise;
-        killChild("SIGTERM");
-        terminationPromise = (async () => {
-          if (await waitForGroup(this.options.killDelayMs ?? DEFAULT_KILL_DELAY_MS)) return;
-          killChild("SIGKILL");
-          await waitForGroup(1_000);
-        })();
+        terminationPromise = terminateOwnedProcessGroup({
+          label: input.command,
+          signal: killChild,
+          isAlive: groupAlive,
+          termGraceMs: this.options.killDelayMs ?? DEFAULT_KILL_DELAY_MS,
+          killGraceMs: 1_000,
+        });
+        void terminationPromise.catch(() => {});
         return terminationPromise;
       };
       const onAbort = (): void => { void terminate(); };
@@ -190,17 +183,28 @@ export class NodeSpawner implements ProcessSpawner {
         if (settled) return;
         settled = true;
         void (async () => {
-          await terminationPromise?.catch(() => {});
+          let cleanupError: unknown;
+          try {
+            await terminationPromise;
+          } catch (error) {
+            cleanupError = error;
+          }
           cleanup();
-          reject(e);
+          reject(cleanupError ?? e);
         })();
       });
       child.on("close", (code) => {
         if (settled) return;
         settled = true;
         void (async () => {
-          await terminationPromise?.catch(() => {});
+          let cleanupError: unknown;
+          try {
+            await terminationPromise;
+          } catch (error) {
+            cleanupError = error;
+          }
           cleanup();
+          if (cleanupError) return reject(cleanupError);
           if (!outputLimitError) {
             const decoded = stdoutDecoder.end();
             if (decoded) input.onStdout?.(decoded);

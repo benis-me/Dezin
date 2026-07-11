@@ -49,7 +49,7 @@ function jsonLine(event: unknown): string | null {
   }
 }
 
-function compactTerminal(event: unknown, seq: number | null): Record<string, unknown> {
+function compactTerminal(event: unknown, seq: number | null, maxBytes: number): Record<string, unknown> {
   let runId: string | undefined;
   try {
     const candidate = event && typeof event === "object" && !Array.isArray(event)
@@ -59,27 +59,31 @@ function compactTerminal(event: unknown, seq: number | null): Record<string, unk
   } catch {
     // A hostile getter must not prevent terminalization.
   }
-  return {
+  const base = {
     type: eventType(event),
-    ...(runId ? { runId } : {}),
     ...(seq === null ? {} : { seq }),
     truncated: true,
   };
+  const withRunId = runId ? { ...base, runId } : base;
+  const encoded = jsonLine(withRunId);
+  return encoded && Buffer.byteLength(encoded, "utf8") < maxBytes ? withRunId : base;
 }
 
 /** A byte-and-count bounded replay buffer with one stable truncation marker. */
 export class BoundedEventBuffer {
   private readonly maxEvents: number;
   private readonly maxBytes: number;
+  private readonly markerType: string;
   private readonly items: BufferedEvent[] = [];
   private itemBytes = 0;
   private truncation: TruncationState | null = null;
 
-  constructor(maxEvents = RUN_JOURNAL_MAX_EVENTS, maxBytes = RUN_JOURNAL_MAX_BYTES) {
+  constructor(maxEvents = RUN_JOURNAL_MAX_EVENTS, maxBytes = RUN_JOURNAL_MAX_BYTES, markerType = RUN_JOURNAL_TRUNCATED) {
     if (!Number.isSafeInteger(maxEvents) || maxEvents < 1) throw new Error("maxEvents must be positive");
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 128) throw new Error("maxBytes is too small");
     this.maxEvents = maxEvents;
     this.maxBytes = maxBytes;
+    this.markerType = markerType;
   }
 
   push(event: unknown): void {
@@ -89,13 +93,13 @@ export class BoundedEventBuffer {
     let line = jsonLine(stored);
     if (!line) {
       stored = terminal
-        ? compactTerminal(event, seq)
+        ? compactTerminal(event, seq, this.maxBytes)
         : { type: "run-event-unserializable", ...(seq === null ? {} : { seq }) };
       line = jsonLine(stored)!;
     }
     if (Buffer.byteLength(line, "utf8") >= this.maxBytes) {
       if (terminal) {
-        stored = compactTerminal(event, seq);
+        stored = compactTerminal(event, seq, this.maxBytes);
         line = jsonLine(stored)!;
       } else {
         this.noteDrop({ event: stored, line, bytes: Buffer.byteLength(line), terminal: false, seq });
@@ -123,6 +127,10 @@ export class BoundedEventBuffer {
 
   get byteLength(): number {
     return this.itemBytes + (this.truncation ? Buffer.byteLength(this.markerLine(), "utf8") : 0);
+  }
+
+  get truncated(): boolean {
+    return this.truncation !== null;
   }
 
   /** Seed truncation metadata when loading only the bounded tail of a legacy journal. */
@@ -153,7 +161,7 @@ export class BoundedEventBuffer {
   private marker(): unknown {
     const state = this.truncation!;
     return {
-      type: RUN_JOURNAL_TRUNCATED,
+      type: this.markerType,
       seq: state.markerSeq,
       droppedEvents: state.droppedEvents,
       droppedBytes: state.droppedBytes,
@@ -185,8 +193,8 @@ export class BoundedEventBuffer {
       const overCount = this.length > this.maxEvents;
       const overBytes = this.byteLength > this.maxBytes;
       if (!overCount && !overBytes) return;
-      const index = this.items.findIndex((item) => !item.terminal);
-      const removeAt = index >= 0 ? index : 0;
+      const removeAt = this.items.findIndex((item) => !item.terminal);
+      if (removeAt < 0) return;
       const [removed] = this.items.splice(removeAt, 1);
       if (!removed) return;
       this.itemBytes -= removed.bytes;

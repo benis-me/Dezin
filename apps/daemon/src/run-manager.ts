@@ -11,7 +11,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from "
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RuntimeSupervisor } from "./runtime-supervisor.ts";
-import { BoundedEventBuffer, RUN_JOURNAL_MAX_BYTES } from "./bounded-buffer.ts";
+import { BoundedEventBuffer, RUN_JOURNAL_MAX_BYTES, RUN_JOURNAL_TRUNCATED } from "./bounded-buffer.ts";
 
 interface RunEntry {
   runId: string;
@@ -169,6 +169,17 @@ export function cancelRun(runId: string): boolean {
  */
 function shouldReplay(ev: unknown, afterSeq: number, seen: Set<number>): boolean {
   const seq = eventSeq(ev);
+  if (ev && typeof ev === "object" && !Array.isArray(ev)) {
+    const marker = ev as { type?: unknown; droppedThroughSeq?: unknown };
+    if (marker.type === RUN_JOURNAL_TRUNCATED && typeof marker.droppedThroughSeq === "number" && Number.isFinite(marker.droppedThroughSeq)) {
+      if (afterSeq >= marker.droppedThroughSeq) return false;
+      if (seq !== null) {
+        if (seen.has(seq)) return false;
+        seen.add(seq);
+      }
+      return true;
+    }
+  }
   if (seq === null) return afterSeq <= 0;
   if (seq <= afterSeq || seen.has(seq)) return false;
   seen.add(seq);

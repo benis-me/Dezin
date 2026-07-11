@@ -3693,6 +3693,17 @@ test("research activity is clamped, incrementally bounded, and force-flushed bef
       const journal = readFileSync(join(dataDir, ".runs", runId, "research-activity.jsonl"), "utf8");
       assert.ok(Buffer.byteLength(journal, "utf8") <= 2 * 1024 * 1024);
       assert.equal(journal.split('"type":"research-activity-truncated"').length - 1, 1);
+      const journalEvents = journal.trim().split("\n").map((line) => JSON.parse(line) as {
+        type?: string;
+        seq?: number;
+        droppedEvents?: number;
+        droppedBytes?: number;
+        droppedThroughSeq?: number;
+      });
+      const marker = journalEvents.find((event) => event.type === "research-activity-truncated");
+      assert.ok(marker && marker.droppedEvents! > 0 && marker.droppedBytes! > 0 && marker.droppedThroughSeq! > 0);
+      const retainedActivities = journalEvents.filter((event) => typeof event.seq === "number" && !event.type);
+      assert.equal(retainedActivities.at(-1)?.seq, 260, "the bounded journal retains the newest activity");
 
       const conversation = store.listConversations(project.id)[0]!;
       const runningCard = store.listMessages(conversation.id).find((message) => {

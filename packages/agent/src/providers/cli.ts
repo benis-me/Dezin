@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, dirname } from "node:path";
 import { BoundedTextBuffer } from "../bounded-text-buffer.ts";
+import { terminateOwnedProcessGroup } from "../process-group.ts";
 
 export const PROVIDER_CAPTURE_LIMIT_BYTES = 1024 * 1024;
 
@@ -45,7 +46,7 @@ export function agentSpawnEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv 
 
 /** Spawn `<command> <args>` on the augmented PATH and capture stdout+stderr (bounded). */
 export function runCapture(command: string, args: string[], timeoutMs: number): Promise<{ code: number; out: string } | null> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let child;
     try {
       child = spawn(command, args, {
@@ -80,24 +81,16 @@ export function runCapture(command: string, args: string[], timeoutMs: number): 
         return (error as NodeJS.ErrnoException).code === "EPERM";
       }
     };
-    const waitForGroup = async (timeout: number): Promise<boolean> => {
-      const deadline = Date.now() + timeout;
-      while (groupAlive() && Date.now() < deadline) {
-        await new Promise<void>((resolveDelay) => {
-          const delay = setTimeout(resolveDelay, 10);
-          delay.unref?.();
-        });
-      }
-      return !groupAlive();
-    };
     const terminate = (): Promise<void> => {
       if (terminationPromise) return terminationPromise;
-      kill("SIGTERM");
-      terminationPromise = (async () => {
-        if (await waitForGroup(250)) return;
-        kill("SIGKILL");
-        await waitForGroup(1_000);
-      })();
+      terminationPromise = terminateOwnedProcessGroup({
+        label: command,
+        signal: kill,
+        isAlive: groupAlive,
+        termGraceMs: 250,
+        killGraceMs: 1_000,
+      });
+      void terminationPromise.catch(() => {});
       return terminationPromise;
     };
     const timer = setTimeout(() => {
@@ -122,18 +115,30 @@ export function runCapture(command: string, args: string[], timeoutMs: number): 
       if (settled) return;
       settled = true;
       void (async () => {
-        await terminationPromise?.catch(() => {});
+        let cleanupError: unknown;
+        try {
+          await terminationPromise;
+        } catch (error) {
+          cleanupError = error;
+        }
         clearTimeout(timer);
-        resolve(null);
+        if (cleanupError) reject(cleanupError);
+        else resolve(null);
       })();
     });
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
       void (async () => {
-        await terminationPromise?.catch(() => {});
+        let cleanupError: unknown;
+        try {
+          await terminationPromise;
+        } catch (error) {
+          cleanupError = error;
+        }
         clearTimeout(timer);
-        resolve(failed ? null : { code: code ?? 0, out: out.toString() });
+        if (cleanupError) reject(cleanupError);
+        else resolve(failed ? null : { code: code ?? 0, out: out.toString() });
       })();
     });
   });

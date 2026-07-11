@@ -154,6 +154,11 @@ test("run journal bounds 10,000 events in memory and on disk while preserving te
     inMemory.slice(-1).map((event) => ({ type: (event as { type?: string }).type, seq: (event as { seq?: number }).seq })),
     [{ type: "run-done", seq: 10_001 }],
   );
+  const cursorReplay: unknown[] = [];
+  const stopCursorReplay = subscribe("r-bounded", dataDir, (event) => cursorReplay.push(event), () => {}, { afterSeq: 100 });
+  stopCursorReplay();
+  assert.equal((cursorReplay[0] as { type?: string }).type, RUN_JOURNAL_TRUNCATED);
+  assert.ok((cursorReplay[0] as { droppedThroughSeq?: number }).droppedThroughSeq! > 100);
 
   await finishRun("r-bounded");
   const logPath = join(dataDir, ".runs", "r-bounded.jsonl");
@@ -187,6 +192,17 @@ test("bounded journal compacts a non-serializable terminal event instead of losi
   assert.ok(buffer.byteLength <= 256);
   assert.equal(values.filter((event) => event.type === RUN_JOURNAL_TRUNCATED).length, 1);
   assert.deepEqual(values.at(-1), { type: "run-done", runId: "r-circular", seq: 2, truncated: true });
+});
+
+test("bounded journal omits an oversized terminal run id instead of evicting the terminal", () => {
+  const buffer = new BoundedEventBuffer(3, 256);
+  buffer.push({ type: "activity", seq: 1, payload: "x".repeat(1_000) });
+  buffer.push({ type: "run-error", runId: "r".repeat(10_000), seq: 2, message: "x".repeat(10_000) });
+
+  const values = buffer.values() as Array<{ type?: string; seq?: number; truncated?: boolean }>;
+  assert.ok(buffer.byteLength <= 256);
+  assert.equal(values.filter((event) => event.type === RUN_JOURNAL_TRUNCATED).length, 1);
+  assert.deepEqual(values.at(-1), { type: "run-error", seq: 2, truncated: true });
 });
 
 test("live events emitted reentrantly during replay stay after the replay snapshot", () => {

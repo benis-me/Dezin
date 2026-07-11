@@ -59,7 +59,7 @@ export function createZip(entries: ZipEntry[]): Buffer {
     const local = Buffer.alloc(30 + nameBytes.length);
     local.writeUInt32LE(0x04034b50, 0); // local file header signature
     local.writeUInt16LE(20, 4); // version needed
-    local.writeUInt16LE(0, 6); // flags
+    local.writeUInt16LE(0x0800, 6); // UTF-8 file name
     local.writeUInt16LE(METHOD, 8);
     local.writeUInt16LE(DOS_TIME, 10);
     local.writeUInt16LE(DOS_DATE, 12);
@@ -75,7 +75,7 @@ export function createZip(entries: ZipEntry[]): Buffer {
     central.writeUInt32LE(0x02014b50, 0); // central directory header signature
     central.writeUInt16LE(20, 4); // version made by
     central.writeUInt16LE(20, 6); // version needed
-    central.writeUInt16LE(0, 8); // flags
+    central.writeUInt16LE(0x0800, 8); // UTF-8 file name
     central.writeUInt16LE(METHOD, 10);
     central.writeUInt16LE(DOS_TIME, 12);
     central.writeUInt16LE(DOS_DATE, 14);
@@ -169,7 +169,7 @@ export async function streamZip(
     const local = Buffer.alloc(30 + nameBytes.length);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0x08, 6); // CRC and sizes follow in a data descriptor.
+    local.writeUInt16LE(0x0808, 6); // UTF-8 name; CRC and sizes follow in a data descriptor.
     local.writeUInt16LE(8, 8); // deflate
     local.writeUInt16LE(DOS_TIME, 10);
     local.writeUInt16LE(DOS_DATE, 12);
@@ -234,7 +234,7 @@ export async function streamZip(
     header.writeUInt32LE(0x02014b50, 0);
     header.writeUInt16LE(20, 4);
     header.writeUInt16LE(20, 6);
-    header.writeUInt16LE(0x08, 8);
+    header.writeUInt16LE(0x0808, 8);
     header.writeUInt16LE(8, 10);
     header.writeUInt16LE(DOS_TIME, 12);
     header.writeUInt16LE(DOS_DATE, 14);

@@ -95,6 +95,9 @@ test("streamZip emits bounded chunks and a valid data-descriptor archive", async
   assert.equal(entries.find((entry) => entry.path === "empty.txt")?.data.length, 0);
   assert.ok(largest < payload.length, `largest emitted chunk ${largest} should not aggregate the source`);
   assert.equal(zip.readUInt16LE(6) & 0x08, 0x08, "streamed local header uses a data descriptor");
+  assert.equal(zip.readUInt16LE(6) & 0x0800, 0x0800, "streamed local header declares UTF-8 names");
+  const centralOffset = zip.readUInt32LE(zip.length - 22 + 16);
+  assert.equal(zip.readUInt16LE(centralOffset + 8) & 0x0800, 0x0800, "central header declares UTF-8 names");
 });
 
 test("streamZip aborts without consuming the rest of an entry", async () => {

@@ -18,7 +18,7 @@ import { projectDir, safeJoin } from "./serve-static.ts";
 import { setupImportedStandardProject } from "./project-runtime.ts";
 import type { MessageRole, Project, QualityFinding, RunStatus } from "../../../packages/core/src/index.ts";
 import type { ProjectMode } from "../../../packages/core/src/types.ts";
-import { BoundedTextBuffer } from "../../../packages/agent/src/index.ts";
+import { BoundedTextBuffer, ProcessGroupCleanupError, terminateOwnedProcessGroup } from "../../../packages/agent/src/index.ts";
 
 export interface FileRef {
   rel: string;
@@ -125,6 +125,105 @@ export class ExportBudget {
   }
 }
 
+/** Incremental JSON encoder with a hard UTF-8 byte ceiling. */
+export class BoundedJsonWriter {
+  private readonly maxBytes: number;
+  private readonly label: string;
+  private readonly chunks: string[] = [];
+  private pending: string[] = [];
+  private pendingChars = 0;
+  private bytes = 0;
+
+  constructor(maxBytes: number, label: string) {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("maxBytes must be positive");
+    this.maxBytes = maxBytes;
+    this.label = label;
+  }
+
+  raw(text: string): void {
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (this.bytes + bytes > this.maxBytes) {
+      throw new ExportLimitError(`${this.label} exceeds ${this.maxBytes} bytes`);
+    }
+    this.bytes += bytes;
+    this.pending.push(text);
+    this.pendingChars += text.length;
+    if (this.pendingChars >= 64 * 1024) this.flushPending();
+  }
+
+  string(value: string): void {
+    this.raw('"');
+    for (let offset = 0; offset < value.length; offset += 16 * 1024) {
+      const encoded = JSON.stringify(value.slice(offset, offset + 16 * 1024));
+      this.raw(encoded.slice(1, -1));
+    }
+    this.raw('"');
+  }
+
+  value(value: unknown): void {
+    this.writeValue(value, new Set<object>(), false);
+  }
+
+  finish(): string {
+    this.flushPending();
+    return this.chunks.join("");
+  }
+
+  private flushPending(): void {
+    if (this.pending.length === 0) return;
+    this.chunks.push(this.pending.join(""));
+    this.pending = [];
+    this.pendingChars = 0;
+  }
+
+  private writeValue(value: unknown, stack: Set<object>, arrayItem: boolean): void {
+    if (value === null) return this.raw("null");
+    if (typeof value === "string") return this.string(value);
+    if (typeof value === "boolean") return this.raw(value ? "true" : "false");
+    if (typeof value === "number") return this.raw(Number.isFinite(value) ? String(value) : "null");
+    if (typeof value === "bigint") throw new TypeError("Cannot serialize BigInt to JSON");
+    if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol") {
+      if (arrayItem) this.raw("null");
+      return;
+    }
+    if (typeof value !== "object") return this.raw("null");
+    if (stack.has(value)) throw new TypeError("Cannot serialize a circular structure to JSON");
+
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") {
+      this.writeValue(toJSON.call(value), stack, arrayItem);
+      return;
+    }
+
+    stack.add(value);
+    try {
+      if (Array.isArray(value)) {
+        this.raw("[");
+        for (let index = 0; index < value.length; index++) {
+          if (index > 0) this.raw(",");
+          this.writeValue(value[index], stack, true);
+        }
+        this.raw("]");
+        return;
+      }
+      this.raw("{");
+      let first = true;
+      for (const key of Object.keys(value)) {
+        const child = (value as Record<string, unknown>)[key];
+        if (typeof child === "undefined" || typeof child === "function" || typeof child === "symbol") continue;
+        if (!first) this.raw(",");
+        first = false;
+        this.string(key);
+        this.raw(":");
+        this.writeValue(child, stack, false);
+      }
+      this.raw("}");
+    } finally {
+      stack.delete(value);
+    }
+  }
+}
+
 interface PreparedExport {
   entries: StreamingZipEntry[];
   cleanup(): Promise<void>;
@@ -187,6 +286,7 @@ export async function handleExport(
     prepared = await prepareExport(project, deps, full, signal);
     if (prepared.entries.length === 0) return sendError(res, 404, "no artifacts to export");
   } catch (error) {
+    if (error instanceof ProcessGroupCleanupError) throw error;
     if (signal?.aborted) throw signal.reason;
     if (error instanceof ExportLimitError) return sendError(res, 413, error.message);
     throw error;
@@ -288,24 +388,16 @@ function runCommand(
         return (error as NodeJS.ErrnoException).code === "EPERM";
       }
     };
-    const waitForGroup = async (timeoutMs: number): Promise<boolean> => {
-      const deadline = Date.now() + timeoutMs;
-      while (groupAlive() && Date.now() < deadline) {
-        await new Promise<void>((resolveDelay) => {
-          const timer = setTimeout(resolveDelay, 10);
-          timer.unref?.();
-        });
-      }
-      return !groupAlive();
-    };
     const terminate = (): Promise<void> => {
       if (terminationPromise) return terminationPromise;
-      kill("SIGTERM");
-      terminationPromise = (async () => {
-        if (await waitForGroup(1_000)) return;
-        kill("SIGKILL");
-        await waitForGroup(1_000);
-      })();
+      terminationPromise = terminateOwnedProcessGroup({
+        label: `${command} ${args.join(" ")}`,
+        signal: kill,
+        isAlive: groupAlive,
+        termGraceMs: 1_000,
+        killGraceMs: 1_000,
+      });
+      void terminationPromise.catch(() => {});
       return terminationPromise;
     };
     const onAbort = (): void => { void terminate(); };
@@ -319,8 +411,17 @@ function runCommand(
       if (settled) return;
       settled = true;
       void (async () => {
-        await terminationPromise?.catch(() => {});
+        let cleanupError: unknown;
+        try {
+          await terminationPromise;
+        } catch (error) {
+          cleanupError = error;
+        }
         signal?.removeEventListener("abort", onAbort);
+        if (cleanupError) {
+          reject(cleanupError);
+          return;
+        }
         if (signal?.aborted) {
           reject(signal.reason);
           return;
@@ -352,9 +453,96 @@ async function maybeGitBundleEntry(
     }
     return { entry: await fileExportEntry("standard/git.bundle", tmp, budget, signal), tmp };
   } catch (error) {
-    await rm(tmp, { force: true }).catch(() => {});
+    // A still-live group may still hold or recreate the bundle path. Preserve it for
+    // operator recovery instead of falsely claiming cleanup while the writer survives.
+    if (!(error instanceof ProcessGroupCleanupError)) await rm(tmp, { force: true }).catch(() => {});
     throw error;
   }
+}
+
+function writeJsonArray<T>(writer: BoundedJsonWriter, values: Iterable<T>, writeItem: (value: T) => void): void {
+  writer.raw("[");
+  let first = true;
+  for (const value of values) {
+    if (!first) writer.raw(",");
+    first = false;
+    writeItem(value);
+  }
+  writer.raw("]");
+}
+
+function serializeExportManifest(
+  project: Project,
+  deps: AppDeps,
+  variants: ReturnType<AppDeps["store"]["listVariants"]>,
+  runs: ReturnType<AppDeps["store"]["listRuns"]>,
+): string {
+  const writer = new BoundedJsonWriter(MAX_EXPORT_FILE_BYTES, MANIFEST_PATH);
+  writer.raw("{");
+  writer.raw('"format":');
+  writer.value("dezin-project");
+  writer.raw(',"version":2,"exportedAt":');
+  writer.value(Date.now());
+  writer.raw(',"project":');
+  writer.value({
+    id: project.id,
+    name: project.name,
+    skillId: project.skillId,
+    designSystemId: project.designSystemId,
+    mode: project.mode,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+    archivedAt: project.archivedAt,
+  });
+  writer.raw(',"variants":');
+  writeJsonArray(writer, variants, (variant) => writer.value({
+    id: variant.id,
+    name: variant.name,
+    createdAt: variant.createdAt,
+    active: Boolean(variant.active),
+  }));
+  writer.raw(',"conversations":');
+  writeJsonArray(writer, deps.store.listConversations(project.id), (conversation) => {
+    writer.raw("{");
+    writer.raw('"id":');
+    writer.value(conversation.id);
+    writer.raw(',"title":');
+    writer.value(conversation.title);
+    writer.raw(',"createdAt":');
+    writer.value(conversation.createdAt);
+    writer.raw(',"messages":');
+    writeJsonArray(writer, deps.store.listMessages(conversation.id), (message) => writer.value({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    }));
+    writer.raw("}");
+  });
+  writer.raw(',"runs":');
+  writeJsonArray(writer, runs, (run) => writer.value({
+    id: run.id,
+    conversationId: run.conversationId,
+    userMessageId: run.userMessageId,
+    assistantMessageId: run.assistantMessageId,
+    variantId: run.variantId,
+    commitHash: run.commitHash,
+    status: run.status,
+    repairRounds: run.repairRounds,
+    lintPassed: run.lintPassed,
+    score: run.score,
+    findings: run.findings,
+    createdAt: run.createdAt,
+    finishedAt: run.finishedAt,
+  }));
+  writer.raw(',"artifacts":');
+  writeJsonArray(writer, deps.store.listArtifacts(project.id), (artifact) => writer.value({
+    path: artifact.path,
+    lintPassed: artifact.lintPassed,
+    createdAt: artifact.createdAt,
+  }));
+  writer.raw("}");
+  return writer.finish();
 }
 
 async function prepareExport(
@@ -376,63 +564,12 @@ async function prepareExport(
   deps.store.ensureMainVariant(project.id);
   const variants = deps.store.listVariants(project.id);
   const runs = deps.store.listRuns(project.id);
-  const manifest = {
-    format: "dezin-project",
-    version: 2,
-    exportedAt: Date.now(),
-    project: {
-      id: project.id,
-      name: project.name,
-      skillId: project.skillId,
-      designSystemId: project.designSystemId,
-      mode: project.mode,
-      createdAt: project.createdAt,
-      updatedAt: project.updatedAt,
-      archivedAt: project.archivedAt,
-    },
-    variants: variants.map((variant) => ({
-      id: variant.id,
-      name: variant.name,
-      createdAt: variant.createdAt,
-      active: Boolean(variant.active),
-    })),
-    conversations: deps.store.listConversations(project.id).map((conversation) => ({
-      id: conversation.id,
-      title: conversation.title,
-      createdAt: conversation.createdAt,
-      messages: deps.store.listMessages(conversation.id).map((message) => ({
-        id: message.id,
-        role: message.role,
-        content: message.content,
-        createdAt: message.createdAt,
-      })),
-    })),
-    runs: runs.map((run) => ({
-      id: run.id,
-      conversationId: run.conversationId,
-      userMessageId: run.userMessageId,
-      assistantMessageId: run.assistantMessageId,
-      variantId: run.variantId,
-      commitHash: run.commitHash,
-      status: run.status,
-      repairRounds: run.repairRounds,
-      lintPassed: run.lintPassed,
-      score: run.score,
-      findings: run.findings,
-      createdAt: run.createdAt,
-      finishedAt: run.finishedAt,
-    })),
-    artifacts: deps.store.listArtifacts(project.id).map((artifact) => ({
-      path: artifact.path,
-      lintPassed: artifact.lintPassed,
-      createdAt: artifact.createdAt,
-    })),
-  };
   try {
     const sourceEntries = await fileEntries("source", activeDir, budget, signal);
     if (sourceEntries.length === 0) return { entries: [], cleanup: async () => {} };
+    const manifest = serializeExportManifest(project, deps, variants, runs);
     const entries: StreamingZipEntry[] = [
-      memoryExportEntry(MANIFEST_PATH, JSON.stringify(manifest, null, 2), budget),
+      memoryExportEntry(MANIFEST_PATH, manifest, budget),
       ...sourceEntries,
     ];
     entries.push(...await fileEntries("refs", join(root, ".refs"), budget, signal));

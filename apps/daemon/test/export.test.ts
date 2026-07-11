@@ -10,6 +10,7 @@ import { request } from "node:http";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 import {
+  BoundedJsonWriter,
   ExportBudget,
   MAX_EXPORT_ENTRIES,
   MAX_EXPORT_FILE_BYTES,
@@ -636,6 +637,16 @@ test("ExportBudget applies one shared entry, file, and total budget", () => {
   for (let index = 0; index < 8; index++) total.reserve(`part-${index}`, MAX_EXPORT_FILE_BYTES);
   assert.equal(MAX_EXPORT_FILE_BYTES * 8, MAX_EXPORT_TOTAL_BYTES);
   assert.throws(() => total.reserve("one-more-byte", 1), /exceeds 512 MiB/);
+});
+
+test("BoundedJsonWriter encodes incrementally and rejects before crossing its byte ceiling", () => {
+  const value = { text: "界\n\"quoted\"🙂", list: [1, true, null], nested: { ok: "yes" } };
+  const writer = new BoundedJsonWriter(512, "manifest.json");
+  writer.value(value);
+  assert.deepEqual(JSON.parse(writer.finish()), value);
+
+  const limited = new BoundedJsonWriter(128, "manifest.json");
+  assert.throws(() => limited.value({ content: "\u0001".repeat(1_000) }), /manifest\.json.*128 bytes/);
 });
 
 test("export walking checks cancellation between directory entries", async () => {

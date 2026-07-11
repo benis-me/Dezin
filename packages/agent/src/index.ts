@@ -45,6 +45,7 @@ export {
   type SpawnOutput,
 } from "./claude-runner.ts";
 export { BoundedTextBuffer, OUTPUT_TRUNCATION_MARKER } from "./bounded-text-buffer.ts";
+export { ProcessGroupCleanupError, terminateOwnedProcessGroup, type OwnedProcessGroupOptions } from "./process-group.ts";
 export {
   GenericCliRunner,
   type GenericAgentConfig,

@@ -46,7 +46,7 @@ import {
 } from "./standard-run-transaction.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
 import { RunExecution, type RunSettlementPatch } from "./run-execution.ts";
-import { BoundedEventBuffer, RUN_JOURNAL_MAX_BYTES } from "./bounded-buffer.ts";
+import { BoundedEventBuffer, RUN_JOURNAL_MAX_BYTES, RUN_JOURNAL_MAX_EVENTS, RUN_JOURNAL_TRUNCATED } from "./bounded-buffer.ts";
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
@@ -867,19 +867,18 @@ function createResearchActivityPersistence(input: {
   flush(): Promise<void>;
 } {
   const snapshot = new BoundedEventBuffer(200, 256 * 1024);
+  const journal = new BoundedEventBuffer(RUN_JOURNAL_MAX_EVENTS, RUN_JOURNAL_MAX_BYTES, "research-activity-truncated");
   const journalPath = join(input.dataDir, ".runs", input.runId, "research-activity.jsonl");
-  const markerLine = `${JSON.stringify({ type: "research-activity-truncated" })}\n`;
-  const dataLimit = RUN_JOURNAL_MAX_BYTES - Buffer.byteLength(markerLine, "utf8");
-  let journalBytes = 0;
-  let journalTruncated = false;
   let seq = 0;
   let writeQueue: Promise<void> = mkdir(join(input.dataDir, ".runs", input.runId), { recursive: true }).then(() => {});
+  let pendingJournalLines: string[] = [];
+  let journalTimer: ReturnType<typeof setTimeout> | undefined;
   let snapshotTimer: ReturnType<typeof setTimeout> | undefined;
 
   const snapshotValues = (): Array<{ kind: string; text: string; track?: "product" | "visual" }> =>
     snapshot.values().map((value) => {
       const event = value as Partial<PersistedResearchActivity> & { type?: string };
-      if (event.type === "run-journal-truncated") return { kind: "text", text: "Earlier research activity was truncated." };
+      if (event.type === RUN_JOURNAL_TRUNCATED) return { kind: "text", text: "Earlier research activity was truncated." };
       return {
         kind: typeof event.kind === "string" ? event.kind : "text",
         text: typeof event.text === "string" ? event.text : "Research activity",
@@ -904,6 +903,34 @@ function createResearchActivityPersistence(input: {
     snapshotTimer.unref?.();
   };
 
+  const flushJournal = (): Promise<void> => {
+    if (journal.truncated) {
+      pendingJournalLines = [];
+      const boundedSnapshot = journal.toJsonl();
+      writeQueue = writeQueue
+        .catch(() => {})
+        .then(() => writeFile(journalPath, boundedSnapshot, "utf8"))
+        .catch(() => {});
+    } else if (pendingJournalLines.length > 0) {
+      const chunk = pendingJournalLines.join("");
+      pendingJournalLines = [];
+      writeQueue = writeQueue
+        .catch(() => {})
+        .then(() => appendFile(journalPath, chunk, "utf8"))
+        .catch(() => {});
+    }
+    return writeQueue;
+  };
+
+  const scheduleJournal = (): void => {
+    if (journalTimer) return;
+    journalTimer = setTimeout(() => {
+      journalTimer = undefined;
+      void flushJournal();
+    }, 50);
+    journalTimer.unref?.();
+  };
+
   return {
     append(activity) {
       const clamped: PersistedResearchActivity = {
@@ -913,25 +940,24 @@ function createResearchActivityPersistence(input: {
         seq: ++seq,
       };
       snapshot.push(clamped);
+      journal.push(clamped);
       const line = `${JSON.stringify(clamped)}\n`;
-      const bytes = Buffer.byteLength(line, "utf8");
-      if (!journalTruncated && journalBytes + bytes <= dataLimit) {
-        journalBytes += bytes;
-        writeQueue = writeQueue.then(() => appendFile(journalPath, line, "utf8")).catch(() => {});
-      } else if (!journalTruncated) {
-        journalTruncated = true;
-        journalBytes += Buffer.byteLength(markerLine, "utf8");
-        writeQueue = writeQueue.then(() => appendFile(journalPath, markerLine, "utf8")).catch(() => {});
-      }
+      if (journal.truncated) pendingJournalLines = [];
+      else pendingJournalLines.push(line);
+      scheduleJournal();
       scheduleSnapshot();
       return clamped;
     },
     async flush() {
+      if (journalTimer) {
+        clearTimeout(journalTimer);
+        journalTimer = undefined;
+      }
       if (snapshotTimer) {
         clearTimeout(snapshotTimer);
         snapshotTimer = undefined;
       }
-      await writeQueue.catch(() => {});
+      await flushJournal().catch(() => {});
       persistSnapshot();
     },
   };
