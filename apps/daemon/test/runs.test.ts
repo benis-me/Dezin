@@ -2578,23 +2578,25 @@ test("Sharingan standard run delegates source regions to isolated subagents befo
 test("Sharingan region subagents run in parallel and the main agent waits for all outputs", async () => {
   let activeRegions = 0;
   let maxActiveRegions = 0;
-  const calls: Array<{ phase: "region" | "main"; id?: string }> = [];
+  const calls: Array<{ phase: "region" | "main"; id?: string; message: string }> = [];
+  const completionOrder: string[] = [];
   const runner: AgentRunner = {
     id: "sharingan-parallel-regions",
     async runTurn(input) {
       const regionMatch = input.message.match(/Region ID:\s*(region-\d+)/);
       if (regionMatch) {
         const id = regionMatch[1]!;
-        calls.push({ phase: "region", id });
+        calls.push({ phase: "region", id, message: input.message });
         activeRegions += 1;
         maxActiveRegions = Math.max(maxActiveRegions, activeRegions);
-        await delay(80);
+        await delay(id === "region-1" ? 120 : 10);
         mkdirSync(join(input.projectDir, "src", "sharingan-regions"), { recursive: true });
         writeFileSync(join(input.projectDir, "src", "sharingan-regions", `${id}.jsx`), `export default function ${id.replace("-", "_")}(){ return <section>${id}</section>; }\n`);
         activeRegions -= 1;
+        completionOrder.push(id);
         return { text: `built ${id}`, artifactHtml: "", artifactPath: "index.html" };
       }
-      calls.push({ phase: "main" });
+      calls.push({ phase: "main", message: input.message });
       assert.equal(activeRegions, 0, "main integration starts only after region agents finish");
       writeFileSync(
         join(input.projectDir, "src", "App.jsx"),
@@ -2622,6 +2624,11 @@ test("Sharingan region subagents run in parallel and the main agent waits for al
       assert.ok(!events.some((e) => e.type === "run-error"), `unexpected run-error: ${JSON.stringify(events)}`);
       assert.equal(maxActiveRegions, 2, "region subagents should overlap instead of running serially");
       assert.deepEqual(calls.map((c) => c.phase).sort(), ["main", "region", "region"].sort());
+      assert.deepEqual(completionOrder, ["region-2", "region-1"], "the fixture proves workers completed out of order");
+      const manifest = JSON.parse(readFileSync(join(dataDir, "projects", project.id, ".sharingan", "region-build.json"), "utf8")) as { regions: Array<{ id: string }> };
+      assert.deepEqual(manifest.regions.map((region) => region.id), ["region-1", "region-2"], "manifest order follows the source plan");
+      const mainMessage = calls.find((call) => call.phase === "main")?.message ?? "";
+      assert.ok(mainMessage.indexOf("region-1") < mainMessage.indexOf("region-2"), "main integration receives source-plan order");
     },
     {
       ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),

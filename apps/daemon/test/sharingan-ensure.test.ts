@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureCaptured, capturedPageCount, ensureProbeSession, SHARINGAN_PROBE_IDLE_MS } from "../src/sharingan-handler.ts";
+import { ensureCaptured, capturedPageCount, ensureProbeSession, releaseSharinganProject, SHARINGAN_PROBE_IDLE_MS } from "../src/sharingan-handler.ts";
 import type { SharinganSession } from "../src/sharingan-browser.ts";
 
 function fakeThatCaptures(): SharinganSession {
@@ -96,4 +96,51 @@ test("ensureCaptured writes a Run-scoped capture only into the supplied transact
   assert.equal(await ensureCaptured(id, dataDir, "http://x.test/", options), "captured");
   assert.equal(existsSync(join(transactionDir, ".sharingan", "pages.json")), true);
   assert.equal(existsSync(join(dataDir, "projects", id, ".sharingan", "pages.json")), false);
+});
+
+test("ensureCaptured aborts promptly instead of waiting for its polling interval", async () => {
+  const id = `ensure-abort-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-abort-"));
+  const controller = new AbortController();
+  const open = async (_url: string, opts: { signal?: AbortSignal }) => new Promise<SharinganSession>((_resolve, reject) => {
+    const rejectAbort = () => reject(opts.signal?.reason ?? Object.assign(new Error("capture aborted"), { name: "AbortError" }));
+    if (opts.signal?.aborted) rejectAbort();
+    else opts.signal?.addEventListener("abort", rejectAbort, { once: true });
+  });
+  const startedAt = performance.now();
+  const capture = ensureCaptured(id, dataDir, "http://x.test/", {
+    maxWaitMs: 250,
+    pollMs: 250,
+    signal: controller.signal,
+    open,
+  });
+  setTimeout(() => controller.abort(Object.assign(new Error("run cancelled"), { name: "AbortError" })), 20);
+
+  try {
+    await assert.rejects(capture, (error: unknown) => error instanceof Error && error.name === "AbortError");
+    assert.ok(performance.now() - startedAt < 150, "abort must wake ensureCaptured before the 250 ms polling interval");
+  } finally {
+    await releaseSharinganProject(id);
+  }
+});
+
+test("different capture scopes receive isolated persistent browser profiles", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-profiles-"));
+  const firstId = `profile-a-${Date.now()}`;
+  const secondId = `profile-b-${Date.now()}`;
+  const profileDirs: string[] = [];
+  const open = async (_url: string, opts: { userDataDir?: string }) => {
+    profileDirs.push(opts.userDataDir ?? "");
+    return fakeThatCaptures();
+  };
+
+  try {
+    await ensureCaptured(firstId, dataDir, "http://a.test/", { maxWaitMs: 5_000, pollMs: 20, open });
+    await ensureCaptured(secondId, dataDir, "http://b.test/", { maxWaitMs: 5_000, pollMs: 20, open });
+    assert.equal(profileDirs.length, 2);
+    assert.notEqual(profileDirs[0], profileDirs[1], "capture scopes must not share a Chrome profile lock or cookies");
+    assert.ok(profileDirs.every((dir) => dir.startsWith(join(dataDir, ".sharingan-profiles"))));
+  } finally {
+    await Promise.all([releaseSharinganProject(firstId), releaseSharinganProject(secondId)]);
+  }
 });

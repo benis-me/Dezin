@@ -5,6 +5,7 @@
  * handling PAUSES (phase "login-required") and never bypasses auth.
  */
 
+import { createHash } from "node:crypto";
 import { join, sep } from "node:path";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -13,7 +14,7 @@ import { capturePage, captureCurrentPage, writePagesManifest, upsertPage, readCa
 import { projectDir, safeJoin } from "./serve-static.ts";
 import { sendJson, readJsonBody } from "./http-util.ts";
 
-type Phase = "idle" | "capturing" | "login-required" | "captured" | "error" | "probing";
+type Phase = "idle" | "capturing" | "login-required" | "captured" | "error" | "probing" | "cancelled";
 interface Capture {
   generation: number;
   released: boolean;
@@ -47,6 +48,7 @@ export type SharinganOpen = (
 /** Idle-release window for a lazily-opened (or build-reused) probe session. */
 export const SHARINGAN_PROBE_IDLE_MS = 300_000;
 export const SHARINGAN_RELEASE_GRACE_MS = 250;
+export const SHARINGAN_STEP_LIMIT = 500;
 
 const captures = new Map<string, Capture>();
 let nextCaptureGeneration = 1;
@@ -75,6 +77,11 @@ function get(id: string): Capture {
 
 function captureArtifactDir(id: string, dataDir: string): string {
   return captures.get(id)?.artifactDir ?? projectDir(dataDir, id);
+}
+
+function sharinganProfileDir(id: string, dataDir: string): string {
+  const scope = createHash("sha256").update(id).digest("hex");
+  return join(dataDir, ".sharingan-profiles", scope);
 }
 
 export function sharinganRunCaptureId(projectId: string, runId: string): string {
@@ -123,8 +130,37 @@ function claimEstablishedSession(c: Capture, expected?: SharinganSession): Shari
 function emit(c: Capture, step: CaptureStep): void {
   if (c.released) return;
   c.steps.push(step);
+  if (c.steps.length > SHARINGAN_STEP_LIMIT) c.steps.splice(0, c.steps.length - SHARINGAN_STEP_LIMIT);
   const line = `data: ${JSON.stringify(step)}\n\n`;
   for (const res of c.listeners) res.write(line);
+}
+
+function signalAbortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(signal.reason == null ? "operation aborted" : String(signal.reason));
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signalAbortError(signal);
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(signalAbortError(signal));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function armProbeIdle(id: string): void {
@@ -168,7 +204,7 @@ export function ensureProbeSession(
     if (!c.pages.length) c.pages = readCapturedPages(captureArtifactDir(id, dataDir));
     if (!c.session) {
       if (!c.opening) {
-        const profileDir = join(dataDir, ".sharingan-profile");
+        const profileDir = sharinganProfileDir(id, dataDir);
         let opening!: Promise<SharinganSession>;
         opening = open(c.url ?? "about:blank", {
           userDataDir: profileDir,
@@ -283,8 +319,9 @@ export async function ensureCaptured(
   id: string,
   dataDir: string,
   url: string,
-  opts: { maxWaitMs?: number; pollMs?: number; keepSessionForProbe?: boolean; artifactDir?: string; open?: SharinganOpen } = {},
+  opts: { signal?: AbortSignal; maxWaitMs?: number; pollMs?: number; keepSessionForProbe?: boolean; artifactDir?: string; open?: SharinganOpen } = {},
 ): Promise<Phase> {
+  throwIfAborted(opts.signal);
   const maxWaitMs = opts.maxWaitMs ?? 300_000;
   const pollMs = opts.pollMs ?? 500;
   const c = get(id);
@@ -295,8 +332,8 @@ export async function ensureCaptured(
   if (opts.keepSessionForProbe) c.keepForProbe = true;
   if (c.phase === "captured") return c.phase;
   // Kick the entry capture if nothing is in flight (idle, or retry after a prior error).
-  if (c.phase === "idle" || c.phase === "error") {
-    const profileDir = join(dataDir, ".sharingan-profile");
+  if (c.phase === "idle" || c.phase === "error" || c.phase === "cancelled") {
+    const profileDir = sharinganProfileDir(id, dataDir);
     void startCapture(id, url, dataDir, profileDir, opts.open);
   }
   // Poll until a terminal phase, waiting through "login-required" (the user signs in via the
@@ -306,9 +343,9 @@ export async function ensureCaptured(
     const phase = get(id).phase;
     // "probing" is a terminal SUCCESS here: the entry capture finished and its session was kept open
     // for the Agent to reuse (keepSessionForProbe). The build can proceed.
-    if (phase === "captured" || phase === "error" || phase === "probing") return phase;
+    if (phase === "captured" || phase === "error" || phase === "probing" || phase === "cancelled") return phase;
     if (Date.now() >= deadline) return phase;
-    await new Promise((r) => setTimeout(r, pollMs));
+    await abortableDelay(Math.min(pollMs, Math.max(0, deadline - Date.now())), opts.signal);
   }
 }
 
@@ -323,7 +360,7 @@ export async function handleSharinganStart(
   const body = (await readJsonBody(req, undefined, signal)) as { url?: string };
   const url = typeof body.url === "string" ? body.url.trim() : "";
   if (!/^https?:\/\//i.test(url)) { sendJson(res, 400, { error: "a valid http(s) url is required" }); return; }
-  const profileDir = join(dataDir, ".sharingan-profile");
+  const profileDir = sharinganProfileDir(id, dataDir);
   void startCapture(id, url, dataDir, profileDir, open);
   sendJson(res, 200, { ok: true });
 }
@@ -563,9 +600,27 @@ export async function releaseSharinganProject(id: string): Promise<void> {
   if (detachDeadline) clearTimeout(detachDeadline);
   const lateSession = claimEstablishedSession(c);
   if (lateSession && lateSession !== s) await lateSession.close().catch(() => {});
+  c.steps.length = 0;
+  c.pages = [];
+  c.error = undefined;
+  c.url = undefined;
+  c.opening = undefined;
+  c.keepForProbe = undefined;
+  c.artifactDir = undefined;
   // Removing the registry entry permits a fresh generation for this id. The released `c` remains
   // a tombstone captured by any in-flight opener, whose isActive() check closes a late session.
   if (captures.get(id) === c) captures.delete(id);
+}
+
+export async function cancelSharinganProject(id: string): Promise<void> {
+  await releaseSharinganProject(id);
+  const cancelled = get(id);
+  cancelled.phase = "cancelled";
+}
+
+export async function handleSharinganCancel(res: ServerResponse, id: string): Promise<void> {
+  await cancelSharinganProject(id);
+  sendJson(res, 200, { ok: true });
 }
 
 export async function closeAllSharinganSessions(): Promise<void> {

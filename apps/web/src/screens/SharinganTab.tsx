@@ -1,61 +1,152 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "../lib/api-context.tsx";
 import { useToast } from "../components/Toast.tsx";
-import type { SharinganStep, SharinganPage } from "../lib/api.ts";
+import type { SharinganStep, SharinganPage, SharinganPhase, SharinganStatus } from "../lib/api.ts";
+
+const SHARINGAN_LOG_LIMIT = 500;
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message.trim() ? error.message : fallback;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
 
 export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sourceUrl: string }) {
   const api = useApi();
   const { toast } = useToast();
-  const [phase, setPhase] = useState<string>("idle");
+  const [phase, setPhase] = useState<SharinganPhase>("idle");
   const [log, setLog] = useState<SharinganStep[]>([]);
   const [pages, setPages] = useState<SharinganPage[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<"starting" | "cancelling" | null>(null);
+  const [streamGeneration, setStreamGeneration] = useState(0);
   const started = useRef(false);
+
+  const applyStatus = useCallback((status: SharinganStatus) => {
+    setPhase(status.phase);
+    setPages(status.pages);
+    setError(status.error ?? (status.phase === "error" ? "Capture failed." : null));
+  }, []);
 
   useEffect(() => {
     const ac = new AbortController();
     let alive = true;
     const refreshStatus = async () => {
-      const s = await api.sharinganStatus(projectId).catch(() => null);
-      if (alive && s) { setPhase(s.phase); setPages(s.pages); }
-      return s;
+      try {
+        const status = await api.sharinganStatus(projectId);
+        if (alive) applyStatus(status);
+        return status;
+      } catch (statusError) {
+        if (alive) setError(errorMessage(statusError, "Couldn't read the capture status."));
+        return null;
+      }
     };
     (async () => {
       const s = await refreshStatus();
       if (alive && s && s.phase === "idle" && !started.current) {
         started.current = true;
-        await api.startSharingan(projectId, sourceUrl).then(() => setPhase("capturing")).catch(() => toast("Couldn't start the capture.", { variant: "error" }));
+        setPendingAction("starting");
+        try {
+          await api.startSharingan(projectId, sourceUrl);
+          if (alive) { setPhase("capturing"); setError(null); }
+        } catch (startError) {
+          if (alive) {
+            setPhase("error");
+            setError(errorMessage(startError, "Couldn't start the capture."));
+            toast("Couldn't start the capture.", { variant: "error" });
+          }
+        } finally {
+          if (alive) setPendingAction(null);
+        }
       }
     })();
     (async () => {
       try {
         for await (const step of api.streamSharinganEvents(projectId, ac.signal)) {
           if (!alive) return;
-          setLog((l) => [...l, step]);
+          setLog((current) => [...current, step].slice(-SHARINGAN_LOG_LIMIT));
           if (step.kind === "login-required") setPhase("login-required");
           if (step.kind === "done") await refreshStatus();
         }
-      } catch { /* aborted on unmount */ }
+      } catch (streamError) {
+        if (alive && !ac.signal.aborted && !isAbortError(streamError)) {
+          setError(errorMessage(streamError, "Capture event stream failed."));
+        }
+      }
     })();
     return () => { alive = false; ac.abort(); };
-  }, [api, projectId, sourceUrl, toast]);
+  }, [api, applyStatus, projectId, sourceUrl, streamGeneration, toast]);
 
-  const recapture = () => {
+  const recapture = async () => {
+    if (pendingAction) return;
     started.current = true;
+    setPendingAction("starting");
+    setError(null);
     setLog([]);
     setPages([]);
-    api.startSharingan(projectId, sourceUrl).then(() => setPhase("capturing")).catch(() => toast("Couldn't re-capture.", { variant: "error" }));
+    try {
+      await api.startSharingan(projectId, sourceUrl);
+      setPhase("capturing");
+      setStreamGeneration((generation) => generation + 1);
+    } catch (startError) {
+      setPhase("error");
+      setError(errorMessage(startError, "Couldn't start the capture."));
+      toast("Couldn't start the capture.", { variant: "error" });
+    } finally {
+      setPendingAction(null);
+    }
   };
+
+  const cancel = async () => {
+    if (pendingAction) return;
+    setPendingAction("cancelling");
+    setError(null);
+    try {
+      await api.cancelSharingan(projectId);
+      const status = await api.sharinganStatus(projectId);
+      applyStatus(status);
+      setLog([]);
+    } catch (cancelError) {
+      setError(errorMessage(cancelError, "Couldn't cancel the capture."));
+      toast("Couldn't cancel the capture.", { variant: "error" });
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const captureIsActive = phase === "capturing" || phase === "login-required" || phase === "probing";
+  const action = pendingAction === "cancelling"
+    ? <button type="button" disabled className="ml-auto rounded-md border px-2 py-1 text-xs disabled:opacity-60">Cancelling…</button>
+    : pendingAction === "starting"
+      ? <button type="button" disabled className="ml-auto rounded-md border px-2 py-1 text-xs disabled:opacity-60">Starting…</button>
+      : captureIsActive
+        ? <button type="button" onClick={() => void cancel()} className="ml-auto rounded-md border px-2 py-1 text-xs">Cancel</button>
+        : <button type="button" onClick={() => void recapture()} className="ml-auto rounded-md border px-2 py-1 text-xs">{phase === "error" || phase === "cancelled" ? "Retry" : "Re-capture"}</button>;
 
   return (
     <div className="flex h-full flex-col p-4">
       <div className="flex shrink-0 items-center gap-3">
         <span className="text-sm font-medium">Sharingan</span>
         <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs text-muted-foreground">{phase}</span>
-        <button type="button" onClick={recapture} className="ml-auto rounded-md border px-2 py-1 text-xs">Re-capture</button>
+        {action}
       </div>
 
       {/* Everything below the header scrolls together (pages gallery + the work-log with its shots). */}
       <div className="mt-3 min-h-0 flex-1 space-y-3 overflow-y-auto">
+        {error ? (
+          <div role="alert" className="rounded-md border border-red-400/40 bg-red-50/60 p-3 text-sm text-red-900 dark:bg-red-500/10 dark:text-red-100">
+            {phase === "error" ? "Capture failed: " : "Capture issue: "}{error}
+          </div>
+        ) : null}
+
+        {phase === "cancelled" ? (
+          <div role="status" className="rounded-md border bg-surface-2 p-3 text-sm text-muted-foreground">
+            Capture cancelled. You can retry when you're ready.
+          </div>
+        ) : null}
+
         {phase === "login-required" ? (
           <div role="status" className="rounded-md border border-amber-400/40 bg-amber-50/60 p-3 text-sm dark:bg-amber-500/10">
             This page needs a login. Open the controlled browser, sign in there, then click Continue.

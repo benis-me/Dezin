@@ -44,7 +44,7 @@ import {
   releaseVariantRuntime,
   stopAllProjectRuntimes,
 } from "./project-runtime.ts";
-import { handleSharinganStart, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, sharinganRunCaptureId, type SharinganOpen } from "./sharingan-handler.ts";
+import { handleSharinganStart, handleSharinganCancel, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, sharinganRunCaptureId, type SharinganOpen } from "./sharingan-handler.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey, isStandardRootVariant, removeStandardVariantWorktree, removeStandardVersionWorktree } from "./variant-workspaces.ts";
 import { RuntimeScopeUnavailableError, RuntimeSupervisor } from "./runtime-supervisor.ts";
 import { handleListDesignSystems, handleGetDesignSystem, handleImportBrand, handleListSkills } from "./catalog-handler.ts";
@@ -244,6 +244,7 @@ export function createRuntimeSupervisor(deps: Pick<AppDeps, "store" | "dataDir" 
     releaseProjectResources: async ({ projectId, runIds }) => {
       await releaseProjectRuntime(projectId);
       await releaseSharinganProject(projectId);
+      await Promise.all(runIds.map((runId) => releaseSharinganProject(sharinganRunCaptureId(projectId, runId))));
       const project = deps.store.getProject(projectId);
       if (project?.mode === "standard") {
         for (const runId of runIds) {
@@ -1173,6 +1174,16 @@ const routes: Route[] = [
       { projectId: p.id! },
       (signal) => handleSharinganStart(req, res, p.id!, deps.dataDir, deps.sharinganOpen, signal),
     ),
+  },
+  {
+    method: "POST",
+    pattern: "/api/sharingan/:id/cancel",
+    handler: async (req, res, p, deps) => {
+      if (!deps.store.getProject(p.id!)) return sendError(res, 404, "project not found");
+      const target = sharinganRequestTarget(req, p.id!, deps);
+      deps.runtimeSupervisor!.assertAdmission(target.scope);
+      await handleSharinganCancel(res, target.captureId);
+    },
   },
   {
     method: "GET",

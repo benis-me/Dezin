@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,10 @@ import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
 import {
   SHARINGAN_RELEASE_GRACE_MS,
+  ensureProbeSession,
+  handleSharinganEvents,
+  handleSharinganReadDom,
+  peekSharinganStatus,
   startCapture,
   handleSharinganStatus,
   releaseSharinganProject,
@@ -180,5 +184,84 @@ test("a re-start while paused for login does not orphan the open login session",
     assert.equal(opens, 1, "re-start during login-required must not launch a second browser (would orphan the paused one)");
   } finally {
     await status.close();
+  }
+});
+
+test("Sharingan retains and replays only the newest 500 steps, and release clears the scope", async () => {
+  const id = `bounded-steps-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-steps-"));
+  let closes = 0;
+  const session = {
+    readDom: async () => [],
+    close: async () => { closes += 1; },
+  } as unknown as SharinganSession;
+  const response = () => {
+    const writes: string[] = [];
+    const res = {
+      writeHead: () => res,
+      write: (chunk: string) => { writes.push(String(chunk)); return true; },
+      end: () => res,
+      on: () => res,
+    } as unknown as ServerResponse;
+    return { res, writes };
+  };
+
+  try {
+    await ensureProbeSession(id, dataDir, async () => session);
+    for (let index = 0; index < 505; index += 1) {
+      await handleSharinganReadDom(response().res, id, dataDir);
+    }
+
+    assert.equal(peekSharinganStatus(id, dataDir).steps, 500, "the in-memory work log has a fixed upper bound");
+    const replay = response();
+    handleSharinganEvents(replay.res, id);
+    assert.equal(replay.writes.length, 500, "new SSE listeners receive only the retained tail");
+    assert.match(replay.writes[0] ?? "", /Agent reading DOM/);
+  } finally {
+    await releaseSharinganProject(id);
+  }
+
+  assert.equal(closes, 1, "release closes the established probe session exactly once");
+  assert.deepEqual(peekSharinganStatus(id, dataDir), { phase: "idle", steps: 0, pages: [] });
+});
+
+test("POST /cancel releases capture resources and exposes a resource-free cancelled status", async () => {
+  const store = new Store(":memory:");
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-cancel-"));
+  const project = store.createProject({ name: "cancel clone", mode: "standard", sharingan: true, sourceUrl: "http://x.test/" });
+  let navigationEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { navigationEntered = resolve; });
+  let rejectNavigation!: (error: Error) => void;
+  const navigation = new Promise<never>((_resolve, reject) => { rejectNavigation = reject; });
+  let closes = 0;
+  const session = {
+    navigate: async () => { navigationEntered(); return navigation; },
+    close: async () => {
+      closes += 1;
+      rejectNavigation(Object.assign(new Error("capture cancelled"), { name: "AbortError" }));
+    },
+  } as unknown as SharinganSession;
+  const app = createApp({ store, dataDir, sharinganOpen: async () => session });
+  await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(app.address() as AddressInfo).port}`;
+
+  try {
+    const started = await fetch(`${base}/api/sharingan/${project.id}/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "http://x.test/" }),
+    });
+    assert.equal(started.status, 200);
+    await entered;
+
+    const cancelled = await fetch(`${base}/api/sharingan/${project.id}/cancel`, { method: "POST" });
+    assert.equal(cancelled.status, 200);
+    const status = await (await fetch(`${base}/api/sharingan/${project.id}/status`)).json() as { phase: string; steps: number; pages: unknown[] };
+    assert.deepEqual(status, { phase: "cancelled", steps: 0, pages: [] });
+    assert.equal(closes, 1);
+  } finally {
+    await releaseSharinganProject(project.id);
+    await new Promise<void>((resolve) => app.close(() => resolve()));
+    store.close();
   }
 });

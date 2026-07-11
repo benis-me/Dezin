@@ -786,6 +786,9 @@ async function runSharinganRegionSubagents(params: {
         error: result.reason instanceof Error ? result.reason.message : "region subagent failed",
       });
     }
+    const sourceOrder = new Map(regions.map((region, index) => [region.id, index]));
+    builds.sort((a, b) => (sourceOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (sourceOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+    failures.sort((a, b) => (sourceOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (sourceOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER));
     await writeSharinganRegionBuildManifest(params.projectDir, builds, failures);
     if (failures.length) throw new Error(`Sharingan region subagents failed: ${sharinganRegionFailureMessage(failures)}`);
     return builds;
@@ -1461,10 +1464,13 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     sharinganCaptureId = sharinganRunCaptureId(project.id, run.id);
     // Best-effort: never fail the build on a capture hiccup — the agent can still probe live.
     await ensureCaptured(sharinganCaptureId, deps.dataDir, project.sourceUrl, {
+      signal: ctrl.signal,
       keepSessionForProbe: true,
       artifactDir: dir,
       open: deps.sharinganOpen,
-    }).catch(() => {});
+    }).catch((error) => {
+      if (isAbortError(error)) throw error;
+    });
     // Write the dezin-probe CLI into .sharingan/ so the agent drives capture with a real tool, not curl.
     const probeBase = `${(origin ?? "").replace(/\/+$/, "")}/api/sharingan/${project.id}`;
     try { writeProbeCli(dir, probeBase, run.id); } catch { /* best-effort */ }

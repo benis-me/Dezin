@@ -495,8 +495,9 @@ export interface SharinganPage {
 }
 
 /** Overall capture status for a Sharingan clone job. */
+export type SharinganPhase = "idle" | "capturing" | "login-required" | "captured" | "error" | "probing" | "cancelled";
 export interface SharinganStatus {
-  phase: string;
+  phase: SharinganPhase;
   steps: number;
   pages: SharinganPage[];
   error?: string;
@@ -698,6 +699,8 @@ export interface ApiClient {
   suggestPreferences(): Promise<{ suggestion: string; signals: number }>;
   /** Start a Sharingan clone capture for the given source URL. */
   startSharingan(id: string, url: string): Promise<void>;
+  /** Cancel the capture and wait until the daemon has released its browser/session resources. */
+  cancelSharingan(id: string): Promise<void>;
   /** Current capture status: phase, step count, and pages captured so far. */
   sharinganStatus(id: string): Promise<SharinganStatus>;
   /** Resume a capture that's paused (e.g. waiting after a login-required step). */
@@ -965,6 +968,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     setRunFeedback: (runId, feedback) => json<{ run: RunSummary }>(`/api/runs/${enc(runId)}/feedback`, jsonInit("POST", feedback ?? { clear: true })),
     suggestPreferences: () => json<{ suggestion: string; signals: number }>("/api/preferences/suggest", { method: "POST" }),
     startSharingan: (id, url) => json<void>(`/api/sharingan/${enc(id)}/start`, jsonInit("POST", { url })),
+    cancelSharingan: (id) => json<void>(`/api/sharingan/${enc(id)}/cancel`, { method: "POST" }),
     sharinganStatus: (id) => json<SharinganStatus>(`/api/sharingan/${enc(id)}/status`),
     continueSharingan: (id) => json<void>(`/api/sharingan/${enc(id)}/continue`, jsonInit("POST")),
     focusSharingan: (id) => json<void>(`/api/sharingan/${enc(id)}/focus`, jsonInit("POST")),

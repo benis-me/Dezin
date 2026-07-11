@@ -144,6 +144,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     }),
     suggestPreferences: async () => ({ suggestion: "", signals: 0 }),
     startSharingan: async () => {},
+    cancelSharingan: async () => {},
     sharinganStatus: async () => ({ phase: "idle", steps: 0, pages: [] }),
     continueSharingan: async () => {},
     focusSharingan: async () => {},

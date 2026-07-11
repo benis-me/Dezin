@@ -59,4 +59,84 @@ describe("SharinganTab", () => {
     const img = await screen.findByAltText(/Captured desktop/i);
     expect(img.getAttribute("src")).toContain("home/shot-desktop.png");
   });
+
+  it("renders daemon status errors as an alert and offers Retry", async () => {
+    const startSharingan = vi.fn(async () => {});
+    renderTab({
+      startSharingan,
+      sharinganStatus: async () => ({ phase: "error", steps: 1, pages: [], error: "Chrome failed to launch" }),
+      streamSharinganEvents: async function* () {},
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Chrome failed to launch");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(startSharingan).toHaveBeenCalledWith("p1", "https://example.com"));
+    expect(screen.queryByText(/Capture cancelled/i)).not.toBeInTheDocument();
+  });
+
+  it("surfaces non-abort event-stream failures instead of swallowing them", async () => {
+    renderTab({
+      sharinganStatus: async () => ({ phase: "capturing", steps: 0, pages: [] }),
+      streamSharinganEvents: async function* () { throw new Error("capture stream disconnected"); },
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("capture stream disconnected");
+  });
+
+  it("waits for cancel acknowledgement and refreshed status before showing cancelled", async () => {
+    let acknowledge!: () => void;
+    const cancelSharingan = vi.fn(() => new Promise<void>((resolve) => { acknowledge = resolve; }));
+    let statusCalls = 0;
+    const sharinganStatus = vi.fn(async () => {
+      statusCalls += 1;
+      return statusCalls === 1
+        ? { phase: "capturing", steps: 3, pages: [] }
+        : { phase: "cancelled", steps: 0, pages: [] };
+    });
+    renderTab({
+      cancelSharingan,
+      sharinganStatus,
+      streamSharinganEvents: async function* () {},
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(cancelSharingan).toHaveBeenCalledWith("p1");
+    expect(screen.getByRole("button", { name: "Cancelling…" })).toBeDisabled();
+    expect(sharinganStatus).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Capture cancelled/i)).not.toBeInTheDocument();
+
+    acknowledge();
+    expect(await screen.findByText(/Capture cancelled/i)).toBeInTheDocument();
+    expect(sharinganStatus).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("renders a persisted cancelled status distinctly from failure", async () => {
+    const startSharingan = vi.fn(async () => {});
+    const streamSharinganEvents = vi.fn(async function* () {});
+    renderTab({
+      startSharingan,
+      sharinganStatus: async () => ({ phase: "cancelled", steps: 0, pages: [] }),
+      streamSharinganEvents,
+    });
+
+    expect(await screen.findByText(/Capture cancelled/i)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(startSharingan).toHaveBeenCalledWith("p1", "https://example.com"));
+    await waitFor(() => expect(streamSharinganEvents).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps only the newest 500 streamed work-log entries", async () => {
+    renderTab({
+      sharinganStatus: async () => ({ phase: "capturing", steps: 0, pages: [] }),
+      streamSharinganEvents: async function* () {
+        for (let index = 0; index < 505; index += 1) yield { at: index, kind: "dom" as const, text: `step ${index}` };
+      },
+    });
+
+    await screen.findByText("step 504");
+    await waitFor(() => expect(screen.queryByText("step 0")).not.toBeInTheDocument());
+    expect(screen.getAllByRole("listitem")).toHaveLength(500);
+  });
 });
