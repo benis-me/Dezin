@@ -264,13 +264,13 @@ export function ensureProbeSession(
         }).then(async (session) => {
           if (!isActive(id, c, generation)) {
             await session.close().catch(() => {});
-            await cleanupReleasedProfile(id, c, profileDir).catch(() => {});
             throw new Error("capture scope released");
           }
           c.session = session;
           c.phase = "probing";
           return session;
-        }).finally(() => {
+        }).finally(async () => {
+          if (!isActive(id, c, generation)) await cleanupReleasedProfile(id, c, profileDir).catch(() => {});
           if (c.opening === opening) c.opening = undefined;
         });
         c.opening = opening;
@@ -350,7 +350,10 @@ export function startCapture(
       // Capture threw after open() launched a browser holding the persistent-profile lock.
       // Close it so it cannot leak (and free the lock), then mark the terminal phase.
       await claimEstablishedSession(c, session)?.close().catch(() => {});
-      if (!isActive(id, c, generation)) return;
+      if (!isActive(id, c, generation)) {
+        await cleanupReleasedProfile(id, c, profileDir).catch(() => {});
+        return;
+      }
       c.error = err instanceof Error ? err.message : "capture failed";
       emit(c, { at: Date.now(), kind: "done", text: `Capture failed: ${c.error}` });
       c.phase = "error";

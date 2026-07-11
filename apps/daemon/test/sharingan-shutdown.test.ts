@@ -105,6 +105,26 @@ test("shutdown removes a Run profile recreated by an opener that resolves after 
   assert.equal(existsSync(profileDir), false, "the old generation removes profile bytes written by its late opener");
 });
 
+test("shutdown removes a Run profile recreated by an opener that rejects after the detach deadline", async () => {
+  const id = sharinganRunCaptureId("late-reject-project", `run-${Date.now()}`);
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-late-reject-"));
+  let profileDir = "";
+  let rejectOpen!: (error: Error) => void;
+  const opening = ensureProbeSession(id, dataDir, (_url, options) => {
+    profileDir = options.userDataDir ?? "";
+    return new Promise((_resolve, reject) => { rejectOpen = reject; });
+  });
+  await Promise.resolve();
+
+  await beforeDeadline(closeAllSharinganSessions(dataDir), 750);
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, "late-marker"), "created before a late opener rejection");
+  rejectOpen(new Error("late opener failed"));
+  await assert.rejects(opening, /late opener failed/);
+
+  assert.equal(existsSync(profileDir), false, "late opener rejection settles the old generation's profile cleanup");
+});
+
 test("production shutdown waits for Runs before closing preview and Sharingan children", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-shutdown-"));
   const store = new Store(":memory:");
