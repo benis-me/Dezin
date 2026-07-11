@@ -34,6 +34,9 @@ export {
 export {
   ClaudeCodeRunner,
   NodeSpawner,
+  AgentOutputLimitError,
+  AGENT_STDOUT_LIMIT_BYTES,
+  AGENT_STDERR_LIMIT_BYTES,
   historyPreamble,
   type ClaudeCodeRunnerOptions,
   type NodeSpawnerOptions,
@@ -41,6 +44,7 @@ export {
   type SpawnInput,
   type SpawnOutput,
 } from "./claude-runner.ts";
+export { BoundedTextBuffer, OUTPUT_TRUNCATION_MARKER } from "./bounded-text-buffer.ts";
 export {
   GenericCliRunner,
   type GenericAgentConfig,

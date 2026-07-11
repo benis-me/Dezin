@@ -3664,6 +3664,53 @@ test("dual-track research: SSE research-activity carries track, and visual asset
   );
 });
 
+test("research activity is clamped, incrementally bounded, and force-flushed before failure", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["unused"] });
+  const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {
+    for (let index = 0; index < 260; index++) {
+      input.onActivity?.({ kind: "note", text: `${index}:${"界".repeat(5_000)}`, track: index % 2 ? "visual" : "product" });
+    }
+    throw new Error("research fixture failed");
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      const project = await createProject(base);
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "research heavily", research: true }),
+      });
+      assert.equal(response.status, 200);
+      const events = parseSse(await response.text());
+      const runId = String(events.find((event) => event.type === "run-start")?.runId ?? "");
+      assert.ok(runId);
+      assert.ok(events.some((event) => event.type === "run-error"));
+      const live = events.filter((event) => event.type === "research-activity");
+      assert.equal(live.length, 260);
+      assert.ok(live.every((event) => Buffer.byteLength(String(event.text ?? ""), "utf8") <= 8 * 1024));
+
+      const journal = readFileSync(join(dataDir, ".runs", runId, "research-activity.jsonl"), "utf8");
+      assert.ok(Buffer.byteLength(journal, "utf8") <= 2 * 1024 * 1024);
+      assert.equal(journal.split('"type":"research-activity-truncated"').length - 1, 1);
+
+      const conversation = store.listConversations(project.id)[0]!;
+      const runningCard = store.listMessages(conversation.id).find((message) => {
+        try {
+          return (JSON.parse(message.content) as { research?: { status?: string } }).research?.status === "running";
+        } catch {
+          return false;
+        }
+      });
+      assert.ok(runningCard, "the pending 250ms snapshot is force-flushed before run-error");
+      assert.ok(Buffer.byteLength(runningCard!.content, "utf8") <= 300 * 1024);
+      const parsed = JSON.parse(runningCard!.content) as { research: { activities: unknown[] } };
+      assert.ok(parsed.research.activities.length <= 200);
+    },
+    { researchPhase },
+  );
+});
+
 test("runs without the research flag skip the research phase", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
   let called = false;

@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import {
   ClaudeCodeRunner,
   NodeSpawner,
+  OUTPUT_TRUNCATION_MARKER,
   type ProcessSpawner,
   type SpawnInput,
   type SpawnOutput,
@@ -163,6 +164,106 @@ test("NodeSpawner abort kills a process that ignores SIGTERM", async () => {
 
   setTimeout(() => controller.abort(), 20);
   await assert.rejects(run, (error) => error instanceof Error && error.name === "AbortError");
+});
+
+test("NodeSpawner retains only a UTF-8-safe 1-marker stderr tail", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-stderr-"));
+  const out = await new NodeSpawner({ stderrLimitBytes: 160 }).run({
+    command: process.execPath,
+    args: ["-e", "process.stderr.write('🙂'.repeat(1000)); process.stdout.write('ok')"],
+    cwd: dir,
+    stdin: "",
+  });
+  assert.equal(out.stdout, "ok");
+  assert.ok(Buffer.byteLength(out.stderr ?? "", "utf8") <= 160);
+  assert.equal((out.stderr ?? "").split(OUTPUT_TRUNCATION_MARKER).length - 1, 1);
+  assert.doesNotMatch(out.stderr ?? "", /�/);
+});
+
+test("NodeSpawner kills the process group and rejects with AGENT_OUTPUT_LIMIT", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-output-limit-"));
+  const spawner = new NodeSpawner({ stdoutLimitBytes: 64 * 1024, killDelayMs: 10, timeoutMs: 2000 });
+  let forwardedBytes = 0;
+  await assert.rejects(
+    spawner.run({
+      command: process.execPath,
+      args: [
+        "-e",
+        "process.on('SIGTERM',()=>{}); const c=Buffer.alloc(16384,120); const pump=()=>{while(process.stdout.write(c)){};process.stdout.once('drain',pump)};pump();setInterval(()=>{},1000)",
+      ],
+      cwd: dir,
+      stdin: "",
+      onStdout: (chunk) => { forwardedBytes += Buffer.byteLength(chunk, "utf8"); },
+    }),
+    (error) => error instanceof Error && (error as Error & { code?: string }).code === "AGENT_OUTPUT_LIMIT",
+  );
+  assert.ok(forwardedBytes <= 64 * 1024);
+});
+
+test("NodeSpawner gives output overflow deterministic priority in an overflow-abort race", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-output-abort-race-"));
+  const controller = new AbortController();
+  const limit = 64 * 1024;
+  let forwardedBytes = 0;
+  const run = new NodeSpawner({ stdoutLimitBytes: limit, killDelayMs: 10, timeoutMs: 2000 }).run({
+    command: process.execPath,
+    args: [
+      "-e",
+      "process.on('SIGTERM',()=>{}); const c=Buffer.alloc(16384,120); const pump=()=>{while(process.stdout.write(c)){};process.stdout.once('drain',pump)};pump();setInterval(()=>{},1000)",
+    ],
+    cwd: dir,
+    stdin: "",
+    signal: controller.signal,
+    onStdout: (chunk) => {
+      forwardedBytes += Buffer.byteLength(chunk, "utf8");
+      if (!controller.signal.aborted) controller.abort();
+    },
+  });
+
+  await assert.rejects(
+    run,
+    (error) => error instanceof Error && (error as Error & { code?: string }).code === "AGENT_OUTPUT_LIMIT",
+  );
+  assert.equal(controller.signal.aborted, true);
+  assert.ok(forwardedBytes <= limit);
+});
+
+test("NodeSpawner waits until an overflowing descendant process is gone", async (t) => {
+  if (process.platform === "win32") return t.skip("POSIX process-group assertion");
+  const dir = mkdtempSync(join(tmpdir(), "dezin-node-spawner-descendant-"));
+  const pidPath = join(dir, "descendant.pid");
+  const descendant = [
+    "const fs=require('node:fs')",
+    `fs.writeFileSync(${JSON.stringify(pidPath)},String(process.pid))`,
+    "process.on('SIGTERM',()=>{})",
+    "const c=Buffer.alloc(16384,120)",
+    "const pump=()=>{while(process.stdout.write(c)){};process.stdout.once('drain',pump)}",
+    "pump()",
+    "setInterval(()=>{},1000)",
+  ].join(";");
+  const parent = [
+    "const {spawn}=require('node:child_process')",
+    "process.on('SIGTERM',()=>{})",
+    `spawn(${JSON.stringify(process.execPath)},['-e',${JSON.stringify(descendant)}],{stdio:['ignore','inherit','ignore']})`,
+    "setInterval(()=>{},1000)",
+  ].join(";");
+
+  await assert.rejects(
+    new NodeSpawner({ stdoutLimitBytes: 64 * 1024, killDelayMs: 10, timeoutMs: 2000 }).run({
+      command: process.execPath,
+      args: ["-e", parent],
+      cwd: dir,
+      stdin: "",
+    }),
+    (error) => error instanceof Error && (error as Error & { code?: string }).code === "AGENT_OUTPUT_LIMIT",
+  );
+
+  const pid = Number.parseInt(readFileSync(pidPath, "utf8"), 10);
+  assert.ok(Number.isSafeInteger(pid));
+  assert.throws(
+    () => process.kill(pid, 0),
+    (error) => (error as NodeJS.ErrnoException).code === "ESRCH",
+  );
 });
 
 test("ClaudeCodeRunner rejects when the CLI exits nonzero", async () => {

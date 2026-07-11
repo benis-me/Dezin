@@ -7,11 +7,13 @@
  */
 
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentRunner, AgentTurnInput, AgentTurnResult } from "./types.ts";
 import { abortError } from "./types.ts";
 import { parseClaudeStream, parseClaudeLine } from "./claude-stream.ts";
 import { agentSpawnEnv } from "./providers/cli.ts";
 import { assertSuccessfulExit, readArtifactSnapshot, readUpdatedArtifactHtml } from "./runner-utils.ts";
+import { BoundedTextBuffer } from "./bounded-text-buffer.ts";
 
 /**
  * A compact transcript of earlier turns, prepended to a turn's message so the agent has the
@@ -63,10 +65,25 @@ export interface NodeSpawnerOptions {
   timeoutMs?: number;
   /** Delay between SIGTERM and SIGKILL during abort/timeout. Default 2 seconds. */
   killDelayMs?: number;
+  /** Hard structured/full stdout ceiling. Default 32 MiB. */
+  stdoutLimitBytes?: number;
+  /** Retained stderr tail. Default 1 MiB. */
+  stderrLimitBytes?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_KILL_DELAY_MS = 2000;
+export const AGENT_STDOUT_LIMIT_BYTES = 32 * 1024 * 1024;
+export const AGENT_STDERR_LIMIT_BYTES = 1024 * 1024;
+
+export class AgentOutputLimitError extends Error {
+  readonly code = "AGENT_OUTPUT_LIMIT";
+
+  constructor(limitBytes: number) {
+    super(`Agent stdout exceeded the ${limitBytes}-byte limit`);
+    this.name = "AgentOutputLimitError";
+  }
+}
 
 /** Real spawner backed by node:child_process. */
 export class NodeSpawner implements ProcessSpawner {
@@ -87,11 +104,16 @@ export class NodeSpawner implements ProcessSpawner {
         detached: process.platform !== "win32",
         shell: process.platform === "win32",
       });
-      let stdout = "";
-      let stderr = "";
+      const stdoutLimit = this.options.stdoutLimitBytes ?? AGENT_STDOUT_LIMIT_BYTES;
+      const stderr = new BoundedTextBuffer(this.options.stderrLimitBytes ?? AGENT_STDERR_LIMIT_BYTES);
+      const stdoutChunks: Buffer[] = [];
+      const stdoutDecoder = new StringDecoder("utf8");
+      let stdoutBytes = 0;
       let timedOut = false;
-      let killTimer: ReturnType<typeof setTimeout> | null = null;
+      let settled = false;
+      let outputLimitError: AgentOutputLimitError | null = null;
       let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+      let terminationPromise: Promise<void> | null = null;
       const killChild = (signal: NodeJS.Signals): void => {
         try {
           if (child.pid && process.platform !== "win32") {
@@ -107,14 +129,38 @@ export class NodeSpawner implements ProcessSpawner {
           }
         }
       };
-      const terminate = (): void => {
-        killChild("SIGTERM");
-        killTimer ??= setTimeout(() => killChild("SIGKILL"), this.options.killDelayMs ?? DEFAULT_KILL_DELAY_MS);
+      const groupAlive = (): boolean => {
+        if (!child.pid || process.platform === "win32") return child.exitCode === null && child.signalCode === null;
+        try {
+          process.kill(-child.pid, 0);
+          return true;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code === "EPERM";
+        }
       };
-      const onAbort = (): void => terminate();
+      const waitForGroup = async (timeoutMs: number): Promise<boolean> => {
+        const deadline = Date.now() + Math.max(0, timeoutMs);
+        while (groupAlive() && Date.now() < deadline) {
+          await new Promise<void>((resolveDelay) => {
+            const timer = setTimeout(resolveDelay, Math.min(10, Math.max(1, deadline - Date.now())));
+            timer.unref?.();
+          });
+        }
+        return !groupAlive();
+      };
+      const terminate = (): Promise<void> => {
+        if (terminationPromise) return terminationPromise;
+        killChild("SIGTERM");
+        terminationPromise = (async () => {
+          if (await waitForGroup(this.options.killDelayMs ?? DEFAULT_KILL_DELAY_MS)) return;
+          killChild("SIGKILL");
+          await waitForGroup(1_000);
+        })();
+        return terminationPromise;
+      };
+      const onAbort = (): void => { void terminate(); };
       const cleanup = (): void => {
         input.signal?.removeEventListener("abort", onAbort);
-        if (killTimer) clearTimeout(killTimer);
         if (timeoutTimer) clearTimeout(timeoutTimer);
       };
       input.signal?.addEventListener("abort", onAbort, { once: true });
@@ -122,25 +168,49 @@ export class NodeSpawner implements ProcessSpawner {
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
         timeoutTimer = setTimeout(() => {
           timedOut = true;
-          terminate();
+          void terminate();
         }, timeoutMs);
+        timeoutTimer.unref?.();
       }
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (d: string) => {
-        stdout += d;
-        input.onStdout?.(d);
+      child.stdout.on("data", (raw: Buffer | Uint8Array) => {
+        if (outputLimitError) return;
+        const chunk = Buffer.from(raw);
+        stdoutBytes += chunk.length;
+        if (stdoutBytes > stdoutLimit) {
+          outputLimitError = new AgentOutputLimitError(stdoutLimit);
+          void terminate();
+          return;
+        }
+        stdoutChunks.push(chunk);
+        const decoded = stdoutDecoder.write(chunk);
+        if (decoded) input.onStdout?.(decoded);
       });
-      child.stderr.on("data", (d: string) => (stderr += d));
+      child.stderr.on("data", (raw: Buffer | Uint8Array) => stderr.append(raw));
       child.on("error", (e) => {
-        cleanup();
-        reject(e);
+        if (settled) return;
+        settled = true;
+        void (async () => {
+          await terminationPromise?.catch(() => {});
+          cleanup();
+          reject(e);
+        })();
       });
       child.on("close", (code) => {
-        cleanup();
-        if (timedOut) return reject(new Error(`${input.command} timed out after ${timeoutMs}ms`));
-        if (input.signal?.aborted) return reject(abortError());
-        resolve({ stdout, stderr, exitCode: code ?? 0 });
+        if (settled) return;
+        settled = true;
+        void (async () => {
+          await terminationPromise?.catch(() => {});
+          cleanup();
+          if (!outputLimitError) {
+            const decoded = stdoutDecoder.end();
+            if (decoded) input.onStdout?.(decoded);
+          }
+          if (outputLimitError) return reject(outputLimitError);
+          if (timedOut) return reject(new Error(`${input.command} timed out after ${timeoutMs}ms`));
+          if (input.signal?.aborted) return reject(abortError());
+          const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString("utf8");
+          resolve({ stdout, stderr: stderr.toString(), exitCode: code ?? 0 });
+        })();
       });
       child.stdin.on("error", () => {}); // ignore EPIPE if the child exits early
       child.stdin.write(input.stdin);
@@ -208,14 +278,26 @@ export class ClaudeCodeRunner implements AgentRunner {
 
     // Buffer stdout into whole lines and surface each as live activity as it streams.
     let buffer = "";
+    let droppingOversizedLiveLine = false;
+    const liveLineLimitBytes = 1024 * 1024;
     const onStdout = input.onActivity
       ? (chunk: string): void => {
+          if (droppingOversizedLiveLine) {
+            const newline = chunk.indexOf("\n");
+            if (newline < 0) return;
+            droppingOversizedLiveLine = false;
+            chunk = chunk.slice(newline + 1);
+          }
           buffer += chunk;
           let nl: number;
           while ((nl = buffer.indexOf("\n")) >= 0) {
             const line = buffer.slice(0, nl);
             buffer = buffer.slice(nl + 1);
             for (const ev of parseClaudeLine(line)) input.onActivity!(ev);
+          }
+          if (Buffer.byteLength(buffer, "utf8") > liveLineLimitBytes) {
+            buffer = "";
+            droppingOversizedLiveLine = true;
           }
         }
       : undefined;

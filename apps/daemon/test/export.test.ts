@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, truncateSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
@@ -8,7 +9,14 @@ import type { AddressInfo } from "node:net";
 import { request } from "node:http";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
-import { MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES } from "../src/export-handler.ts";
+import {
+  ExportBudget,
+  MAX_EXPORT_ENTRIES,
+  MAX_EXPORT_FILE_BYTES,
+  MAX_EXPORT_TOTAL_BYTES,
+  MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES,
+  walkFiles,
+} from "../src/export-handler.ts";
 import { createZip } from "../src/zip.ts";
 
 interface Ctx {
@@ -36,15 +44,25 @@ async function withServer(fn: (ctx: Ctx) => Promise<void>, extraDeps: Partial<Ap
 
 function readZip(zip: Buffer): Array<{ path: string; data: Buffer }> {
   const out: Array<{ path: string; data: Buffer }> = [];
-  let o = 0;
-  while (o + 4 <= zip.length && zip.readUInt32LE(o) === 0x04034b50) {
-    const compSize = zip.readUInt32LE(o + 18);
-    const nameLen = zip.readUInt16LE(o + 26);
-    const extraLen = zip.readUInt16LE(o + 28);
-    const path = zip.toString("utf8", o + 30, o + 30 + nameLen);
-    const start = o + 30 + nameLen + extraLen;
-    out.push({ path, data: inflateRawSync(zip.subarray(start, start + compSize)) });
-    o = start + compSize;
+  const eocd = zip.length - 22;
+  assert.equal(zip.readUInt32LE(eocd), 0x06054b50);
+  const count = zip.readUInt16LE(eocd + 10);
+  let central = zip.readUInt32LE(eocd + 16);
+  for (let index = 0; index < count; index++) {
+    assert.equal(zip.readUInt32LE(central), 0x02014b50);
+    const method = zip.readUInt16LE(central + 10);
+    const compSize = zip.readUInt32LE(central + 20);
+    const nameLen = zip.readUInt16LE(central + 28);
+    const extraLen = zip.readUInt16LE(central + 30);
+    const commentLen = zip.readUInt16LE(central + 32);
+    const localOffset = zip.readUInt32LE(central + 42);
+    const path = zip.toString("utf8", central + 46, central + 46 + nameLen);
+    const localNameLen = zip.readUInt16LE(localOffset + 26);
+    const localExtraLen = zip.readUInt16LE(localOffset + 28);
+    const start = localOffset + 30 + localNameLen + localExtraLen;
+    const raw = zip.subarray(start, start + compSize);
+    out.push({ path, data: method === 8 ? inflateRawSync(raw) : Buffer.from(raw) });
+    central += 46 + nameLen + extraLen + commentLen;
   }
   return out;
 }
@@ -603,5 +621,183 @@ test("export 404s for a project with no artifacts", async () => {
 test("export 404s for an unknown project", async () => {
   await withServer(async ({ base }) => {
     assert.equal((await fetch(`${base}/api/projects/nope/export`)).status, 404);
+  });
+});
+
+test("ExportBudget applies one shared entry, file, and total budget", () => {
+  const entries = new ExportBudget();
+  for (let index = 0; index < MAX_EXPORT_ENTRIES; index++) entries.reserve(`file-${index}`, 0);
+  assert.throws(() => entries.reserve("overflow", 0), /more than 10,000 entries/);
+
+  const file = new ExportBudget();
+  assert.throws(() => file.reserve("huge.bin", MAX_EXPORT_FILE_BYTES + 1), /exceeds 64 MiB/);
+
+  const total = new ExportBudget();
+  for (let index = 0; index < 8; index++) total.reserve(`part-${index}`, MAX_EXPORT_FILE_BYTES);
+  assert.equal(MAX_EXPORT_FILE_BYTES * 8, MAX_EXPORT_TOTAL_BYTES);
+  assert.throws(() => total.reserve("one-more-byte", 1), /exceeds 512 MiB/);
+});
+
+test("export walking checks cancellation between directory entries", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-export-walk-abort-"));
+  for (let index = 0; index < 20; index++) writeFileSync(join(dir, `file-${index}.txt`), "x");
+  let checks = 0;
+  const signal = {
+    throwIfAborted() {
+      checks += 1;
+      if (checks === 5) throw new Error("cancel export walk");
+    },
+  } as AbortSignal;
+
+  await assert.rejects(walkFiles(dir, dir, [], { signal }), /cancel export walk/);
+  assert.equal(checks, 5);
+});
+
+test("export rejects a file over 64 MiB with 413 before download headers", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Oversized" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(dir, { recursive: true });
+    const huge = join(dir, "huge.bin");
+    writeFileSync(huge, "");
+    truncateSync(huge, MAX_EXPORT_FILE_BYTES + 1);
+
+    const response = await fetch(`${base}/api/projects/${project.id}/export`);
+    assert.equal(response.status, 413);
+    assert.equal(response.headers.get("content-disposition"), null);
+    assert.match(((await response.json()) as { error?: string }).error ?? "", /64 MiB/);
+  });
+});
+
+test("export rejects more than 10,000 combined entries before writing archive headers", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Too many" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(dir, { recursive: true });
+    for (let index = 0; index <= MAX_EXPORT_ENTRIES; index++) writeFileSync(join(dir, `f-${index}.txt`), "");
+
+    const response = await fetch(`${base}/api/projects/${project.id}/export`);
+    assert.equal(response.status, 413);
+    assert.equal(response.headers.get("content-disposition"), null);
+    assert.match(((await response.json()) as { error?: string }).error ?? "", /too many|10,000/i);
+  });
+});
+
+test("export rejects a sparse combined payload over 512 MiB before headers", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Too large" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(dir, { recursive: true });
+    for (let index = 0; index < 8; index++) {
+      const part = join(dir, `part-${index}.bin`);
+      writeFileSync(part, "");
+      truncateSync(part, MAX_EXPORT_FILE_BYTES);
+    }
+    writeFileSync(join(dir, "overflow.bin"), "x");
+
+    const response = await fetch(`${base}/api/projects/${project.id}/export`);
+    assert.equal(response.status, 413);
+    assert.equal(response.headers.get("content-disposition"), null);
+    assert.match(((await response.json()) as { error?: string }).error ?? "", /512 MiB/);
+  });
+});
+
+test("aborting a streaming Standard export removes its temporary Git bundle", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Abort export", mode: "standard" });
+    store.ensureMainVariant(project.id);
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(dir, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "Dezin Test"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "dezin@example.test"], { cwd: dir });
+    writeFileSync(join(dir, "index.html"), "<main>abort me</main>");
+    writeFileSync(join(dir, "payload.bin"), Buffer.alloc(2 * 1024 * 1024, 0x5a));
+    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync("git", ["commit", "-qm", "fixture"], { cwd: dir });
+
+    const controller = new AbortController();
+    const response = await fetch(`${base}/api/projects/${project.id}/export?scope=full`, { signal: controller.signal });
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    await reader.read();
+    controller.abort(new Error("stop download"));
+    await reader.read().catch(() => ({ done: true as const, value: undefined }));
+
+    const exportDir = join(dataDir, ".exports");
+    for (let attempt = 0; attempt < 100 && existsSync(exportDir) && readdirSync(exportDir).length > 0; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(exportDir) ? readdirSync(exportDir).length : 0, 0);
+  });
+});
+
+test("aborting while the Standard Git bundle command runs kills its process group and leaves no temp file", async (t) => {
+  if (process.platform === "win32") return t.skip("POSIX process-group assertion");
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Abort Git bundle", mode: "standard" });
+    store.ensureMainVariant(project.id);
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(dir, { recursive: true });
+    execFileSync(realGit, ["init", "-q"], { cwd: dir });
+    execFileSync(realGit, ["config", "user.name", "Dezin Test"], { cwd: dir });
+    execFileSync(realGit, ["config", "user.email", "dezin@example.test"], { cwd: dir });
+    writeFileSync(join(dir, "index.html"), "<main>wait for bundle</main>");
+    execFileSync(realGit, ["add", "."], { cwd: dir });
+    execFileSync(realGit, ["commit", "-qm", "fixture"], { cwd: dir });
+
+    const binDir = join(dataDir, "fake-bin");
+    const pidPath = join(dataDir, "git-wrapper.pid");
+    mkdirSync(binDir, { recursive: true });
+    const wrapper = join(binDir, "git");
+    writeFileSync(
+      wrapper,
+      [
+        "#!/bin/sh",
+        "if [ \"$1\" = \"bundle\" ]; then",
+        `  echo $$ > ${JSON.stringify(pidPath)}`,
+        "  trap '' TERM",
+        "  while true; do sleep 1; done",
+        "fi",
+        `exec ${JSON.stringify(realGit)} \"$@\"`,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(wrapper, 0o755);
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${previousPath ?? ""}`;
+    const controller = new AbortController();
+    try {
+      const outcome = fetch(`${base}/api/projects/${project.id}/export?scope=full`, { signal: controller.signal })
+        .then((response) => ({ response }), (error: unknown) => ({ error }));
+      for (let attempt = 0; attempt < 200 && !existsSync(pidPath); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(existsSync(pidPath), true, "the controlled Git bundle command started");
+      controller.abort();
+      const result = await outcome;
+      assert.ok("error" in result && result.error instanceof Error && result.error.name === "AbortError");
+
+      const pid = Number.parseInt(readFileSync(pidPath, "utf8"), 10);
+      const exportDir = join(dataDir, ".exports");
+      let alive = true;
+      for (let attempt = 0; attempt < 300; attempt++) {
+        try {
+          process.kill(pid, 0);
+          alive = true;
+        } catch (error) {
+          alive = (error as NodeJS.ErrnoException).code !== "ESRCH";
+        }
+        const files = existsSync(exportDir) ? readdirSync(exportDir) : [];
+        if (!alive && files.length === 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(alive, false);
+      assert.equal(existsSync(exportDir) ? readdirSync(exportDir).length : 0, 0);
+    } finally {
+      process.env.PATH = previousPath;
+    }
   });
 });

@@ -6,6 +6,9 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, dirname } from "node:path";
+import { BoundedTextBuffer } from "../bounded-text-buffer.ts";
+
+export const PROVIDER_CAPTURE_LIMIT_BYTES = 1024 * 1024;
 
 /** PATH augmented with well-known toolchain dirs so a minimal-env daemon (e.g. the desktop
  *  app launched from Finder, or a fresh machine) still finds CLIs. Critically this includes
@@ -45,26 +48,93 @@ export function runCapture(command: string, args: string[], timeoutMs: number): 
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv(), shell: process.platform === "win32" });
+      child = spawn(command, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: agentSpawnEnv(),
+        shell: process.platform === "win32",
+        detached: process.platform !== "win32",
+        windowsHide: true,
+      });
     } catch {
       return resolve(null);
     }
-    let out = "";
+    const out = new BoundedTextBuffer(PROVIDER_CAPTURE_LIMIT_BYTES);
+    let seenBytes = 0;
+    let failed = false;
+    let settled = false;
+    let terminationPromise: Promise<void> | undefined;
+    const kill = (signal: NodeJS.Signals): void => {
+      try {
+        if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        // Process already exited.
+      }
+    };
+    const groupAlive = (): boolean => {
+      if (!child.pid || process.platform === "win32") return child.exitCode === null && child.signalCode === null;
+      try {
+        process.kill(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM";
+      }
+    };
+    const waitForGroup = async (timeout: number): Promise<boolean> => {
+      const deadline = Date.now() + timeout;
+      while (groupAlive() && Date.now() < deadline) {
+        await new Promise<void>((resolveDelay) => {
+          const delay = setTimeout(resolveDelay, 10);
+          delay.unref?.();
+        });
+      }
+      return !groupAlive();
+    };
+    const terminate = (): Promise<void> => {
+      if (terminationPromise) return terminationPromise;
+      kill("SIGTERM");
+      terminationPromise = (async () => {
+        if (await waitForGroup(250)) return;
+        kill("SIGKILL");
+        await waitForGroup(1_000);
+      })();
+      return terminationPromise;
+    };
     const timer = setTimeout(() => {
-      child.kill();
-      resolve(null);
+      failed = true;
+      void terminate();
     }, timeoutMs);
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (d: string) => (out += d));
-    child.stderr?.on("data", (d: string) => (out += d));
+    timer.unref?.();
+    const append = (raw: Buffer | Uint8Array): void => {
+      if (failed) return;
+      const chunk = Buffer.from(raw);
+      seenBytes += chunk.length;
+      if (seenBytes > PROVIDER_CAPTURE_LIMIT_BYTES) {
+        failed = true;
+        void terminate();
+        return;
+      }
+      out.append(chunk);
+    };
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
     child.on("error", () => {
-      clearTimeout(timer);
-      resolve(null);
+      if (settled) return;
+      settled = true;
+      void (async () => {
+        await terminationPromise?.catch(() => {});
+        clearTimeout(timer);
+        resolve(null);
+      })();
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? 0, out });
+      if (settled) return;
+      settled = true;
+      void (async () => {
+        await terminationPromise?.catch(() => {});
+        clearTimeout(timer);
+        resolve(failed ? null : { code: code ?? 0, out: out.toString() });
+      })();
     });
   });
 }

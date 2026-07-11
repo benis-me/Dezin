@@ -1,12 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createRun, finishRun, pushEvent, readRunLog, subscribe } from "../src/run-manager.ts";
 import { RuntimeSupervisor } from "../src/runtime-supervisor.ts";
+import {
+  BoundedEventBuffer,
+  RUN_JOURNAL_MAX_BYTES,
+  RUN_JOURNAL_MAX_EVENTS,
+  RUN_JOURNAL_TRUNCATED,
+} from "../src/bounded-buffer.ts";
 
 test("run-manager registers scoped ownership and settles only after its JSONL queue flushes", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-manager-"));
@@ -128,6 +134,94 @@ test("finished run logs persist sequence numbers for restart reattach cursors", 
   subscribe("r-log", dataDir, (event) => seen.push(event), () => {}, { afterSeq: 1 });
   assert.deepEqual(readRunLog(join(dataDir, ".runs", "r-log.jsonl")).map((event) => (event as { seq?: number }).seq), [1, 2]);
   assert.deepEqual(seen.map((event) => (event as { type?: string }).type), ["second"]);
+});
+
+test("run journal bounds 10,000 events in memory and on disk while preserving terminal sequence", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-manager-bounded-"));
+  createRun({ runId: "r-bounded", conversationId: "c1", dataDir });
+  const payload = "x".repeat(2048);
+  for (let index = 0; index < 10_000; index++) {
+    pushEvent("r-bounded", { type: "activity", index, payload });
+  }
+  pushEvent("r-bounded", { type: "run-done", runId: "r-bounded" });
+
+  const inMemory: unknown[] = [];
+  const unsubscribe = subscribe("r-bounded", dataDir, (event) => inMemory.push(event), () => {});
+  unsubscribe();
+  assert.ok(inMemory.length <= RUN_JOURNAL_MAX_EVENTS);
+  assert.equal(inMemory.filter((event) => (event as { type?: string }).type === RUN_JOURNAL_TRUNCATED).length, 1);
+  assert.deepEqual(
+    inMemory.slice(-1).map((event) => ({ type: (event as { type?: string }).type, seq: (event as { seq?: number }).seq })),
+    [{ type: "run-done", seq: 10_001 }],
+  );
+
+  await finishRun("r-bounded");
+  const logPath = join(dataDir, ".runs", "r-bounded.jsonl");
+  const raw = readFileSync(logPath, "utf8");
+  assert.ok(Buffer.byteLength(raw, "utf8") <= RUN_JOURNAL_MAX_BYTES);
+  const persisted = readRunLog(logPath);
+  assert.ok(persisted.length <= RUN_JOURNAL_MAX_EVENTS);
+  assert.equal(persisted.filter((event) => (event as { type?: string }).type === RUN_JOURNAL_TRUNCATED).length, 1);
+  assert.equal((persisted.at(-1) as { type?: string }).type, "run-done");
+  assert.equal((persisted.at(-1) as { seq?: number }).seq, 10_001);
+
+  const replayed: unknown[] = [];
+  subscribe("r-bounded", dataDir, (event) => replayed.push(event), () => {}, { afterSeq: 9_990 });
+  const replaySeqs = replayed.map((event) => (event as { seq?: number }).seq).filter((seq): seq is number => typeof seq === "number");
+  assert.equal(new Set(replaySeqs).size, replaySeqs.length);
+  assert.equal(replaySeqs.at(-1), 10_001);
+});
+
+test("bounded journal compacts a non-serializable terminal event instead of losing it", () => {
+  const buffer = new BoundedEventBuffer(3, 256);
+  buffer.push({ type: "activity", seq: 1, payload: "x".repeat(1_000) });
+  const terminal: { type: string; runId: string; seq: number; self?: unknown } = {
+    type: "run-done",
+    runId: "r-circular",
+    seq: 2,
+  };
+  terminal.self = terminal;
+  buffer.push(terminal);
+
+  const values = buffer.values() as Array<{ type?: string; seq?: number; truncated?: boolean }>;
+  assert.ok(buffer.byteLength <= 256);
+  assert.equal(values.filter((event) => event.type === RUN_JOURNAL_TRUNCATED).length, 1);
+  assert.deepEqual(values.at(-1), { type: "run-done", runId: "r-circular", seq: 2, truncated: true });
+});
+
+test("live events emitted reentrantly during replay stay after the replay snapshot", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-manager-reentrant-"));
+  createRun({ runId: "r-reentrant", conversationId: "c1", dataDir });
+  pushEvent("r-reentrant", { type: "first" });
+  pushEvent("r-reentrant", { type: "second" });
+  pushEvent("r-reentrant", { type: "third" });
+
+  const seqs: number[] = [];
+  const unsubscribe = subscribe("r-reentrant", dataDir, (event) => {
+    const seq = (event as { seq?: number }).seq;
+    if (typeof seq === "number") seqs.push(seq);
+    if (seq === 1) pushEvent("r-reentrant", { type: "reentrant-live" });
+  }, () => {});
+  unsubscribe();
+
+  assert.deepEqual(seqs, [1, 2, 3, 4]);
+});
+
+test("restart replay bounds a legacy oversized JSONL without losing its terminal tail", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-run-manager-legacy-log-"));
+  const logPath = join(dataDir, "legacy.jsonl");
+  const lines: string[] = [];
+  for (let index = 1; index <= 3_000; index++) {
+    lines.push(JSON.stringify({ type: "activity", seq: index, payload: "x".repeat(1_024) }));
+  }
+  lines.push(JSON.stringify({ type: "run-done", runId: "legacy", seq: 3_001 }));
+  writeFileSync(logPath, `${lines.join("\n")}\n`);
+
+  const replay = readRunLog(logPath) as Array<{ type?: string; seq?: number }>;
+  assert.ok(replay.length <= RUN_JOURNAL_MAX_EVENTS);
+  assert.ok(Buffer.byteLength(replay.map((event) => `${JSON.stringify(event)}\n`).join(""), "utf8") <= RUN_JOURNAL_MAX_BYTES);
+  assert.equal(replay.filter((event) => event.type === RUN_JOURNAL_TRUNCATED).length, 1);
+  assert.deepEqual(replay.at(-1), { type: "run-done", runId: "legacy", seq: 3_001 });
 });
 
 test("subscribe removes a partially attached listener when broker subscription throws", () => {

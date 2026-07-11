@@ -7,20 +7,22 @@
  */
 
 import { EventEmitter } from "node:events";
-import { mkdirSync, readFileSync, existsSync } from "node:fs";
-import { appendFile } from "node:fs/promises";
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RuntimeSupervisor } from "./runtime-supervisor.ts";
+import { BoundedEventBuffer, RUN_JOURNAL_MAX_BYTES } from "./bounded-buffer.ts";
 
 interface RunEntry {
   runId: string;
   conversationId: string;
   logPath: string;
-  buffer: unknown[];
+  buffer: BoundedEventBuffer;
   nextSeq: number;
   emitter: EventEmitter;
   ctrl: AbortController;
   writeQueue: Promise<void>;
+  flushTimer?: ReturnType<typeof setTimeout>;
   settled: Promise<void>;
   resolveSettled: () => void;
   finishPromise?: Promise<void>;
@@ -58,7 +60,7 @@ export function createRun(meta: {
     runId: meta.runId,
     conversationId: meta.conversationId,
     logPath,
-    buffer: [],
+    buffer: new BoundedEventBuffer(),
     nextSeq: 1,
     emitter,
     ctrl: new AbortController(),
@@ -103,14 +105,34 @@ export function pushEvent(runId: string, ev: unknown): void {
   if (!e || e.done) return;
   const event = withSeq(ev, e.nextSeq++);
   e.buffer.push(event);
-  let line = "";
-  try {
-    line = `${JSON.stringify(event)}\n`;
-  } catch {
-    line = "";
-  }
-  if (line) e.writeQueue = e.writeQueue.catch(() => {}).then(() => appendFile(e.logPath, line)).catch(() => {});
+  scheduleFlush(e);
   e.emitter.emit("event", event);
+}
+
+function queueSnapshot(e: RunEntry): Promise<void> {
+  const snapshot = e.buffer.toJsonl();
+  e.writeQueue = e.writeQueue
+    .catch(() => {})
+    .then(() => writeFile(e.logPath, snapshot, "utf8"))
+    .catch(() => {});
+  return e.writeQueue;
+}
+
+function scheduleFlush(e: RunEntry): void {
+  if (e.flushTimer) return;
+  e.flushTimer = setTimeout(() => {
+    e.flushTimer = undefined;
+    void queueSnapshot(e);
+  }, 50);
+  e.flushTimer.unref?.();
+}
+
+function forceFlush(e: RunEntry): Promise<void> {
+  if (e.flushTimer) {
+    clearTimeout(e.flushTimer);
+    e.flushTimer = undefined;
+  }
+  return queueSnapshot(e);
 }
 
 /** Mark the run finished; late subscribers fall back to the persisted log. */
@@ -118,7 +140,7 @@ export function finishRun(runId: string): Promise<void> {
   const e = runs.get(runId);
   if (!e) return Promise.resolve();
   e.done = true;
-  e.finishPromise ??= e.writeQueue
+  e.finishPromise ??= forceFlush(e)
     .catch(() => {})
     .then(() => {
       if (runs.get(runId) !== e) return;
@@ -171,8 +193,14 @@ export function subscribe(
     return () => {};
   }
   let ended = false;
-  const onEv = (ev: unknown): void => {
+  let replaying = true;
+  const pending: unknown[] = [];
+  const deliver = (ev: unknown): void => {
     if (shouldReplay(ev, afterSeq, seen)) onEvent(ev);
+  };
+  const onEv = (ev: unknown): void => {
+    if (replaying) pending.push(ev);
+    else deliver(ev);
   };
   const onDone = (): void => {
     if (ended) return;
@@ -184,9 +212,12 @@ export function subscribe(
       e.emitter.on("event", onEv);
       e.emitter.once("done", onDone);
     }
-    for (const ev of e.buffer.slice()) onEv(ev);
+    for (const ev of e.buffer.values()) deliver(ev);
+    for (let index = 0; index < pending.length; index++) deliver(pending[index]);
+    replaying = false;
     if (e.done) onDone();
   } catch (err) {
+    replaying = false;
     e.emitter.off("event", onEv);
     e.emitter.off("done", onDone);
     throw err;
@@ -199,15 +230,76 @@ export function subscribe(
 
 export function readRunLog(logPath: string): unknown[] {
   if (!existsSync(logPath)) return [];
-  return readFileSync(logPath, "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .map((l) => {
+  let size: number;
+  try {
+    size = statSync(logPath).size;
+  } catch {
+    return [];
+  }
+  const start = Math.max(0, size - RUN_JOURNAL_MAX_BYTES);
+  const data = Buffer.alloc(Math.min(size, RUN_JOURNAL_MAX_BYTES));
+  let bytesRead = 0;
+  let fd: number | undefined;
+  try {
+    fd = openSync(logPath, "r");
+    while (bytesRead < data.length) {
+      const count = readSync(fd, data, bytesRead, data.length - bytesRead, start + bytesRead);
+      if (count === 0) break;
+      bytesRead += count;
+    }
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) {
       try {
-        return JSON.parse(l) as unknown;
+        closeSync(fd);
       } catch {
-        return null;
+        // Best-effort close on a concurrently removed journal.
       }
-    })
-    .filter((x): x is unknown => x !== null);
+    }
+  }
+
+  let text = data.subarray(0, bytesRead).toString("utf8");
+  let droppedPrefixBytes = start;
+  if (start > 0) {
+    const newline = text.indexOf("\n");
+    if (newline < 0) text = "";
+    else {
+      droppedPrefixBytes += Buffer.byteLength(text.slice(0, newline + 1), "utf8");
+      text = text.slice(newline + 1);
+    }
+  }
+
+  const bounded = new BoundedEventBuffer();
+  let seededPrefix = start === 0;
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line) as unknown;
+    } catch {
+      continue;
+    }
+    if (!seededPrefix) {
+      const seq = eventSeq(event);
+      const throughSeq = seq === null ? 0 : Math.max(0, seq - 1);
+      bounded.recordDroppedPrefix({
+        droppedEvents: 1,
+        droppedBytes: droppedPrefixBytes,
+        droppedThroughSeq: throughSeq,
+        markerSeq: throughSeq,
+      });
+      seededPrefix = true;
+    }
+    bounded.push(event);
+  }
+  if (!seededPrefix) {
+    bounded.recordDroppedPrefix({
+      droppedEvents: 1,
+      droppedBytes: droppedPrefixBytes,
+      droppedThroughSeq: 0,
+      markerSeq: 0,
+    });
+  }
+  return bounded.values();
 }

@@ -1067,7 +1067,26 @@ const routes: Route[] = [
     method: "GET",
     pattern: "/api/projects/:id/export",
     publicRead: true,
-    handler: (req, res, params, deps) => handleExport(req, res, params, deps),
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      async (scopeSignal) => {
+        const requestController = new AbortController();
+        const abortRequest = (): void => {
+          if (!requestController.signal.aborted) requestController.abort(new Error("export request closed"));
+        };
+        const closeResponse = (): void => {
+          if (!res.writableEnded) abortRequest();
+        };
+        req.once("aborted", abortRequest);
+        res.once("close", closeResponse);
+        try {
+          await handleExport(req, res, params, deps, AbortSignal.any([scopeSignal, requestController.signal]));
+        } finally {
+          req.off("aborted", abortRequest);
+          res.off("close", closeResponse);
+        }
+      },
+    ),
   },
   {
     method: "GET",

@@ -5,7 +5,7 @@
  * (@dezin/core Store) → write the artifact to disk so /projects/:id/preview/ serves it.
  */
 
-import { cp, mkdir, readdir, readFile, rm, writeFile, stat } from "node:fs/promises";
+import { appendFile, cp, mkdir, readdir, readFile, rm, writeFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
@@ -46,6 +46,7 @@ import {
 } from "./standard-run-transaction.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
 import { RunExecution, type RunSettlementPatch } from "./run-execution.ts";
+import { BoundedEventBuffer, RUN_JOURNAL_MAX_BYTES } from "./bounded-buffer.ts";
 import { appendMoodboardReferenceLine, buildProjectMoodboardContext, normalizeProjectMoodboardRefs } from "./project-moodboard-context.ts";
 import { appendEffectReferenceLine, buildProjectEffectContext, normalizeProjectEffectRefs } from "./project-effect-context.ts";
 import { buildAgentEnv } from "./agent-env.ts";
@@ -846,6 +847,96 @@ function researchCardMessage(activities: Array<{ kind: string; text: string; tra
   return JSON.stringify({ research: { status: "running", activities } });
 }
 
+type PersistedResearchActivity = { kind: string; text: string; track?: "product" | "visual"; seq?: number };
+
+function clampUtf8(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= maxBytes) return value;
+  const marker = Buffer.from("…", "utf8");
+  let end = Math.max(0, maxBytes - marker.length);
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return Buffer.concat([bytes.subarray(0, end), marker]).toString("utf8");
+}
+
+function createResearchActivityPersistence(input: {
+  dataDir: string;
+  runId: string;
+  updateSnapshot: (activities: Array<{ kind: string; text: string; track?: "product" | "visual" }>) => void;
+}): {
+  append(activity: { kind: string; text: string; track?: "product" | "visual" }): PersistedResearchActivity;
+  flush(): Promise<void>;
+} {
+  const snapshot = new BoundedEventBuffer(200, 256 * 1024);
+  const journalPath = join(input.dataDir, ".runs", input.runId, "research-activity.jsonl");
+  const markerLine = `${JSON.stringify({ type: "research-activity-truncated" })}\n`;
+  const dataLimit = RUN_JOURNAL_MAX_BYTES - Buffer.byteLength(markerLine, "utf8");
+  let journalBytes = 0;
+  let journalTruncated = false;
+  let seq = 0;
+  let writeQueue: Promise<void> = mkdir(join(input.dataDir, ".runs", input.runId), { recursive: true }).then(() => {});
+  let snapshotTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const snapshotValues = (): Array<{ kind: string; text: string; track?: "product" | "visual" }> =>
+    snapshot.values().map((value) => {
+      const event = value as Partial<PersistedResearchActivity> & { type?: string };
+      if (event.type === "run-journal-truncated") return { kind: "text", text: "Earlier research activity was truncated." };
+      return {
+        kind: typeof event.kind === "string" ? event.kind : "text",
+        text: typeof event.text === "string" ? event.text : "Research activity",
+        ...(event.track === "product" || event.track === "visual" ? { track: event.track } : {}),
+      };
+    });
+
+  const persistSnapshot = (): void => {
+    try {
+      input.updateSnapshot(snapshotValues());
+    } catch {
+      // Research activity is diagnostic; message persistence cannot fail the Run.
+    }
+  };
+
+  const scheduleSnapshot = (): void => {
+    if (snapshotTimer) return;
+    snapshotTimer = setTimeout(() => {
+      snapshotTimer = undefined;
+      persistSnapshot();
+    }, 250);
+    snapshotTimer.unref?.();
+  };
+
+  return {
+    append(activity) {
+      const clamped: PersistedResearchActivity = {
+        kind: clampUtf8(String(activity.kind || "text"), 64),
+        text: clampUtf8(String(activity.text || ""), 8 * 1024),
+        ...(activity.track === "product" || activity.track === "visual" ? { track: activity.track } : {}),
+        seq: ++seq,
+      };
+      snapshot.push(clamped);
+      const line = `${JSON.stringify(clamped)}\n`;
+      const bytes = Buffer.byteLength(line, "utf8");
+      if (!journalTruncated && journalBytes + bytes <= dataLimit) {
+        journalBytes += bytes;
+        writeQueue = writeQueue.then(() => appendFile(journalPath, line, "utf8")).catch(() => {});
+      } else if (!journalTruncated) {
+        journalTruncated = true;
+        journalBytes += Buffer.byteLength(markerLine, "utf8");
+        writeQueue = writeQueue.then(() => appendFile(journalPath, markerLine, "utf8")).catch(() => {});
+      }
+      scheduleSnapshot();
+      return clamped;
+    },
+    async flush() {
+      if (snapshotTimer) {
+        clearTimeout(snapshotTimer);
+        snapshotTimer = undefined;
+      }
+      await writeQueue.catch(() => {});
+      persistSnapshot();
+    },
+  };
+}
+
 /** A compact HTML snippet of a kept design from any project, for cross-project exemplars. */
 function exemplarSnippet(dataDir: string, projectId: string, runId: string): string | null {
   const path = join(projectDir(dataDir, projectId), ".versions", `${runId}.html`);
@@ -1241,24 +1332,33 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     sse({ type: "research-start", runId: run.id });
     // Persist the research card from the START (not just its done-summary), updated per activity, so
     // its live Product/Visual lanes survive navigating away and back — history restore rehydrates them.
-    const researchActivities: Array<{ kind: string; text: string; track?: "product" | "visual" }> = [];
-    const researchCardMsg = store.addMessage(conversation.id, "system", researchCardMessage(researchActivities));
-    const research = await (deps.researchPhase ?? runResearchPhase)({
-      dir,
-      brief: visibleBrief,
-      skill: skill ? { id: skill.id, name: skill.name } : undefined,
-      designSystemName: (designSystem ?? registry.default()).name,
-      hasUserReferences: moodboardContext.labels.length > 0 || effectContext.labels.length > 0,
-      agentCommand: researchAgentCommand(settings, runAgentCommand),
-      model: researchModel(settings, runModel),
-      env: agentEnv,
-      signal: ctrl.signal,
-      onActivity: (a) => {
-        researchActivities.push({ kind: a.kind, text: a.text, track: a.track });
-        store.updateMessage(researchCardMsg.id, researchCardMessage(researchActivities));
-        sse({ type: "research-activity", runId: run.id, kind: a.kind, text: a.text, track: a.track });
-      },
+    const researchCardMsg = store.addMessage(conversation.id, "system", researchCardMessage([]));
+    const researchActivity = createResearchActivityPersistence({
+      dataDir: deps.dataDir,
+      runId: run.id,
+      updateSnapshot: (activities) => store.updateMessage(researchCardMsg.id, researchCardMessage(activities)),
     });
+    let research: Awaited<ReturnType<typeof runResearchPhase>>;
+    try {
+      research = await (deps.researchPhase ?? runResearchPhase)({
+        dir,
+        brief: visibleBrief,
+        skill: skill ? { id: skill.id, name: skill.name } : undefined,
+        designSystemName: (designSystem ?? registry.default()).name,
+        hasUserReferences: moodboardContext.labels.length > 0 || effectContext.labels.length > 0,
+        agentCommand: researchAgentCommand(settings, runAgentCommand),
+        model: researchModel(settings, runModel),
+        env: agentEnv,
+        signal: ctrl.signal,
+        onActivity: (activity) => {
+          const persisted = researchActivity.append(activity);
+          sse({ type: "research-activity", runId: run.id, kind: persisted.kind, text: persisted.text, track: persisted.track });
+        },
+      });
+    } finally {
+      // Flush the bounded JSONL + message snapshot before any direction/question/terminal path.
+      await researchActivity.flush();
+    }
     // Best-effort: fold any visual-track assets into the project's "Visual research" moodboard
     // so the workspace can show them immediately. Idempotent (reuses the board via a pointer
     // file) and safe to run on every research pass, independent of whether the product track

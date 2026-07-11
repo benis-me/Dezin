@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { inflateRawSync } from "node:zlib";
-import { createZip, crc32 } from "../src/zip.ts";
+import { createZip, crc32, streamZip } from "../src/zip.ts";
 
 interface ReadEntry {
   path: string;
@@ -11,18 +11,26 @@ interface ReadEntry {
 /** Minimal ZIP reader for round-trip verification. */
 function readZip(buf: Buffer): ReadEntry[] {
   const out: ReadEntry[] = [];
-  let o = 0;
-  while (o + 4 <= buf.length && buf.readUInt32LE(o) === 0x04034b50) {
-    const method = buf.readUInt16LE(o + 8);
-    const compSize = buf.readUInt32LE(o + 18);
-    const nameLen = buf.readUInt16LE(o + 26);
-    const extraLen = buf.readUInt16LE(o + 28);
-    const path = buf.toString("utf8", o + 30, o + 30 + nameLen);
-    const start = o + 30 + nameLen + extraLen;
+  const eocd = buf.length - 22;
+  assert.equal(buf.readUInt32LE(eocd), 0x06054b50);
+  const count = buf.readUInt16LE(eocd + 10);
+  let central = buf.readUInt32LE(eocd + 16);
+  for (let i = 0; i < count; i++) {
+    assert.equal(buf.readUInt32LE(central), 0x02014b50);
+    const method = buf.readUInt16LE(central + 10);
+    const compSize = buf.readUInt32LE(central + 20);
+    const nameLen = buf.readUInt16LE(central + 28);
+    const extraLen = buf.readUInt16LE(central + 30);
+    const commentLen = buf.readUInt16LE(central + 32);
+    const localOffset = buf.readUInt32LE(central + 42);
+    const path = buf.toString("utf8", central + 46, central + 46 + nameLen);
+    const localNameLen = buf.readUInt16LE(localOffset + 26);
+    const localExtraLen = buf.readUInt16LE(localOffset + 28);
+    const start = localOffset + 30 + localNameLen + localExtraLen;
     const comp = buf.subarray(start, start + compSize);
     const data = method === 8 ? inflateRawSync(comp) : Buffer.from(comp);
     out.push({ path, data });
-    o = start + compSize;
+    central += 46 + nameLen + extraLen + commentLen;
   }
   return out;
 }
@@ -52,4 +60,63 @@ test("entries round-trip through inflateRawSync", () => {
 test("crc32 matches a known value", () => {
   // CRC-32 of "hello" is 0x3610a686
   assert.equal(crc32(Buffer.from("hello")), 0x3610a686);
+});
+
+test("streamZip emits bounded chunks and a valid data-descriptor archive", async () => {
+  const chunks: Buffer[] = [];
+  let largest = 0;
+  const payload = Buffer.from("stream me\n".repeat(20_000));
+  await streamZip(
+    [
+      {
+        path: "large.txt",
+        expectedSize: payload.length,
+        async *open() {
+          for (let offset = 0; offset < payload.length; offset += 4096) {
+            yield payload.subarray(offset, Math.min(payload.length, offset + 4096));
+          }
+        },
+      },
+      {
+        path: "empty.txt",
+        expectedSize: 0,
+        async *open() {},
+      },
+    ],
+    async (chunk) => {
+      largest = Math.max(largest, chunk.byteLength);
+      chunks.push(Buffer.from(chunk));
+    },
+  );
+
+  const zip = Buffer.concat(chunks);
+  const entries = readZip(zip);
+  assert.equal(entries.find((entry) => entry.path === "large.txt")?.data.equals(payload), true);
+  assert.equal(entries.find((entry) => entry.path === "empty.txt")?.data.length, 0);
+  assert.ok(largest < payload.length, `largest emitted chunk ${largest} should not aggregate the source`);
+  assert.equal(zip.readUInt16LE(6) & 0x08, 0x08, "streamed local header uses a data descriptor");
+});
+
+test("streamZip aborts without consuming the rest of an entry", async () => {
+  const controller = new AbortController();
+  let reads = 0;
+  await assert.rejects(
+    streamZip(
+      [{
+        path: "abort.txt",
+        async *open() {
+          for (let i = 0; i < 100; i++) {
+            reads += 1;
+            yield Buffer.alloc(1024, i);
+          }
+        },
+      }],
+      async () => {
+        controller.abort(new Error("client left"));
+      },
+      { signal: controller.signal },
+    ),
+    /client left/,
+  );
+  assert.ok(reads < 100);
 });
