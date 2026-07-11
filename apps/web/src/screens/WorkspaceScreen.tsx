@@ -46,6 +46,38 @@ import { DesignSystemDetailScreen } from "./DesignSystemDetailScreen.tsx";
 import { Markdown } from "../components/Markdown.tsx";
 import { ResearchCard, ResearchPanel, type ResearchCardData } from "./ResearchViews.tsx";
 import { SharinganTab } from "./SharinganTab.tsx";
+import {
+  groupAssistantTurns,
+  groupRunCardMessages,
+  liveText,
+  runCardRadiusClass,
+  runCardStackPosition,
+  type LiveItem,
+  type Msg,
+  type ResultMeta,
+  type RunCardStackPosition,
+  type VisualReviewState,
+} from "./workspace-transcript.tsx";
+import {
+  activeVariantIdOf,
+  buildVersionGroups,
+  cacheBustPreviewUrl,
+  findVersionSelection,
+  isVersionPreviewSrc,
+  sortRunsNewestFirst,
+  versionLabel,
+  type VersionGroup,
+} from "./workspace-versions.ts";
+import {
+  MARKUP_POPOVER,
+  clamp,
+  computeMarkupPosition,
+  formatMarkupTarget,
+  parseUserMessage,
+  type MarkupAttributes,
+  type MarkupStyles,
+  type MarkupTarget,
+} from "./workspace-markup.ts";
 import { highlightToReact } from "../lib/highlight-lite.tsx";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
@@ -63,6 +95,8 @@ import { PreviewRuntimeErrorOverlay } from "../components/PreviewRuntimeErrorOve
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
 import { isImeComposing } from "../lib/keyboard.ts";
+
+export { computeMarkupPosition } from "./workspace-markup.ts";
 
 const TABS = ["Preview", "Sharingan", "Research", "Files", "Quality"] as const;
 type Tab = (typeof TABS)[number];
@@ -218,274 +252,6 @@ function writeQueue(projectId: string, queue: QueuedPrompt[]): void {
   } catch {
     /* localStorage may be unavailable */
   }
-}
-
-interface ResultMeta {
-  passed?: boolean;
-  score?: number | null;
-  rounds?: number;
-  error?: boolean;
-  status?: "done" | "stopped" | "failed";
-  materialSources?: string[];
-  /** False when Visual Review was on but the critic never rendered/judged (only anti-slop ran). */
-  designReviewed?: boolean;
-  /** Count of defects the auto-fixer repeatedly failed to resolve (gave up on). */
-  unresolved?: number;
-}
-interface Msg {
-  id: number;
-  dbId?: string;
-  kind: "user" | "assistant" | "result" | "process" | "question" | "visual-review" | "direction-gate" | "research";
-  text: string;
-  directions?: Array<{ slug: string; title: string; markdown: string }>;
-  /** Live + final state of the pre-design Research phase (its dedicated card). */
-  research?: ResearchCardData;
-  meta?: ResultMeta;
-  steps?: string[];
-  items?: LiveItem[];
-  visualReview?: VisualReviewState;
-  elapsedMs?: number;
-  runId?: string;
-  /** DB createdAt — used to link a Versions run back to its triggering message. */
-  at?: number;
-}
-
-type RunCardStackPosition = "single" | "first" | "middle" | "last";
-type TranscriptRow = { kind: "single"; message: Msg } | { kind: "stack"; messages: Msg[] };
-type TranscriptBlock =
-  | { kind: "row"; row: TranscriptRow }
-  | { kind: "assistant-turn"; prelude?: Msg[]; message: Msg; stack?: Msg[] };
-
-/** A live, ordered chunk of the agent's turn — assistant prose or a tool step — so the two
- *  render interleaved (chronologically) during generation, not split into separate blocks. */
-type LiveItem = { type: "text"; text: string } | { type: "tool"; summary: string };
-
-interface VisualReviewState {
-  status: "running" | "complete";
-  runId?: string;
-  enabled?: boolean;
-  round?: number;
-  agentCommand?: string;
-  model?: string;
-  screenshotUrl?: string;
-  screenshotPath?: string;
-  summary?: string;
-  findings: QualityFinding[];
-  process: LiveItem[];
-}
-
-function isRunCardMessage(message: Msg): boolean {
-  return message.kind === "process" || message.kind === "result" || message.kind === "visual-review";
-}
-
-function isStepsMessage(message: Msg | undefined): message is Msg {
-  return message?.kind === "process" && (message.steps?.length ?? 0) > 0;
-}
-
-function isTurnProcessMessage(message: Msg | undefined): message is Msg {
-  return message?.kind === "process" && (message.items?.length ?? 0) > 0;
-}
-
-function shouldSplitRunCardStack(current: Msg, next: Msg): boolean {
-  return current.kind === "visual-review" && isTurnProcessMessage(next);
-}
-
-function processSummaryText(message: Msg): string {
-  return message.kind === "process" && message.items ? liveText(message.items).replace(/\s+/g, " ").trim() : "";
-}
-
-function stripDuplicatedProcessText(message: Msg, summary?: string): Msg | null {
-  if (message.kind !== "process" || !message.items?.length) return message;
-  const normalizedSummary = (summary ?? "").replace(/\s+/g, " ").trim();
-  const normalizedProcessText = processSummaryText(message);
-  if (!normalizedSummary || normalizedSummary !== normalizedProcessText) return message;
-  const items = message.items.filter((item): item is { type: "tool"; summary: string } => item.type === "tool");
-  if (!items.length && !message.steps?.length) return null;
-  return { ...message, items };
-}
-
-function normalizeTranscriptMessages(messages: Msg[]): Msg[] {
-  const normalized: Msg[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const current = messages[i]!;
-    if (current.kind === "process" && current.items?.length) {
-      const next = messages[i + 1];
-      const assistant = isStepsMessage(next) ? messages[i + 2] : next;
-      const cleaned = stripDuplicatedProcessText(current, assistant?.kind === "assistant" ? assistant.text : undefined);
-      if (cleaned) normalized.push(cleaned);
-      continue;
-    }
-    if (isStepsMessage(current) && messages[i - 1]?.kind === "process" && messages[i + 1]?.kind === "assistant") {
-      continue;
-    }
-    normalized.push(current);
-    if (current.kind === "assistant" && messages[i - 2]?.kind === "process" && isStepsMessage(messages[i - 1])) {
-      normalized.push(messages[i - 1]!);
-    }
-  }
-  return normalized;
-}
-
-function groupRunCardMessages(source: Msg[]): TranscriptRow[] {
-  const messages = normalizeTranscriptMessages(source);
-  const rows: TranscriptRow[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i];
-    if (!isRunCardMessage(message)) {
-      rows.push({ kind: "single", message });
-      continue;
-    }
-    const start = i;
-    while (
-      i + 1 < messages.length &&
-      isRunCardMessage(messages[i + 1]) &&
-      !shouldSplitRunCardStack(messages[i]!, messages[i + 1]!)
-    )
-      i++;
-    const group = messages.slice(start, i + 1);
-    rows.push(group.length > 1 ? { kind: "stack", messages: group } : { kind: "single", message });
-  }
-  return rows;
-}
-
-function groupAssistantTurns(rows: TranscriptRow[]): TranscriptBlock[] {
-  const blocks: TranscriptBlock[] = [];
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i]!;
-    if (row.kind === "single" && isTurnProcessMessage(row.message)) {
-      const next = rows[i + 1];
-      if (next?.kind === "single" && next.message.kind === "assistant") {
-        const after = rows[i + 2];
-        if (after?.kind === "stack") {
-          blocks.push({ kind: "assistant-turn", prelude: [row.message], message: next.message, stack: after.messages });
-          i += 2;
-        } else {
-          blocks.push({ kind: "assistant-turn", prelude: [row.message], message: next.message });
-          i++;
-        }
-        continue;
-      }
-    }
-    if (row.kind === "single" && row.message.kind === "assistant") {
-      const next = rows[i + 1];
-      if (next?.kind === "stack") {
-        blocks.push({ kind: "assistant-turn", message: row.message, stack: next.messages });
-        i++;
-      } else {
-        blocks.push({ kind: "assistant-turn", message: row.message });
-      }
-      continue;
-    }
-    blocks.push({ kind: "row", row });
-  }
-  return blocks;
-}
-
-function runCardStackPosition(index: number, total: number): RunCardStackPosition {
-  if (total <= 1) return "single";
-  if (index === 0) return "first";
-  if (index === total - 1) return "last";
-  return "middle";
-}
-
-function runCardRadiusClass(position: RunCardStackPosition): string {
-  if (position === "first") return "rounded-t-lg";
-  if (position === "middle") return "rounded-none";
-  if (position === "last") return "rounded-b-lg";
-  return "rounded-lg";
-}
-
-interface MarkupRect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-interface MarkupStyles {
-  display?: string;
-  position?: string;
-  top?: string;
-  right?: string;
-  bottom?: string;
-  left?: string;
-  zIndex?: string;
-  width?: string;
-  height?: string;
-  minWidth?: string;
-  maxWidth?: string;
-  minHeight?: string;
-  maxHeight?: string;
-  overflow?: string;
-  overflowX?: string;
-  overflowY?: string;
-  flexDirection?: string;
-  flexWrap?: string;
-  justifyContent?: string;
-  alignItems?: string;
-  alignContent?: string;
-  gap?: string;
-  rowGap?: string;
-  columnGap?: string;
-  gridTemplateColumns?: string;
-  gridTemplateRows?: string;
-  padding?: string;
-  margin?: string;
-  color?: string;
-  background?: string;
-  backgroundImage?: string;
-  fontFamily?: string;
-  fontSize?: string;
-  fontWeight?: string;
-  lineHeight?: string;
-  letterSpacing?: string;
-  textAlign?: string;
-  textTransform?: string;
-  borderRadius?: string;
-  opacity?: string;
-  borderColor?: string;
-  borderWidth?: string;
-  borderStyle?: string;
-  borderTopColor?: string;
-  borderTopWidth?: string;
-  borderTopStyle?: string;
-  borderRightColor?: string;
-  borderRightWidth?: string;
-  borderRightStyle?: string;
-  borderBottomColor?: string;
-  borderBottomWidth?: string;
-  borderBottomStyle?: string;
-  borderLeftColor?: string;
-  borderLeftWidth?: string;
-  borderLeftStyle?: string;
-  outlineColor?: string;
-  outlineWidth?: string;
-  outlineStyle?: string;
-  boxShadow?: string;
-  filter?: string;
-  backdropFilter?: string;
-  transform?: string;
-  mixBlendMode?: string;
-}
-
-interface MarkupAttributes {
-  id?: string;
-  className?: string;
-  role?: string;
-  ariaLabel?: string;
-  screenLabel?: string;
-  href?: string;
-  src?: string;
-}
-
-interface MarkupTarget {
-  selector: string;
-  tag: string;
-  text: string;
-  rect?: MarkupRect;
-  note?: string;
-  styles?: MarkupStyles;
-  attrs?: MarkupAttributes;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -854,68 +620,6 @@ function toMsg(m: Message, id: number): Msg {
   return { id, dbId: m.id, kind: m.role === "user" ? "user" : "assistant", text: m.content, at: m.createdAt };
 }
 
-const IMG_REF_RE = /\.refs\/[^\s,"'`)]+\.(?:png|jpe?g|gif|webp|svg|avif)/gi;
-const RECT_RE = /x=(-?\d+)\s+y=(-?\d+)\s+w=(\d+)\s+h=(\d+)/;
-
-function unquote(value: string): string {
-  return value.trim().replace(/^["“`]+|["”`]+$/g, "");
-}
-
-function parseMarkupTargets(block: string): MarkupTarget[] {
-  const targets: MarkupTarget[] = [];
-  let currentIndex = -1;
-  const start = (selector: string): MarkupTarget => {
-    const target = { selector, tag: "", text: "" };
-    targets.push(target);
-    currentIndex = targets.length - 1;
-    return target;
-  };
-  for (const line of block.split("\n")) {
-    const modern = line.match(/^\s*-\s*selector:\s*`([^`]+)`/);
-    if (modern) {
-      start(modern[1]!.trim());
-      continue;
-    }
-    const legacy = line.match(/^\s*-\s*`([^`]+)`(?:\s+\(“([^”]*)”\))?(?::\s*(.*))?/);
-    if (legacy) {
-      const target = start(legacy[1]!.trim());
-      target.text = legacy[2]?.trim() ?? "";
-      target.note = legacy[3]?.trim() || undefined;
-      continue;
-    }
-    const target = targets[currentIndex];
-    if (!target) continue;
-    const attr = line.match(/^\s*(tag|rect|text|note):\s*(.*)$/);
-    if (!attr) continue;
-    const [, key, raw = ""] = attr;
-    if (key === "tag") target.tag = unquote(raw);
-    else if (key === "text") target.text = unquote(raw);
-    else if (key === "note") target.note = unquote(raw) || undefined;
-    else if (key === "rect") {
-      const m = raw.match(RECT_RE);
-      if (m) target.rect = { x: Number(m[1]), y: Number(m[2]), w: Number(m[3]), h: Number(m[4]) };
-    }
-  }
-  return targets;
-}
-
-/** Split a user message into its prose and any attached image refs, dropping the
- *  auto-generated "(read them from disk): …" reference lines from the visible text. */
-function parseUserMessage(text: string): { body: string; images: string[]; targets: MarkupTarget[] } {
-  const images = [...new Set(text.match(IMG_REF_RE) ?? [])];
-  const targets: MarkupTarget[] = [];
-  const bodyParts: string[] = [];
-  for (const part of text.split(/\n{2,}/)) {
-    if (/read them from disk/i.test(part)) continue;
-    if (/^Scoped edit\s+—/i.test(part.trim())) {
-      targets.push(...parseMarkupTargets(part));
-      continue;
-    }
-    bodyParts.push(part);
-  }
-  return { body: bodyParts.join("\n\n").trim(), images, targets };
-}
-
 function MarkupTargetCards({ targets, onTargetClick }: { targets: MarkupTarget[]; onTargetClick?: (target: MarkupTarget) => void }) {
   if (!targets.length) return null;
   return (
@@ -945,19 +649,6 @@ function MarkupTargetCards({ targets, onTargetClick }: { targets: MarkupTarget[]
       ))}
     </div>
   );
-}
-
-function quoteMarkupValue(value: string): string {
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-function formatMarkupTarget(target: MarkupTarget): string {
-  const lines = [`- selector: \`${target.selector}\``];
-  if (target.tag) lines.push(`  tag: ${target.tag}`);
-  if (target.rect) lines.push(`  rect: x=${target.rect.x} y=${target.rect.y} w=${target.rect.w} h=${target.rect.h}`);
-  if (target.text) lines.push(`  text: ${quoteMarkupValue(target.text)}`);
-  if (target.note) lines.push(`  note: ${target.note}`);
-  return lines.join("\n");
 }
 
 /** A user turn: attached images render as 1:1 thumbnails (hover to preview), right-aligned
@@ -1031,76 +722,6 @@ function shortTime(ts: number): string {
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
   return new Date(ts).toLocaleDateString();
-}
-
-const UNASSIGNED_VARIANT_ID = "__unassigned__";
-
-interface VersionGroup {
-  id: string;
-  name: string;
-  active: boolean;
-  runs: RunSummary[];
-}
-
-function activeVariantIdOf(variants: Variant[]): string | null {
-  return variants.find((v) => v.active)?.id ?? variants[0]?.id ?? null;
-}
-
-function buildVersionGroups(runs: RunSummary[], variants: Variant[]): VersionGroup[] {
-  const fallbackVariantId = activeVariantIdOf(variants) ?? UNASSIGNED_VARIANT_ID;
-  const byVariant = new Map<string, RunSummary[]>();
-  for (const run of sortRunsNewestFirst(runs)) {
-    const variantId = run.variantId ?? fallbackVariantId;
-    const groupRuns = byVariant.get(variantId);
-    if (groupRuns) groupRuns.push(run);
-    else byVariant.set(variantId, [run]);
-  }
-
-  const known = new Set<string>();
-  const groups = variants.map((variant) => {
-    known.add(variant.id);
-    return { id: variant.id, name: variant.name, active: !!variant.active, runs: byVariant.get(variant.id) ?? [] };
-  });
-  for (const [id, groupRuns] of byVariant) {
-    if (!known.has(id)) {
-      groups.push({ id, name: id === UNASSIGNED_VARIANT_ID ? "Unassigned" : "Archived branch", active: false, runs: groupRuns });
-    }
-  }
-
-  return groups.filter((group) => group.runs.length > 0 || group.active || variants.length > 1);
-}
-
-function versionLabel(group: VersionGroup, index: number): string {
-  return `v${group.runs.length - index}`;
-}
-
-function findVersionSelection(
-  groups: VersionGroup[],
-  runId: string | null,
-): { group: VersionGroup; run: RunSummary; label: string } | null {
-  if (!runId) return null;
-  for (const group of groups) {
-    const index = group.runs.findIndex((run) => run.id === runId);
-    if (index >= 0) return { group, run: group.runs[index]!, label: versionLabel(group, index) };
-  }
-  return null;
-}
-
-function sortRunsNewestFirst(runs: RunSummary[]): RunSummary[] {
-  return [...runs].sort((a, b) => {
-    const created = b.createdAt - a.createdAt;
-    if (created !== 0) return created;
-    const finished = (b.finishedAt ?? 0) - (a.finishedAt ?? 0);
-    return finished;
-  });
-}
-
-function cacheBustPreviewUrl(url: string, t = Date.now()): string {
-  return `${url.split("?")[0]}?t=${t}`;
-}
-
-function isVersionPreviewSrc(projectId: string, src: string | null): boolean {
-  return !!src && src.includes(`/api/projects/${projectId}/versions/`);
 }
 
 function PreviewBusyOverlay({ title, detail }: PreviewBusyState): ReactNode {
@@ -1336,35 +957,6 @@ function FilesPanel({
   );
 }
 
-const MARKUP_POPOVER = { width: 288, height: 192, margin: 12, gap: 8 };
-
-function clamp(n: number, min: number, max: number): number {
-  return Math.min(Math.max(n, min), max);
-}
-
-export function computeMarkupPosition(
-  iframeRect: { left: number; top: number; width: number; height: number } | null | undefined,
-  elementRect: { x: number; y: number; w: number; h: number } | null | undefined,
-  viewport: { width: number; height: number },
-  popover: { width: number; height: number; margin?: number; gap?: number } = MARKUP_POPOVER,
-): { x: number; y: number } {
-  const margin = popover.margin ?? MARKUP_POPOVER.margin;
-  const gap = popover.gap ?? MARKUP_POPOVER.gap;
-  const maxX = Math.max(margin, viewport.width - popover.width - margin);
-  const maxY = Math.max(margin, viewport.height - popover.height - margin);
-  if (!iframeRect || !elementRect) return { x: maxX, y: Math.min(120, maxY) };
-
-  const anchorX = iframeRect.left + elementRect.x;
-  const belowY = iframeRect.top + elementRect.y + elementRect.h + gap;
-  const aboveY = iframeRect.top + elementRect.y - popover.height - gap;
-  const y = belowY <= maxY ? belowY : aboveY >= margin ? clamp(aboveY, margin, maxY) : clamp(belowY, margin, maxY);
-
-  return {
-    x: clamp(anchorX, margin, maxX),
-    y,
-  };
-}
-
 function clampMarkupPopover(
   position: { x: number; y: number },
   viewport: { width: number; height: number },
@@ -1448,14 +1040,6 @@ function formatElapsed(ms?: number): string {
   const min = Math.floor(total / 60);
   const sec = total % 60;
   return min > 0 ? `${min}m ${sec.toString().padStart(2, "0")}s` : `${sec}s`;
-}
-
-function liveText(items: LiveItem[]): string {
-  return items
-    .filter((i): i is { type: "text"; text: string } => i.type === "text")
-    .map((i) => i.text)
-    .join("")
-    .trim();
 }
 
 function VisualReviewRecord({

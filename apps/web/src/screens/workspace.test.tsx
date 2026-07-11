@@ -4,10 +4,12 @@ import { test, expect, afterEach, beforeEach, vi } from "vitest";
 import {
   AUTO_FIX_MAX_PER_CONVERSATION,
   buildProjectAnalysisPrompt,
-  computeMarkupPosition,
   isPreviewBridgeMessage,
   WorkspaceScreen,
 } from "./WorkspaceScreen.tsx";
+import { computeMarkupPosition } from "./workspace-markup.ts";
+import { normalizeTranscriptMessages, runCardStackPosition } from "./workspace-transcript.tsx";
+import { sortRunsNewestFirst } from "./workspace-versions.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import type { RunEvent, RunSummary } from "../lib/api.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
@@ -30,6 +32,22 @@ const AGENTS = [
   { id: "claude", command: "claude", available: true, version: "claude 1.2.3", models: ["opus", "sonnet"] },
   { id: "codex", command: "codex", available: true, version: "codex 1.0.0", models: ["gpt-5"] },
 ];
+
+test("workspace helper modules preserve transcript and version ordering semantics", () => {
+  expect(runCardStackPosition(0, 1)).toBe("single");
+  expect(
+    normalizeTranscriptMessages([
+      { id: 1, kind: "assistant", text: "first" },
+      { id: 2, kind: "assistant", text: "second" },
+    ]).map((message) => message.id),
+  ).toEqual([1, 2]);
+  expect(
+    sortRunsNewestFirst([
+      { id: "older", createdAt: 1 },
+      { id: "newer", createdAt: 2 },
+    ] as RunSummary[]).map((run) => run.id),
+  ).toEqual(["newer", "older"]);
+});
 
 function dispatchPreviewMessage(data: Record<string, unknown>): void {
   const iframe = screen.getByTitle("Artifact preview") as HTMLIFrameElement;
