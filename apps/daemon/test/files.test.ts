@@ -37,10 +37,10 @@ async function withServer(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   }
 }
 
-async function waitForFile(path: string, timeoutMs = 1500): Promise<void> {
+async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
   const started = Date.now();
   while (!existsSync(path)) {
-    if (Date.now() - started > timeoutMs) return;
+    if (Date.now() - started > timeoutMs) assert.fail(`timed out waiting for ${path}`);
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
@@ -92,9 +92,13 @@ test("standard mode: POST /api/projects scaffolds a Vite project + git, reports 
     const project = (await res.json()) as { id: string; mode: string };
     assert.equal(project.mode, "standard");
 
-    // the template was copied into the project dir (scaffold runs synchronously up to install)
+    // Scaffolding runs in the background; wait for every copied file asserted below.
     const dir = join(dataDir, "projects", project.id);
-    await waitForFile(join(dir, "src", "App.jsx"));
+    await Promise.all([
+      waitForFile(join(dir, "package.json")),
+      waitForFile(join(dir, "src", "App.jsx")),
+      waitForFile(join(dir, "vite.config.js")),
+    ]);
     assert.ok(existsSync(join(dir, "package.json")), "package.json scaffolded");
     assert.ok(existsSync(join(dir, "src", "App.jsx")), "App.jsx scaffolded");
     const viteConfig = readFileSync(join(dir, "vite.config.js"), "utf8");

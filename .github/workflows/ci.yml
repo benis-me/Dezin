@@ -25,6 +25,8 @@ jobs:
       - name: Typecheck every workspace
         run: pnpm typecheck
       - name: Test with coverage and process-leak guard
+        env:
+          DEZIN_SHARINGAN_HEADLESS: "1"
         run: node scripts/check-process-leaks.mjs -- pnpm test:coverage
       - name: Build and enforce bundle budgets
         run: pnpm build:check

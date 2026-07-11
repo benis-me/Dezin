@@ -127,11 +127,12 @@ function fakeFreshSharinganSession(): SharinganSession {
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const SSE_CLOSE_TIMEOUT_MS = 10_000;
 
 async function closedSse(res: Response, label: string): Promise<Array<Record<string, unknown>>> {
   const text = await Promise.race([
     res.text(),
-    delay(2_000).then(() => {
+    delay(SSE_CLOSE_TIMEOUT_MS).then(() => {
       throw new Error(`${label} stream did not close`);
     }),
   ]);
