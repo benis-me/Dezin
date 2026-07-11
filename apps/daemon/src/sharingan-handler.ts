@@ -681,7 +681,10 @@ export async function releaseSharinganProject(
 }
 
 export async function cancelSharinganProject(id: string, dataDir: string): Promise<void> {
-  await releaseSharinganProject(id, { dataDir, profileCleanup: "capture" });
+  for (;;) {
+    await releaseSharinganProject(id, { dataDir, profileCleanup: "capture" });
+    if (!captures.has(id)) break;
+  }
   const cancelled = get(id);
   cancelled.phase = "cancelled";
 }

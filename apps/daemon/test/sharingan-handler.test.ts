@@ -10,6 +10,7 @@ import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
 import {
   SHARINGAN_RELEASE_GRACE_MS,
+  cancelSharinganProject,
   ensureProbeSession,
   handleSharinganEvents,
   handleSharinganReadDom,
@@ -277,5 +278,32 @@ test("POST /cancel releases capture resources and exposes a resource-free cancel
     await releaseSharinganProject(project.id);
     await new Promise<void>((resolve) => app.close(() => resolve()));
     store.close();
+  }
+});
+
+test("cancel releases a capture generation that starts while profile cleanup is pending", async () => {
+  const id = `cancel-start-race-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-cancel-start-"));
+  let rejectNavigation!: (error: Error) => void;
+  const navigation = new Promise<never>((_resolve, reject) => { rejectNavigation = reject; });
+  let closes = 0;
+  const session = {
+    navigate: async () => navigation,
+    close: async () => {
+      closes += 1;
+      rejectNavigation(Object.assign(new Error("concurrent capture cancelled"), { name: "AbortError" }));
+    },
+  } as unknown as SharinganSession;
+
+  const cancelling = cancelSharinganProject(id, dataDir);
+  const capturing = startCapture(id, "http://x.test/", dataDir, join(dataDir, "manual-profile"), async () => session);
+  try {
+    await cancelling;
+    assert.equal(closes, 1, "the generation admitted during cancellation is still closed");
+    assert.deepEqual(peekSharinganStatus(id, dataDir), { phase: "cancelled", steps: 0, pages: [] });
+  } finally {
+    rejectNavigation(Object.assign(new Error("test cleanup"), { name: "AbortError" }));
+    await releaseSharinganProject(id);
+    await capturing;
   }
 });
