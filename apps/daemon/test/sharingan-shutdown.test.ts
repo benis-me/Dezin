@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createRuntimeSupervisor } from "../src/app.ts";
 import { ensureDevServer } from "../src/project-runtime.ts";
-import { ensureProbeSession, closeAllSharinganSessions, releaseSharinganProject } from "../src/sharingan-handler.ts";
+import { ensureProbeSession, closeAllSharinganSessions, releaseSharinganProject, sharinganRunCaptureId } from "../src/sharingan-handler.ts";
 
 async function beforeDeadline<T>(promise: Promise<T>, deadlineMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -83,6 +83,26 @@ test("project release aborts a stuck opener, meets its deadline, and closes a la
   await releaseSharinganProject(id);
   assert.equal(freshCloses, 1, "a new generation for the same project owns its session independently");
   assert.equal(lateCloses, 1, "the late old-generation session is never closed twice");
+});
+
+test("shutdown removes a Run profile recreated by an opener that resolves after the detach deadline", async () => {
+  const id = sharinganRunCaptureId("late-profile-project", `run-${Date.now()}`);
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-late-profile-"));
+  let profileDir = "";
+  let resolveOpen!: (session: import("../src/sharingan-browser.ts").SharinganSession) => void;
+  const opening = ensureProbeSession(id, dataDir, (_url, options) => {
+    profileDir = options.userDataDir ?? "";
+    return new Promise((resolve) => { resolveOpen = resolve; });
+  });
+  await Promise.resolve();
+
+  await beforeDeadline(closeAllSharinganSessions(dataDir), 750);
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, "late-marker"), "created after shutdown cleanup returned");
+  resolveOpen({ close: async () => {} } as unknown as import("../src/sharingan-browser.ts").SharinganSession);
+  await assert.rejects(opening, /capture scope released/);
+
+  assert.equal(existsSync(profileDir), false, "the old generation removes profile bytes written by its late opener");
 });
 
 test("production shutdown waits for Runs before closing preview and Sharingan children", async () => {

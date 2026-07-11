@@ -32,6 +32,8 @@ interface Capture {
   keepForProbe?: boolean;
   /** Run-scoped Standard transactions redirect every capture/probe write here. */
   artifactDir?: string;
+  profileDir?: string;
+  profileCleanup?: { dataDir: string; scope: "capture" | "project" };
 }
 
 interface CaptureOperation {
@@ -107,6 +109,28 @@ export async function removeSharinganProfile(id: string, dataDir: string): Promi
 
 export async function removeSharinganProjectProfiles(projectId: string, dataDir: string): Promise<void> {
   await rm(sharinganProfileOwnerDir(projectId, dataDir), { recursive: true, force: true });
+}
+
+function requestProfileCleanup(c: Capture, dataDir: string, scope: "capture" | "project"): void {
+  if (!c.profileCleanup || scope === "project") c.profileCleanup = { dataDir, scope };
+}
+
+async function cleanupReleasedProfile(id: string, c: Capture, profileDir = c.profileDir): Promise<void> {
+  const cleanup = c.profileCleanup;
+  if (!cleanup) return;
+  const projectId = sharinganProjectCaptureId(id);
+  if (cleanup.scope === "project") {
+    const anotherOwner = [...captures.entries()].some(
+      ([captureId, current]) => current !== c && !current.released && sharinganProjectCaptureId(captureId) === projectId,
+    );
+    if (anotherOwner) return;
+    await removeSharinganProjectProfiles(projectId, cleanup.dataDir);
+    return;
+  }
+  if (!profileDir) profileDir = sharinganProfileDir(id, cleanup.dataDir);
+  const current = captures.get(id);
+  if (current && current !== c && !current.released && current.profileDir === profileDir) return;
+  await rm(profileDir, { recursive: true, force: true });
 }
 
 export function sharinganRunCaptureId(projectId: string, runId: string): string {
@@ -231,6 +255,7 @@ export function ensureProbeSession(
     if (!c.session) {
       if (!c.opening) {
         const profileDir = sharinganProfileDir(id, dataDir);
+        c.profileDir = profileDir;
         let opening!: Promise<SharinganSession>;
         opening = open(c.url ?? "about:blank", {
           userDataDir: profileDir,
@@ -239,6 +264,7 @@ export function ensureProbeSession(
         }).then(async (session) => {
           if (!isActive(id, c, generation)) {
             await session.close().catch(() => {});
+            await cleanupReleasedProfile(id, c, profileDir).catch(() => {});
             throw new Error("capture scope released");
           }
           c.session = session;
@@ -294,6 +320,7 @@ export function startCapture(
   // re-running the entry capture would otherwise clobber pages.json + discard prior probe captures.
   // The entry capture then upserts into this, preserving them.
   c.phase = "capturing"; c.steps = []; c.pages = readCapturedPages(captureArtifactDir(id, dataDir)); c.error = undefined;
+  c.profileDir = profileDir;
   const generation = c.generation;
   return retainCaptureOperation(c, async (signal, operation) => {
     let session: SharinganSession | undefined;
@@ -310,6 +337,7 @@ export function startCapture(
       }
       if (!isActive(id, c, generation)) {
         await session.close().catch(() => {});
+        await cleanupReleasedProfile(id, c, profileDir).catch(() => {});
         return;
       }
       c.session = session;
@@ -594,9 +622,19 @@ export function handleSharinganShot(res: ServerResponse, id: string, relPath: st
  * persistent-profile lock, which would block the next clone from opening. Best-effort: never
  * throws, so it's safe to call unconditionally from the shutdown path.
  */
-export async function releaseSharinganProject(id: string): Promise<void> {
+export async function releaseSharinganProject(
+  id: string,
+  options: { dataDir?: string; profileCleanup?: "capture" | "project"; deferProfileCleanup?: boolean } = {},
+): Promise<void> {
   const c = captures.get(id);
-  if (!c) return;
+  if (!c) {
+    if (options.dataDir && options.profileCleanup && !options.deferProfileCleanup) {
+      if (options.profileCleanup === "project") await removeSharinganProjectProfiles(sharinganProjectCaptureId(id), options.dataDir);
+      else await removeSharinganProfile(id, options.dataDir);
+    }
+    return;
+  }
+  if (options.dataDir && options.profileCleanup) requestProfileCleanup(c, options.dataDir, options.profileCleanup);
   c.released = true;
   c.generation += 1;
   if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
@@ -636,25 +674,26 @@ export async function releaseSharinganProject(id: string): Promise<void> {
   // Removing the registry entry permits a fresh generation for this id. The released `c` remains
   // a tombstone captured by any in-flight opener, whose isActive() check closes a late session.
   if (captures.get(id) === c) captures.delete(id);
+  if (c.profileCleanup && !options.deferProfileCleanup) await cleanupReleasedProfile(id, c).catch(() => {});
 }
 
-export async function cancelSharinganProject(id: string): Promise<void> {
-  await releaseSharinganProject(id);
+export async function cancelSharinganProject(id: string, dataDir: string): Promise<void> {
+  await releaseSharinganProject(id, { dataDir, profileCleanup: "capture" });
   const cancelled = get(id);
   cancelled.phase = "cancelled";
 }
 
-export async function handleSharinganCancel(res: ServerResponse, id: string): Promise<void> {
-  await cancelSharinganProject(id);
+export async function handleSharinganCancel(res: ServerResponse, id: string, dataDir: string): Promise<void> {
+  await cancelSharinganProject(id, dataDir);
   sendJson(res, 200, { ok: true });
 }
 
 export async function closeAllSharinganSessions(dataDir?: string): Promise<void> {
   const ids = [...captures.keys()];
-  await Promise.allSettled(ids.map((id) => releaseSharinganProject(id)));
-  if (dataDir) {
-    await Promise.allSettled(ids.filter(isSharinganRunCaptureId).map((id) => removeSharinganProfile(id, dataDir)));
-  }
+  await Promise.allSettled(ids.map((id) => releaseSharinganProject(
+    id,
+    dataDir && isSharinganRunCaptureId(id) ? { dataDir, profileCleanup: "capture" } : {},
+  )));
 }
 
 export function handleSharinganEvents(res: ServerResponse, id: string): void {

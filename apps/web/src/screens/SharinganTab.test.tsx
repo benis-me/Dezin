@@ -75,21 +75,29 @@ describe("SharinganTab", () => {
   });
 
   it("surfaces non-abort event-stream failures instead of swallowing them", async () => {
+    let resolveStatus!: (status: { phase: "capturing"; steps: number; pages: [] }) => void;
+    const status = new Promise<{ phase: "capturing"; steps: number; pages: [] }>((resolve) => { resolveStatus = resolve; });
     let attempts = 0;
     const streamSharinganEvents = vi.fn(async function* () {
       attempts += 1;
+      yield { at: 1, kind: "dom" as const, text: "retained step" };
       if (attempts === 1) throw new Error("capture stream disconnected");
       yield { at: 2, kind: "dom" as const, text: "stream reconnected" };
     });
     renderTab({
-      sharinganStatus: async () => ({ phase: "capturing", steps: 0, pages: [] }),
+      sharinganStatus: async () => status,
       streamSharinganEvents,
     });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("capture stream disconnected");
+    resolveStatus({ phase: "capturing", steps: 1, pages: [] });
+    await screen.findByText("capturing");
+    expect(screen.getByRole("alert")).toHaveTextContent("capture stream disconnected");
     fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
     expect(await screen.findByText("stream reconnected")).toBeInTheDocument();
     expect(streamSharinganEvents).toHaveBeenCalledTimes(2);
+    expect(screen.getAllByText("retained step")).toHaveLength(1);
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 

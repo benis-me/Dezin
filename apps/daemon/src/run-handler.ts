@@ -68,7 +68,7 @@ import {
 } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
-import { ensureCaptured, capturedPageCount, releaseSharinganProject, removeSharinganProfile, sharinganRunCaptureId } from "./sharingan-handler.ts";
+import { ensureCaptured, capturedPageCount, releaseSharinganProject, sharinganRunCaptureId } from "./sharingan-handler.ts";
 import { buildSharinganContext, buildSharinganSystemPrompt } from "./sharingan-context.ts";
 import { writeProbeCli } from "./sharingan-probe-cli.ts";
 import { sharinganReviewReference } from "./sharingan-capture.ts";
@@ -2276,8 +2276,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     try {
       stopPoll?.();
       if (sharinganCaptureId) {
-        await releaseSharinganProject(sharinganCaptureId).catch(() => {});
-        await removeSharinganProfile(sharinganCaptureId, deps.dataDir).catch(() => {});
+        await releaseSharinganProject(sharinganCaptureId, { dataDir: deps.dataDir, profileCleanup: "capture" }).catch(() => {});
       }
       if (standardTransaction) {
         if (dir === standardTransaction.dir) {

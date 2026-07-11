@@ -20,16 +20,16 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
   const [log, setLog] = useState<SharinganStep[]>([]);
   const [pages, setPages] = useState<SharinganPage[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<"starting" | "cancelling" | null>(null);
   const [streamGeneration, setStreamGeneration] = useState(0);
-  const [streamFailed, setStreamFailed] = useState(false);
   const started = useRef(false);
 
   const applyStatus = useCallback((status: SharinganStatus) => {
     setPhase(status.phase);
     setPages(status.pages);
     setError(status.error ?? (status.phase === "error" ? "Capture failed." : null));
-    if (status.phase === "captured" || status.phase === "cancelled" || status.phase === "error") setStreamFailed(false);
+    if (status.phase === "captured" || status.phase === "cancelled" || status.phase === "error") setStreamError(null);
   }, []);
 
   useEffect(() => {
@@ -68,15 +68,14 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
       try {
         for await (const step of api.streamSharinganEvents(projectId, ac.signal)) {
           if (!alive) return;
-          setStreamFailed(false);
+          setStreamError(null);
           setLog((current) => [...current, step].slice(-SHARINGAN_LOG_LIMIT));
           if (step.kind === "login-required") setPhase("login-required");
           if (step.kind === "done") await refreshStatus();
         }
-      } catch (streamError) {
-        if (alive && !ac.signal.aborted && !isAbortError(streamError)) {
-          setStreamFailed(true);
-          setError(errorMessage(streamError, "Capture event stream failed."));
+      } catch (streamFailure) {
+        if (alive && !ac.signal.aborted && !isAbortError(streamFailure)) {
+          setStreamError(errorMessage(streamFailure, "Capture event stream failed."));
         }
       }
     })();
@@ -87,7 +86,7 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
     if (pendingAction) return;
     started.current = true;
     setPendingAction("starting");
-    setStreamFailed(false);
+    setStreamError(null);
     setError(null);
     setLog([]);
     setPages([]);
@@ -107,7 +106,7 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
   const cancel = async () => {
     if (pendingAction) return;
     setPendingAction("cancelling");
-    setStreamFailed(false);
+    setStreamError(null);
     setError(null);
     try {
       await api.cancelSharingan(projectId);
@@ -125,11 +124,14 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
   const reconnect = () => {
     if (pendingAction) return;
     setError(null);
-    setStreamFailed(false);
+    setStreamError(null);
+    setLog([]);
     setStreamGeneration((generation) => generation + 1);
   };
 
   const captureIsActive = phase === "capturing" || phase === "login-required" || phase === "probing";
+  const streamFailed = streamError !== null;
+  const displayedError = streamError ?? error;
   const action = pendingAction === "cancelling"
     ? <button type="button" disabled className="ml-auto rounded-md border px-2 py-1 text-xs disabled:opacity-60">Cancelling…</button>
     : pendingAction === "starting"
@@ -150,9 +152,9 @@ export function SharinganTab({ projectId, sourceUrl }: { projectId: string; sour
 
       {/* Everything below the header scrolls together (pages gallery + the work-log with its shots). */}
       <div className="mt-3 min-h-0 flex-1 space-y-3 overflow-y-auto">
-        {error ? (
+        {displayedError ? (
           <div role="alert" className="rounded-md border border-red-400/40 bg-red-50/60 p-3 text-sm text-red-900 dark:bg-red-500/10 dark:text-red-100">
-            {phase === "error" ? "Capture failed: " : "Capture issue: "}{error}
+            {streamError ? "Capture stream failed: " : phase === "error" ? "Capture failed: " : "Capture issue: "}{displayedError}
           </div>
         ) : null}
 
