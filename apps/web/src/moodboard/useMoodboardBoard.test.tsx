@@ -526,6 +526,139 @@ test("useMoodboardBoard ignores an image generation result after switching board
   expect(board.assets).toEqual([]);
 });
 
+test("a switched-away board reconciles generation before a late upload saves", async () => {
+  const generator = (boardId: string): MoodboardNode => ({
+    id: `generator-${boardId}`,
+    boardId,
+    type: "image-generator",
+    x: 0,
+    y: 0,
+    width: 240,
+    height: 180,
+    rotation: 0,
+    zIndex: 0,
+    data: { generatorPrompt: boardId },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:late-upload");
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  vi.stubGlobal(
+    "Image",
+    class {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(_value: string) {
+        queueMicrotask(() => this.onerror?.());
+      }
+    },
+  );
+
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  let resolveGeneration!: (value: Awaited<ReturnType<ReturnType<typeof makeFakeApi>["generateMoodboardImage"]>>) => void;
+  let resolveUpload!: (value: Awaited<ReturnType<ReturnType<typeof makeFakeApi>["uploadMoodboardAsset"]>>) => void;
+  function Probe({ boardId }: { boardId: string }) {
+    board = useMoodboardBoard(boardId);
+    return null;
+  }
+  const saveMoodboardNodes = vi.fn(async (boardId: string, inputs: SaveMoodboardNodeInput[]) =>
+    inputs.map((input, index) => ({
+      ...input,
+      id: input.id ?? `saved-${index}`,
+      boardId,
+      rotation: input.rotation ?? 0,
+      zIndex: input.zIndex ?? index,
+      data: input.data ?? {},
+      createdAt: 1,
+      updatedAt: 2,
+    })),
+  );
+  const api = makeFakeApi({
+    getMoodboard: async (boardId: string) => ({
+      id: boardId,
+      name: boardId,
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [generator(boardId)],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+    generateMoodboardImage: async () => new Promise((resolve) => {
+      resolveGeneration = resolve;
+    }),
+    uploadMoodboardAsset: async () => new Promise((resolve) => {
+      resolveUpload = resolve;
+    }),
+    saveMoodboardNodes,
+  });
+  const view = render(
+    <ApiProvider client={api}>
+      <Probe boardId="board-1" />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.detail?.id).toBe("board-1"));
+
+  let generation!: Promise<void>;
+  let upload!: Promise<void>;
+  await act(async () => {
+    generation = board.generateImage(generator("board-1"), "board one");
+    upload = board.uploadFiles([new File(["image"], "upload.png", { type: "image/png" })]);
+  });
+  await waitFor(() => expect(resolveUpload).toBeTypeOf("function"));
+  view.rerender(
+    <ApiProvider client={api}>
+      <Probe boardId="board-2" />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.detail?.id).toBe("board-2"));
+
+  await act(async () => {
+    resolveGeneration({
+      asset: {
+        id: "generated-asset",
+        boardId: "board-1",
+        kind: "image",
+        fileName: "generated.png",
+        mimeType: "image/png",
+        width: 1024,
+        height: 1024,
+        source: "generated",
+        createdAt: 2,
+        url: "/api/moodboards/board-1/assets/generated-asset",
+      },
+      nodes: [{ ...generator("board-1"), type: "image", data: { assetId: "generated-asset" } }],
+      messages: [],
+    });
+    await generation;
+  });
+  await act(async () => {
+    resolveUpload({
+      id: "uploaded-asset",
+      boardId: "board-1",
+      kind: "image",
+      fileName: "upload.png",
+      mimeType: "image/png",
+      width: 320,
+      height: 240,
+      source: "upload",
+      createdAt: 3,
+      url: "/api/moodboards/board-1/assets/uploaded-asset",
+    });
+    await upload;
+  });
+  await waitFor(() => expect(saveMoodboardNodes).toHaveBeenCalled());
+  expect(saveMoodboardNodes).toHaveBeenLastCalledWith(
+    "board-1",
+    expect.arrayContaining([
+      expect.objectContaining({ id: "generator-board-1", type: "image", data: expect.objectContaining({ assetId: "generated-asset" }) }),
+      expect.objectContaining({ type: "image", data: expect.objectContaining({ assetId: "uploaded-asset" }) }),
+    ]),
+  );
+});
+
 test("useMoodboardBoard never appends a completed upload to a different board", async () => {
   const node = (boardId: string): MoodboardNode => ({
     id: `note-${boardId}`,

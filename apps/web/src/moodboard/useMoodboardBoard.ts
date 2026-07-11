@@ -287,6 +287,7 @@ export function useMoodboardBoard(boardId: string) {
     async (files: FileList | File[] | null, point?: { x: number; y: number }) => {
       if (!files?.length) return;
       const targetBoardId = boardId;
+      const uploadMutation = saveCoordinator.beginServerMutation(targetBoardId);
       const fallbackInputs = nodes.map(toInput);
       const nextNodes: SaveMoodboardNodeInput[] = [];
       setImageBusy(true);
@@ -310,6 +311,7 @@ export function useMoodboardBoard(boardId: string) {
           saveCoordinator.append(targetBoardId, nextNodes, fallbackInputs);
           void saveCoordinator.flush(targetBoardId);
         }
+        uploadMutation.release();
         if (isCurrentBoard(targetBoardId)) setImageBusy(false);
       }
     },
@@ -356,6 +358,7 @@ export function useMoodboardBoard(boardId: string) {
       options: { sourceAssetId?: string; referenceAssetIds?: string[]; params?: ImageGenerationParams } = {},
     ) => {
       const targetBoardId = boardId;
+      const serverMutation = saveCoordinator.beginServerMutation(targetBoardId);
       const selectedModel = generatorModel(node) || imageModel;
       const generationParams = options.params ?? imageGenerationParamsFromNode(node);
       const imageReferenceAssetIds = options.referenceAssetIds ?? referenceAssetIds(node);
@@ -392,8 +395,8 @@ export function useMoodboardBoard(boardId: string) {
           x: node.x + node.width + 24,
           y: node.y,
         });
+        const reconciledInputs = saveCoordinator.reconcileServerNodes(targetBoardId, result.nodes, serverMutation);
         if (!isCurrentBoard(targetBoardId)) return;
-        const reconciledInputs = saveCoordinator.reconcileServerNodes(targetBoardId, result.nodes);
         setNodes(materializeInputs(targetBoardId, result.nodes, reconciledInputs));
         setAssets((current) => mergeAssets(current, [result.asset]));
         if (agentConversationId && agentConversationId === conversationId && result.messages.length) {
@@ -406,6 +409,7 @@ export function useMoodboardBoard(boardId: string) {
         );
         toast("Couldn't generate an image. Check Models settings.", { variant: "error" });
       } finally {
+        serverMutation.release();
         if (isCurrentBoard(targetBoardId)) setImageBusy(false);
       }
     },
@@ -445,15 +449,24 @@ export function useMoodboardBoard(boardId: string) {
           return;
         }
         if (!isCurrentBoard(targetBoardId)) return;
-        const result = await api.postMoodboardMessage(targetBoardId, content, {
-          agentCommand: runAgent || undefined,
-          model: runModel || undefined,
-          conversationId: activeConversationId || undefined,
-        });
+        const serverMutation = saveCoordinator.beginServerMutation(targetBoardId);
+        let result: Awaited<ReturnType<typeof api.postMoodboardMessage>>;
+        let reconciledInputs: SaveMoodboardNodeInput[] | undefined;
+        try {
+          result = await api.postMoodboardMessage(targetBoardId, content, {
+            agentCommand: runAgent || undefined,
+            model: runModel || undefined,
+            conversationId: activeConversationId || undefined,
+          });
+          reconciledInputs = result.nodes
+            ? saveCoordinator.reconcileServerNodes(targetBoardId, result.nodes, serverMutation)
+            : undefined;
+        } finally {
+          serverMutation.release();
+        }
         if (!isCurrentBoard(targetBoardId)) return;
         if (result.nodes) {
-          const reconciledInputs = saveCoordinator.reconcileServerNodes(targetBoardId, result.nodes);
-          setNodes(materializeInputs(targetBoardId, result.nodes, reconciledInputs));
+          setNodes(materializeInputs(targetBoardId, result.nodes, reconciledInputs!));
         }
         setMessages((cur) => {
           const withoutOptimistic = cur.filter((message) => message.id !== optimistic.id);

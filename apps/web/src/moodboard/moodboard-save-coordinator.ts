@@ -16,7 +16,14 @@ interface BoardSaveState {
   inFlightVersion: number | null;
   retryCount: number;
   detachedRetryBudget: number;
+  activeServerMutations: number;
   subscribers: Set<SaveSubscriber>;
+}
+
+export interface MoodboardServerMutation {
+  readonly boardId: string;
+  readonly baselineInputs: SaveMoodboardNodeInput[];
+  release(): void;
 }
 
 function cloneInputs(inputs: SaveMoodboardNodeInput[]): SaveMoodboardNodeInput[] {
@@ -51,6 +58,89 @@ function sameInput(left: SaveMoodboardNodeInput, right: SaveMoodboardNodeInput):
   );
 }
 
+function sameInputs(left: SaveMoodboardNodeInput[], right: SaveMoodboardNodeInput[]): boolean {
+  return left.length === right.length && left.every((input, index) => sameInput(input, right[index]!));
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function mergeData(
+  baseline: Record<string, unknown> | undefined,
+  local: Record<string, unknown> | undefined,
+  server: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const baselineData = baseline ?? {};
+  const localData = local ?? {};
+  const merged = { ...(server ?? {}) };
+  for (const key of new Set([...Object.keys(baselineData), ...Object.keys(localData)])) {
+    const baselineHasKey = Object.hasOwn(baselineData, key);
+    const localHasKey = Object.hasOwn(localData, key);
+    if (baselineHasKey && !localHasKey) {
+      delete merged[key];
+      continue;
+    }
+    if (localHasKey && (!baselineHasKey || !sameValue(localData[key], baselineData[key]))) {
+      merged[key] = localData[key];
+    }
+  }
+  return merged;
+}
+
+function mergeChangedFields(
+  baseline: SaveMoodboardNodeInput,
+  local: SaveMoodboardNodeInput,
+  server: SaveMoodboardNodeInput,
+): SaveMoodboardNodeInput {
+  const changed = (key: keyof SaveMoodboardNodeInput): boolean => {
+    const normalize = (input: SaveMoodboardNodeInput): unknown =>
+      key === "rotation" || key === "zIndex" ? input[key] ?? 0 : input[key];
+    return !sameValue(normalize(local), normalize(baseline));
+  };
+  return {
+    id: server.id ?? local.id,
+    type: changed("type") ? local.type : server.type,
+    x: changed("x") ? local.x : server.x,
+    y: changed("y") ? local.y : server.y,
+    width: changed("width") ? local.width : server.width,
+    height: changed("height") ? local.height : server.height,
+    rotation: changed("rotation") ? local.rotation : server.rotation,
+    zIndex: changed("zIndex") ? local.zIndex : server.zIndex,
+    data: mergeData(baseline.data, local.data, server.data),
+  };
+}
+
+function mergeServerWithLocalChanges(
+  baselineInputs: SaveMoodboardNodeInput[],
+  localInputs: SaveMoodboardNodeInput[],
+  serverInputs: SaveMoodboardNodeInput[],
+): SaveMoodboardNodeInput[] {
+  const baselineById = new Map(baselineInputs.flatMap((input) => (input.id ? [[input.id, input] as const] : [])));
+  const localById = new Map(localInputs.flatMap((input) => (input.id ? [[input.id, input] as const] : [])));
+  const serverIds = new Set(serverInputs.flatMap((input) => (input.id ? [input.id] : [])));
+  const merged = serverInputs.flatMap((server): SaveMoodboardNodeInput[] => {
+    if (!server.id) return [server];
+    const baseline = baselineById.get(server.id);
+    const local = localById.get(server.id);
+    if (baseline && !local) return [];
+    if (!local) return [server];
+    if (!baseline) return [local];
+    return [mergeChangedFields(baseline, local, server)];
+  });
+
+  for (const local of localInputs) {
+    if (!local.id) {
+      merged.push(local);
+      continue;
+    }
+    if (serverIds.has(local.id)) continue;
+    const baseline = baselineById.get(local.id);
+    if (!baseline || !sameInput(baseline, local)) merged.push(local);
+  }
+  return merged;
+}
+
 export class MoodboardSaveCoordinator {
   private readonly states = new Map<string, BoardSaveState>();
 
@@ -69,6 +159,7 @@ export class MoodboardSaveCoordinator {
         inFlightVersion: null,
         retryCount: 0,
         detachedRetryBudget: 0,
+        activeServerMutations: 0,
         subscribers: new Set(),
       };
       this.states.set(boardId, state);
@@ -83,35 +174,35 @@ export class MoodboardSaveCoordinator {
     return cloneInputs(state.latestInputs);
   }
 
-  reconcileServerNodes(boardId: string, serverNodes: MoodboardNode[]): SaveMoodboardNodeInput[] {
+  beginServerMutation(boardId: string): MoodboardServerMutation {
+    const state = this.state(boardId);
+    state.activeServerMutations += 1;
+    let released = false;
+    return {
+      boardId,
+      baselineInputs: cloneInputs(state.latestInputs ?? state.confirmedInputs),
+      release: () => {
+        if (released) return;
+        released = true;
+        state.activeServerMutations = Math.max(0, state.activeServerMutations - 1);
+        this.releaseIfIdle(boardId, state);
+      },
+    };
+  }
+
+  reconcileServerNodes(
+    boardId: string,
+    serverNodes: MoodboardNode[],
+    mutation?: MoodboardServerMutation,
+  ): SaveMoodboardNodeInput[] {
     const state = this.state(boardId);
     const serverInputs = nodeInputs(serverNodes);
-    if (!state.pending || !state.latestInputs) {
-      state.confirmedInputs = cloneInputs(serverInputs);
-      state.latestInputs = cloneInputs(serverInputs);
-      return cloneInputs(serverInputs);
-    }
-
-    const confirmedById = new Map(state.confirmedInputs.flatMap((input) => (input.id ? [[input.id, input] as const] : [])));
-    const localById = new Map(state.latestInputs.flatMap((input) => (input.id ? [[input.id, input] as const] : [])));
-    const locallyDeleted = new Set([...confirmedById.keys()].filter((id) => !localById.has(id)));
-    const locallyChanged = new Map(
-      [...localById].filter(([id, input]) => {
-        const confirmed = confirmedById.get(id);
-        return confirmed ? !sameInput(confirmed, input) : false;
-      }),
-    );
-    const merged = serverInputs.flatMap((input): SaveMoodboardNodeInput[] => {
-      if (input.id && locallyDeleted.has(input.id)) return [];
-      return [input.id ? locallyChanged.get(input.id) ?? input : input];
-    });
-    const mergedIds = new Set(merged.flatMap((input) => (input.id ? [input.id] : [])));
-    for (const input of state.latestInputs) {
-      if (input.id && confirmedById.has(input.id)) continue;
-      if (!input.id || !mergedIds.has(input.id)) merged.push(input);
-    }
+    const baselineInputs = mutation?.boardId === boardId ? mutation.baselineInputs : state.confirmedInputs;
+    const localInputs = state.latestInputs ?? state.confirmedInputs;
+    const merged = mergeServerWithLocalChanges(baselineInputs, localInputs, serverInputs);
     state.confirmedInputs = cloneInputs(serverInputs);
-    this.queue(boardId, merged, 0);
+    if (state.pending || !sameInputs(merged, serverInputs)) this.queue(boardId, merged, 0);
+    else state.latestInputs = cloneInputs(serverInputs);
     return cloneInputs(merged);
   }
 
@@ -228,7 +319,7 @@ export class MoodboardSaveCoordinator {
   }
 
   private releaseIfIdle(boardId: string, state: BoardSaveState): void {
-    if (state.subscribers.size > 0 || state.pending || state.inFlight || state.timer !== null) return;
+    if (state.subscribers.size > 0 || state.activeServerMutations > 0 || state.pending || state.inFlight || state.timer !== null) return;
     this.states.delete(boardId);
   }
 }

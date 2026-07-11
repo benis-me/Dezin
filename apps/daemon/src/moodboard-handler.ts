@@ -670,8 +670,11 @@ async function createMoodboardAgentTurn(
     }
   }
   const parsed = parseMoodboardAgentOutput(assistantText);
+  // Agent turns can outlive canvas saves. Apply the parsed operations to the latest durable
+  // board, not the prompt-time snapshot, so a concurrent local PUT is never replaced wholesale.
+  const currentNodes = store.listMoodboardNodes(id);
   const savedNodes = parsed.operations.length
-    ? store.replaceMoodboardNodes(id, applyMoodboardAgentOperations(nodes, parsed.operations, conversation.id))
+    ? store.replaceMoodboardNodes(id, applyMoodboardAgentOperations(currentNodes, parsed.operations, conversation.id))
     : undefined;
   const assistant = store.addMoodboardMessage(id, "assistant", clippedBlock(parsed.text || "Updated the moodboard."), conversation.id);
   return { messages: [user, assistant], ...(savedNodes ? { nodes: savedNodes } : {}) };

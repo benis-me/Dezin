@@ -1124,6 +1124,55 @@ test("moodboard messages apply agent canvas operations", async () => {
   );
 });
 
+test("moodboard agent operations preserve nodes saved while the agent is running", async () => {
+  let resolveAgent!: (text: string) => void;
+  let markAgentStarted!: () => void;
+  const agentStarted = new Promise<void>((resolve) => {
+    markAgentStarted = resolve;
+  });
+  await withServer(
+    async ({ base, store }) => {
+      const board = store.createMoodboard({ name: "Concurrent board" });
+      store.replaceMoodboardNodes(board.id, [
+        { id: "base", type: "note", x: 0, y: 0, width: 160, height: 120, data: { content: "Base" } },
+      ]);
+      const agentRequest = fetch(`${base}/api/moodboards/${board.id}/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "Add an agent note", agentCommand: "codex" }),
+      });
+      await agentStarted;
+
+      const localSave = await fetch(`${base}/api/moodboards/${board.id}/nodes`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          nodes: [
+            { id: "base", type: "note", x: 0, y: 0, width: 160, height: 120, data: { content: "Base" } },
+            { id: "local", type: "note", x: 200, y: 0, width: 160, height: 120, data: { content: "Local" } },
+          ],
+        }),
+      });
+      assert.equal(localSave.status, 200);
+
+      resolveAgent(`Added an agent note.\n\n\`\`\`dezin_moodboard_ops\n[{"type":"add_note","content":"Agent","x":400,"y":0}]\n\`\`\``);
+      const response = await agentRequest;
+      assert.equal(response.status, 201);
+      const nodes = store.listMoodboardNodes(board.id);
+      assert.deepEqual(nodes.map((node) => node.id), ["base", "local", nodes[2]!.id]);
+      assert.equal(nodes[2]?.data.content, "Agent");
+    },
+    {
+      moodboardAgentText: async () => {
+        markAgentStarted();
+        return new Promise<string>((resolve) => {
+          resolveAgent = resolve;
+        });
+      },
+    },
+  );
+});
+
 test("moodboard conversations isolate agent messages", async () => {
   await withServer(async ({ base, store }) => {
     const board = store.createMoodboard({ name: "Material board" });
