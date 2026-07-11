@@ -678,6 +678,54 @@ test("Sharingan status returns 404 after project deletion without recreating cap
   });
 });
 
+test("project deletion waits for an admitted Sharingan cancel and removes its cancelled tombstone", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({
+      name: "Sharingan cancel deletion race",
+      mode: "standard",
+      sharingan: true,
+      sourceUrl: "https://example.test/",
+    });
+    mkdirSync(join(dataDir, "projects", project.id), { recursive: true });
+    const registryBefore = sharinganCaptureRegistrySizeForTests();
+    let closeEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { closeEntered = resolve; });
+    let finishClose!: () => void;
+    const closeFinished = new Promise<void>((resolve) => { finishClose = resolve; });
+    await ensureProbeSession(
+      project.id,
+      dataDir,
+      async () => ({
+        close: async () => {
+          closeEntered();
+          await closeFinished;
+        },
+      }) as unknown as import("../src/sharingan-browser.ts").SharinganSession,
+    );
+
+    const cancelling = fetch(`${base}/api/sharingan/${project.id}/cancel`, { method: "POST" });
+    await entered;
+    let deletionSettled = false;
+    const deleting = fetch(`${base}/api/projects/${project.id}`, { method: "DELETE" }).then((response) => {
+      deletionSettled = true;
+      return response;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    const deletionWaitedForCancel = !deletionSettled;
+    finishClose();
+
+    const [cancelled, deleted] = await Promise.all([cancelling, deleting]);
+    assert.equal(deletionWaitedForCancel, true, "DELETE waits for the admitted cancel operation to settle");
+    assert.equal(cancelled.status, 200);
+    assert.equal(deleted.status, 204);
+    assert.equal(
+      sharinganCaptureRegistrySizeForTests(),
+      registryBefore,
+      "project cleanup releases the cancelled tombstone instead of letting cancel recreate it",
+    );
+  });
+});
+
 test("project deletion aborts a partial reference upload before it can recreate .refs", async () => {
   await withServer(async ({ base, dataDir, store }) => {
     const project = store.createProject({ name: "Slow reference upload" });

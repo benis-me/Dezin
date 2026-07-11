@@ -1178,11 +1178,10 @@ const routes: Route[] = [
   {
     method: "POST",
     pattern: "/api/sharingan/:id/cancel",
-    handler: async (req, res, p, deps) => {
+    handler: (req, res, p, deps) => {
       if (!deps.store.getProject(p.id!)) return sendError(res, 404, "project not found");
       const target = sharinganRequestTarget(req, p.id!, deps);
-      deps.runtimeSupervisor!.assertAdmission(target.scope);
-      await handleSharinganCancel(res, target.captureId);
+      return deps.runtimeSupervisor!.trackOperation(target.scope, () => handleSharinganCancel(res, target.captureId));
     },
   },
   {
