@@ -453,17 +453,31 @@ async function maybeGitBundleEntry(
     }
     return { entry: await fileExportEntry("standard/git.bundle", tmp, budget, signal), tmp };
   } catch (error) {
-    // A still-live group may still hold or recreate the bundle path. Preserve it for
-    // operator recovery instead of falsely claiming cleanup while the writer survives.
-    if (!(error instanceof ProcessGroupCleanupError)) await rm(tmp, { force: true }).catch(() => {});
+    if (error instanceof ProcessGroupCleanupError) {
+      // Do not race the surviving writer. Its independent, unref'ed reaper removes the
+      // unique bundle path as soon as the process group is observably gone.
+      void reapExportTempAfterCleanupFailure(tmp, error);
+    } else {
+      await rm(tmp, { force: true }).catch(() => {});
+    }
     throw error;
   }
 }
 
-function writeJsonArray<T>(writer: BoundedJsonWriter, values: Iterable<T>, writeItem: (value: T) => void): void {
+export function reapExportTempAfterCleanupFailure(path: string, error: ProcessGroupCleanupError): Promise<void> {
+  return error.whenGone.then(() => rm(path, { force: true })).catch(() => {});
+}
+
+function writeJsonArray<T>(
+  writer: BoundedJsonWriter,
+  values: Iterable<T>,
+  writeItem: (value: T) => void,
+  signal?: AbortSignal,
+): void {
   writer.raw("[");
   let first = true;
   for (const value of values) {
+    signal?.throwIfAborted();
     if (!first) writer.raw(",");
     first = false;
     writeItem(value);
@@ -471,12 +485,100 @@ function writeJsonArray<T>(writer: BoundedJsonWriter, values: Iterable<T>, write
   writer.raw("]");
 }
 
+const MANIFEST_RECORD_OVERHEAD_BYTES = 512;
+
+/** Reject oversized DB-backed manifest data before Store list methods materialize it. */
+export function assertManifestStorageWithinLimit(
+  store: AppDeps["store"],
+  projectId: string,
+  maxBytes = MAX_EXPORT_FILE_BYTES,
+  signal?: AbortSignal,
+): void {
+  const queries = [
+    `SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(id AS BLOB)) + length(CAST(name AS BLOB))), 0) AS bytes
+       FROM variants WHERE project_id = ?`,
+    `SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(id AS BLOB)) + length(CAST(title AS BLOB))), 0) AS bytes
+       FROM conversations WHERE project_id = ?`,
+    `SELECT COUNT(*) AS count,
+            COALESCE(SUM(length(CAST(m.id AS BLOB)) + length(CAST(m.role AS BLOB)) + length(CAST(m.content AS BLOB))), 0) AS bytes
+       FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.project_id = ?`,
+    `SELECT COUNT(*) AS count,
+            COALESCE(SUM(
+              length(CAST(id AS BLOB)) + length(CAST(conversation_id AS BLOB)) + length(CAST(status AS BLOB)) +
+              length(CAST(final_findings AS BLOB)) + length(CAST(COALESCE(user_message_id, '') AS BLOB)) +
+              length(CAST(COALESCE(assistant_message_id, '') AS BLOB)) + length(CAST(COALESCE(variant_id, '') AS BLOB)) +
+              length(CAST(COALESCE(commit_hash, '') AS BLOB))
+            ), 0) AS bytes
+       FROM runs WHERE project_id = ?`,
+    `SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(path AS BLOB))), 0) AS bytes
+       FROM artifacts WHERE project_id = ?`,
+  ];
+  let estimatedBytes = 1024;
+  for (const sql of queries) {
+    signal?.throwIfAborted();
+    const row = store.db.prepare(sql).get(projectId) as { count?: unknown; bytes?: unknown } | undefined;
+    const count = Number(row?.count ?? 0);
+    const bytes = Number(row?.bytes ?? 0);
+    if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(bytes) || bytes < 0) {
+      throw new ExportLimitError(`${MANIFEST_PATH} manifest storage is invalid`);
+    }
+    const contribution = bytes + count * MANIFEST_RECORD_OVERHEAD_BYTES;
+    if (!Number.isSafeInteger(contribution) || estimatedBytes + contribution > maxBytes) {
+      throw new ExportLimitError(`${MANIFEST_PATH} manifest storage exceeds ${maxBytes} bytes`);
+    }
+    estimatedBytes += contribution;
+  }
+  signal?.throwIfAborted();
+}
+
+function* iterateManifestMessages(
+  store: AppDeps["store"],
+  conversationId: string,
+  signal?: AbortSignal,
+): Generator<{ id: string; role: string; content: string; createdAt: number }> {
+  const statement = store.db.prepare(
+    `SELECT rowid AS cursor_rowid, id, role, content, created_at
+       FROM messages
+      WHERE conversation_id = ?
+        AND (? IS NULL OR created_at > ? OR (created_at = ? AND rowid > ?))
+      ORDER BY created_at ASC, rowid ASC
+      LIMIT 100`,
+  );
+  let cursorCreatedAt: number | null = null;
+  let cursorRowid = 0;
+  for (;;) {
+    signal?.throwIfAborted();
+    const rows = statement.all(
+      conversationId,
+      cursorCreatedAt,
+      cursorCreatedAt,
+      cursorCreatedAt,
+      cursorRowid,
+    ) as Array<Record<string, unknown>>;
+    if (rows.length === 0) return;
+    for (const row of rows) {
+      signal?.throwIfAborted();
+      cursorCreatedAt = Number(row.created_at);
+      cursorRowid = Number(row.cursor_rowid);
+      yield {
+        id: String(row.id),
+        role: String(row.role),
+        content: typeof row.content === "string" ? row.content : String(row.content ?? ""),
+        createdAt: cursorCreatedAt,
+      };
+    }
+    if (rows.length < 100) return;
+  }
+}
+
 function serializeExportManifest(
   project: Project,
   deps: AppDeps,
   variants: ReturnType<AppDeps["store"]["listVariants"]>,
   runs: ReturnType<AppDeps["store"]["listRuns"]>,
+  signal?: AbortSignal,
 ): string {
+  signal?.throwIfAborted();
   const writer = new BoundedJsonWriter(MAX_EXPORT_FILE_BYTES, MANIFEST_PATH);
   writer.raw("{");
   writer.raw('"format":');
@@ -500,9 +602,12 @@ function serializeExportManifest(
     name: variant.name,
     createdAt: variant.createdAt,
     active: Boolean(variant.active),
-  }));
+  }), signal);
   writer.raw(',"conversations":');
-  writeJsonArray(writer, deps.store.listConversations(project.id), (conversation) => {
+  const conversations = deps.store.listConversations(project.id);
+  signal?.throwIfAborted();
+  writeJsonArray(writer, conversations, (conversation) => {
+    signal?.throwIfAborted();
     writer.raw("{");
     writer.raw('"id":');
     writer.value(conversation.id);
@@ -511,14 +616,14 @@ function serializeExportManifest(
     writer.raw(',"createdAt":');
     writer.value(conversation.createdAt);
     writer.raw(',"messages":');
-    writeJsonArray(writer, deps.store.listMessages(conversation.id), (message) => writer.value({
+    writeJsonArray(writer, iterateManifestMessages(deps.store, conversation.id, signal), (message) => writer.value({
       id: message.id,
       role: message.role,
       content: message.content,
       createdAt: message.createdAt,
-    }));
+    }), signal);
     writer.raw("}");
-  });
+  }, signal);
   writer.raw(',"runs":');
   writeJsonArray(writer, runs, (run) => writer.value({
     id: run.id,
@@ -534,14 +639,17 @@ function serializeExportManifest(
     findings: run.findings,
     createdAt: run.createdAt,
     finishedAt: run.finishedAt,
-  }));
+  }), signal);
   writer.raw(',"artifacts":');
-  writeJsonArray(writer, deps.store.listArtifacts(project.id), (artifact) => writer.value({
+  const artifacts = deps.store.listArtifacts(project.id);
+  signal?.throwIfAborted();
+  writeJsonArray(writer, artifacts, (artifact) => writer.value({
     path: artifact.path,
     lintPassed: artifact.lintPassed,
     createdAt: artifact.createdAt,
-  }));
+  }), signal);
   writer.raw("}");
+  signal?.throwIfAborted();
   return writer.finish();
 }
 
@@ -562,12 +670,15 @@ async function prepareExport(
     };
   }
   deps.store.ensureMainVariant(project.id);
+  assertManifestStorageWithinLimit(deps.store, project.id, MAX_EXPORT_FILE_BYTES, signal);
   const variants = deps.store.listVariants(project.id);
+  signal?.throwIfAborted();
   const runs = deps.store.listRuns(project.id);
+  signal?.throwIfAborted();
   try {
     const sourceEntries = await fileEntries("source", activeDir, budget, signal);
     if (sourceEntries.length === 0) return { entries: [], cleanup: async () => {} };
-    const manifest = serializeExportManifest(project, deps, variants, runs);
+    const manifest = serializeExportManifest(project, deps, variants, runs, signal);
     const entries: StreamingZipEntry[] = [
       memoryExportEntry(MANIFEST_PATH, manifest, budget),
       ...sourceEntries,

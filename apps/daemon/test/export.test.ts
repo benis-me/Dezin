@@ -8,6 +8,7 @@ import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
 import { request } from "node:http";
 import { Store } from "../../../packages/core/src/index.ts";
+import { ProcessGroupCleanupError } from "../../../packages/agent/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 import {
   BoundedJsonWriter,
@@ -16,6 +17,8 @@ import {
   MAX_EXPORT_FILE_BYTES,
   MAX_EXPORT_TOTAL_BYTES,
   MAX_PROJECT_ARCHIVE_UNCOMPRESSED_BYTES,
+  assertManifestStorageWithinLimit,
+  reapExportTempAfterCleanupFailure,
   walkFiles,
 } from "../src/export-handler.ts";
 import { createZip } from "../src/zip.ts";
@@ -647,6 +650,33 @@ test("BoundedJsonWriter encodes incrementally and rejects before crossing its by
 
   const limited = new BoundedJsonWriter(128, "manifest.json");
   assert.throws(() => limited.value({ content: "\u0001".repeat(1_000) }), /manifest\.json.*128 bytes/);
+});
+
+test("manifest storage preflight rejects a large SQLite message without materializing it", () => {
+  const store = new Store(":memory:");
+  const project = store.createProject({ name: "Manifest budget" });
+  const conversation = store.createConversation(project.id);
+  store.db.prepare(
+    "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, 'user', zeroblob(?), ?)",
+  ).run("oversized-message", conversation.id, 4_096, Date.now());
+
+  assert.throws(() => assertManifestStorageWithinLimit(store, project.id, 1_024), /manifest.*storage/i);
+  store.close();
+});
+
+test("failed process-group cleanup reaps its temp file after the group is gone", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-export-reaper-"));
+  const path = join(dir, "pending.bundle");
+  writeFileSync(path, "partial");
+  let resolveGone!: () => void;
+  const whenGone = new Promise<void>((resolve) => { resolveGone = resolve; });
+  const reaping = reapExportTempAfterCleanupFailure(path, new ProcessGroupCleanupError("git bundle", whenGone));
+
+  await Promise.resolve();
+  assert.equal(existsSync(path), true, "the writer may still own the path before group exit");
+  resolveGone();
+  await reaping;
+  assert.equal(existsSync(path), false);
 });
 
 test("export walking checks cancellation between directory entries", async () => {

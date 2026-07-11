@@ -1,10 +1,12 @@
 export class ProcessGroupCleanupError extends Error {
   readonly code = "PROCESS_GROUP_CLEANUP_FAILED";
   readonly groupStillAlive = true;
+  readonly whenGone: Promise<void>;
 
-  constructor(label: string) {
+  constructor(label: string, whenGone: Promise<void>) {
     super(`${label} process group remained alive after SIGKILL`);
     this.name = "ProcessGroupCleanupError";
+    this.whenGone = whenGone;
   }
 }
 
@@ -29,11 +31,23 @@ async function waitUntilGone(options: OwnedProcessGroupOptions, timeoutMs: numbe
   return !options.isAlive();
 }
 
+async function waitUntilEventuallyGone(options: OwnedProcessGroupOptions): Promise<void> {
+  const pollMs = Math.max(50, options.pollMs ?? 100);
+  while (options.isAlive()) {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, pollMs);
+      timer.unref?.();
+    });
+  }
+}
+
 /** TERM, then KILL, and reject instead of claiming cleanup while the group is still alive. */
 export async function terminateOwnedProcessGroup(options: OwnedProcessGroupOptions): Promise<void> {
   options.signal("SIGTERM");
   if (await waitUntilGone(options, options.termGraceMs)) return;
   options.signal("SIGKILL");
   if (await waitUntilGone(options, options.killGraceMs)) return;
-  throw new ProcessGroupCleanupError(options.label);
+  const whenGone = waitUntilEventuallyGone(options);
+  void whenGone.catch(() => {});
+  throw new ProcessGroupCleanupError(options.label, whenGone);
 }
