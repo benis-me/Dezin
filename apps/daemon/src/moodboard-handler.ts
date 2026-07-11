@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { extname, join } from "node:path";
-import type { Moodboard, MoodboardAsset, MoodboardConversation, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
+import type { Moodboard, MoodboardAsset, MoodboardConversation, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput } from "../../../packages/core/src/index.ts";
 import { requestImage, requestImageEdit, type ImageGenerationParams, type SourceImageInput } from "./image-gen.ts";
 import {
   buildMoodboardAgentContext,
@@ -14,12 +14,20 @@ import {
   type MoodboardAgentCanvasOperation,
 } from "./moodboard-agent.ts";
 import type { AppDeps } from "./app.ts";
-import { readJsonBody, send, sendError, sendJson } from "./http-util.ts";
+import { HttpError, readJsonBody, send, sendError, sendJson } from "./http-util.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
 
 type JsonObject = Record<string, unknown>;
+
+interface StartMoodboardImage {
+  name: string;
+  contentBase64: string;
+  mimeType: string;
+  width?: number;
+  height?: number;
+}
 
 function moodboardDir(dataDir: string, boardId: string): string {
   return join(dataDir, "moodboards", boardId);
@@ -192,6 +200,64 @@ function nodeInput(node: MoodboardNode): SaveMoodboardNodeInput {
   };
 }
 
+function startImages(value: unknown): StartMoodboardImage[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new HttpError(400, "images must be an array");
+  return value.map((raw) => {
+    const image = asObject(raw);
+    const name = stringValue(image.name) || "asset.png";
+    const contentBase64 = stringValue(image.contentBase64);
+    if (!contentBase64) throw new HttpError(400, "image contentBase64 is required");
+    return {
+      name,
+      contentBase64,
+      mimeType: mimeForFile(name, stringValue(image.mimeType) || "image/png"),
+      ...(typeof image.width === "number" && Number.isFinite(image.width) ? { width: Math.max(1, Math.round(image.width)) } : {}),
+      ...(typeof image.height === "number" && Number.isFinite(image.height) ? { height: Math.max(1, Math.round(image.height)) } : {}),
+    };
+  });
+}
+
+function createUploadedMoodboardAsset(
+  boardId: string,
+  input: StartMoodboardImage,
+  { store, dataDir }: Pick<AppDeps, "store" | "dataDir">,
+): MoodboardAsset & { url: string } {
+  const kind = input.mimeType.startsWith("video/") ? "video" : "image";
+  const asset = store.createMoodboardAsset(boardId, {
+    kind,
+    fileName: input.name,
+    mimeType: input.mimeType,
+    width: input.width ?? null,
+    height: input.height ?? null,
+    source: "upload",
+  });
+  const dir = moodboardAssetsDir(dataDir, boardId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${asset.id}${extForMime(input.mimeType)}`), Buffer.from(input.contentBase64, "base64"));
+  return { ...asset, url: assetUrl(boardId, asset.id) };
+}
+
+function initialImageNode(asset: MoodboardAsset & { url: string }, index: number): SaveMoodboardNodeInput {
+  const height = asset.width && asset.height ? Math.max(160, Math.round(320 * (asset.height / asset.width))) : 240;
+  return {
+    type: "image",
+    x: 80 + index * 24,
+    y: 80 + index * 24,
+    width: 320,
+    height,
+    zIndex: index,
+    data: {
+      assetId: asset.id,
+      url: asset.url,
+      fileName: asset.fileName,
+      source: "upload",
+      ...(asset.width ? { originalWidth: asset.width } : {}),
+      ...(asset.height ? { originalHeight: asset.height } : {}),
+    },
+  };
+}
+
 function sized(value: unknown, fallback: number): number {
   return Math.max(40, finiteNumber(value, fallback));
 }
@@ -279,6 +345,66 @@ function applyMoodboardAgentOperations(
   return inputs;
 }
 
+async function generateInitialMoodboardImage(
+  boardId: string,
+  prompt: string,
+  modelOverride: string | undefined,
+  { store, dataDir }: Pick<AppDeps, "store" | "dataDir">,
+): Promise<void> {
+  const settings = store.getSettings();
+  const runtime = providerRuntimeConfig(settings, settings.aiProviderId);
+  const imageBaseUrl = runtime.baseUrl || settings.imageApiBaseUrl;
+  const imageApiKey = runtime.apiKey || settings.imageApiKey;
+  const providerCanUseDefaultBaseUrl = settings.aiProviderId === "vertex" || settings.aiProviderId === "fal";
+  if ((!imageBaseUrl && !providerCanUseDefaultBaseUrl) || !imageApiKey) {
+    throw new HttpError(409, "image generation is not configured");
+  }
+  const model = modelOverride || settings.imageModel;
+  const b64 = await requestImage(
+    {
+      baseUrl: imageBaseUrl,
+      apiKey: imageApiKey,
+      model,
+      providerId: settings.aiProviderId,
+      apiVersion: runtime.organization || settings.aiProviderOrganization,
+    },
+    prompt,
+    createProviderFetch(),
+  );
+  const asset = store.createMoodboardAsset(boardId, {
+    kind: "image",
+    fileName: "generated.png",
+    mimeType: "image/png",
+    width: 1024,
+    height: 1024,
+    source: "generated",
+  });
+  const dir = moodboardAssetsDir(dataDir, boardId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${asset.id}.png`), Buffer.from(b64, "base64"));
+  const nodes = store.listMoodboardNodes(boardId);
+  store.replaceMoodboardNodes(boardId, [
+    ...nodes.map(nodeInput),
+    {
+      type: "image",
+      x: 80 + nodes.length * 24,
+      y: 80 + nodes.length * 24,
+      width: 1024,
+      height: 1024,
+      zIndex: Math.max(0, ...nodes.map((node) => node.zIndex ?? 0)) + 1,
+      data: {
+        assetId: asset.id,
+        url: assetUrl(boardId, asset.id),
+        prompt,
+        model,
+        source: "generated",
+        originalWidth: 1024,
+        originalHeight: 1024,
+      },
+    },
+  ]);
+}
+
 export function handleListMoodboards(res: ServerResponse, { store }: AppDeps): void {
   const boards = store.listMoodboards().map((board) => withCover(board, store.listMoodboardAssets(board.id)));
   sendJson(res, 200, boards);
@@ -289,6 +415,47 @@ export async function handleCreateMoodboard(req: IncomingMessage, res: ServerRes
   const name = stringValue(body.name);
   if (!name) return sendError(res, 400, "name is required");
   sendJson(res, 201, withCover(store.createMoodboard({ name })));
+}
+
+export async function handleStartMoodboard(req: IncomingMessage, res: ServerResponse, deps: AppDeps): Promise<void> {
+  const body = asObject(await readJsonBody(req, 64 * 1024 * 1024));
+  const name = stringValue(body.name);
+  if (!name) return sendError(res, 400, "name is required");
+  const mode = body.mode === "generate" ? "generate" : body.mode === "agent" ? "agent" : null;
+  if (!mode) return sendError(res, 400, "mode must be agent or generate");
+  const prompt = stringValue(body.prompt);
+  const images = startImages(body.images);
+  const board = deps.store.createMoodboard({ name });
+  try {
+    const assets = images.map((image) => createUploadedMoodboardAsset(board.id, image, deps));
+    if (assets.length) deps.store.replaceMoodboardNodes(board.id, assets.map(initialImageNode));
+    if (prompt) {
+      if (mode === "generate") {
+        await generateInitialMoodboardImage(board.id, prompt, stringValue(body.imageModel) || undefined, deps);
+      } else {
+        await createMoodboardAgentTurn(
+          board.id,
+          {
+            content: prompt,
+            agentCommand: stringValue(body.agentCommand) || undefined,
+            model: stringValue(body.agentModel) || undefined,
+          },
+          deps,
+        );
+      }
+    }
+    const saved = deps.store.getMoodboard(board.id);
+    if (!saved) throw new Error("moodboard disappeared during start");
+    sendJson(res, 201, withCover(saved, deps.store.listMoodboardAssets(board.id)));
+  } catch (error) {
+    try {
+      deps.store.deleteMoodboard(board.id);
+    } catch {
+      // Preserve the original stage failure; the filesystem compensation still runs below.
+    }
+    await rm(moodboardDir(deps.dataDir, board.id), { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 export function handleGetMoodboard(res: ServerResponse, { id }: Record<string, string>, { store }: AppDeps): void {
@@ -403,14 +570,66 @@ export function handleListMoodboardConversationMessages(res: ServerResponse, { i
   sendJson(res, 200, store.listMoodboardMessages(id!, cid!));
 }
 
+async function createMoodboardAgentTurn(
+  id: string,
+  input: { content: string; agentCommand?: string; model?: string; conversationId?: string },
+  { store, dataDir, moodboardAgentText }: AppDeps,
+): Promise<{ messages: MoodboardMessage[]; nodes?: MoodboardNode[] }> {
+  const board = store.getMoodboard(id);
+  if (!board) throw new HttpError(404, "moodboard not found");
+  const conversationId = input.conversationId || store.ensureMoodboardConversation(id).id;
+  const conversation = conversationForBoard(store.getMoodboardConversation(conversationId), id);
+  if (!conversation) throw new HttpError(404, "moodboard conversation not found");
+  const previousMessages = store.listMoodboardMessages(id, conversation.id);
+  const user = store.addMoodboardMessage(id, "user", input.content, conversation.id);
+  const nodes = store.listMoodboardNodes(id);
+  const assets = store.listMoodboardAssets(id);
+  const messages = store.listMoodboardMessages(id, conversation.id);
+  const cwd = moodboardDir(dataDir, id);
+  mkdirSync(cwd, { recursive: true });
+  const contextPath = join(cwd, "moodboard-context.json");
+  writeFileSync(contextPath, JSON.stringify(buildMoodboardAgentContext({ board, nodes, assets, messages: previousMessages, content: input.content }), null, 2));
+
+  let assistantText = localMoodboardReply(nodes, assets);
+  if (input.agentCommand) {
+    const prompt = buildMoodboardAgentPrompt({ board, nodes, assets, messages: previousMessages, content: input.content, contextPath });
+    const env = buildAgentEnv(store.getSettings(), input.agentCommand);
+    try {
+      assistantText = await runMoodboardAgentText(
+        {
+          board,
+          nodes,
+          assets,
+          messages,
+          content: input.content,
+          agentCommand: input.agentCommand,
+          model: input.model,
+          prompt,
+          cwd,
+          env,
+        },
+        moodboardAgentText,
+      );
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "request failed";
+      assistantText = `${assistantText}\n\nAgent note: ${input.agentCommand} could not respond (${clippedBlock(reason, 180)}).`;
+    }
+  }
+  const parsed = parseMoodboardAgentOutput(assistantText);
+  const savedNodes = parsed.operations.length
+    ? store.replaceMoodboardNodes(id, applyMoodboardAgentOperations(nodes, parsed.operations, conversation.id))
+    : undefined;
+  const assistant = store.addMoodboardMessage(id, "assistant", clippedBlock(parsed.text || "Updated the moodboard."), conversation.id);
+  return { messages: [user, assistant], ...(savedNodes ? { nodes: savedNodes } : {}) };
+}
+
 export async function handlePostMoodboardMessage(
   req: IncomingMessage,
   res: ServerResponse,
   { id, cid }: Record<string, string>,
   { store, dataDir, moodboardAgentText }: AppDeps,
 ): Promise<void> {
-  const board = store.getMoodboard(id!);
-  if (!board) return sendError(res, 404, "moodboard not found");
+  if (!store.getMoodboard(id!)) return sendError(res, 404, "moodboard not found");
   const body = asObject(await readJsonBody(req));
   const content = stringValue(body.content);
   if (!content) return sendError(res, 400, "content is required");
@@ -419,36 +638,11 @@ export async function handlePostMoodboardMessage(
   const conversationId = cid || stringValue(body.conversationId) || store.ensureMoodboardConversation(id!).id;
   const conversation = conversationForBoard(store.getMoodboardConversation(conversationId), id!);
   if (!conversation) return sendError(res, 404, "moodboard conversation not found");
-  const previousMessages = store.listMoodboardMessages(id!, conversation.id);
-  const user = store.addMoodboardMessage(id!, "user", content, conversation.id);
-  const nodes = store.listMoodboardNodes(id!);
-  const assets = store.listMoodboardAssets(id!);
-  const messages = store.listMoodboardMessages(id!, conversation.id);
-  const cwd = moodboardDir(dataDir, id!);
-  mkdirSync(cwd, { recursive: true });
-  const contextPath = join(cwd, "moodboard-context.json");
-  writeFileSync(contextPath, JSON.stringify(buildMoodboardAgentContext({ board, nodes, assets, messages: previousMessages, content }), null, 2));
-
-  let assistantText = localMoodboardReply(nodes, assets);
-  if (agentCommand) {
-    const prompt = buildMoodboardAgentPrompt({ board, nodes, assets, messages: previousMessages, content, contextPath });
-    const env = buildAgentEnv(store.getSettings(), agentCommand);
-    try {
-      assistantText = await runMoodboardAgentText(
-        { board, nodes, assets, messages, content, agentCommand, model, prompt, cwd, env },
-        moodboardAgentText,
-      );
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : "request failed";
-      assistantText = `${assistantText}\n\nAgent note: ${agentCommand} could not respond (${clippedBlock(reason, 180)}).`;
-    }
-  }
-  const parsed = parseMoodboardAgentOutput(assistantText);
-  const savedNodes = parsed.operations.length
-    ? store.replaceMoodboardNodes(id!, applyMoodboardAgentOperations(nodes, parsed.operations, conversation.id))
-    : undefined;
-  const assistant = store.addMoodboardMessage(id!, "assistant", clippedBlock(parsed.text || "Updated the moodboard."), conversation.id);
-  sendJson(res, 201, { messages: [user, assistant], ...(savedNodes ? { nodes: savedNodes } : {}) });
+  sendJson(
+    res,
+    201,
+    await createMoodboardAgentTurn(id!, { content, agentCommand, model, conversationId: conversation.id }, { store, dataDir, moodboardAgentText }),
+  );
 }
 
 export async function handleUploadMoodboardAsset(
@@ -463,19 +657,21 @@ export async function handleUploadMoodboardAsset(
   if (!contentBase64) return sendError(res, 400, "contentBase64 is required");
   const originalName = stringValue(body.name) || "asset.png";
   const mimeType = mimeForFile(originalName, stringValue(body.mimeType) || "image/png");
-  const kind = mimeType.startsWith("video/") ? "video" : "image";
-  const asset = store.createMoodboardAsset(id!, {
-    kind,
-    fileName: originalName,
-    mimeType,
-    width: typeof body.width === "number" ? Math.round(body.width) : null,
-    height: typeof body.height === "number" ? Math.round(body.height) : null,
-    source: "upload",
-  });
-  const dir = moodboardAssetsDir(dataDir, id!);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${asset.id}${extForMime(mimeType)}`), Buffer.from(contentBase64, "base64"));
-  sendJson(res, 201, { ...asset, url: assetUrl(id!, asset.id) });
+  sendJson(
+    res,
+    201,
+    createUploadedMoodboardAsset(
+      id!,
+      {
+        name: originalName,
+        contentBase64,
+        mimeType,
+        ...(typeof body.width === "number" ? { width: Math.round(body.width) } : {}),
+        ...(typeof body.height === "number" ? { height: Math.round(body.height) } : {}),
+      },
+      { store, dataDir },
+    ),
+  );
 }
 
 export function handleServeMoodboardAsset(

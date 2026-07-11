@@ -1,4 +1,4 @@
-import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, beforeEach, vi } from "vitest";
 import {
@@ -1017,13 +1017,20 @@ test("re-entry reattaches the loaded conversation's live run, not another conver
 });
 
 test("Stop explicitly cancels the active daemon run", async () => {
-  const cancelRun = vi.fn(async () => ({ cancelled: true }));
+  let emitCancelled!: () => void;
+  const cancelRun = vi.fn(async () => {
+    emitCancelled();
+    return { cancelled: true };
+  });
   const fake = makeFakeApi({
-    streamRun: async function* (_input, signal): AsyncGenerator<RunEvent> {
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
       yield { type: "run-start", runId: "r-stop", conversationId: "c1" };
       yield { type: "activity", activity: { kind: "text", text: "Partial output before stop." } };
       yield { type: "activity", activity: { kind: "tool", name: "Edit", summary: "Editing hero.tsx" } };
-      await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+      await new Promise<void>((resolve) => {
+        emitCancelled = resolve;
+      });
+      yield { type: "run-cancelled", runId: "r-stop", reason: "user" };
     },
     cancelRun,
   });
@@ -1041,6 +1048,70 @@ test("Stop explicitly cancels the active daemon run", async () => {
   await waitFor(() => expect(cancelRun).toHaveBeenCalledWith("r-stop"));
   expect(await screen.findByRole("button", { name: /Processed/ })).toBeInTheDocument();
   expect(screen.getByText("Partial output before stop.")).toBeInTheDocument();
+  expect(await screen.findByText("Stopped")).toBeInTheDocument();
+});
+
+test("a rejected Stop request keeps the run stream alive and does not report Stopped", async () => {
+  let release!: () => void;
+  const cancelRun = vi.fn(async () => {
+    throw new Error("daemon refused cancellation");
+  });
+  const fake = makeFakeApi({
+    streamRun: async function* (_input, signal): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-rejected-stop", conversationId: "c1" };
+      yield { type: "activity", activity: { kind: "text", text: "Still working." } };
+      await new Promise<void>((resolve) => {
+        release = resolve;
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+    },
+    cancelRun,
+  });
+
+  const view = render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "keep going" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  fireEvent.click(await screen.findByLabelText("Stop"));
+
+  await waitFor(() => expect(cancelRun).toHaveBeenCalledWith("r-rejected-stop"));
+  await waitFor(() => expect(screen.getByText("Still working.")).toBeInTheDocument());
+  expect(screen.queryByText("Stopped")).toBeNull();
+  expect(screen.getByLabelText("Stop")).toBeInTheDocument();
+
+  release();
+  view.unmount();
+});
+
+test("an acknowledged Stop stays in Stopping until the run-cancelled event", async () => {
+  let emitCancelled!: () => void;
+  const cancelRun = vi.fn(async () => ({ cancelled: true }));
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-stopping", conversationId: "c1" };
+      await new Promise<void>((resolve) => {
+        emitCancelled = resolve;
+      });
+      yield { type: "run-cancelled", runId: "r-stopping", reason: "user" };
+    },
+    cancelRun,
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "stop later" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  fireEvent.click(await screen.findByLabelText("Stop"));
+
+  expect(await screen.findByText("Stopping…")).toBeInTheDocument();
+  expect(screen.queryByText("Stopped")).toBeNull();
+  act(() => emitCancelled());
   expect(await screen.findByText("Stopped")).toBeInTheDocument();
 });
 
@@ -2659,6 +2730,47 @@ test("prototype preview-update stream events refresh the preview during generati
   } finally {
     release?.();
   }
+});
+
+test("preview and completion events update data without stealing the active artifact tab", async () => {
+  let emitPreview!: () => void;
+  let emitDone!: () => void;
+  const fake = makeFakeApi({
+    streamRun: async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-passive-preview", conversationId: "c1" };
+      await new Promise<void>((resolve) => {
+        emitPreview = resolve;
+      });
+      yield { type: "preview-update", runId: "r-passive-preview", t: 123456 };
+      await new Promise<void>((resolve) => {
+        emitDone = resolve;
+      });
+      yield { type: "run-done", runId: "r-passive-preview", passed: true, rounds: 0, findings: [] };
+    },
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+  const quality = screen.getByRole("tab", { name: /Quality/ });
+  fireEvent.click(quality);
+  expect(quality).toHaveAttribute("aria-selected", "true");
+
+  await waitFor(() => expect(emitPreview).toBeTypeOf("function"));
+  act(() => emitPreview());
+  await waitFor(() => expect(quality).toHaveAttribute("aria-selected", "true"));
+  fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
+  expect(await screen.findByTitle("Artifact preview")).toHaveAttribute("src", "/projects/p1/preview/?t=123456");
+  fireEvent.click(quality);
+
+  await waitFor(() => expect(emitDone).toBeTypeOf("function"));
+  act(() => emitDone());
+  await waitFor(() => expect(screen.getByText(/Done/)).toBeInTheDocument());
+  expect(quality).toHaveAttribute("aria-selected", "true");
 });
 
 test("standard preview-update stream events use the live dev-server URL and refresh versions during generation", async () => {

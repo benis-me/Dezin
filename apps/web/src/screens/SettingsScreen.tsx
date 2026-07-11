@@ -18,12 +18,8 @@ type SectionId = "appearance" | "provider" | "models" | "quality" | "defaults" |
 
 const SECRET_SETTING_KEYS = ["apiKey", "imageApiKey", "videoApiKey"] as const;
 
-function mergeSettingsSaveResponse(current: Settings | null, next: Settings): Settings {
-  const merged = { ...next };
-  for (const key of SECRET_SETTING_KEYS) {
-    if (current) merged[key] = current[key];
-  }
-  return merged;
+function assignSetting(target: Settings, key: keyof Settings, value: Settings[keyof Settings]): void {
+  (target as unknown as Record<keyof Settings, Settings[keyof Settings]>)[key] = value;
 }
 
 // Grouped into related pairs; a divider is drawn between groups in the sidebar.
@@ -118,6 +114,8 @@ export function SettingsScreen({
   const [section, setSection] = useState<SectionId>(initialTarget.section);
   const [defaultsFocusTarget, setDefaultsFocusTarget] = useState<ImageActionModelField | null>(initialTarget.focusTarget);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const confirmedSettingsRef = useRef<Settings | null>(null);
+  const mutationVersionsRef = useRef(new Map<keyof Settings, number>());
   const { agents, loading: agentsInitial, scanning, status: scanStatus, rescan } = useAgents();
   const agentsLoading = agentsInitial || scanning;
   const [systems, setSystems] = useState<DesignSystemCard[]>([]);
@@ -131,7 +129,14 @@ export function SettingsScreen({
 
   useEffect(() => {
     let alive = true;
-    void api.getSettings().then((s) => alive && setSettings(s)).catch(() => {});
+    void api
+      .getSettings()
+      .then((s) => {
+        if (!alive) return;
+        confirmedSettingsRef.current = s;
+        setSettings(s);
+      })
+      .catch(() => {});
     void api.listDesignSystems().then((d) => alive && setSystems(d)).catch(() => {});
     void api.getHealth().then((h) => alive && setVersion(h.version)).catch(() => {});
     return () => {
@@ -190,23 +195,59 @@ export function SettingsScreen({
       publishSettingsUpdated(next);
       return next;
     });
-  const save = (key: keyof Settings, value: string | boolean | number) => {
-    setLocal(key, value);
-    void api.updateSettings({ [key]: value } as Partial<Settings>).catch(() => toast("Couldn't save settings.", { variant: "error" }));
-  };
-  const savePatch = (patch: Partial<Settings>) => {
+  const mutateSettings = (patch: Partial<Settings>) => {
+    const keys = Object.keys(patch) as Array<keyof Settings>;
+    if (!keys.length) return;
+    const versions = new Map<keyof Settings, number>();
+    const before = new Map<keyof Settings, Settings[keyof Settings]>();
+    const confirmed = confirmedSettingsRef.current;
+    for (const key of keys) {
+      const version = (mutationVersionsRef.current.get(key) ?? 0) + 1;
+      mutationVersionsRef.current.set(key, version);
+      versions.set(key, version);
+      if (confirmed) before.set(key, confirmed[key]);
+    }
     setLocalPatch(patch);
     void api
       .updateSettings(patch)
-      .then((next) =>
+      .then((next) => {
         setSettings((current) => {
-          const merged = mergeSettingsSaveResponse(current, next);
+          if (!current) return current;
+          const merged = { ...current };
+          const nextConfirmed = { ...(confirmedSettingsRef.current ?? current) };
+          let changed = false;
+          for (const key of keys) {
+            if (mutationVersionsRef.current.get(key) !== versions.get(key)) continue;
+            const value = SECRET_SETTING_KEYS.includes(key as (typeof SECRET_SETTING_KEYS)[number]) ? current[key] : next[key];
+            assignSetting(merged, key, value);
+            assignSetting(nextConfirmed, key, value);
+            changed = true;
+          }
+          if (!changed) return current;
+          confirmedSettingsRef.current = nextConfirmed;
           publishSettingsUpdated(merged);
           return merged;
-        }),
-      )
-      .catch(() => toast("Couldn't save settings.", { variant: "error" }));
+        });
+      })
+      .catch(() => {
+        setSettings((current) => {
+          if (!current) return current;
+          const rolledBack = { ...current };
+          let changed = false;
+          for (const key of keys) {
+            if (mutationVersionsRef.current.get(key) !== versions.get(key) || !before.has(key)) continue;
+            assignSetting(rolledBack, key, before.get(key)!);
+            changed = true;
+          }
+          if (!changed) return current;
+          publishSettingsUpdated(rolledBack);
+          return rolledBack;
+        });
+        toast("Couldn't save settings.", { variant: "error" });
+      });
   };
+  const save = (key: keyof Settings, value: string | boolean | number) => mutateSettings({ [key]: value } as Partial<Settings>);
+  const savePatch = (patch: Partial<Settings>) => mutateSettings(patch);
   const generatePairingCode = async () => {
     setPairingBusy(true);
     try {

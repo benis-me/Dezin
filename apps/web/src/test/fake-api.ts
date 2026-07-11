@@ -107,6 +107,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     importProject: notImpl as ApiClient["importProject"],
     listMoodboards: async () => [],
     createMoodboard: notImpl as ApiClient["createMoodboard"],
+    startMoodboard: notImpl as ApiClient["startMoodboard"],
     getMoodboard: notImpl as ApiClient["getMoodboard"],
     patchMoodboard: notImpl as ApiClient["patchMoodboard"],
     deleteMoodboard: notImpl as ApiClient["deleteMoodboard"],

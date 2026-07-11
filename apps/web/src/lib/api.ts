@@ -136,6 +136,22 @@ export interface SaveMoodboardNodeInput {
   data?: Record<string, unknown>;
 }
 
+export interface StartMoodboardInput {
+  name: string;
+  prompt?: string;
+  mode: "agent" | "generate";
+  images?: Array<{
+    name: string;
+    contentBase64: string;
+    mimeType?: string;
+    width?: number;
+    height?: number;
+  }>;
+  agentCommand?: string;
+  agentModel?: string;
+  imageModel?: string;
+}
+
 export interface MoodboardMessage {
   id: string;
   boardId: string;
@@ -662,6 +678,7 @@ export interface ApiClient {
   importProject(file: Blob): Promise<Project>;
   listMoodboards(): Promise<Moodboard[]>;
   createMoodboard(input: { name: string }): Promise<Moodboard>;
+  startMoodboard(input: StartMoodboardInput): Promise<Moodboard>;
   getMoodboard(id: string): Promise<MoodboardDetail>;
   patchMoodboard(id: string, patch: Partial<Pick<Moodboard, "name" | "coverAssetId">> & { archived?: boolean }): Promise<Moodboard>;
   deleteMoodboard(id: string): Promise<void>;
@@ -932,6 +949,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       }),
     listMoodboards: () => json<Moodboard[]>("/api/moodboards"),
     createMoodboard: (input) => json<Moodboard>("/api/moodboards", jsonInit("POST", input)),
+    startMoodboard: (input) => json<Moodboard>("/api/moodboards/start", jsonInit("POST", input)),
     getMoodboard: (id) => json<MoodboardDetail>(`/api/moodboards/${enc(id)}`),
     patchMoodboard: (id, patch) => json<Moodboard>(`/api/moodboards/${enc(id)}`, jsonInit("PATCH", patch)),
     deleteMoodboard: (id) => json<void>(`/api/moodboards/${enc(id)}`, { method: "DELETE" }),

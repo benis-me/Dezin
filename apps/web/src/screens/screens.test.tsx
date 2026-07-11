@@ -83,9 +83,72 @@ function settingsFixture(patch: Partial<Settings> = {}): Settings {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 test("HomeScreen shows an empty state with no projects", () => {
   renderWithApi(<HomeScreen projects={[]} />, { listSkills: async () => SKILLS });
   expect(screen.getByText(/No projects yet/i)).toBeInTheDocument();
+});
+
+test("HomeScreen exposes a retryable alert after the first project load fails", async () => {
+  const saved = project("p-retry", "Recovered project");
+  const listProjects = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue([saved]);
+  renderWithApi(<HomeScreen />, { listProjects, listSkills: async () => SKILLS });
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Couldn't load projects");
+  fireEvent.click(screen.getByRole("button", { name: "Retry loading projects" }));
+
+  expect(await screen.findByText("Recovered project")).toBeInTheDocument();
+});
+
+test("HomeScreen keeps last-good project cards when a background refresh fails", async () => {
+  const saved = project("p-retained", "Retained project");
+  const listProjects = vi
+    .fn()
+    .mockResolvedValueOnce([saved])
+    .mockResolvedValueOnce([saved])
+    .mockRejectedValueOnce(new Error("background offline"));
+  renderWithApi(<HomeScreen />, { listProjects, listSkills: async () => SKILLS });
+  expect(await screen.findByText("Retained project")).toBeInTheDocument();
+
+  act(() => window.dispatchEvent(new Event("focus")));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't refresh projects");
+  expect(screen.getByText("Retained project")).toBeInTheDocument();
+});
+
+test("HomeScreen allows a project reference to be the only design input", async () => {
+  const user = userEvent.setup();
+  const source = project("p-source", "Reference source");
+  const onNewProject = vi.fn();
+  renderWithApi(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+    listProjects: async () => [source],
+    listSkills: async () => SKILLS,
+    getFileText: async () => "<main>Reference artifact</main>",
+  });
+
+  const design = screen.getByRole("button", { name: "Design" });
+  expect(design).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "Add files and context" }));
+  await user.hover(await screen.findByText("Reference a project"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Reference source" }));
+
+  await screen.findByLabelText("Remove reference Reference source");
+  await waitFor(() => expect(design).toBeEnabled());
+  fireEvent.click(design);
+  expect(onNewProject).toHaveBeenCalledWith("Build on the referenced design.", "frontend-design", "modern-minimal", "prototype");
 });
 
 test("HomeScreen persists the selected agent model as the next default", async () => {
@@ -343,13 +406,11 @@ test("HomeScreen prompt accepts dropped image references", async () => {
 test("MoodboardsScreen uses a Home-like prompt to start a board with initial direction", async () => {
   const onOpenBoard = vi.fn();
   const board = moodboard("b1", "Warm editorial references");
-  const createMoodboard = vi.fn(async () => board);
-  const postMoodboardMessage = vi.fn(async () => ({ messages: [] }));
+  const startMoodboard = vi.fn(async () => board);
   renderWithApiAndAgents(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
     listMoodboards: async () => [],
     listAgents: async () => [{ id: "claude", command: "claude", available: true, models: ["sonnet"] }],
-    createMoodboard,
-    postMoodboardMessage,
+    startMoodboard,
   });
 
   const prompt = await screen.findByLabelText("Describe moodboard direction");
@@ -362,14 +423,55 @@ test("MoodboardsScreen uses a Home-like prompt to start a board with initial dir
   expect(start).not.toHaveClass("rounded-xl");
   fireEvent.click(start);
 
-  await waitFor(() => expect(createMoodboard).toHaveBeenCalledWith({ name: "Warm editorial references" }));
-  expect(postMoodboardMessage).toHaveBeenCalledWith(
-    "b1",
-    "Warm editorial references for a boutique hotel",
-    expect.objectContaining({ agentCommand: "claude" }),
+  await waitFor(() =>
+    expect(startMoodboard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Warm editorial references",
+        prompt: "Warm editorial references for a boutique hotel",
+        mode: "agent",
+        agentCommand: "claude",
+      }),
+    ),
   );
   expect(onOpenBoard).toHaveBeenCalledWith("b1");
   expect(screen.getByRole("button", { name: "New board" })).toBeInTheDocument();
+});
+
+test("MoodboardsScreen uses the atomic start endpoint and preserves inputs until it succeeds", async () => {
+  const onOpenBoard = vi.fn();
+  const board = moodboard("b-atomic", "Retryable board");
+  const first = deferred<typeof board>();
+  const startMoodboard = vi.fn().mockImplementationOnce(() => first.promise).mockResolvedValueOnce(board);
+  renderWithApiAndAgents(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
+    listMoodboards: async () => [],
+    listAgents: async () => [{ id: "claude", command: "claude", available: true, models: ["sonnet"] }],
+    startMoodboard,
+  });
+
+  const prompt = await screen.findByLabelText("Describe moodboard direction");
+  fireEvent.change(prompt, { target: { value: "Retryable board direction" } });
+  fireEvent.click(screen.getByRole("button", { name: "Start board" }));
+  await waitFor(() => expect(startMoodboard).toHaveBeenCalledTimes(1));
+  expect(prompt).toHaveValue("Retryable board direction");
+
+  await act(async () => first.reject(new Error("generation failed")));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Start board" })).toBeEnabled());
+  expect(prompt).toHaveValue("Retryable board direction");
+
+  fireEvent.click(screen.getByRole("button", { name: "Start board" }));
+  await waitFor(() => expect(onOpenBoard).toHaveBeenCalledWith("b-atomic"));
+  expect(prompt).toHaveValue("");
+});
+
+test("MoodboardsScreen retains rows while a background refresh fails", async () => {
+  const board = moodboard("b-retained", "Retained board");
+  const listMoodboards = vi.fn().mockResolvedValueOnce([board]).mockRejectedValueOnce(new Error("offline"));
+  renderWithApi(<MoodboardsScreen onOpenBoard={vi.fn()} />, { listMoodboards });
+  expect(await screen.findByText("Retained board")).toBeInTheDocument();
+
+  act(() => window.dispatchEvent(new Event("focus")));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't refresh moodboards");
+  expect(screen.getByText("Retained board")).toBeInTheDocument();
 });
 
 test("MoodboardsScreen homepage prompt textarea auto-sizes with a capped height", async () => {
@@ -385,24 +487,7 @@ test("MoodboardsScreen homepage prompt textarea auto-sizes with a capped height"
 test("MoodboardsScreen generate mode starts a board with an image model instead of an agent message", async () => {
   const onOpenBoard = vi.fn();
   const board = moodboard("b1", "Brutalist campaign board");
-  const createMoodboard = vi.fn(async () => board);
-  const postMoodboardMessage = vi.fn(async () => ({ messages: [] }));
-  const generateMoodboardImage = vi.fn(async () => ({
-    asset: {
-      id: "asset-1",
-      boardId: "b1",
-      kind: "image" as const,
-      fileName: "generated.png",
-      mimeType: "image/png",
-      width: 1024,
-      height: 1024,
-      source: "generated" as const,
-      createdAt: 1,
-      url: "/api/moodboards/b1/assets/asset-1",
-    },
-    nodes: [],
-    messages: [],
-  }));
+  const startMoodboard = vi.fn(async () => board);
   renderWithApiAndAgents(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
     listMoodboards: async () => [],
     listAgents: async () => [{ id: "claude", command: "claude", available: true, models: ["sonnet"] }],
@@ -435,9 +520,7 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
       autoImproveEnabled: true,
       autoImproveMaxRounds: 8,
     }),
-    createMoodboard,
-    postMoodboardMessage,
-    generateMoodboardImage,
+    startMoodboard,
   });
 
   await userEvent.click(await screen.findByRole("button", { name: "Model" }));
@@ -447,13 +530,15 @@ test("MoodboardsScreen generate mode starts a board with an image model instead 
   fireEvent.click(screen.getByRole("button", { name: "Generate board" }));
 
   await waitFor(() =>
-    expect(generateMoodboardImage).toHaveBeenCalledWith(
-      "b1",
-      "Brutalist campaign board with product images",
-      expect.objectContaining({ model: "gpt-image-1" }),
+    expect(startMoodboard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Brutalist campaign board",
+        prompt: "Brutalist campaign board with product images",
+        mode: "generate",
+        imageModel: "gpt-image-1",
+      }),
     ),
   );
-  expect(postMoodboardMessage).not.toHaveBeenCalled();
   expect(onOpenBoard).toHaveBeenCalledWith("b1");
 });
 
@@ -523,23 +608,10 @@ test("MoodboardsScreen prompt creates image nodes from dropped references", asyn
   vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
   const onOpenBoard = vi.fn();
   const board = moodboard("b1", "Gallery wall");
-  const createMoodboard = vi.fn(async () => board);
-  const uploadMoodboardAsset = vi.fn(async () => ({
-    id: "asset-1",
-    boardId: "b1",
-    fileName: "material.png",
-    mimeType: "image/png",
-    width: undefined,
-    height: undefined,
-    createdAt: 1,
-    url: "/api/moodboards/b1/assets/asset-1",
-  }));
-  const saveMoodboardNodes = vi.fn(async () => []);
+  const startMoodboard = vi.fn(async () => board);
   renderWithApi(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
     listMoodboards: async () => [],
-    createMoodboard,
-    uploadMoodboardAsset,
-    saveMoodboardNodes,
+    startMoodboard,
   });
 
   const file = new File(["image"], "material.png", { type: "image/png" });
@@ -548,11 +620,13 @@ test("MoodboardsScreen prompt creates image nodes from dropped references", asyn
 
   fireEvent.click(screen.getByRole("button", { name: "Start board" }));
 
-  await waitFor(() => expect(uploadMoodboardAsset).toHaveBeenCalledWith("b1", expect.objectContaining({ name: "material.png", mimeType: "image/png" })));
   await waitFor(() =>
-    expect(saveMoodboardNodes).toHaveBeenCalledWith(
-      "b1",
-      expect.arrayContaining([expect.objectContaining({ type: "image", data: expect.objectContaining({ assetId: "asset-1", source: "upload" }) })]),
+    expect(startMoodboard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Visual references",
+        mode: "agent",
+        images: [expect.objectContaining({ name: "material.png", mimeType: "image/png", contentBase64: expect.any(String) })],
+      }),
     ),
   );
   expect(onOpenBoard).toHaveBeenCalledWith("b1");
@@ -1097,6 +1171,45 @@ test("SettingsScreen persists the chosen provider and custom instructions", asyn
   await user.click(screen.getByRole("combobox", { name: "Research model" }));
   await user.click(await screen.findByRole("option", { name: "gpt-5" }));
   expect(updateSettings).toHaveBeenCalledWith({ researchModel: "gpt-5" });
+});
+
+test("SettingsScreen rolls back only the keys from a failed optimistic mutation", async () => {
+  const visual = deferred<Settings>();
+  const research = deferred<Settings>();
+  const updateSettings = vi.fn((patch: Partial<Settings>) =>
+    "visualQaEnabled" in patch ? visual.promise : "researchEnabled" in patch ? research.promise : Promise.resolve(settingsFixture(patch)),
+  );
+  renderSettings({ updateSettings });
+  fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+  const visualSwitch = await screen.findByRole("switch", { name: "Agent visual review" });
+  const researchSwitch = screen.getByRole("switch", { name: "Design research" });
+
+  fireEvent.click(visualSwitch);
+  fireEvent.click(researchSwitch);
+  await act(async () => research.resolve(settingsFixture({ researchEnabled: true })));
+  await act(async () => visual.reject(new Error("write failed")));
+
+  await waitFor(() => expect(visualSwitch).not.toBeChecked());
+  expect(researchSwitch).toBeChecked();
+});
+
+test("SettingsScreen ignores stale full responses that arrive after a newer edit", async () => {
+  const researchAgent = deferred<Settings>();
+  const visual = deferred<Settings>();
+  const updateSettings = vi.fn((patch: Partial<Settings>) =>
+    "researchAgentCommand" in patch ? researchAgent.promise : "visualQaEnabled" in patch ? visual.promise : Promise.resolve(settingsFixture(patch)),
+  );
+  renderSettings({ updateSettings });
+  fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+  await userEvent.click(await screen.findByRole("combobox", { name: "Research agent" }));
+  await userEvent.click(await screen.findByRole("option", { name: "Codex" }));
+  const visualSwitch = screen.getByRole("switch", { name: "Agent visual review" });
+  fireEvent.click(visualSwitch);
+
+  await act(async () => visual.resolve(settingsFixture({ visualQaEnabled: true })));
+  await act(async () => researchAgent.resolve(settingsFixture({ researchAgentCommand: "codex", visualQaEnabled: false })));
+
+  await waitFor(() => expect(visualSwitch).toBeChecked());
 });
 
 test("SettingsScreen keeps model API key drafts after redacted settings saves", async () => {

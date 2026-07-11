@@ -64,6 +64,17 @@ function imageNodeAssetId(node: MoodboardNode): string {
   return node.type === "image" && typeof node.data.assetId === "string" ? node.data.assetId.trim() : "";
 }
 
+interface PendingNodeSave {
+  inputs: SaveMoodboardNodeInput[];
+  version: number;
+  timer: number | null;
+}
+
+interface FlushPendingNodesOptions {
+  applyResult: boolean;
+  notify: boolean;
+}
+
 export function useMoodboardBoard(boardId: string) {
   const api = useApi();
   const { toast } = useToast();
@@ -90,14 +101,27 @@ export function useMoodboardBoard(boardId: string) {
   const [agentBusy, setAgentBusy] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
   const busy = agentBusy || imageBusy;
-  const saveTimer = useRef<number | null>(null);
-  const pendingSaveInputs = useRef<SaveMoodboardNodeInput[] | null>(null);
+  const mountedRef = useRef(true);
+  const currentBoardIdRef = useRef(boardId);
+  const pendingSavesRef = useRef(new Map<string, PendingNodeSave>());
+  const inFlightSavesRef = useRef(new Map<string, Promise<boolean>>());
+  const saveVersionsRef = useRef(new Map<string, number>());
+  currentBoardIdRef.current = boardId;
 
-  const load = useCallback(() => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
     setLoading(true);
-    api
+    void api
       .getMoodboard(boardId)
       .then((next) => {
+        if (!alive) return;
         setDetail(next);
         setNodes(next.nodes);
         setAssets(next.assets ?? []);
@@ -105,11 +129,16 @@ export function useMoodboardBoard(boardId: string) {
         setConversationId(next.activeConversationId ?? next.conversations?.[0]?.id ?? "");
         setMessages(next.messages);
       })
-      .catch(() => toast("Couldn't load the moodboard.", { variant: "error" }))
-      .finally(() => setLoading(false));
+      .catch(() => {
+        if (alive) toast("Couldn't load the moodboard.", { variant: "error" });
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, [api, boardId, toast]);
-
-  useEffect(() => load(), [load]);
 
   useEffect(() => {
     let alive = true;
@@ -178,40 +207,69 @@ export function useMoodboardBoard(boardId: string) {
     if (useSaved && agentDefaults.model) setRunModel((current) => current || agentDefaults.model);
   }, [agentDefaults, agents]);
 
-  useEffect(() => {
-    return () => {
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    };
-  }, []);
+  const flushBoardNodes = useCallback(
+    async (targetBoardId: string, options: FlushPendingNodesOptions): Promise<boolean> => {
+      const inFlight = inFlightSavesRef.current.get(targetBoardId);
+      if (inFlight) {
+        const succeeded = await inFlight;
+        if (!succeeded) return false;
+        return pendingSavesRef.current.has(targetBoardId) ? flushBoardNodes(targetBoardId, options) : true;
+      }
 
-  const flushPendingNodes = useCallback(async (): Promise<boolean> => {
-    const inputs = pendingSaveInputs.current;
-    if (!inputs) return true;
-    pendingSaveInputs.current = null;
-    if (saveTimer.current) {
-      window.clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
-    try {
-      const saved = await api.saveMoodboardNodes(boardId, inputs);
-      setNodes(saved);
-      return true;
-    } catch {
-      toast("Couldn't save the board.", { variant: "error" });
-      return false;
-    }
-  }, [api, boardId, toast]);
+      const pending = pendingSavesRef.current.get(targetBoardId);
+      if (!pending) return true;
+      if (pending.timer !== null) window.clearTimeout(pending.timer);
+      pendingSavesRef.current.delete(targetBoardId);
+
+      const save = (async () => {
+        try {
+          const saved = await api.saveMoodboardNodes(targetBoardId, pending.inputs);
+          const isLatest = saveVersionsRef.current.get(targetBoardId) === pending.version && !pendingSavesRef.current.has(targetBoardId);
+          if (options.applyResult && mountedRef.current && currentBoardIdRef.current === targetBoardId && isLatest) setNodes(saved);
+          return true;
+        } catch {
+          if (!pendingSavesRef.current.has(targetBoardId)) pendingSavesRef.current.set(targetBoardId, { ...pending, timer: null });
+          if (options.notify && mountedRef.current) toast("Couldn't save the board.", { variant: "error" });
+          return false;
+        } finally {
+          inFlightSavesRef.current.delete(targetBoardId);
+        }
+      })();
+      inFlightSavesRef.current.set(targetBoardId, save);
+      const succeeded = await save;
+      if (!succeeded) return false;
+      return pendingSavesRef.current.has(targetBoardId) ? flushBoardNodes(targetBoardId, options) : true;
+    },
+    [api, toast],
+  );
+
+  const flushPendingNodes = useCallback(
+    (options: FlushPendingNodesOptions = { applyResult: true, notify: true }): Promise<boolean> => flushBoardNodes(boardId, options),
+    [boardId, flushBoardNodes],
+  );
+
+  useEffect(
+    () => () => {
+      void flushBoardNodes(boardId, { applyResult: false, notify: false });
+    },
+    [boardId, flushBoardNodes],
+  );
 
   const persistNodes = useCallback(
     (inputs: SaveMoodboardNodeInput[]) => {
-      pendingSaveInputs.current = inputs;
-      if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => {
-        saveTimer.current = null;
-        void flushPendingNodes();
+      const targetBoardId = boardId;
+      const previous = pendingSavesRef.current.get(targetBoardId);
+      if (previous?.timer !== null && previous?.timer !== undefined) window.clearTimeout(previous.timer);
+      const version = (saveVersionsRef.current.get(targetBoardId) ?? 0) + 1;
+      saveVersionsRef.current.set(targetBoardId, version);
+      const pending: PendingNodeSave = { inputs, version, timer: null };
+      pending.timer = window.setTimeout(() => {
+        pending.timer = null;
+        void flushBoardNodes(targetBoardId, { applyResult: true, notify: true });
       }, 350);
+      pendingSavesRef.current.set(targetBoardId, pending);
     },
-    [flushPendingNodes],
+    [boardId, flushBoardNodes],
   );
 
   const updateNodes = useCallback(
@@ -403,7 +461,7 @@ export function useMoodboardBoard(boardId: string) {
       setAgentBusy(true);
       setMessages((cur) => [...cur, optimistic]);
       try {
-        if (!(await flushPendingNodes())) {
+        if (!(await flushPendingNodes({ applyResult: true, notify: true }))) {
           setMessages((cur) => cur.filter((message) => message.id !== optimistic.id));
           return;
         }
@@ -557,6 +615,7 @@ export function useMoodboardBoard(boardId: string) {
     uploadReferenceFiles,
     generateImage,
     setCoverImage,
+    flushPendingNodes,
     sendMessage,
     rescanAgents,
   };

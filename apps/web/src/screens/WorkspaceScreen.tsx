@@ -2451,6 +2451,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const runningRef = useRef(false);
   const queueRef = useRef<QueuedPrompt[]>(queue);
   const activeRunIdRef = useRef<string | null>(null);
+  const stopRequestRef = useRef<Promise<void> | null>(null);
   const runStartedAtRef = useRef<number | null>(null);
   const turnStartedAtRef = useRef<number | null>(null);
   // On unmount (project switch via the key= in App.tsx, or navigating away), abort the in-flight run
@@ -3087,6 +3088,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     switch (ev.type) {
       case "run-start":
         terminalEventRef.current = false;
+        stopRequestRef.current = null;
         runStartedAtRef.current = Date.now();
         turnStartedAtRef.current = null;
         if (typeof ev.runId === "string") activeRunIdRef.current = ev.runId;
@@ -3189,7 +3191,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         } else if (ev.mode !== "standard" && modeRef.current !== "standard") {
           setPreviewSrc(`${api.previewUrl(id)}?t=${typeof ev.t === "number" ? ev.t : Date.now()}`);
         }
-        setTab("Preview");
         void loadFiles(); // refresh the Files list live as the artifact is rewritten (both modes)
         if (ev.mode === "standard" || modeRef.current === "standard") {
           void loadRuns();
@@ -3293,7 +3294,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           clearVersionPreviewState();
           setPreviewSrc(`${api.previewUrl(id)}?t=${Date.now()}`);
         }
-        setTab("Preview");
         setRanOnce(true);
         void loadFiles();
         void loadRuns();
@@ -3615,9 +3615,23 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const stop = (): void => {
     const runId = activeRunIdRef.current;
-    materializeLive();
-    if (runId) void api.cancelRun(runId).catch(() => {});
-    abortRef.current?.abort();
+    if (!runId || stopRequestRef.current) return;
+    let request!: Promise<void>;
+    request = api
+      .cancelRun(runId)
+      .then((result) => {
+        if (!result.cancelled) throw new Error("The daemon did not accept the stop request.");
+        if (!terminalEventRef.current && activeRunIdRef.current === runId) setLiveStatus("Stopping…");
+      })
+      .catch((error) => {
+        if (!workspaceDisposedRef.current) {
+          toast(error instanceof Error && error.message ? error.message : "Couldn't stop the run.", { variant: "error" });
+        }
+      })
+      .finally(() => {
+        if (stopRequestRef.current === request) stopRequestRef.current = null;
+      });
+    stopRequestRef.current = request;
   };
 
   // Keep the transcript pinned to the newest content as it streams — unless the user scrolled

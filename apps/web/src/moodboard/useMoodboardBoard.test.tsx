@@ -1,12 +1,15 @@
 import { useEffect } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
-import type { MoodboardConversation, MoodboardMessage, MoodboardNode, Settings } from "../lib/api.ts";
+import { afterEach, expect, test, vi } from "vitest";
+import type { MoodboardConversation, MoodboardMessage, MoodboardNode, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { imageModelOptions, useMoodboardBoard } from "./useMoodboardBoard.ts";
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 function settings(overrides: Partial<Settings> = {}): Settings {
   return {
@@ -315,6 +318,128 @@ test("sendMessage flushes pending node saves before posting to the agent", async
   });
 
   expect(calls).toEqual(["save:42", "post"]);
+});
+
+test("useMoodboardBoard flushes the latest pending nodes on unmount", async () => {
+  const initialNode: MoodboardNode = {
+    id: "note-1",
+    boardId: "board-1",
+    type: "note",
+    x: 0,
+    y: 0,
+    width: 160,
+    height: 120,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: "draft" },
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-1");
+    return null;
+  }
+  const saveMoodboardNodes = vi.fn(async (_id: string, inputs: SaveMoodboardNodeInput[]) =>
+    inputs.map((input) => ({ ...initialNode, ...input, boardId: _id })),
+  );
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-1",
+      name: "Board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [initialNode],
+      assets: [],
+      messages: [],
+    }),
+    saveMoodboardNodes,
+  });
+  const view = render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+  vi.useFakeTimers();
+
+  act(() => {
+    board.updateNodes([{ ...initialNode, x: 12 }]);
+    board.updateNodes([{ ...initialNode, x: 84 }]);
+  });
+  view.unmount();
+  await act(async () => {
+    await Promise.resolve();
+  });
+
+  expect(saveMoodboardNodes).toHaveBeenCalledTimes(1);
+  expect(saveMoodboardNodes).toHaveBeenCalledWith("board-1", [expect.objectContaining({ id: "note-1", x: 84 })]);
+});
+
+test("useMoodboardBoard keeps pending saves isolated when the board id changes", async () => {
+  const node = (boardId: string): MoodboardNode => ({
+    id: `note-${boardId}`,
+    boardId,
+    type: "note",
+    x: 0,
+    y: 0,
+    width: 160,
+    height: 120,
+    rotation: 0,
+    zIndex: 0,
+    data: { content: boardId },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe({ boardId }: { boardId: string }) {
+    board = useMoodboardBoard(boardId);
+    return null;
+  }
+  const saveMoodboardNodes = vi.fn(async (boardId: string, inputs: SaveMoodboardNodeInput[]) =>
+    inputs.map((input) => ({ ...node(boardId), ...input, boardId })),
+  );
+  const api = makeFakeApi({
+    getMoodboard: async (boardId: string) => ({
+      id: boardId,
+      name: boardId,
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [node(boardId)],
+      assets: [],
+      messages: [],
+    }),
+    saveMoodboardNodes,
+  });
+  const view = render(
+    <ApiProvider client={api}>
+      <Probe boardId="board-1" />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.detail?.id).toBe("board-1"));
+  vi.useFakeTimers();
+
+  act(() => board.updateNodes([{ ...node("board-1"), x: 11 }]));
+  view.rerender(
+    <ApiProvider client={api}>
+      <Probe boardId="board-2" />
+    </ApiProvider>,
+  );
+  await act(async () => {
+    await Promise.resolve();
+  });
+  act(() => board.updateNodes([{ ...node("board-2"), x: 22 }]));
+  await act(async () => {
+    vi.advanceTimersByTime(350);
+    await Promise.resolve();
+  });
+
+  expect(saveMoodboardNodes).toHaveBeenCalledWith("board-1", [expect.objectContaining({ id: "note-board-1", x: 11 })]);
+  expect(saveMoodboardNodes).toHaveBeenCalledWith("board-2", [expect.objectContaining({ id: "note-board-2", x: 22 })]);
 });
 
 test("useMoodboardBoard sets an image node as the current board cover", async () => {

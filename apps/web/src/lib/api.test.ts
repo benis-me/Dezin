@@ -413,6 +413,7 @@ test("moodboard client methods hit first-class board endpoints", async () => {
     updatedAt: 1,
   };
   const fetchImpl = vi.fn<FetchLike>(async (url, init) => {
+    if (url.endsWith("/api/moodboards/start")) return jsonResponse(board, 201);
     if (url.endsWith("/api/moodboards") && init?.method === "POST") return jsonResponse(board, 201);
     if (url.endsWith("/api/moodboards")) return jsonResponse([board]);
     if (url.endsWith("/api/moodboards/b1/nodes") && init?.method === "PUT") return jsonResponse([node]);
@@ -426,6 +427,7 @@ test("moodboard client methods hit first-class board endpoints", async () => {
 
   await expect(api.listMoodboards()).resolves.toEqual([board]);
   await expect(api.createMoodboard({ name: "Refs" })).resolves.toEqual(board);
+  await expect(api.startMoodboard({ name: "Refs", prompt: "Warm editorial", mode: "agent", agentCommand: "codex" })).resolves.toEqual(board);
   await expect(api.getMoodboard("b1")).resolves.toMatchObject({ id: "b1", nodes: [node] });
   await expect(api.saveMoodboardNodes("b1", [node])).resolves.toEqual([node]);
   await expect(api.postMoodboardMessage("b1", "read the board", { agentCommand: "codex", model: "gpt-5" })).resolves.toEqual({ messages: [] });
@@ -435,6 +437,13 @@ test("moodboard client methods hit first-class board endpoints", async () => {
   });
 
   expect(fetchImpl).toHaveBeenCalledWith("http://d/api/moodboards", undefined);
+  expect(fetchImpl).toHaveBeenCalledWith(
+    "http://d/api/moodboards/start",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ name: "Refs", prompt: "Warm editorial", mode: "agent", agentCommand: "codex" }),
+    }),
+  );
   expect(fetchImpl).toHaveBeenCalledWith("http://d/api/moodboards/b1/nodes", expect.objectContaining({ method: "PUT" }));
   expect(fetchImpl).toHaveBeenCalledWith(
     "http://d/api/moodboards/b1/messages",

@@ -57,6 +57,7 @@ import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
 import { fetchProjectArtifact, toBase64 } from "../lib/project-ref.ts";
 import { AgentModelSelect } from "../components/AgentModelSelect.tsx";
 import { cn } from "../lib/utils.ts";
+import { beginResourceLoad, idleResource, readyResource, rejectResource, resolveResource } from "../lib/async-resource.ts";
 import type { DesignSystemCard, Project, ProjectMode, Settings, SkillCard } from "../lib/api.ts";
 
 const DEFAULT_SKILL = "frontend-design";
@@ -243,8 +244,12 @@ export function HomeScreen({
   // ever prompts once per install.
   const [affirmed, setAffirmed] = useState(false);
   const [affirmPending, setAffirmPending] = useState<null | { url: string }>(null);
-  const [projects, setProjects] = useState<Project[]>(projectsOverride ?? []);
-  const [loading, setLoading] = useState(!projectsOverride);
+  const [projectsResource, setProjectsResource] = useState(() =>
+    projectsOverride ? readyResource(projectsOverride) : idleResource<Project[]>(),
+  );
+  const projectRequestRef = useRef(0);
+  const projects = projectsResource.data ?? [];
+  const loading = projectsResource.status === "idle" || projectsResource.status === "loading";
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [q, setQ] = useState("");
@@ -289,11 +294,16 @@ export function HomeScreen({
 
   const refresh = useCallback(() => {
     if (projectsOverride) return;
+    const request = ++projectRequestRef.current;
+    setProjectsResource((current) => beginResourceLoad(current));
     api
       .listProjects()
-      .then(setProjects)
-      .catch(() => {})
-      .finally(() => setLoading(false));
+      .then((next) => {
+        if (request === projectRequestRef.current) setProjectsResource(resolveResource(next));
+      })
+      .catch((error) => {
+        if (request === projectRequestRef.current) setProjectsResource((current) => rejectResource(current, error));
+      });
   }, [api, projectsOverride]);
 
   // The home feature toggles write straight to global Settings (optimistic), then broadcast so
@@ -327,7 +337,10 @@ export function HomeScreen({
   }, []);
 
   useEffect(() => {
-    if (projectsOverride) setProjects(projectsOverride);
+    if (projectsOverride) {
+      projectRequestRef.current += 1;
+      setProjectsResource(readyResource(projectsOverride));
+    }
     else refresh();
   }, [projectsOverride, refresh]);
 
@@ -926,7 +939,7 @@ export function HomeScreen({
                   <Button
                     size="lg"
                     onClick={submit}
-                    disabled={creating || optimizingPrompt || (brief.trim().length === 0 && images.length === 0)}
+                    disabled={creating || optimizingPrompt || (brief.trim().length === 0 && images.length === 0 && refs.length === 0)}
                     aria-label="Design"
                     className="px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
                   >
@@ -1031,9 +1044,18 @@ export function HomeScreen({
           </div>
         </div>
 
+        {projectsResource.status === "error" ? (
+          <div role="alert" className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+            <span>{projectsResource.data ? "Couldn't refresh projects. Showing the last loaded list." : "Couldn't load projects."}</span>
+            <Button variant="outline" size="sm" aria-label="Retry loading projects" onClick={refresh}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
+
         {loading ? (
           <Loading label="Loading projects…" />
-        ) : visible.length === 0 ? (
+        ) : projectsResource.status === "error" && projectsResource.data === null ? null : visible.length === 0 ? (
           <div className="mt-5 grid min-h-[340px] place-items-center rounded-2xl border border-dashed border-border dz-canvas">
             <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center">
               <span className="grid size-14 place-items-center rounded-2xl border border-border bg-card text-muted-foreground">

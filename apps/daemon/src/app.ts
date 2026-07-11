@@ -74,6 +74,7 @@ import {
   handlePutMoodboardNodes,
   handleRenameMoodboardConversation,
   handleServeMoodboardAsset,
+  handleStartMoodboard,
   handleUploadMoodboardAsset,
 } from "./moodboard-handler.ts";
 import type { MoodboardAgentTextRunner } from "./moodboard-agent.ts";
@@ -610,6 +611,11 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/moodboards",
     handler: (req, res, _p, deps) => handleCreateMoodboard(req, res, deps),
+  },
+  {
+    method: "POST",
+    pattern: "/api/moodboards/start",
+    handler: (req, res, _p, deps) => handleStartMoodboard(req, res, deps),
   },
   {
     method: "GET",

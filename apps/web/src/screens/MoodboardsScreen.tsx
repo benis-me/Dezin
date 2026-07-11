@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { Archive, ArchiveRestore, ArrowRight, ImagePlus, Images, LayoutGrid, List, Pencil, Plus, Search, Trash2, X } from "lucide-react";
-import type { Moodboard, SaveMoodboardNodeInput, Settings } from "../lib/api.ts";
+import type { Moodboard, Settings } from "../lib/api.ts";
 import { useApi } from "../lib/api-context.tsx";
 import { useAgents } from "../lib/agents-context.tsx";
 import { useAutoRefresh } from "../lib/use-auto-refresh.ts";
@@ -22,9 +22,10 @@ import {
   Tabs,
 } from "../components/ui/index.ts";
 import { ImageModelPicker } from "../moodboard/ImageModelPicker.tsx";
-import { createImageNode, fileToBase64, imageSize } from "../moodboard/moodboard-board-utils.ts";
+import { fileToBase64, imageSize } from "../moodboard/moodboard-board-utils.ts";
 import { imageModelOptions } from "../moodboard/useMoodboardBoard.ts";
 import { filesFromDataTransfer, hasDraggedFiles, localPathsFromDataTransfer } from "../lib/drag-drop.ts";
+import { beginResourceLoad, idleResource, rejectResource, resolveResource } from "../lib/async-resource.ts";
 
 interface PromptImage {
   file: File;
@@ -60,8 +61,10 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
   const api = useApi();
   const { toast } = useToast();
   const { agents, rescan: rescanAgents } = useAgents();
-  const [boards, setBoards] = useState<Moodboard[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [boardsResource, setBoardsResource] = useState(() => idleResource<Moodboard[]>());
+  const boardRequestRef = useRef(0);
+  const boards = boardsResource.data ?? [];
+  const loading = boardsResource.status === "idle" || boardsResource.status === "loading";
   const [view, setView] = useState<"active" | "archived">("active");
   const [layout, setLayout] = useState<"grid" | "list">("grid");
   const [sort, setSort] = useState<"recent" | "name" | "oldest">("recent");
@@ -82,13 +85,17 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
   const promptImageInputRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(() => {
-    setLoading(true);
+    const request = ++boardRequestRef.current;
+    setBoardsResource((current) => beginResourceLoad(current));
     api
       .listMoodboards()
-      .then(setBoards)
-      .catch(() => toast("Couldn't load moodboards.", { variant: "error" }))
-      .finally(() => setLoading(false));
-  }, [api, toast]);
+      .then((next) => {
+        if (request === boardRequestRef.current) setBoardsResource(resolveResource(next));
+      })
+      .catch((error) => {
+        if (request === boardRequestRef.current) setBoardsResource((current) => rejectResource(current, error));
+      });
+  }, [api]);
 
   useEffect(() => refresh(), [refresh]);
   useAutoRefresh(refresh);
@@ -200,30 +207,27 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
     if (!text && promptImages.length === 0) return;
     setStarting(true);
     try {
-      const board = await api.createMoodboard({ name: titleFromPrompt(text) || (promptImages.length ? "Visual references" : "Untitled moodboard") });
-      if (promptImages.length) {
-        const nodes: SaveMoodboardNodeInput[] = [];
-        for (const [index, image] of promptImages.entries()) {
-          const [asset, size] = await Promise.all([
-            api.uploadMoodboardAsset(board.id, {
-              name: image.name,
-              contentBase64: image.base64,
-              mimeType: image.file.type,
-            }),
-            imageSizeWithFallback(image.file),
-          ]);
-          nodes.push(createImageNode(asset, index, index, size));
-        }
-        if (nodes.length) await api.saveMoodboardNodes(board.id, nodes);
-      }
-      if (text) {
-        if (startMode === "generate") {
-          await api.generateMoodboardImage(board.id, text, imageModel ? { model: imageModel } : undefined);
-        } else {
-          const options = runAgent || runModel ? { agentCommand: runAgent || undefined, model: runModel || undefined } : undefined;
-          await api.postMoodboardMessage(board.id, text, options);
-        }
-      }
+      const images = await Promise.all(
+        promptImages.map(async (image) => {
+          const size = await imageSizeWithFallback(image.file);
+          return {
+            name: image.name,
+            contentBase64: image.base64,
+            mimeType: image.file.type,
+            width: size.width,
+            height: size.height,
+          };
+        }),
+      );
+      const board = await api.startMoodboard({
+        name: titleFromPrompt(text) || (promptImages.length ? "Visual references" : "Untitled moodboard"),
+        prompt: text || undefined,
+        mode: startMode,
+        images: images.length ? images : undefined,
+        agentCommand: startMode === "agent" ? runAgent || undefined : undefined,
+        agentModel: startMode === "agent" ? runModel || undefined : undefined,
+        imageModel: startMode === "generate" ? imageModel || undefined : undefined,
+      });
       setPrompt("");
       setPromptImages([]);
       refresh();
@@ -455,9 +459,18 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
             </div>
           </div>
 
+          {boardsResource.status === "error" ? (
+            <div role="alert" className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+              <span>{boardsResource.data ? "Couldn't refresh moodboards. Showing the last loaded list." : "Couldn't load moodboards."}</span>
+              <Button variant="outline" size="sm" aria-label="Retry loading moodboards" onClick={refresh}>
+                Retry
+              </Button>
+            </div>
+          ) : null}
+
           {loading ? (
             <Loading label="Loading moodboards..." />
-          ) : visible.length === 0 ? (
+          ) : boardsResource.status === "error" && boardsResource.data === null ? null : visible.length === 0 ? (
             <div className="dz-canvas mt-5 grid min-h-[360px] place-items-center rounded-2xl border border-dashed border-border">
               <div className="flex max-w-sm flex-col items-center gap-3 px-6 text-center">
                 <span className="grid size-14 place-items-center rounded-2xl border border-border bg-card text-muted-foreground">
