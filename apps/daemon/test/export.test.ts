@@ -652,7 +652,15 @@ test("BoundedJsonWriter encodes incrementally and rejects before crossing its by
   assert.throws(() => limited.value({ content: "\u0001".repeat(1_000) }), /manifest\.json.*128 bytes/);
 });
 
-test("manifest storage preflight rejects a large SQLite message without materializing it", () => {
+test("BoundedJsonWriter yields so a request abort can interrupt a large manifest string", async () => {
+  const writer = new BoundedJsonWriter(4 * 1024 * 1024, "manifest.json");
+  const controller = new AbortController();
+  const encoding = writer.valueAsync({ content: "x".repeat(2 * 1024 * 1024) }, controller.signal);
+  setImmediate(() => controller.abort(new Error("stop manifest encoding")));
+  await assert.rejects(encoding, /stop manifest encoding/);
+});
+
+test("manifest storage preflight rejects a large SQLite message without materializing it", async () => {
   const store = new Store(":memory:");
   const project = store.createProject({ name: "Manifest budget" });
   const conversation = store.createConversation(project.id);
@@ -660,7 +668,7 @@ test("manifest storage preflight rejects a large SQLite message without material
     "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, 'user', zeroblob(?), ?)",
   ).run("oversized-message", conversation.id, 4_096, Date.now());
 
-  assert.throws(() => assertManifestStorageWithinLimit(store, project.id, 1_024), /manifest.*storage/i);
+  await assert.rejects(assertManifestStorageWithinLimit(store, project.id, 1_024), /manifest.*storage/i);
   store.close();
 });
 

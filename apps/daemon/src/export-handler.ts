@@ -51,6 +51,20 @@ export const MAX_EXPORT_ENTRIES = 10_000;
 export const MAX_EXPORT_FILE_BYTES = 64 * 1024 * 1024;
 export const MAX_EXPORT_TOTAL_BYTES = 512 * 1024 * 1024;
 
+function yieldToEventLoop(signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    setImmediate(() => {
+      try {
+        signal?.throwIfAborted();
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
 function isSecretEnvFile(name: string): boolean {
   if (name === ".env" || name === ".envrc") return true;
   if (!name.startsWith(".env.")) return false;
@@ -164,6 +178,10 @@ export class BoundedJsonWriter {
     this.writeValue(value, new Set<object>(), false);
   }
 
+  async valueAsync(value: unknown, signal?: AbortSignal): Promise<void> {
+    await this.writeValueAsync(value, new Set<object>(), false, signal);
+  }
+
   finish(): string {
     this.flushPending();
     return this.chunks.join("");
@@ -216,6 +234,76 @@ export class BoundedJsonWriter {
         this.string(key);
         this.raw(":");
         this.writeValue(child, stack, false);
+      }
+      this.raw("}");
+    } finally {
+      stack.delete(value);
+    }
+  }
+
+  private async writeStringAsync(value: string, signal?: AbortSignal): Promise<void> {
+    this.raw('"');
+    let chunks = 0;
+    for (let offset = 0; offset < value.length; offset += 16 * 1024) {
+      signal?.throwIfAborted();
+      const encoded = JSON.stringify(value.slice(offset, offset + 16 * 1024));
+      this.raw(encoded.slice(1, -1));
+      chunks += 1;
+      if (chunks % 16 === 0) await yieldToEventLoop(signal);
+    }
+    this.raw('"');
+  }
+
+  private async writeValueAsync(
+    value: unknown,
+    stack: Set<object>,
+    arrayItem: boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    if (value === null) return this.raw("null");
+    if (typeof value === "string") return this.writeStringAsync(value, signal);
+    if (typeof value === "boolean") return this.raw(value ? "true" : "false");
+    if (typeof value === "number") return this.raw(Number.isFinite(value) ? String(value) : "null");
+    if (typeof value === "bigint") throw new TypeError("Cannot serialize BigInt to JSON");
+    if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol") {
+      if (arrayItem) this.raw("null");
+      return;
+    }
+    if (typeof value !== "object") return this.raw("null");
+    if (stack.has(value)) throw new TypeError("Cannot serialize a circular structure to JSON");
+
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") {
+      await this.writeValueAsync(toJSON.call(value), stack, arrayItem, signal);
+      return;
+    }
+
+    stack.add(value);
+    try {
+      if (Array.isArray(value)) {
+        this.raw("[");
+        for (let index = 0; index < value.length; index++) {
+          if (index > 0) this.raw(",");
+          await this.writeValueAsync(value[index], stack, true, signal);
+          if ((index + 1) % 100 === 0) await yieldToEventLoop(signal);
+        }
+        this.raw("]");
+        return;
+      }
+      this.raw("{");
+      let first = true;
+      let fields = 0;
+      for (const key of Object.keys(value)) {
+        const child = (value as Record<string, unknown>)[key];
+        if (typeof child === "undefined" || typeof child === "function" || typeof child === "symbol") continue;
+        if (!first) this.raw(",");
+        first = false;
+        this.string(key);
+        this.raw(":");
+        await this.writeValueAsync(child, stack, false, signal);
+        fields += 1;
+        if (fields % 100 === 0) await yieldToEventLoop(signal);
       }
       this.raw("}");
     } finally {
@@ -468,65 +556,79 @@ export function reapExportTempAfterCleanupFailure(path: string, error: ProcessGr
   return error.whenGone.then(() => rm(path, { force: true })).catch(() => {});
 }
 
-function writeJsonArray<T>(
+async function writeJsonArray<T>(
   writer: BoundedJsonWriter,
   values: Iterable<T>,
-  writeItem: (value: T) => void,
+  writeItem: (value: T) => void | Promise<void>,
   signal?: AbortSignal,
-): void {
+): Promise<void> {
   writer.raw("[");
   let first = true;
+  let count = 0;
   for (const value of values) {
     signal?.throwIfAborted();
     if (!first) writer.raw(",");
     first = false;
-    writeItem(value);
+    await writeItem(value);
+    count += 1;
+    if (count % 25 === 0) await yieldToEventLoop(signal);
   }
   writer.raw("]");
 }
 
-const MANIFEST_RECORD_OVERHEAD_BYTES = 512;
+const MANIFEST_RECORD_OVERHEAD_BYTES = 4 * 1024;
 
 /** Reject oversized DB-backed manifest data before Store list methods materialize it. */
-export function assertManifestStorageWithinLimit(
+export async function assertManifestStorageWithinLimit(
   store: AppDeps["store"],
   projectId: string,
   maxBytes = MAX_EXPORT_FILE_BYTES,
   signal?: AbortSignal,
-): void {
+): Promise<void> {
   const queries = [
-    `SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(id AS BLOB)) + length(CAST(name AS BLOB))), 0) AS bytes
-       FROM variants WHERE project_id = ?`,
-    `SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(id AS BLOB)) + length(CAST(title AS BLOB))), 0) AS bytes
-       FROM conversations WHERE project_id = ?`,
-    `SELECT COUNT(*) AS count,
-            COALESCE(SUM(length(CAST(m.id AS BLOB)) + length(CAST(m.role AS BLOB)) + length(CAST(m.content AS BLOB))), 0) AS bytes
-       FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.project_id = ?`,
-    `SELECT COUNT(*) AS count,
-            COALESCE(SUM(
-              length(CAST(id AS BLOB)) + length(CAST(conversation_id AS BLOB)) + length(CAST(status AS BLOB)) +
-              length(CAST(final_findings AS BLOB)) + length(CAST(COALESCE(user_message_id, '') AS BLOB)) +
-              length(CAST(COALESCE(assistant_message_id, '') AS BLOB)) + length(CAST(COALESCE(variant_id, '') AS BLOB)) +
-              length(CAST(COALESCE(commit_hash, '') AS BLOB))
-            ), 0) AS bytes
-       FROM runs WHERE project_id = ?`,
-    `SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(path AS BLOB))), 0) AS bytes
-       FROM artifacts WHERE project_id = ?`,
+    `SELECT rowid AS cursor_rowid, length(CAST(id AS BLOB)) + length(CAST(name AS BLOB)) AS bytes
+       FROM variants WHERE project_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT 100`,
+    `SELECT rowid AS cursor_rowid, length(CAST(id AS BLOB)) + length(CAST(title AS BLOB)) AS bytes
+       FROM conversations WHERE project_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT 100`,
+    `SELECT m.rowid AS cursor_rowid,
+            length(CAST(m.id AS BLOB)) + length(CAST(m.role AS BLOB)) + length(CAST(m.content AS BLOB)) AS bytes
+       FROM messages m JOIN conversations c ON c.id = m.conversation_id
+      WHERE c.project_id = ? AND m.rowid > ? ORDER BY m.rowid ASC LIMIT 100`,
+    `SELECT rowid AS cursor_rowid,
+            length(CAST(id AS BLOB)) + length(CAST(conversation_id AS BLOB)) + length(CAST(status AS BLOB)) +
+            length(CAST(final_findings AS BLOB)) + length(CAST(COALESCE(user_message_id, '') AS BLOB)) +
+            length(CAST(COALESCE(assistant_message_id, '') AS BLOB)) + length(CAST(COALESCE(variant_id, '') AS BLOB)) +
+            length(CAST(COALESCE(commit_hash, '') AS BLOB)) AS bytes
+       FROM runs WHERE project_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT 100`,
+    `SELECT rowid AS cursor_rowid, length(CAST(path AS BLOB)) AS bytes
+       FROM artifacts WHERE project_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT 100`,
   ];
   let estimatedBytes = 1024;
   for (const sql of queries) {
-    signal?.throwIfAborted();
-    const row = store.db.prepare(sql).get(projectId) as { count?: unknown; bytes?: unknown } | undefined;
-    const count = Number(row?.count ?? 0);
-    const bytes = Number(row?.bytes ?? 0);
-    if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(bytes) || bytes < 0) {
-      throw new ExportLimitError(`${MANIFEST_PATH} manifest storage is invalid`);
+    const statement = store.db.prepare(sql);
+    let cursorRowid = 0;
+    for (;;) {
+      signal?.throwIfAborted();
+      const rows = statement.all(projectId, cursorRowid) as Array<{ cursor_rowid?: unknown; bytes?: unknown }>;
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        signal?.throwIfAborted();
+        const rowid = Number(row.cursor_rowid);
+        const bytes = Number(row.bytes ?? 0);
+        if (!Number.isSafeInteger(rowid) || rowid <= cursorRowid || !Number.isSafeInteger(bytes) || bytes < 0) {
+          throw new ExportLimitError(`${MANIFEST_PATH} manifest storage is invalid`);
+        }
+        cursorRowid = rowid;
+        const contribution = bytes + MANIFEST_RECORD_OVERHEAD_BYTES;
+        if (!Number.isSafeInteger(contribution) || estimatedBytes + contribution > maxBytes) {
+          throw new ExportLimitError(`${MANIFEST_PATH} manifest storage exceeds ${maxBytes} bytes`);
+        }
+        estimatedBytes += contribution;
+      }
+      if (rows.length < 100) break;
+      await yieldToEventLoop(signal);
     }
-    const contribution = bytes + count * MANIFEST_RECORD_OVERHEAD_BYTES;
-    if (!Number.isSafeInteger(contribution) || estimatedBytes + contribution > maxBytes) {
-      throw new ExportLimitError(`${MANIFEST_PATH} manifest storage exceeds ${maxBytes} bytes`);
-    }
-    estimatedBytes += contribution;
+    await yieldToEventLoop(signal);
   }
   signal?.throwIfAborted();
 }
@@ -571,22 +673,22 @@ function* iterateManifestMessages(
   }
 }
 
-function serializeExportManifest(
+async function serializeExportManifest(
   project: Project,
   deps: AppDeps,
   variants: ReturnType<AppDeps["store"]["listVariants"]>,
   runs: ReturnType<AppDeps["store"]["listRuns"]>,
   signal?: AbortSignal,
-): string {
+): Promise<string> {
   signal?.throwIfAborted();
   const writer = new BoundedJsonWriter(MAX_EXPORT_FILE_BYTES, MANIFEST_PATH);
   writer.raw("{");
   writer.raw('"format":');
-  writer.value("dezin-project");
+  await writer.valueAsync("dezin-project", signal);
   writer.raw(',"version":2,"exportedAt":');
-  writer.value(Date.now());
+  await writer.valueAsync(Date.now(), signal);
   writer.raw(',"project":');
-  writer.value({
+  await writer.valueAsync({
     id: project.id,
     name: project.name,
     skillId: project.skillId,
@@ -595,37 +697,37 @@ function serializeExportManifest(
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     archivedAt: project.archivedAt,
-  });
+  }, signal);
   writer.raw(',"variants":');
-  writeJsonArray(writer, variants, (variant) => writer.value({
+  await writeJsonArray(writer, variants, (variant) => writer.valueAsync({
     id: variant.id,
     name: variant.name,
     createdAt: variant.createdAt,
     active: Boolean(variant.active),
-  }), signal);
+  }, signal), signal);
   writer.raw(',"conversations":');
   const conversations = deps.store.listConversations(project.id);
   signal?.throwIfAborted();
-  writeJsonArray(writer, conversations, (conversation) => {
+  await writeJsonArray(writer, conversations, async (conversation) => {
     signal?.throwIfAborted();
     writer.raw("{");
     writer.raw('"id":');
-    writer.value(conversation.id);
+    await writer.valueAsync(conversation.id, signal);
     writer.raw(',"title":');
-    writer.value(conversation.title);
+    await writer.valueAsync(conversation.title, signal);
     writer.raw(',"createdAt":');
-    writer.value(conversation.createdAt);
+    await writer.valueAsync(conversation.createdAt, signal);
     writer.raw(',"messages":');
-    writeJsonArray(writer, iterateManifestMessages(deps.store, conversation.id, signal), (message) => writer.value({
+    await writeJsonArray(writer, iterateManifestMessages(deps.store, conversation.id, signal), (message) => writer.valueAsync({
       id: message.id,
       role: message.role,
       content: message.content,
       createdAt: message.createdAt,
-    }), signal);
+    }, signal), signal);
     writer.raw("}");
   }, signal);
   writer.raw(',"runs":');
-  writeJsonArray(writer, runs, (run) => writer.value({
+  await writeJsonArray(writer, runs, (run) => writer.valueAsync({
     id: run.id,
     conversationId: run.conversationId,
     userMessageId: run.userMessageId,
@@ -639,15 +741,15 @@ function serializeExportManifest(
     findings: run.findings,
     createdAt: run.createdAt,
     finishedAt: run.finishedAt,
-  }), signal);
+  }, signal), signal);
   writer.raw(',"artifacts":');
   const artifacts = deps.store.listArtifacts(project.id);
   signal?.throwIfAborted();
-  writeJsonArray(writer, artifacts, (artifact) => writer.value({
+  await writeJsonArray(writer, artifacts, (artifact) => writer.valueAsync({
     path: artifact.path,
     lintPassed: artifact.lintPassed,
     createdAt: artifact.createdAt,
-  }), signal);
+  }, signal), signal);
   writer.raw("}");
   signal?.throwIfAborted();
   return writer.finish();
@@ -670,7 +772,7 @@ async function prepareExport(
     };
   }
   deps.store.ensureMainVariant(project.id);
-  assertManifestStorageWithinLimit(deps.store, project.id, MAX_EXPORT_FILE_BYTES, signal);
+  await assertManifestStorageWithinLimit(deps.store, project.id, MAX_EXPORT_FILE_BYTES, signal);
   const variants = deps.store.listVariants(project.id);
   signal?.throwIfAborted();
   const runs = deps.store.listRuns(project.id);
@@ -678,7 +780,7 @@ async function prepareExport(
   try {
     const sourceEntries = await fileEntries("source", activeDir, budget, signal);
     if (sourceEntries.length === 0) return { entries: [], cleanup: async () => {} };
-    const manifest = serializeExportManifest(project, deps, variants, runs, signal);
+    const manifest = await serializeExportManifest(project, deps, variants, runs, signal);
     const entries: StreamingZipEntry[] = [
       memoryExportEntry(MANIFEST_PATH, manifest, budget),
       ...sourceEntries,
