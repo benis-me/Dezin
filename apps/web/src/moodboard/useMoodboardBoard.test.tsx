@@ -634,6 +634,105 @@ test("useMoodboardBoard never appends a completed upload to a different board", 
   );
 });
 
+test("an upload preserves nodes returned by an agent after the initial hydration", async () => {
+  const node = (id: string, type: MoodboardNode["type"] = "note"): MoodboardNode => ({
+    id,
+    boardId: "board-agent",
+    type,
+    x: id === "agent-node" ? 220 : 0,
+    y: 0,
+    width: 160,
+    height: 120,
+    rotation: 0,
+    zIndex: id === "agent-node" ? 1 : 0,
+    data: type === "image" ? { assetId: "asset-upload" } : { content: id },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const initialNode = node("initial-node");
+  const agentNode = node("agent-node");
+  let board!: ReturnType<typeof useMoodboardBoard>;
+  function Probe() {
+    board = useMoodboardBoard("board-agent");
+    return null;
+  }
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:agent-upload");
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  vi.stubGlobal(
+    "Image",
+    class {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(_value: string) {
+        queueMicrotask(() => this.onerror?.());
+      }
+    },
+  );
+  const saveMoodboardNodes = vi.fn(async (boardId: string, inputs: SaveMoodboardNodeInput[]) =>
+    inputs.map((input, index) => ({
+      ...input,
+      id: input.id ?? `saved-${index}`,
+      boardId,
+      rotation: input.rotation ?? 0,
+      zIndex: input.zIndex ?? index,
+      data: input.data ?? {},
+      createdAt: 1,
+      updatedAt: 2,
+    })),
+  );
+  const api = makeFakeApi({
+    getMoodboard: async () => ({
+      id: "board-agent",
+      name: "Agent board",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+      coverAssetId: null,
+      nodes: [initialNode],
+      assets: [],
+      conversations: [],
+      messages: [],
+    }),
+    postMoodboardMessage: async () => ({ messages: [], nodes: [initialNode, agentNode] }),
+    uploadMoodboardAsset: async () => ({
+      id: "asset-upload",
+      boardId: "board-agent",
+      kind: "image",
+      fileName: "upload.png",
+      mimeType: "image/png",
+      width: null,
+      height: null,
+      source: "upload",
+      createdAt: 2,
+      url: "/api/moodboards/board-agent/assets/asset-upload",
+    }),
+    saveMoodboardNodes,
+  });
+  render(
+    <ApiProvider client={api}>
+      <Probe />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(board.loading).toBe(false));
+  await act(async () => {
+    await board.sendMessage("add another node");
+  });
+  expect(board.nodes.map((item) => item.id)).toEqual(["initial-node", "agent-node"]);
+
+  await act(async () => {
+    await board.uploadFiles([new File(["image"], "upload.png", { type: "image/png" })]);
+  });
+  await waitFor(() => expect(saveMoodboardNodes).toHaveBeenCalled());
+  expect(saveMoodboardNodes).toHaveBeenLastCalledWith(
+    "board-agent",
+    expect.arrayContaining([
+      expect.objectContaining({ id: "initial-node" }),
+      expect.objectContaining({ id: "agent-node" }),
+      expect.objectContaining({ type: "image", data: expect.objectContaining({ assetId: "asset-upload" }) }),
+    ]),
+  );
+});
+
 test("useMoodboardBoard retries a failed unmount flush instead of stranding a timerless save", async () => {
   const initialNode: MoodboardNode = {
     id: "note-retry",

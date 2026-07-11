@@ -35,13 +35,16 @@ export function Shell({
   dark,
   onToggleDark,
   onOpenSettings,
+  routeOverride,
 }: {
   children: ReactNode;
   dark: boolean;
   onToggleDark: () => void;
   onOpenSettings: (section?: string) => void;
+  routeOverride?: Route;
 }) {
-  const route = useRoute();
+  const currentRoute = useRoute();
+  const route = routeOverride ?? currentRoute;
   const inProject = route.name === "project" || route.name === "moodboard";
   const mobile = useMediaQuery("(max-width: 639px)");
   const sidebarPercent = readPanelPercent(SHELL_SIDEBAR_WIDTH_KEY, 18, 12, 28);

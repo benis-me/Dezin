@@ -247,9 +247,10 @@ test("HomeScreen project cards are keyboard reachable and activate on Enter", ()
   renderWithApi(<HomeScreen projects={[project("p-keyboard", "Keyboard project")]} onOpenProject={onOpenProject} />, {
     listSkills: async () => SKILLS,
   });
-  const card = screen.getByRole("button", { name: "Open Keyboard project" });
+  const card = screen.getByRole("link", { name: "Open Keyboard project" });
   expect(card).toHaveAttribute("tabindex", "0");
   expect(card.className).toContain("focus-visible:ring");
+  expect(card).not.toContainElement(screen.getByRole("button", { name: "Rename Keyboard project" }));
   card.focus();
   fireEvent.keyDown(card, { key: "Enter" });
   expect(onOpenProject).toHaveBeenCalledWith("p-keyboard");
@@ -538,9 +539,10 @@ test("MoodboardsScreen board cards are keyboard reachable and activate on Space"
   renderWithApi(<MoodboardsScreen onOpenBoard={onOpenBoard} />, {
     listMoodboards: async () => [moodboard("b-keyboard", "Keyboard board")],
   });
-  const card = await screen.findByRole("button", { name: "Open Keyboard board" });
+  const card = await screen.findByRole("link", { name: "Open Keyboard board" });
   expect(card).toHaveAttribute("tabindex", "0");
   expect(card.className).toContain("focus-visible:ring");
+  expect(card).not.toContainElement(screen.getByRole("button", { name: "Rename Keyboard board" }));
   card.focus();
   fireEvent.keyDown(card, { key: " " });
   expect(onOpenBoard).toHaveBeenCalledWith("b-keyboard");

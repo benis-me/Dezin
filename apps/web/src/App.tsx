@@ -3,7 +3,7 @@ import { Shell } from "./components/Shell.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { Button, Dialog, Loading } from "./components/ui/index.ts";
 import { useToast } from "./components/Toast.tsx";
-import { useRoute, navigate, routeToPath, type Route } from "./router.tsx";
+import { useRoute, navigate, replace, routeToPath, type Route } from "./router.tsx";
 import { useApi } from "./lib/api-context.tsx";
 import { setPendingBrief } from "./lib/pending-brief.ts";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
@@ -131,15 +131,27 @@ export default function App() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
+  const backgroundRouteRef = useRef<Route | null>(route.name === "settings" ? null : route);
+  if (route.name !== "settings") backgroundRouteRef.current = route;
+  const backgroundRoute = route.name === "settings" ? backgroundRouteRef.current : route;
   const settingsReturnPathRef = useRef(route.name === "settings" ? "/" : routeToPath(route));
+  const settingsOpenedInAppRef = useRef(false);
   const openSettings = useCallback((section?: string) => {
-    if (route.name !== "settings") settingsReturnPathRef.current = routeToPath(route);
+    if (route.name !== "settings") {
+      settingsReturnPathRef.current = routeToPath(route);
+      settingsOpenedInAppRef.current = true;
+    }
     setSettingsSection(section);
     navigate("/settings");
   }, [route]);
   const closeSettings = useCallback(() => {
     setSettingsSection(undefined);
-    navigate(settingsReturnPathRef.current || "/");
+    if (settingsOpenedInAppRef.current) {
+      settingsOpenedInAppRef.current = false;
+      window.history.back();
+      return;
+    }
+    replace(settingsReturnPathRef.current || "/");
   }, []);
   const onToggleDark = () =>
     setDark((d) => {
@@ -169,6 +181,10 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [closeSettings, openSettings, route.name]);
 
+  useEffect(() => {
+    if (route.name !== "settings") settingsOpenedInAppRef.current = false;
+  }, [route.name]);
+
   if (!onboarded) {
     return (
       <RouteErrorBoundary>
@@ -189,21 +205,25 @@ export default function App() {
   }
 
   return (
-    <Shell dark={dark} onToggleDark={onToggleDark} onOpenSettings={openSettings}>
-      <RouteErrorBoundary key={routeToPath(route)}>
+    <Shell dark={dark} onToggleDark={onToggleDark} onOpenSettings={openSettings} routeOverride={backgroundRoute ?? undefined}>
+      <RouteErrorBoundary key={backgroundRoute ? routeToPath(backgroundRoute) : "direct-settings"}>
         <Suspense fallback={<RouteLoading label="Loading screen..." />}>
-          <Screen route={route} onOpenSettings={openSettings} />
-          <CommandPalette
-            open={paletteOpen}
-            onClose={() => setPaletteOpen(false)}
-            dark={dark}
-            onToggleTheme={onToggleDark}
-            onOpenSettings={() => openSettings()}
-          />
-          <Dialog open={route.name === "settings"} onClose={closeSettings} label="Settings" className="sm:max-w-5xl" showClose>
-            {route.name === "settings" ? <SettingsScreen dark={dark} onToggleDark={onToggleDark} initialSection={settingsSection} /> : null}
-          </Dialog>
+          {backgroundRoute ? <Screen route={backgroundRoute} onOpenSettings={openSettings} /> : null}
         </Suspense>
+        <CommandPalette
+          open={paletteOpen}
+          onClose={() => setPaletteOpen(false)}
+          dark={dark}
+          onToggleTheme={onToggleDark}
+          onOpenSettings={() => openSettings()}
+        />
+        <Dialog open={route.name === "settings"} onClose={closeSettings} label="Settings" className="sm:max-w-5xl" showClose>
+          {route.name === "settings" ? (
+            <Suspense fallback={<RouteLoading label="Loading Settings..." />}>
+              <SettingsScreen dark={dark} onToggleDark={onToggleDark} initialSection={settingsSection} />
+            </Suspense>
+          ) : null}
+        </Dialog>
       </RouteErrorBoundary>
     </Shell>
   );

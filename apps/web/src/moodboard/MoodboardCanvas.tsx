@@ -286,24 +286,25 @@ export function MoodboardCanvas(props: MoodboardCanvasProps) {
   }, [canvas.runtimeReady, canvas.selectedNodes, onSendToAgent, presentationMode, quickEditOpen, referencePickActive, sendNodesToAgent]);
 
   const handleExternalDragEnter = (event: ReactDragEvent<HTMLDivElement>): void => {
-    if (!capabilities.upload || !hasDraggedFiles(event)) return;
+    if (!hasDraggedFiles(event)) return;
     event.preventDefault();
   };
 
   const handleExternalDragOver = (event: ReactDragEvent<HTMLDivElement>): void => {
-    if (!capabilities.upload || !hasDraggedFiles(event)) return;
+    if (!hasDraggedFiles(event)) return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
+    event.dataTransfer.dropEffect = capabilities.upload ? "copy" : "none";
   };
 
   const handleExternalDragLeave = (event: ReactDragEvent<HTMLDivElement>): void => {
-    if (!capabilities.upload || !hasDraggedFiles(event)) return;
+    if (!hasDraggedFiles(event)) return;
     event.preventDefault();
   };
 
   const handleExternalDrop = (event: ReactDragEvent<HTMLDivElement>): void => {
-    if (!capabilities.upload || !hasDraggedFiles(event)) return;
+    if (!hasDraggedFiles(event)) return;
     event.preventDefault();
+    if (!capabilities.upload) return;
     const dataTransfer = event.dataTransfer;
     const containerRect = canvas.hostRef.current?.getBoundingClientRect();
     const point = containerRect

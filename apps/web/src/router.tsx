@@ -72,6 +72,12 @@ export function navigate(path: string): void {
   window.dispatchEvent(new Event(NAV_EVENT));
 }
 
+export function replace(path: string): void {
+  if (path === window.location.pathname) return;
+  window.history.replaceState({}, "", path);
+  window.dispatchEvent(new Event(NAV_EVENT));
+}
+
 // useSyncExternalStore needs a stable snapshot: cache the Route while the path is unchanged.
 let cachedPath: string | null = null;
 let cachedRoute: Route = { name: "home" };

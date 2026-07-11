@@ -393,7 +393,8 @@ export function useMoodboardBoard(boardId: string) {
           y: node.y,
         });
         if (!isCurrentBoard(targetBoardId)) return;
-        setNodes(result.nodes);
+        const reconciledInputs = saveCoordinator.reconcileServerNodes(targetBoardId, result.nodes);
+        setNodes(materializeInputs(targetBoardId, result.nodes, reconciledInputs));
         setAssets((current) => mergeAssets(current, [result.asset]));
         if (agentConversationId && agentConversationId === conversationId && result.messages.length) {
           setMessages((current) => appendUniqueMessages(current, result.messages));
@@ -408,7 +409,7 @@ export function useMoodboardBoard(boardId: string) {
         if (isCurrentBoard(targetBoardId)) setImageBusy(false);
       }
     },
-    [api, boardId, conversationId, imageModel, isCurrentBoard, toast],
+    [api, boardId, conversationId, imageModel, isCurrentBoard, saveCoordinator, toast],
   );
 
   const setCoverImage = useCallback(
@@ -450,7 +451,10 @@ export function useMoodboardBoard(boardId: string) {
           conversationId: activeConversationId || undefined,
         });
         if (!isCurrentBoard(targetBoardId)) return;
-        if (result.nodes) setNodes(result.nodes);
+        if (result.nodes) {
+          const reconciledInputs = saveCoordinator.reconcileServerNodes(targetBoardId, result.nodes);
+          setNodes(materializeInputs(targetBoardId, result.nodes, reconciledInputs));
+        }
         setMessages((cur) => {
           const withoutOptimistic = cur.filter((message) => message.id !== optimistic.id);
           const serverReturnedUser = result.messages.some((message) => message.role === "user" && message.content === content);
@@ -466,7 +470,7 @@ export function useMoodboardBoard(boardId: string) {
         if (isCurrentBoard(targetBoardId)) setAgentBusy(false);
       }
     },
-    [api, boardId, conversationId, flushPendingNodes, isCurrentBoard, runAgent, runModel, toast],
+    [api, boardId, conversationId, flushPendingNodes, isCurrentBoard, runAgent, runModel, saveCoordinator, toast],
   );
 
   const switchConversation = useCallback(

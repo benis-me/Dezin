@@ -222,7 +222,7 @@ test("MoodboardCanvas review capabilities keep navigation but invoke no authorin
   fireEvent.keyDown(window, { key: "Delete" });
   fireEvent.keyDown(window, { key: "d", metaKey: true });
   const root = container.querySelector("[data-moodboard-canvas-root]")!;
-  fireEvent.drop(root, {
+  const dropAllowed = fireEvent.drop(root, {
     dataTransfer: { types: ["Files"], items: [], files: [new File(["x"], "reference.png", { type: "image/png" })] },
   });
 
@@ -232,6 +232,7 @@ test("MoodboardCanvas review capabilities keep navigation but invoke no authorin
   expect(onAddSection).not.toHaveBeenCalled();
   expect(onAddImageGenerator).not.toHaveBeenCalled();
   expect(onUploadFiles).not.toHaveBeenCalled();
+  expect(dropAllowed).toBe(false);
   expect(onGenerateImage).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Add note" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Image generator" })).toBeNull();

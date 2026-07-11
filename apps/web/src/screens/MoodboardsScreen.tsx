@@ -487,28 +487,31 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
               {visible.map((board) => (
                 <StaggerItem as="li" key={board.id}>
                   <Card
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Open ${board.name}`}
-                    className="group cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                    onClick={() => onOpenBoard(board.id)}
-                    onKeyDown={(event) => {
-                      if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
-                      event.preventDefault();
-                      onOpenBoard(board.id);
-                    }}
+                    className="group relative gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
                   >
-                    <BoardThumb coverUrl={board.coverUrl} />
-                    <div className="p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium text-foreground">{board.name}</p>
-                          <p className="mt-0.5 truncate text-xs text-muted-foreground">Updated {formatUpdatedAt(board.updatedAt)}</p>
-                        </div>
-                        <div className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100" onClick={(e) => e.stopPropagation()}>
-                          {actions(board)}
-                        </div>
+                    <a
+                      href={`/moodboards/${encodeURIComponent(board.id)}`}
+                      tabIndex={0}
+                      aria-label={`Open ${board.name}`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        onOpenBoard(board.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        onOpenBoard(board.id);
+                      }}
+                      className="block rounded-[inherit] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+                    >
+                      <BoardThumb coverUrl={board.coverUrl} />
+                      <div className="min-w-0 p-3 pr-20">
+                        <p className="truncate text-sm font-medium text-foreground">{board.name}</p>
+                        <p className="mt-0.5 truncate text-xs text-muted-foreground">Updated {formatUpdatedAt(board.updatedAt)}</p>
                       </div>
+                    </a>
+                    <div className="absolute bottom-2 right-2 z-10 flex shrink-0 gap-0.5 rounded-md bg-card/90 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                      {actions(board)}
                     </div>
                   </Card>
                 </StaggerItem>
@@ -518,26 +521,31 @@ export function MoodboardsScreen({ onOpenBoard }: { onOpenBoard: (id: string) =>
             <Stagger as="ul" className="mt-5 overflow-hidden rounded-xl border border-border">
               {visible.map((board) => (
                 <StaggerItem as="li" key={board.id} className="border-b border-border last:border-0">
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Open ${board.name}`}
-                    onClick={() => onOpenBoard(board.id)}
-                    onKeyDown={(event) => {
-                      if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
-                      event.preventDefault();
-                      onOpenBoard(board.id);
-                    }}
-                    className="group flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-2/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
-                  >
-                    <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
-                      {board.coverUrl ? <img src={board.coverUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : <div className="dz-canvas h-full w-full" />}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium text-foreground">{board.name}</p>
-                      <p className="truncate text-xs text-muted-foreground">Moodboard</p>
-                    </div>
-                    <div className="relative flex min-w-[7rem] shrink-0 justify-end" onClick={(e) => e.stopPropagation()}>
+                  <div className="group flex items-center hover:bg-surface-2/50">
+                    <a
+                      href={`/moodboards/${encodeURIComponent(board.id)}`}
+                      tabIndex={0}
+                      aria-label={`Open ${board.name}`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        onOpenBoard(board.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        onOpenBoard(board.id);
+                      }}
+                      className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+                    >
+                      <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
+                        {board.coverUrl ? <img src={board.coverUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : <div className="dz-canvas h-full w-full" />}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-foreground">{board.name}</p>
+                        <p className="truncate text-xs text-muted-foreground">Moodboard</p>
+                      </div>
+                    </a>
+                    <div className="relative mr-3 flex min-w-[7rem] shrink-0 justify-end">
                       <span className="text-xs text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                         {formatUpdatedAt(board.updatedAt)}
                       </span>

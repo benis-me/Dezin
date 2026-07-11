@@ -1095,39 +1095,39 @@ export function HomeScreen({
             {visible.map((p) => (
               <StaggerItem as="li" key={p.id}>
                 <Card
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`Open ${p.name}`}
-                  className="group cursor-pointer gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                  onClick={() => onOpenProject?.(p.id)}
-                  onKeyDown={(event) => {
-                    if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
-                    event.preventDefault();
-                    onOpenProject?.(p.id);
-                  }}
+                  className="group relative gap-0 overflow-hidden p-0 transition-all duration-150 ease-[var(--ease-out)] hover:-translate-y-0.5 hover:border-border-strong hover:shadow-pop"
                 >
-                  <ProjectThumb coverUrl={p.coverUrl} runStatus={p.runStatus} />
-                  <div className="p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
-                        <p className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-muted-foreground">
-                          <span className="truncate">{dsName(p.designSystemId) || modeLabel(p.mode)}</span>
-                          {skillName(p.skillId) ? (
-                            <>
-                              <span className="text-border-strong">·</span>
-                              <span className="truncate">{skillName(p.skillId)}</span>
-                            </>
-                          ) : null}
-                        </p>
-                      </div>
-                      <div
-                        className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {projectActions(p)}
-                      </div>
+                  <a
+                    href={`/projects/${encodeURIComponent(p.id)}`}
+                    tabIndex={0}
+                    aria-label={`Open ${p.name}`}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      onOpenProject?.(p.id);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      onOpenProject?.(p.id);
+                    }}
+                    className="block rounded-[inherit] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+                  >
+                    <ProjectThumb coverUrl={p.coverUrl} runStatus={p.runStatus} />
+                    <div className="min-w-0 p-3 pr-20">
+                      <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
+                      <p className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-muted-foreground">
+                        <span className="truncate">{dsName(p.designSystemId) || modeLabel(p.mode)}</span>
+                        {skillName(p.skillId) ? (
+                          <>
+                            <span className="text-border-strong">·</span>
+                            <span className="truncate">{skillName(p.skillId)}</span>
+                          </>
+                        ) : null}
+                      </p>
                     </div>
+                  </a>
+                  <div className="absolute bottom-2 right-2 z-10 flex shrink-0 gap-0.5 rounded-md bg-card/90 opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                    {projectActions(p)}
                   </div>
                 </Card>
               </StaggerItem>
@@ -1138,43 +1138,48 @@ export function HomeScreen({
             <Stagger as="ul" className="mt-5 overflow-hidden rounded-xl border border-border">
               {visible.map((p) => (
                 <StaggerItem as="li" key={p.id} className="border-b border-border last:border-0">
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Open ${p.name}`}
-                    onClick={() => onOpenProject?.(p.id)}
-                    onKeyDown={(event) => {
-                      if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
-                      event.preventDefault();
-                      onOpenProject?.(p.id);
-                    }}
-                    className="group flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-2/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
-                  >
-                    <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
-                      {p.coverUrl ? (
-                        <img src={p.coverUrl} alt="" draggable={false} className="h-full w-full object-cover" />
-                      ) : (
-                        <div className="dz-canvas grid h-full w-full place-items-center">
-                          <ImageIcon size={13} strokeWidth={1.5} className="text-muted-foreground/60" />
-                        </div>
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
-                        <ActiveRunBadge status={p.runStatus} />
+                  <div className="group flex items-center hover:bg-surface-2/50">
+                    <a
+                      href={`/projects/${encodeURIComponent(p.id)}`}
+                      tabIndex={0}
+                      aria-label={`Open ${p.name}`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        onOpenProject?.(p.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        onOpenProject?.(p.id);
+                      }}
+                      className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+                    >
+                      <div className="h-9 w-12 shrink-0 overflow-hidden rounded-md border border-border bg-surface-2">
+                        {p.coverUrl ? (
+                          <img src={p.coverUrl} alt="" draggable={false} className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="dz-canvas grid h-full w-full place-items-center">
+                            <ImageIcon size={13} strokeWidth={1.5} className="text-muted-foreground/60" />
+                          </div>
+                        )}
                       </div>
-                      <p className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
-                        <span className="truncate">{dsName(p.designSystemId) || modeLabel(p.mode)}</span>
-                        {skillName(p.skillId) ? (
-                          <>
-                            <span className="text-border-strong">·</span>
-                            <span className="truncate">{skillName(p.skillId)}</span>
-                          </>
-                        ) : null}
-                      </p>
-                    </div>
-                    <div className="relative flex min-w-[7rem] shrink-0 justify-end" onClick={(e) => e.stopPropagation()}>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <p className="truncate text-sm font-medium text-foreground">{p.name}</p>
+                          <ActiveRunBadge status={p.runStatus} />
+                        </div>
+                        <p className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
+                          <span className="truncate">{dsName(p.designSystemId) || modeLabel(p.mode)}</span>
+                          {skillName(p.skillId) ? (
+                            <>
+                              <span className="text-border-strong">·</span>
+                              <span className="truncate">{skillName(p.skillId)}</span>
+                            </>
+                          ) : null}
+                        </p>
+                      </div>
+                    </a>
+                    <div className="relative mr-3 flex min-w-[7rem] shrink-0 justify-end">
                       <span className="text-xs text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                         {formatUpdatedAt(p.updatedAt)}
                       </span>

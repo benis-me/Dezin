@@ -7,6 +7,7 @@ interface SaveSubscriber {
 }
 
 interface BoardSaveState {
+  confirmedInputs: SaveMoodboardNodeInput[];
   latestInputs: SaveMoodboardNodeInput[] | null;
   version: number;
   pending: boolean;
@@ -36,6 +37,20 @@ function nodeInputs(nodes: MoodboardNode[]): SaveMoodboardNodeInput[] {
   }));
 }
 
+function sameInput(left: SaveMoodboardNodeInput, right: SaveMoodboardNodeInput): boolean {
+  return (
+    left.id === right.id &&
+    left.type === right.type &&
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height &&
+    (left.rotation ?? 0) === (right.rotation ?? 0) &&
+    (left.zIndex ?? 0) === (right.zIndex ?? 0) &&
+    JSON.stringify(left.data ?? {}) === JSON.stringify(right.data ?? {})
+  );
+}
+
 export class MoodboardSaveCoordinator {
   private readonly states = new Map<string, BoardSaveState>();
 
@@ -45,6 +60,7 @@ export class MoodboardSaveCoordinator {
     let state = this.states.get(boardId);
     if (!state) {
       state = {
+        confirmedInputs: [],
         latestInputs: null,
         version: 0,
         pending: false,
@@ -62,8 +78,41 @@ export class MoodboardSaveCoordinator {
 
   hydrate(boardId: string, serverNodes: MoodboardNode[]): SaveMoodboardNodeInput[] {
     const state = this.state(boardId);
-    if (!state.pending || !state.latestInputs) state.latestInputs = nodeInputs(serverNodes);
+    state.confirmedInputs = nodeInputs(serverNodes);
+    if (!state.pending || !state.latestInputs) state.latestInputs = cloneInputs(state.confirmedInputs);
     return cloneInputs(state.latestInputs);
+  }
+
+  reconcileServerNodes(boardId: string, serverNodes: MoodboardNode[]): SaveMoodboardNodeInput[] {
+    const state = this.state(boardId);
+    const serverInputs = nodeInputs(serverNodes);
+    if (!state.pending || !state.latestInputs) {
+      state.confirmedInputs = cloneInputs(serverInputs);
+      state.latestInputs = cloneInputs(serverInputs);
+      return cloneInputs(serverInputs);
+    }
+
+    const confirmedById = new Map(state.confirmedInputs.flatMap((input) => (input.id ? [[input.id, input] as const] : [])));
+    const localById = new Map(state.latestInputs.flatMap((input) => (input.id ? [[input.id, input] as const] : [])));
+    const locallyDeleted = new Set([...confirmedById.keys()].filter((id) => !localById.has(id)));
+    const locallyChanged = new Map(
+      [...localById].filter(([id, input]) => {
+        const confirmed = confirmedById.get(id);
+        return confirmed ? !sameInput(confirmed, input) : false;
+      }),
+    );
+    const merged = serverInputs.flatMap((input): SaveMoodboardNodeInput[] => {
+      if (input.id && locallyDeleted.has(input.id)) return [];
+      return [input.id ? locallyChanged.get(input.id) ?? input : input];
+    });
+    const mergedIds = new Set(merged.flatMap((input) => (input.id ? [input.id] : [])));
+    for (const input of state.latestInputs) {
+      if (input.id && confirmedById.has(input.id)) continue;
+      if (!input.id || !mergedIds.has(input.id)) merged.push(input);
+    }
+    state.confirmedInputs = cloneInputs(serverInputs);
+    this.queue(boardId, merged, 0);
+    return cloneInputs(merged);
   }
 
   latest(boardId: string, fallback: SaveMoodboardNodeInput[] = []): SaveMoodboardNodeInput[] {
@@ -88,6 +137,7 @@ export class MoodboardSaveCoordinator {
     state.version += 1;
     state.pending = true;
     state.retryCount = 0;
+    if (state.subscribers.size === 0) state.detachedRetryBudget = Math.max(state.detachedRetryBudget, 1);
     if (state.timer !== null) {
       window.clearTimeout(state.timer);
       state.timer = null;
@@ -149,6 +199,7 @@ export class MoodboardSaveCoordinator {
       .saveMoodboardNodes(boardId, inputs)
       .then((saved) => {
         if (state.version === version) {
+          state.confirmedInputs = nodeInputs(saved);
           state.latestInputs = nodeInputs(saved);
           state.pending = false;
           state.retryCount = 0;

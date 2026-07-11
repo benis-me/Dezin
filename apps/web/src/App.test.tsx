@@ -54,7 +54,20 @@ test("the gear navigates to route-driven Settings and close returns to the prior
   expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
   expect(await screen.findByRole("button", { name: "Appearance" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
-  expect(window.location.pathname).toBe("/");
+  await waitFor(() => expect(window.location.pathname).toBe("/"));
+});
+
+test("route-driven Settings keeps the background screen mounted and uses browser back on close", async () => {
+  const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+  renderApp();
+  const prompt = screen.getByLabelText("Describe your design");
+  fireEvent.change(prompt, { target: { value: "Keep this draft while settings are open" } });
+  fireEvent.click(screen.getByLabelText("Settings"));
+  expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Describe your design")).toHaveValue("Keep this draft while settings are open");
+
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(back).toHaveBeenCalledTimes(1);
 });
 
 test("direct /settings renders Settings instead of falling back to Home", async () => {
@@ -63,6 +76,15 @@ test("direct /settings renders Settings instead of falling back to Home", async 
   expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
   expect(await screen.findByRole("button", { name: "Appearance" })).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Start a design" })).toBeNull();
+});
+
+test("closing a direct /settings entry replaces it instead of pushing a history trap", async () => {
+  window.history.pushState({}, "", "/settings");
+  const replaceState = vi.spyOn(window.history, "replaceState");
+  renderApp();
+  fireEvent.click(await screen.findByRole("button", { name: "Close" }));
+  expect(replaceState).toHaveBeenCalledWith({}, "", "/");
+  expect(window.location.pathname).toBe("/");
 });
 
 test("the theme toggle flips the .dark class", () => {
