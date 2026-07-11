@@ -12,6 +12,25 @@ import { createApp } from "../src/index.ts";
 import { findChrome } from "../src/capture-cover.ts";
 import { projectDir } from "../src/serve-static.ts";
 import { closeAllSharinganSessions } from "../src/sharingan-handler.ts";
+import { sharinganRegionsForSubagents } from "../src/sharingan-region-runner.ts";
+
+test("Sharingan region preparation keeps source order while normalizing duplicate ids", () => {
+  const regions = sharinganRegionsForSubagents({
+    regions: [
+      { id: "Hero Banner", label: "Hero", texts: ["One", "One", "Two"] },
+      { id: "Hero Banner", label: "Details", assets: ["/_assets/a.png"] },
+    ],
+  });
+
+  assert.deepEqual(
+    regions.map((region) => ({ id: region.id, label: region.label })),
+    [
+      { id: "hero-banner", label: "Hero" },
+      { id: "hero-banner-2", label: "Details" },
+    ],
+  );
+  assert.deepEqual(regions[0]?.texts, ["One", "Two"]);
+});
 
 function parseSse(text: string): Array<Record<string, unknown>> {
   return text

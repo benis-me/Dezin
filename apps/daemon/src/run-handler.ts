@@ -5,11 +5,9 @@
  * (@dezin/core Store) → write the artifact to disk so /projects/:id/preview/ serves it.
  */
 
-import { appendFile, cp, mkdir, readdir, readFile, rm, writeFile, stat } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, writeFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { composeSystemPrompt, inferDials } from "../../../packages/prompt/src/index.ts";
 import {
@@ -19,7 +17,6 @@ import {
   getProvider,
   providerFamily,
   extractAskUserQuestion,
-  extractFinalSummary,
   isAbortError,
   abortError,
   type GenerateEvent,
@@ -28,7 +25,7 @@ import {
 import { defaultRegistry } from "../../../packages/design/src/index.ts";
 import { loadSkills, findSkill, selectSkill, defaultSkillsDir, type SkillInfo } from "../../../packages/skills/src/index.ts";
 import { loadCraftSections } from "../../../packages/craft/src/index.ts";
-import { lintArtifact, lintScore, renderFindingsForAgent, applyIgnores } from "../../../packages/quality/src/index.ts";
+import { lintArtifact, applyIgnores } from "../../../packages/quality/src/index.ts";
 import { generateImages } from "./image-gen.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
@@ -73,9 +70,48 @@ import { buildSharinganContext, buildSharinganSystemPrompt } from "./sharingan-c
 import { writeProbeCli } from "./sharingan-probe-cli.ts";
 import { sharinganReviewReference } from "./sharingan-capture.ts";
 import { SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
+import {
+  CEILING_MAX_ROUNDS,
+  DEFECT_RECUR_LIMIT,
+  IMPROVE_RECUR_LIMIT,
+  autoImproveMaxRounds,
+  floorScore,
+  freshFindings,
+  markVisualReviewRound,
+  producedDesignReview,
+  prototypeRepairPrompt,
+  recurKey,
+  researchAgentCommand,
+  researchModel,
+  reviewerAgentCommand,
+  reviewerModel,
+  shouldAutoRepair,
+  splitFinalSummary,
+  standardRepairableDefects,
+  standardRepairPolicy,
+  standardRepairPrompt,
+  standardRunPassed,
+  visualQaStartPayload,
+  withResolvedVisualReviewHistory,
+  withVisualScreenshotUrl,
+} from "./run-policy.ts";
+import {
+  appendSharinganRegionIntegrationContext,
+  runSharinganRegionSubagents,
+  sharinganMainIntegrationRetryPrompt,
+  syncSharinganCaptureBundle,
+  type SharinganRegionBuild,
+} from "./sharingan-region-runner.ts";
 import type { AppDeps, DevServerLease } from "./app.ts";
 
-const execFileAsync = promisify(execFile);
+export {
+  freshFindings,
+  recurKey,
+  standardRepairableDefects,
+  standardRepairPolicy,
+  standardRepairPrompt,
+  standardRunPassed,
+};
 
 // Skills are scanned once and cached for the daemon process.
 let cachedSkills: SkillInfo[] | null = null;
@@ -186,106 +222,6 @@ interface RunBody {
 
 type ProcessItem = { type: "text"; text: string } | { type: "tool"; summary: string };
 
-const DEFAULT_AUTO_IMPROVE_MAX_ROUNDS = 8;
-// Normal Standard/Prototype runs only auto-repair real defects/slop. Sharingan overrides this:
-// every source-fidelity finding is required because reconstruction quality is the product.
-const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"]);
-
-/** Max bounded design-improvement (ceiling) rounds once the floor (defects/slop) is clean. */
-const CEILING_MAX_ROUNDS = 3;
-/** How many times one advisory SUGGESTION is re-sent before we give up (the agent isn't taking it). */
-const IMPROVE_RECUR_LIMIT = 1;
-/** How many times one objective DEFECT is retried before we give up — the model keeps failing to
- *  fix it, so spinning on it wastes rounds; stop, and surface it as unresolved instead. */
-const DEFECT_RECUR_LIMIT = 2;
-
-/** Looser cross-round identity for a finding. The critic rephrases its prose every round, so the
- *  message is an unreliable key — the target SELECTOR is the stable anchor for "same issue on the
- *  same element". Falls back to a normalized message only when there's no selector. */
-export function recurKey(f: QualityFinding): string {
-  if (f.selector) return `sel:${f.selector.toLowerCase()}`;
-  return `msg:${f.message.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 40)}`;
-}
-
-/** Verify-applied: return the findings still worth re-sending (fed back fewer than `limit` times)
- *  and record this round's attempt in `history`. A finding the critic keeps re-raising unchanged
- *  is one the agent won't/can't apply — dropping it converges the loop (for suggestions) or gives
- *  up gracefully instead of spinning on a defect the model can't fix. */
-export function freshFindings(findings: QualityFinding[], history: Map<string, number>, limit: number): QualityFinding[] {
-  const fresh = findings.filter((f) => (history.get(recurKey(f)) ?? 0) < limit);
-  for (const f of findings) history.set(recurKey(f), (history.get(recurKey(f)) ?? 0) + 1);
-  return fresh;
-}
-
-/** The lint/FLOOR score — slop + defects only. The ceiling (advisory design improvements + the
- *  "reviewed" marker) is separate and must NOT drag the floor score down. */
-function floorScore(findings: QualityFinding[]): number {
-  return lintScore(findings.filter((f) => !f.id.startsWith("visual-improve") && f.id !== "visual-reviewed"));
-}
-
-const SHARINGAN_LAYOUT_DEFECT_IDS = new Set([
-  "visual-horizontal-overflow",
-  "visual-below-fold-strip",
-  "visual-fixed-offscreen",
-  "visual-text-clipped",
-]);
-
-function isSharinganBlockingFinding(finding: QualityFinding): boolean {
-  return finding.id !== "visual-reviewed";
-}
-
-export function standardRunPassed(findings: QualityFinding[], isSharingan: boolean | undefined): boolean {
-  if (isSharingan) return !findings.some(isSharinganBlockingFinding);
-  if (findings.some((f) => f.severity === "P0")) return false;
-  return true;
-}
-
-export function standardRepairableDefects(findings: QualityFinding[], isSharingan: boolean | undefined): QualityFinding[] {
-  if (isSharingan) return findings.filter(isSharinganBlockingFinding);
-  return findings.filter((f) => {
-    if (!AUTO_REPAIR_SEVERITIES.has(f.severity) || f.id.startsWith("visual-improve") || f.id === "visual-reviewed") return false;
-    return true;
-  });
-}
-
-/** Whether the critic actually ran and judged across the run (produced the visual-reviewed marker
- *  or any real finding) — as opposed to only render/capture failures. Lets us avoid reporting a
- *  clean "reviewed" pass when the ceiling never actually ran (e.g. headless render failed). */
-function producedDesignReview(visualFindings: QualityFinding[]): boolean {
-  return visualFindings.some((f) => {
-    const id = String(f.id);
-    return id === "visual-reviewed" || id.startsWith("visual-ai-review") || id.startsWith("visual-improve");
-  });
-}
-
-function autoImproveMaxRounds(settings: Settings, override?: number): number {
-  const raw = typeof override === "number" ? override : settings.autoImproveMaxRounds;
-  const value = Number.isFinite(raw) ? Math.trunc(raw) : DEFAULT_AUTO_IMPROVE_MAX_ROUNDS;
-  return Math.max(0, Math.min(20, value));
-}
-
-export function standardRepairPolicy(settings: Settings, isSharingan: boolean | undefined, override?: number): { enabled: boolean; maxRounds: number } {
-  const configuredMaxRounds = autoImproveMaxRounds(settings, override);
-  if (isSharingan) return { enabled: true, maxRounds: Math.max(3, configuredMaxRounds) };
-  return { enabled: settings.autoImproveEnabled, maxRounds: configuredMaxRounds };
-}
-
-function reviewerAgentCommand(settings: Settings, fallback: string): string {
-  return settings.visualQaAgentCommand.trim() || fallback || settings.agentCommand || "claude";
-}
-
-function reviewerModel(settings: Settings, fallback?: string): string | undefined {
-  return settings.visualQaModel.trim() || fallback || settings.model || undefined;
-}
-
-function researchAgentCommand(settings: Settings, fallback: string): string {
-  return settings.researchAgentCommand.trim() || fallback || settings.agentCommand || "claude";
-}
-
-function researchModel(settings: Settings, fallback?: string): string | undefined {
-  return settings.researchModel.trim() || fallback || settings.model || undefined;
-}
-
 /**
  * In-memory guard that closes the TOCTOU window between findActiveRun and createRun: the DB row that
  * makes a concurrent request lose the race isn't inserted until createRun, and there are awaits in
@@ -294,508 +230,6 @@ function researchModel(settings: Settings, fallback?: string): string | undefine
  * outermost finally so failures before or after durable row creation cannot strand or overlap a start.
  */
 const startingRuns = new Set<string>();
-
-function shouldAutoRepair(settings: Settings, findings: QualityFinding[], repairRounds: number, maxRounds: number): boolean {
-  if (!settings.autoImproveEnabled || repairRounds >= maxRounds) return false;
-  return findings.some((finding) => AUTO_REPAIR_SEVERITIES.has(finding.severity));
-}
-
-function withVisualScreenshotUrl(findings: QualityFinding[], screenshotUrl: string): QualityFinding[] {
-  return findings.map((finding) =>
-    finding.id.startsWith("visual-") && !finding.screenshotUrl ? { ...finding, screenshotUrl } : finding,
-  );
-}
-
-function markVisualReviewRound(findings: QualityFinding[], round: number): QualityFinding[] {
-  return findings.map((finding) => (finding.id.startsWith("visual-") ? { ...finding, reviewStatus: "active", reviewRound: round } : finding));
-}
-
-function findingKey(finding: QualityFinding): string {
-  return `${finding.id}\n${finding.message}`;
-}
-
-function withResolvedVisualReviewHistory(finalFindings: QualityFinding[], history: QualityFinding[]): QualityFinding[] {
-  if (!history.length) return finalFindings;
-  const active = new Set(finalFindings.map(findingKey));
-  const seen = new Set<string>();
-  const resolved = history.flatMap((finding): QualityFinding[] => {
-    const key = findingKey(finding);
-    if (active.has(key) || seen.has(key)) return [];
-    seen.add(key);
-    return [{ ...finding, reviewStatus: "resolved" }];
-  });
-  return resolved.length ? [...finalFindings, ...resolved] : finalFindings;
-}
-
-function visualQaStartPayload(
-  round: number,
-  settings: Settings,
-  agentCommand: string,
-  model: string | undefined,
-  screenshotUrl: string,
-): Record<string, unknown> {
-  return {
-    type: "visual-qa-start",
-    round,
-    enabled: true,
-    agentCommand: reviewerAgentCommand(settings, agentCommand),
-    model: reviewerModel(settings, model),
-    screenshotUrl,
-  };
-}
-
-function hasSourceFidelityFindings(findings: QualityFinding[]): boolean {
-  return findings.some((finding) => finding.id.startsWith("visual-source-"));
-}
-
-function hasMeasuredLayoutFindings(findings: QualityFinding[]): boolean {
-  return findings.some((finding) => SHARINGAN_LAYOUT_DEFECT_IDS.has(finding.id));
-}
-
-export function standardRepairPrompt(
-  findings: QualityFinding[],
-  round: number,
-  maxRounds: number,
-  score: number,
-  intent?: string,
-  options: { isSharingan?: boolean } = {},
-): string | null {
-  const lintBlock = renderFindingsForAgent(findings, { unranked: options.isSharingan });
-  if (!lintBlock) return null;
-  const sourceFidelityGuard = hasSourceFidelityFindings(findings)
-    ? "Source-fidelity repair mode: visual-source-* findings are source-vs-result measurements. Apply measured local patches to the named element/region only. Do not redesign or re-layout the whole page to chase one delta; preserve the captured source hierarchy, text, assets, and palette."
-    : "";
-  const measuredLayoutGuard = hasMeasuredLayoutFindings(findings)
-    ? "Measured layout repair mode: fix only the named overflow, clipping, or offscreen layout defects. Do not add new content, infer missing sections, or reinterpret the page structure."
-    : "";
-  const taskLine = options.isSharingan
-    ? "You are editing the existing Standard-mode Vite project in this directory. Sharingan reconstruction mode: fix every finding below as a required source-fidelity issue. Complete the full list before stopping."
-    : "You are editing the existing Standard-mode Vite project in this directory. Apply the findings below — defects are bugs to fix; improvements are concrete design upgrades to make.";
-  return [
-    `Automatic quality repair round ${round}/${maxRounds}.`,
-    taskLine,
-    intent ? `Stay true to the original request and the chosen direction — do not drift:\n${intent}` : "Preserve the user's concept and the current visual direction.",
-    "Do NOT undo or oscillate on earlier fixes; if a finding is ambiguous, make the choice a senior designer would and keep it. Do not ask a follow-up question. Edit the actual project files, then stop.",
-    sourceFidelityGuard,
-    measuredLayoutGuard,
-    `Current quality score: ${score}/100.`,
-    lintBlock,
-  ].filter(Boolean).join("\n\n");
-}
-
-function prototypeRepairPrompt(findings: QualityFinding[], round: number, maxRounds: number, score: number, intent?: string): string | null {
-  const lintBlock = renderFindingsForAgent(findings);
-  if (!lintBlock) return null;
-  return [
-    `Automatic quality repair round ${round}/${maxRounds}.`,
-    "You are repairing the current single-file Dezin prototype. Apply the findings below — defects are bugs to fix; improvements are concrete design upgrades. Return a complete corrected HTML artifact.",
-    intent ? `Stay true to the original request and the chosen direction — do not drift:\n${intent}` : "Preserve the user's concept and visual direction.",
-    "Do NOT undo or oscillate on earlier fixes; make a senior designer's choice on ambiguous findings and keep it. Do not ask a follow-up question. Rewrite the artifact, then stop.",
-    `Current quality score: ${score}/100.`,
-    lintBlock,
-  ].join("\n\n");
-}
-
-function splitFinalSummary(text: string): ReturnType<typeof extractFinalSummary> {
-  return extractFinalSummary(text);
-}
-
-interface SharinganRegionBox {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-interface SharinganSourceRegion {
-  id?: unknown;
-  label?: unknown;
-  bbox?: unknown;
-  counts?: unknown;
-  texts?: unknown;
-  assets?: unknown;
-  textRuns?: unknown;
-  media?: unknown;
-  paintBoxes?: unknown;
-  vectors?: unknown;
-  styleTokens?: unknown;
-  refs?: unknown;
-}
-
-interface SharinganRegionPlan {
-  version?: unknown;
-  sourceUrl?: unknown;
-  viewport?: unknown;
-  document?: unknown;
-  regions?: unknown;
-}
-
-interface SharinganPreparedRegion {
-  id: string;
-  label: string;
-  bbox: SharinganRegionBox | null;
-  counts: unknown;
-  texts: string[];
-  assets: string[];
-  textRuns: unknown[];
-  media: unknown[];
-  paintBoxes: unknown[];
-  vectors: unknown[];
-  styleTokens: unknown;
-  refs: unknown[];
-}
-
-interface SharinganRegionBuild {
-  id: string;
-  label: string;
-  file: string;
-  summary: string;
-  attempts: number;
-}
-
-interface SharinganRegionFailure {
-  id: string;
-  label: string;
-  attempts: number;
-  error: string;
-}
-
-const SHARINGAN_REGION_MAX_ATTEMPTS = 2;
-
-async function readSharinganRegionPlan(root: string): Promise<SharinganRegionPlan | null> {
-  const text = await readFile(join(root, ".sharingan", "region-plan.json"), "utf8").catch(() => "");
-  if (!text.trim()) return null;
-  try {
-    return JSON.parse(text) as SharinganRegionPlan;
-  } catch {
-    return null;
-  }
-}
-
-async function ensureSharinganRegionPlan(root: string): Promise<SharinganRegionPlan | null> {
-  const existing = await readSharinganRegionPlan(root);
-  if (Array.isArray(existing?.regions) && existing.regions.length) return existing;
-
-  const probe = join(root, ".sharingan", "probe.mjs");
-  if (!existsSync(probe)) return existing;
-  await execFileAsync(process.execPath, [probe, "source-scaffold"], {
-    cwd: root,
-    timeout: 30_000,
-    maxBuffer: 10_000_000,
-  }).catch(() => null);
-  return readSharinganRegionPlan(root);
-}
-
-function safeSharinganRegionId(value: unknown, fallback: string): string {
-  const normalized = String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60);
-  return normalized || fallback;
-}
-
-function sharinganRegionBox(value: unknown): SharinganRegionBox | null {
-  if (!value || typeof value !== "object") return null;
-  const box = value as Record<string, unknown>;
-  const x = Number(box.x);
-  const y = Number(box.y);
-  const w = Number(box.w);
-  const h = Number(box.h);
-  if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return null;
-  return { x, y, w, h };
-}
-
-function sharinganStringList(value: unknown, max: number): string[] {
-  if (!Array.isArray(value)) return [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const item of value) {
-    const text = String(item || "").trim();
-    if (!text || seen.has(text)) continue;
-    seen.add(text);
-    out.push(text);
-    if (out.length >= max) break;
-  }
-  return out;
-}
-
-function sharinganUnknownList(value: unknown, max: number): unknown[] {
-  return Array.isArray(value) ? value.slice(0, max) : [];
-}
-
-function sharinganRegionsForSubagents(plan: SharinganRegionPlan, maxRegions = 8): SharinganPreparedRegion[] {
-  const rawRegions = Array.isArray(plan.regions) ? (plan.regions as SharinganSourceRegion[]) : [];
-  const used = new Set<string>();
-  const out: SharinganPreparedRegion[] = [];
-  for (const raw of rawRegions) {
-    if (!raw || typeof raw !== "object") continue;
-    const fallback = `region-${out.length + 1}`;
-    let id = safeSharinganRegionId(raw.id, fallback);
-    if (used.has(id)) id = `${id}-${out.length + 1}`;
-    used.add(id);
-    const texts = sharinganStringList(raw.texts, 18);
-    const assets = sharinganStringList(raw.assets, 14);
-    const refs = Array.isArray(raw.refs) ? raw.refs.slice(0, 24) : [];
-    out.push({
-      id,
-      label: String(raw.label || texts[0] || fallback).trim().slice(0, 80),
-      bbox: sharinganRegionBox(raw.bbox),
-      counts: raw.counts ?? {},
-      texts,
-      assets,
-      textRuns: sharinganUnknownList(raw.textRuns, 24),
-      media: sharinganUnknownList(raw.media, 18),
-      paintBoxes: sharinganUnknownList(raw.paintBoxes, 18),
-      vectors: sharinganUnknownList(raw.vectors, 18),
-      styleTokens: raw.styleTokens ?? {},
-      refs,
-    });
-    if (out.length >= maxRegions) break;
-  }
-  return out;
-}
-
-function sharinganRegionSubagentPrompt(region: SharinganPreparedRegion, index: number, total: number): string {
-  return [
-    "# SHARINGAN REGION SUBAGENT",
-    `Region ID: ${region.id}`,
-    `Region label: ${region.label}`,
-    `Region order: ${index + 1}/${total}`,
-    "",
-    "You are an isolated implementation subagent for one measured source region. Build only this region as normal Standard React source.",
-    `Write \`src/sharingan-regions/${region.id}.jsx\` for this region. You may also create a sibling CSS file if needed.`,
-    "Do not edit `src/App.jsx`, `src/index.css`, package files, git metadata, `.sharingan/source-scaffold/*`, or any other region file.",
-    "Use only the measured text, assets, bbox, counts, and refs below. Do not invent extra copy, UI states, icons, controls, metrics, sections, animations, placeholders, or decorative effects.",
-    "If an asset listed below is required, reference the captured local `/_assets/...` path directly. If a visible asset is missing, render a same-size neutral box rather than using external stock or generated media.",
-    "Use `textRuns` for exact visible copy, font size, weight, color, line height, line count, and alignment. Do not substitute copy or let text resize its container.",
-    "Use `media` and `paintBoxes` as measured slots. Preserve their relative position within this region's bbox and keep icon/text alignment from the captured boxes.",
-    "Keep layout dimensions explicit and stable so the main integrator can compose regions without text overflow, accidental wrapping, clipping, or alignment drift.",
-    "Do not ask a question. Edit the region file, then stop.",
-    "",
-    "Region spec JSON:",
-    JSON.stringify(region, null, 2),
-  ].join("\n");
-}
-
-function sharinganRegionSystemPrompt(): string {
-  return [
-    "# Sharingan Region Subagent",
-    "",
-    "You are running in Sharingan mode as an isolated child implementation task.",
-    "This is not a design-generation task and not a normal Standard project task.",
-    "The Region spec JSON in the user message is the authoritative source for this turn.",
-    "",
-    "Rules:",
-    "- Produce one source-derived region component only.",
-    "- Do not run source-summary, source-scaffold, outline, render-map, grep, find, tree, or raw `.sharingan` inspection.",
-    "- Do not edit the main app or other regions.",
-    "- Do not invent content, structure, images, icons, interactions, animations, or completion states.",
-    "- Match the provided measured textRuns, media boxes, paintBoxes, bbox, styleTokens, and captured `/_assets/` references.",
-  ].join("\n");
-}
-
-function appendSharinganRegionIntegrationContext(message: string, builds: SharinganRegionBuild[]): string {
-  if (!builds.length) return message;
-  const lines = builds.map((build, index) => {
-    const retry = build.attempts > 1 ? ` after ${build.attempts} attempts` : "";
-    const summary = build.summary ? ` — ${build.summary.replace(/\s+/g, " ").slice(0, 180)}` : "";
-    return `${index + 1}. ${build.file} (${build.label})${retry}${summary}`;
-  });
-  return [
-    message,
-    "",
-    "## SHARINGAN MAIN INTEGRATION",
-    "Region subagents have already converted measured source regions into isolated files. Integrate these files into the real Standard app instead of replaying `.sharingan/source-scaffold` or replacing them with a guessed generic layout.",
-    "Use the files below as source-derived building blocks. Compose them in captured page order, wire shared CSS in `src/index.css` if needed, and run the project build. Do not add missing sections, fake interactions, synthetic icons, external images, or invented text.",
-    "",
-    ...lines,
-  ].join("\n");
-}
-
-function sharinganMainIntegrationRetryPrompt(builds: SharinganRegionBuild[]): string {
-  const lines = builds.map((build, index) => `${index + 1}. ${build.file} (${build.label})`);
-  return [
-    "# SHARINGAN MAIN INTEGRATION RETRY",
-    "",
-    "The previous main integration turn made no project-file changes after the source-region subagents completed. That is incomplete.",
-    "Do not analyze the capture again. Do not say it is done. Edit the real Standard app now.",
-    "",
-    "Required edits:",
-    "- Compose the generated region components into `src/App.jsx` in source page order.",
-    "- Add or adjust shared CSS in `src/index.css` only as needed for stable layout.",
-    "- Keep source fidelity: no invented sections, fake content, extra controls, stock images, or decorative redesign.",
-    "- Run the project build after editing.",
-    "",
-    "Validated source-region files:",
-    ...lines,
-  ].join("\n");
-}
-
-async function copyIfExists(from: string, to: string): Promise<void> {
-  if (!existsSync(from)) return;
-  await cp(from, to, { recursive: true, force: true });
-}
-
-async function syncSharinganCaptureBundle(sourceRoot: string, targetRoot: string): Promise<void> {
-  if (sourceRoot === targetRoot) return;
-  // A selected variant's checked-in capture is authoritative. The project-root bundle is only a
-  // legacy seed for a transaction that has no bundle of its own; never overlay divergent variants.
-  if (existsSync(join(targetRoot, ".sharingan"))) return;
-  await copyIfExists(join(sourceRoot, ".sharingan"), join(targetRoot, ".sharingan"));
-  await rm(join(targetRoot, ".sharingan", "region-work"), { recursive: true, force: true });
-  await rm(join(targetRoot, ".sharingan", "region-build.json"), { force: true });
-  await mkdir(join(targetRoot, "public"), { recursive: true });
-  await copyIfExists(join(sourceRoot, "public", "_assets"), join(targetRoot, "public", "_assets"));
-}
-
-async function prepareSharinganRegionWorkspace(root: string, runId: string, region: SharinganPreparedRegion, attempt: number): Promise<string> {
-  const workspace = join(root, ".sharingan", "region-work", runId, `${region.id}-attempt-${attempt}`);
-  await rm(workspace, { recursive: true, force: true });
-  await mkdir(workspace, { recursive: true });
-  await Promise.all([
-    copyIfExists(join(root, "package.json"), join(workspace, "package.json")),
-    copyIfExists(join(root, "index.html"), join(workspace, "index.html")),
-    copyIfExists(join(root, "vite.config.js"), join(workspace, "vite.config.js")),
-    copyIfExists(join(root, "tsconfig.json"), join(workspace, "tsconfig.json")),
-    copyIfExists(join(root, "tsconfig.app.json"), join(workspace, "tsconfig.app.json")),
-    copyIfExists(join(root, "src"), join(workspace, "src")),
-    copyIfExists(join(root, "public"), join(workspace, "public")),
-  ]);
-  await rm(join(workspace, "src", "sharingan-regions"), { recursive: true, force: true });
-  await mkdir(join(workspace, "src", "sharingan-regions"), { recursive: true });
-  return workspace;
-}
-
-async function validateAndCopySharinganRegionOutput(root: string, workspace: string, region: SharinganPreparedRegion): Promise<string> {
-  const outputRel = join("src", "sharingan-regions", `${region.id}.jsx`);
-  const outputPath = join(workspace, outputRel);
-  const text = await readFile(outputPath, "utf8").catch(() => "");
-  if (!text.trim()) throw new Error(`missing ${outputRel}`);
-  if (!/\bexport\s+default\b/.test(text)) throw new Error(`${outputRel} must export a default React component`);
-
-  const targetDir = join(root, "src", "sharingan-regions");
-  await mkdir(targetDir, { recursive: true });
-  await writeFile(join(root, outputRel), text, "utf8");
-  for (const cssName of [`${region.id}.css`, `${region.id}.module.css`]) {
-    const cssPath = join(workspace, "src", "sharingan-regions", cssName);
-    if (existsSync(cssPath)) await cp(cssPath, join(targetDir, cssName), { force: true });
-  }
-  return `src/sharingan-regions/${region.id}.jsx`;
-}
-
-async function runSharinganRegionWithRetry(
-  params: {
-    runner: AgentRunner;
-    projectDir: string;
-    runId: string;
-    signal: AbortSignal;
-    env: NodeJS.ProcessEnv;
-    onActivity: (activity: unknown, region: SharinganPreparedRegion) => void;
-    emit: (event: unknown) => void;
-  },
-  region: SharinganPreparedRegion,
-  index: number,
-  total: number,
-): Promise<{ ok: true; build: SharinganRegionBuild } | { ok: false; failure: SharinganRegionFailure }> {
-  let lastError = "";
-  for (let attempt = 1; attempt <= SHARINGAN_REGION_MAX_ATTEMPTS; attempt += 1) {
-    let workspace = "";
-    try {
-      workspace = await prepareSharinganRegionWorkspace(params.projectDir, params.runId, region, attempt);
-      params.emit({ type: "sharingan-region-start", runId: params.runId, regionId: region.id, label: region.label, index, total, attempt, maxAttempts: SHARINGAN_REGION_MAX_ATTEMPTS });
-      const result = await runTurnWithRetry(params.runner, {
-        systemPrompt: sharinganRegionSystemPrompt(),
-        message: sharinganRegionSubagentPrompt(region, index, total),
-        projectDir: workspace,
-        history: [],
-        isRepair: attempt > 1,
-        onActivity: (activity) => params.onActivity(activity, region),
-        signal: params.signal,
-        env: params.env,
-      });
-      const file = await validateAndCopySharinganRegionOutput(params.projectDir, workspace, region);
-      const asked = extractAskUserQuestion(result.text);
-      const final = splitFinalSummary(asked.text);
-      const summary = (final.summaryText || asked.text || result.text || "").trim();
-      const build = { id: region.id, label: region.label, file, summary, attempts: attempt };
-      params.emit({ type: "sharingan-region-done", runId: params.runId, regionId: region.id, label: region.label, index, total, attempt, file, summary });
-      return { ok: true, build };
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      lastError = err instanceof Error ? err.message : "region subagent failed";
-      if (attempt < SHARINGAN_REGION_MAX_ATTEMPTS) {
-        params.emit({ type: "sharingan-region-retry", runId: params.runId, regionId: region.id, label: region.label, index, total, attempt, nextAttempt: attempt + 1, error: lastError });
-      } else {
-        params.emit({ type: "sharingan-region-failed", runId: params.runId, regionId: region.id, label: region.label, index, total, attempts: attempt, error: lastError });
-      }
-    } finally {
-      if (workspace) await rm(workspace, { recursive: true, force: true }).catch(() => {});
-    }
-  }
-  return { ok: false, failure: { id: region.id, label: region.label, attempts: SHARINGAN_REGION_MAX_ATTEMPTS, error: lastError || "region subagent failed" } };
-}
-
-function sharinganRegionFailureMessage(failures: SharinganRegionFailure[]): string {
-  return failures.map((failure) => `${failure.id} (${failure.label}) after ${failure.attempts} attempts: ${failure.error}`).join("; ");
-}
-
-async function writeSharinganRegionBuildManifest(root: string, builds: SharinganRegionBuild[], failures: SharinganRegionFailure[]): Promise<void> {
-  await mkdir(join(root, ".sharingan"), { recursive: true });
-  await writeFile(
-    join(root, ".sharingan", "region-build.json"),
-    JSON.stringify({ version: 1, builtAt: new Date().toISOString(), regions: builds, failures }, null, 2),
-    "utf8",
-  );
-}
-
-async function cleanupSharinganRegionWorkspaces(root: string, runId: string): Promise<void> {
-  await rm(join(root, ".sharingan", "region-work", runId), { recursive: true, force: true }).catch(() => {});
-}
-
-async function runSharinganRegionSubagents(params: {
-  runner: AgentRunner;
-  projectDir: string;
-  runId: string;
-  signal: AbortSignal;
-  env: NodeJS.ProcessEnv;
-  onActivity: (activity: unknown, region: SharinganPreparedRegion) => void;
-  emit: (event: unknown) => void;
-}): Promise<SharinganRegionBuild[]> {
-  const plan = await ensureSharinganRegionPlan(params.projectDir);
-  const regions = plan ? sharinganRegionsForSubagents(plan) : [];
-  if (!regions.length) return [];
-
-  await mkdir(join(params.projectDir, "src", "sharingan-regions"), { recursive: true });
-  try {
-    const settled = await Promise.allSettled(regions.map((region, index) => runSharinganRegionWithRetry(params, region, index, regions.length)));
-    const builds: SharinganRegionBuild[] = [];
-    const failures: SharinganRegionFailure[] = [];
-    for (const [index, result] of settled.entries()) {
-      if (result.status === "fulfilled") {
-        if (result.value.ok) builds.push(result.value.build);
-        else failures.push(result.value.failure);
-        continue;
-      }
-      if (isAbortError(result.reason)) throw result.reason;
-      failures.push({
-        id: regions[index]?.id ?? `region-${index + 1}`,
-        label: regions[index]?.label ?? `Region ${index + 1}`,
-        attempts: SHARINGAN_REGION_MAX_ATTEMPTS,
-        error: result.reason instanceof Error ? result.reason.message : "region subagent failed",
-      });
-    }
-    const sourceOrder = new Map(regions.map((region, index) => [region.id, index]));
-    builds.sort((a, b) => (sourceOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (sourceOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER));
-    failures.sort((a, b) => (sourceOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (sourceOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER));
-    await writeSharinganRegionBuildManifest(params.projectDir, builds, failures);
-    if (failures.length) throw new Error(`Sharingan region subagents failed: ${sharinganRegionFailureMessage(failures)}`);
-    return builds;
-  } finally {
-    await cleanupSharinganRegionWorkspaces(params.projectDir, params.runId);
-  }
-}
 
 function resultMessage(text: string, meta: Record<string, unknown>): string {
   return JSON.stringify({ result: { text, meta } });

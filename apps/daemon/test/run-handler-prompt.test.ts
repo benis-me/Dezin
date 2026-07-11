@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { standardRepairableDefects, standardRepairPolicy, standardRepairPrompt, standardRunPassed } from "../src/run-handler.ts";
+import { standardRepairableDefects, standardRepairPolicy, standardRepairPrompt, standardRunPassed } from "../src/run-policy.ts";
 import type { QualityFinding } from "../../../packages/core/src/index.ts";
 import type { Settings } from "../../../packages/core/src/index.ts";
 
