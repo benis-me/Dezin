@@ -590,12 +590,17 @@ test("project agent composer cards serialize context at send time", async () => 
 
   expect(await screen.findByText(".hero-title")).toBeInTheDocument();
   const rail = screen.getByRole("list", { name: "Attached context" });
+  const message = screen.getByRole("textbox", { name: "Message" });
+  const actions = screen.getByTestId("project-composer-actions");
+  expect(rail).toHaveAttribute("data-context-layout", "top-rail");
+  expect(rail.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(rail.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   fireEvent.dragOver(rail, {
     dataTransfer: { types: ["application/x-dezin-agent-context"], files: [] },
   });
   expect(screen.queryByText("Add files to this request")).toBeNull();
 
-  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Use the selected references" } });
+  fireEvent.change(message, { target: { value: "Use the selected references" } });
   fireEvent.click(screen.getByLabelText("Send"));
 
   await waitFor(() => expect(streamRun).toHaveBeenCalled());
@@ -638,17 +643,61 @@ test("project composer presents uploaded image metadata and serializes only its 
     "src",
     expect.stringMatching(/^data:image\/png;base64,/),
   );
-  expect(within(rail).getByText("Image")).toBeInTheDocument();
-  expect(within(rail).getByText("· 5 bytes")).toBeInTheDocument();
+  const cloudCard = within(rail).getByTestId("agent-context-card-file:.refs/cloud.png");
+  expect(within(rail).queryByText("Image")).toBeNull();
+  expect(within(rail).queryByText("· 5 bytes")).toBeNull();
+  expect(cloudCard).toHaveAttribute("title", "cloud.png: Image · .refs/cloud.png · 5 bytes");
   expect(refUrl).toHaveBeenCalledWith("p1", ".refs/cloud.png");
+  const message = screen.getByRole("textbox", { name: "Message" });
   const actions = screen.getByTestId("project-composer-actions");
-  expect(actions.compareDocumentPosition(rail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(rail).toHaveAttribute("data-context-layout", "top-rail");
+  expect(rail.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(rail.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
   fireEvent.click(screen.getByLabelText("Send"));
   await waitFor(() => expect(streamRun).toHaveBeenCalled());
   const input = streamRun.mock.calls[0]![0] as { brief: string };
   expect(input.brief).toContain("Reference files (read them from disk): .refs/cloud.png");
   expect(input.brief).not.toContain(displayPreviewUrl);
+});
+
+test("project composer reorders uploaded context through the screen-reader controls", async () => {
+  const fake = makeFakeApi({
+    uploadRef: async (_projectId, name) => ({ name, path: `.refs/${name}` }),
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByLabelText("Message");
+  fireEvent.change(screen.getByLabelText("Attach files"), {
+    target: {
+      files: [
+        new File(["first"], "first.png", { type: "image/png" }),
+        new File(["second"], "second.png", { type: "image/png" }),
+      ],
+    },
+  });
+
+  const rail = await screen.findByRole("list", { name: "Attached context" });
+  await waitFor(() => expect(within(rail).getAllByRole("listitem")).toHaveLength(2));
+  const contextTitlesInDomOrder = () =>
+    within(rail)
+      .getAllByRole("listitem")
+      .map((item) =>
+        within(item).queryByText("first.png")
+          ? "first.png"
+          : within(item).queryByText("second.png")
+            ? "second.png"
+            : null,
+      );
+  expect(contextTitlesInDomOrder()).toEqual(["first.png", "second.png"]);
+
+  fireEvent.click(screen.getByRole("button", { name: "Move second.png before previous context card" }));
+
+  expect(contextTitlesInDomOrder()).toEqual(["second.png", "first.png"]);
 });
 
 test("project composer returns focus to the message after removing an uploaded image", async () => {

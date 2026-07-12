@@ -4603,6 +4603,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 }}
               />
             ) : null}
+            <AgentComposerContextCards
+              className="mb-2"
+              items={contextItems}
+              onChange={setContextItems}
+              onRemove={(id) => {
+                setContextItems((items) => removeContextItem(items, id));
+                window.requestAnimationFrame(() => messageInputRef.current?.focus({ preventScroll: true }));
+              }}
+            />
             <textarea
               ref={messageInputRef}
               aria-label="Message"
@@ -4699,15 +4708,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 </div>
               </TooltipProvider>
             </div>
-            <AgentComposerContextCards
-              className="mt-2.5"
-              items={contextItems}
-              onChange={setContextItems}
-              onRemove={(id) => {
-                setContextItems((items) => removeContextItem(items, id));
-                window.requestAnimationFrame(() => messageInputRef.current?.focus({ preventScroll: true }));
-              }}
-            />
           </div>
           </div>
         </div>

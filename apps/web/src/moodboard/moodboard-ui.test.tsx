@@ -1933,6 +1933,15 @@ test("MoodboardAgentPanel renders canvas insertion as a removable sendable conte
               nodeType: "note",
               body: "Material tone [note, id:note-1] at x:10, y:20, 180x80",
             },
+            {
+              id: "canvas-node:image-2",
+              type: "canvas-node",
+              title: "Texture crop",
+              subtitle: "image",
+              nodeId: "image-2",
+              nodeType: "image",
+              body: "Texture crop [image, id:image-2] at x:220, y:20, 180x80",
+            },
           ],
         }}
         onBack={() => {}}
@@ -1948,11 +1957,32 @@ test("MoodboardAgentPanel renders canvas insertion as a removable sendable conte
   await waitFor(() => expect(message).toHaveFocus());
   expect(message).toHaveValue("");
   const rail = screen.getByRole("list", { name: "Attached context" });
-  expect(within(rail).getByText("Canvas selection")).toBeInTheDocument();
+  const materialCard = within(rail).getByTestId("agent-context-card-canvas-node:note-1");
+  expect(within(rail).queryByText("Canvas selection")).toBeNull();
   expect(within(rail).getByText("Material tone")).toBeInTheDocument();
-  expect(within(rail).getByText("· note")).toBeInTheDocument();
+  expect(within(rail).queryByText("· note")).toBeNull();
+  expect(materialCard).toHaveAttribute("title", "Material tone: Canvas selection · note");
   const actions = screen.getByTestId("moodboard-composer-actions");
-  expect(actions.compareDocumentPosition(rail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(rail).toHaveAttribute("data-context-layout", "top-rail");
+  expect(rail.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(rail.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  const contextTitlesInDomOrder = () =>
+    within(rail)
+      .getAllByRole("listitem")
+      .map((item) =>
+        within(item).queryByText("Material tone")
+          ? "Material tone"
+          : within(item).queryByText("Texture crop")
+            ? "Texture crop"
+            : null,
+      );
+  expect(contextTitlesInDomOrder()).toEqual(["Material tone", "Texture crop"]);
+  fireEvent.click(screen.getByRole("button", { name: "Move Texture crop before previous context card" }));
+  expect(contextTitlesInDomOrder()).toEqual(["Texture crop", "Material tone"]);
+
+  fireEvent.click(within(rail).getByLabelText("Remove Texture crop"));
+  await waitFor(() => expect(within(rail).queryByText("Texture crop")).toBeNull());
 
   fireEvent.dragOver(rail, {
     dataTransfer: { types: ["application/x-dezin-agent-context"], files: [] },

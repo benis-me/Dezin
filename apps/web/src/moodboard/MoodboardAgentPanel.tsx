@@ -360,6 +360,15 @@ export function MoodboardAgentPanel({
               </div>
             ) : (
               <>
+                <AgentComposerContextCards
+                  className="mb-2"
+                  items={contextItems}
+                  onChange={setContextItems}
+                  onRemove={(id) => {
+                    setContextItems((items) => removeContextItem(items, id));
+                    window.requestAnimationFrame(focusComposerEnd);
+                  }}
+                />
                 <textarea
                   ref={textareaRef}
                   aria-label="Message"
@@ -456,15 +465,6 @@ export function MoodboardAgentPanel({
                     </div>
                   </TooltipProvider>
                 </div>
-                <AgentComposerContextCards
-                  className="mt-2.5"
-                  items={contextItems}
-                  onChange={setContextItems}
-                  onRemove={(id) => {
-                    setContextItems((items) => removeContextItem(items, id));
-                    window.requestAnimationFrame(focusComposerEnd);
-                  }}
-                />
               </>
             )}
           </div>
