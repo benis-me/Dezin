@@ -329,10 +329,10 @@ export function MoodboardAgentPanel({
             }`}
           >
             {dragging ? (
-              <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl bg-card/90 text-sm font-medium text-foreground">
+              <div className="pointer-events-none absolute inset-1 z-10 grid place-items-center rounded-xl border border-dashed border-ring bg-card/90 text-sm font-medium text-foreground">
                 <span className="flex items-center gap-2">
                   <Paperclip size={15} strokeWidth={1.75} />
-                  Drop files to attach
+                  Add images to this moodboard
                 </span>
               </div>
             ) : null}
@@ -360,11 +360,6 @@ export function MoodboardAgentPanel({
               </div>
             ) : (
               <>
-                <AgentComposerContextCards
-                  items={contextItems}
-                  onChange={setContextItems}
-                  onRemove={(id) => setContextItems((items) => removeContextItem(items, id))}
-                />
                 <textarea
                   ref={textareaRef}
                   aria-label="Message"
@@ -380,7 +375,7 @@ export function MoodboardAgentPanel({
                     }
                   }}
                 />
-                <div className="mt-1 flex items-center justify-between gap-2">
+                <div data-testid="moodboard-composer-actions" className="mt-1.5 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-0.5">
                     <AttachMenu
                       onAttachFile={onUploadFiles ? () => fileInputRef.current?.click() : undefined}
@@ -460,6 +455,15 @@ export function MoodboardAgentPanel({
                     </div>
                   </TooltipProvider>
                 </div>
+                <AgentComposerContextCards
+                  className="mt-2.5"
+                  items={contextItems}
+                  onChange={setContextItems}
+                  onRemove={(id) => {
+                    setContextItems((items) => removeContextItem(items, id));
+                    window.requestAnimationFrame(focusComposerEnd);
+                  }}
+                />
               </>
             )}
           </div>

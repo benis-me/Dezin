@@ -1947,14 +1947,53 @@ test("MoodboardAgentPanel renders canvas insertion as a removable sendable conte
   const message = screen.getByLabelText("Message") as HTMLTextAreaElement;
   await waitFor(() => expect(message).toHaveFocus());
   expect(message).toHaveValue("");
-  expect(screen.getByRole("list", { name: "Attached context" })).toBeInTheDocument();
-  expect(screen.getByText("Material tone")).toBeInTheDocument();
-  expect(screen.getByText("· note")).toBeInTheDocument();
+  const rail = screen.getByRole("list", { name: "Attached context" });
+  expect(within(rail).getByText("Canvas selection")).toBeInTheDocument();
+  expect(within(rail).getByText("Material tone")).toBeInTheDocument();
+  expect(within(rail).getByText("· note")).toBeInTheDocument();
+  const actions = screen.getByTestId("moodboard-composer-actions");
+  expect(actions.compareDocumentPosition(rail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-  fireEvent.dragOver(screen.getByRole("list", { name: "Attached context" }), {
+  fireEvent.dragOver(rail, {
     dataTransfer: { types: ["application/x-dezin-agent-context"], files: [] },
   });
-  expect(screen.queryByText("Drop files to attach")).toBeNull();
+  expect(screen.queryByText("Add images to this moodboard")).toBeNull();
+
+  fireEvent.click(within(rail).getByLabelText("Remove Material tone"));
+  await waitFor(() => expect(message).toHaveFocus());
+
+  rerender(
+    <ApiProvider client={makeFakeApi()}>
+      <MoodboardAgentPanel
+        boardName="Material board"
+        messages={[]}
+        busy={false}
+        agents={[]}
+        agent=""
+        model=""
+        composerInsertion={{
+          id: 2,
+          items: [
+            {
+              id: "canvas-node:note-1",
+              type: "canvas-node",
+              title: "Material tone",
+              subtitle: "note",
+              nodeId: "note-1",
+              nodeType: "note",
+              body: "Material tone [note, id:note-1] at x:10, y:20, 180x80",
+            },
+          ],
+        }}
+        onBack={() => {}}
+        onAgentChange={() => {}}
+        onModelChange={() => {}}
+        onRescanAgents={async () => {}}
+        onSend={onSend}
+      />
+    </ApiProvider>,
+  );
+  await waitFor(() => expect(screen.getByRole("list", { name: "Attached context" })).toBeInTheDocument());
 
   fireEvent.keyDown(message, { key: "Enter" });
   await waitFor(() =>
@@ -2089,7 +2128,8 @@ test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
 
   const composer = screen.getByLabelText("Message").closest("div")!;
   fireEvent.dragOver(composer, { dataTransfer: { types: ["Files"], files } });
-  expect(screen.getByText("Drop files to attach")).toBeInTheDocument();
+  const overlay = screen.getByText("Add images to this moodboard").closest("div");
+  expect(overlay).toHaveClass("inset-1", "rounded-xl", "border-dashed", "border-ring");
   fireEvent.drop(composer, { dataTransfer: { types: ["Files"], files } });
 
   expect(onUploadFiles).toHaveBeenCalledWith(files);
