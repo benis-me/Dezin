@@ -54,24 +54,26 @@ test("AgentComposerContextCards renders typed cards, removes, and reorders witho
   render(<Harness />);
 
   const list = screen.getByRole("list", { name: "Attached context" });
-  expect(list).toHaveAttribute("data-context-layout", "rail");
-  expect(list).toHaveAttribute("data-context-density", "panel");
+  expect(list).toHaveAttribute("data-context-layout", "top-rail");
+  expect(list).not.toHaveAttribute("data-context-density");
   expect(screen.getAllByRole("listitem")).toHaveLength(3);
   expect(within(list).getByText("cloud.png")).toBeInTheDocument();
   expect(within(list).getByText("Warm references")).toBeInTheDocument();
   expect(within(list).getByText("Figma import")).toBeInTheDocument();
   const cloudCard = screen.getByTestId("agent-context-card-file:.refs/cloud.png");
   const cloudDragHandle = screen.getByLabelText("Drag cloud.png");
+  expect(cloudCard).toHaveClass("h-9", "min-w-28", "max-w-[184px]", "w-fit");
   expect(cloudCard).toHaveAttribute("data-context-icon", "image");
   expect(cloudCard).not.toHaveClass("touch-none");
   expect(cloudDragHandle).toHaveClass("touch-none");
   await waitFor(() => expect(cloudDragHandle).toHaveAttribute("aria-roledescription", "draggable"));
   expect(cloudCard).not.toHaveAttribute("aria-roledescription", "draggable");
   expect(screen.getByRole("img", { name: "cloud.png" })).toHaveAttribute("src", "data:image/png;base64,Y2xvdWQ=");
-  expect(screen.getByText("Image")).toBeInTheDocument();
-  expect(screen.getByText("Moodboard")).toBeInTheDocument();
-  expect(screen.getByText("Imported context")).toBeInTheDocument();
-  expect(screen.getByLabelText("Remove cloud.png")).toHaveClass("focus-visible:ring-2");
+  expect(screen.getByRole("img", { name: "cloud.png" }).parentElement).toHaveClass("size-6");
+  expect(screen.getByRole("button", { name: "Remove cloud.png" })).toHaveClass("size-5");
+  expect(within(list).queryByText("Image")).toBeNull();
+  expect(cloudCard.getAttribute("title")).toContain("cloud.png: Image · .refs/cloud.png · 2 KB");
+  expect(screen.getByRole("button", { name: "Remove cloud.png" })).toHaveClass("focus-visible:ring-2");
   expect(screen.getByLabelText("Drag Figma import")).not.toHaveAttribute("draggable", "true");
 
   fireEvent.click(screen.getByLabelText("Remove Warm references"));
@@ -83,7 +85,7 @@ test("AgentComposerContextCards renders typed cards, removes, and reorders witho
   expect(onChange).toHaveBeenCalledWith([baseItems[2], baseItems[0], baseItems[1]]);
 });
 
-test("AgentComposerContextCards keeps a single panel card and its remove control enabled", async () => {
+test("AgentComposerContextCards keeps a single compact card and its remove control enabled", async () => {
   render(
     <AgentComposerContextCards
       items={[baseItems[0]!]}
@@ -92,38 +94,27 @@ test("AgentComposerContextCards keeps a single panel card and its remove control
     />,
   );
 
-  const panelCard = screen.getByRole("listitem");
+  const compactCard = screen.getByRole("listitem");
   const removeButton = screen.getByRole("button", { name: "Remove cloud.png" });
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  await waitFor(() => expect(panelCard).not.toHaveAttribute("aria-disabled", "true"));
+  await waitFor(() => expect(compactCard).not.toHaveAttribute("aria-disabled", "true"));
   expect(removeButton.closest('[aria-disabled="true"]')).toBeNull();
-  expect(panelCard).toHaveClass("h-10", "w-52", "basis-52");
-  expect(removeButton).toHaveClass("size-7");
-  expect(removeButton).not.toHaveClass("size-8");
+  expect(compactCard).toHaveClass("h-9", "w-fit", "min-w-28", "max-w-[184px]");
+  expect(removeButton).toHaveClass("size-5");
+  expect(screen.queryByLabelText("Drag cloud.png")).toBeNull();
 });
 
-test("AgentComposerContextCards supports a preview-led hero rail without sorting", async () => {
+test("AgentComposerContextCards keeps compact cards non-sortable when requested", async () => {
   render(
     <AgentComposerContextCards
       items={baseItems}
       onChange={vi.fn()}
       onRemove={vi.fn()}
-      density="hero"
       sortable={false}
     />,
   );
 
-  expect(screen.getByRole("list", { name: "Attached context" })).toHaveAttribute("data-context-density", "hero");
-  expect(screen.queryByLabelText("Agent context cards")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("Drag cloud.png")).not.toBeInTheDocument();
-  const heroCard = screen.getByTestId("agent-context-card-file:.refs/cloud.png");
-  const removeButton = screen.getByRole("button", { name: "Remove cloud.png" });
-  const previewRegion = screen.getByRole("img", { name: "cloud.png" }).parentElement;
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  await waitFor(() => expect(heroCard).not.toHaveAttribute("aria-disabled", "true"));
-  expect(removeButton.closest('[aria-disabled="true"]')).toBeNull();
-  expect(heroCard).toHaveClass("flex-col", "h-28", "w-44", "basis-44", "items-stretch");
-  expect(previewRegion).toHaveClass("h-16", "w-full");
-  expect(removeButton).toHaveClass("absolute", "right-1.5", "top-1.5", "size-8");
-  expect(removeButton).not.toHaveClass("size-7");
+  expect(screen.getByRole("list", { name: "Attached context" })).toHaveAttribute("data-context-layout", "top-rail");
+  expect(screen.queryByLabelText("Drag cloud.png")).toBeNull();
+  expect(screen.getByTestId("agent-context-card-file:.refs/cloud.png")).toHaveClass("h-9", "w-fit");
 });

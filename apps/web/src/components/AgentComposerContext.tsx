@@ -148,14 +148,12 @@ export function AgentComposerContextCards<T extends AgentComposerContextItem>({
   onChange,
   onRemove,
   className,
-  density = "panel",
   sortable = true,
 }: {
   items: T[];
   onChange: (items: T[]) => void;
   onRemove: (id: string) => void;
   className?: string;
-  density?: "hero" | "panel";
   sortable?: boolean;
 }) {
   if (!items.length) return null;
@@ -184,11 +182,10 @@ export function AgentComposerContextCards<T extends AgentComposerContextItem>({
       role="list"
       aria-label="Attached context"
       data-testid="agent-context-rail"
-      data-context-layout="rail"
-      data-context-density={density}
-      className={cn("min-w-0 border-t border-border/70 pt-2.5", className)}
+      data-context-layout="top-rail"
+      className={cn("min-w-0 border-b border-border/70 pb-2", className)}
     >
-      <div className="flex min-w-0 gap-2 overflow-x-auto pb-0.5 pr-1 [scrollbar-width:thin]">
+      <div className="flex min-w-0 gap-1.5 overflow-x-auto pb-0.5 pr-1 [scrollbar-width:thin]">
         <DragDropProvider onDragEnd={handleDragEnd}>
           {items.map((item, index) => (
             <AgentComposerContextCard
@@ -196,7 +193,6 @@ export function AgentComposerContextCards<T extends AgentComposerContextItem>({
               item={item}
               index={index}
               count={items.length}
-              density={density}
               sortable={sortable}
               onMoveBefore={() => moveBefore(item.id)}
               onMoveAfter={() => moveAfter(item.id)}
@@ -213,7 +209,6 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
   item,
   index,
   count,
-  density,
   sortable,
   onMoveBefore,
   onMoveAfter,
@@ -222,7 +217,6 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
   item: T;
   index: number;
   count: number;
-  density: "hero" | "panel";
   sortable: boolean;
   onMoveBefore: () => void;
   onMoveAfter: () => void;
@@ -239,83 +233,68 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
   const iconKind = contextIconKind(item);
   const typeLabel = contextTypeLabel(item, iconKind);
   const meta = contextMeta(item);
-  const visibleMeta = meta === typeLabel ? undefined : meta;
+  const tooltipMeta = Array.from(
+    new Set(
+      [typeLabel, item.type === "file" ? item.path : undefined, meta].filter(
+        (value): value is string => Boolean(value),
+      ),
+    ),
+  ).join(" · ");
   const showGrip = sortable && count > 1;
 
   return (
-    <>
-      {!showGrip ? <span ref={ref} aria-hidden="true" className="hidden" /> : null}
-      <div
-        ref={showGrip ? ref : undefined}
-        role="listitem"
-        data-testid={`agent-context-card-${item.id}`}
-        data-context-icon={iconKind}
-        className={cn(
-          "group flex shrink-0 select-none items-center overflow-hidden rounded-lg border border-border bg-card text-xs text-foreground-2 transition-[opacity,border-color,box-shadow,transform,background-color] duration-150 ease-out motion-reduce:transition-none",
-          density === "hero" ? "relative h-28 w-44 basis-44 flex-col items-stretch" : "h-10 w-52 basis-52 gap-1.5 px-1.5",
-          isDragging && "opacity-55 ring-2 ring-ring/30",
-          isDropTarget && "border-ring ring-2 ring-ring/30",
+    <div
+      ref={showGrip ? ref : undefined}
+      role="listitem"
+      data-testid={`agent-context-card-${item.id}`}
+      data-context-icon={iconKind}
+      title={tooltipMeta ? `${item.title}: ${tooltipMeta}` : item.title}
+      className={cn(
+        "group flex h-9 w-fit min-w-28 max-w-[184px] shrink-0 select-none items-center gap-1.5 overflow-hidden rounded-lg border border-border bg-card px-1.5 text-xs text-foreground-2 transition-[opacity,border-color,background-color] duration-150 ease-out motion-reduce:transition-none",
+        isDragging && "opacity-55 ring-2 ring-ring/30",
+        isDropTarget && "border-ring ring-2 ring-ring/30",
+      )}
+    >
+      <span className="grid size-6 shrink-0 place-items-center overflow-hidden rounded-md border border-border/70 bg-surface-2 text-brand">
+        {item.type === "file" && item.previewUrl ? (
+          <img className="size-full object-cover" src={item.previewUrl} alt={item.title} />
+        ) : (
+          contextIcon(iconKind, 12)
         )}
-        title={meta ? `${item.title}: ${meta}` : item.title}
-      >
-        <span
-          className={cn(
-            "grid shrink-0 place-items-center overflow-hidden rounded-md border border-border/70 bg-surface-2 text-brand",
-            density === "hero" ? "h-16 w-full rounded-none border-x-0 border-t-0" : "size-7",
-          )}
-          aria-hidden={item.type === "file" && item.previewUrl ? undefined : true}
-        >
-          {item.type === "file" && item.previewUrl ? (
-            <img className="size-full object-cover" src={item.previewUrl} alt={item.title} />
-          ) : (
-            contextIcon(iconKind, density === "hero" ? 20 : 12)
-          )}
-        </span>
-        <span className={cn("min-w-0 flex-1", density === "hero" && "flex w-full flex-col justify-center px-2 py-1.5")}>
-          <span className="block truncate font-medium text-foreground">{item.title}</span>
-          <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[10px] leading-none text-muted-foreground">
-            <span className="shrink-0">{typeLabel}</span>
-            {visibleMeta ? (
-              <span className="min-w-0 truncate">· {visibleMeta}</span>
-            ) : null}
-          </span>
-        </span>
-        {showGrip ? (
-          <button
-            ref={handleRef}
-            type="button"
-            aria-label={`Drag ${item.title}`}
-            className="grid h-6 w-4 shrink-0 touch-none cursor-grab place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          >
-            <GripVertical size={12} strokeWidth={1.75} />
-          </button>
-        ) : null}
-        {showGrip ? (
-          <>
-            <button type="button" disabled={index === 0} className="sr-only" onClick={onMoveBefore}>
-              Move {item.title} before previous context card
-            </button>
-            <button type="button" disabled={index >= count - 1} className="sr-only" onClick={onMoveAfter}>
-              Move {item.title} after next context card
-            </button>
-          </>
-        ) : null}
+      </span>
+      <span className="min-w-0 flex-1 truncate font-medium text-foreground">{item.title}</span>
+      {showGrip ? (
         <button
+          ref={handleRef}
           type="button"
-          aria-label={`Remove ${item.title}`}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onRemove();
-          }}
-          className={cn(
-            "grid shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-            density === "hero" ? "absolute right-1.5 top-1.5 size-8 border border-border bg-card text-foreground" : "size-7",
-          )}
+          aria-label={`Drag ${item.title}`}
+          className="grid h-6 w-3 shrink-0 touch-none cursor-grab place-items-center rounded text-muted-foreground/60 opacity-0 transition-[opacity,color,background-color] group-hover:opacity-100 focus:opacity-100 active:cursor-grabbing"
         >
-          <X size={11} strokeWidth={2} />
+          <GripVertical size={11} strokeWidth={1.75} />
         </button>
-      </div>
-    </>
+      ) : null}
+      {showGrip ? (
+        <>
+          <button type="button" disabled={index === 0} className="sr-only" onClick={onMoveBefore}>
+            Move {item.title} before previous context card
+          </button>
+          <button type="button" disabled={index >= count - 1} className="sr-only" onClick={onMoveAfter}>
+            Move {item.title} after next context card
+          </button>
+        </>
+      ) : null}
+      <button
+        type="button"
+        aria-label={`Remove ${item.title}`}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          onRemove();
+        }}
+        className="grid size-5 shrink-0 place-items-center rounded text-muted-foreground/70 transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+      >
+        <X size={10} strokeWidth={2} />
+      </button>
+    </div>
   );
 }
