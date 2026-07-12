@@ -180,11 +180,11 @@ The local QA projects intentionally have no generated preview run. For the final
 
 ## Automated verification
 
-- `pnpm --filter @dezin/web test`: 46 files passed, 504 tests passed
+- pre-lifecycle `pnpm --filter @dezin/web test`: 46 files passed, 504 tests passed
 - `pnpm typecheck`: `TYPECHECK: PASS`
 - `pnpm build:check`: `BUNDLE: PASS`, total JS gzip 771.0 KiB / 806.6 KiB
 - `git diff --check`: clean
-- `pnpm run ci`: exit 0; coverage suites passed; `PROCESS LEAKS: PASS`; bundle passed; production audit reported no known vulnerabilities
+- final `pnpm run ci` at `b3c898f5`: exit 0; web coverage ran 46 files / 506 tests; all coverage suites passed; `PROCESS LEAKS: PASS`; bundle passed; production audit reported no known vulnerabilities
 - post-review lifecycle regression: focused Project/Moodboard screen files passed, 120 tests passed
 - post-review orientation-cache regression: focused Project/Moodboard screen files passed, 120 tests passed
 
