@@ -156,7 +156,7 @@ test("workspace preserves its loaded preview and desktop layout across a narrow 
       </ApiProvider>,
     );
 
-    const message = await screen.findByLabelText("Message");
+    const message = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
     const preview = await screen.findByTitle("Artifact preview");
     const separator = screen.getByRole("separator", { name: "Resize panels" });
     expect(separator).toHaveAttribute("aria-orientation", "vertical");

@@ -244,7 +244,7 @@ test("MoodboardScreen preserves its loaded composer and desktop layout across a 
 
     fireEvent.click(screen.getByRole("button", { name: "Send mock node to agent" }));
     await screen.findByRole("list", { name: "Attached context" });
-    const message = screen.getByLabelText("Message");
+    const message = screen.getByLabelText("Message") as HTMLTextAreaElement;
     const separator = screen.getByRole("separator", { name: "Resize moodboard agent panel" });
     expect(separator).toHaveAttribute("aria-orientation", "vertical");
     const desktopAgentSize = Number(separator.getAttribute("aria-valuenow"));
