@@ -76,7 +76,7 @@ fireEvent.doubleClick(screen.getByText("Start a design"));
 Run:
 
 ```bash
-pnpm --filter @dezin/web test -- src/screens/HomeScreen.sharingan.test.tsx src/screens/screens.test.tsx
+pnpm --filter @dezin/web test src/screens/HomeScreen.sharingan.test.tsx src/screens/screens.test.tsx
 ```
 
 Expected: FAIL because the toolbar still contains the button named `Sharingan clone from URL`.
@@ -102,7 +102,7 @@ Do not change `toggleSharingan`, the heading `onDoubleClick`, or Sharingan state
 Run:
 
 ```bash
-pnpm --filter @dezin/web test -- src/screens/HomeScreen.sharingan.test.tsx src/screens/home-sharingan.test.tsx src/screens/HomeScreen.sharingan-gate.test.tsx src/screens/screens.test.tsx
+pnpm --filter @dezin/web test src/screens/HomeScreen.sharingan.test.tsx src/screens/home-sharingan.test.tsx src/screens/HomeScreen.sharingan-gate.test.tsx src/screens/screens.test.tsx
 ```
 
 Expected: PASS, including double-click enter, double-click exit, browser denial, authorization gate, and no visible button.
@@ -192,7 +192,7 @@ Remove the old visible `Image`, `Moodboard`, and `Imported context` expectations
 Run:
 
 ```bash
-pnpm --filter @dezin/web test -- src/components/AgentComposerContext.test.tsx
+pnpm --filter @dezin/web test src/components/AgentComposerContext.test.tsx
 ```
 
 Expected: FAIL because the component still reports `rail`/`hero`/`panel`, renders two text rows, and uses 40px or 112px cards.
@@ -305,7 +305,7 @@ Keep `contextTypeLabel` and `contextMeta` for the tooltip/title even though neit
 Run:
 
 ```bash
-pnpm --filter @dezin/web test -- src/components/AgentComposerContext.test.tsx
+pnpm --filter @dezin/web test src/components/AgentComposerContext.test.tsx
 ```
 
 Expected: PASS with compact dimensions, hidden metadata, thumbnails/icons, removal, drag sorting, and non-sortable mode.
@@ -367,7 +367,7 @@ expect(within(rail).queryByText("Folder")).toBeNull();
 Run:
 
 ```bash
-pnpm --filter @dezin/web test -- src/screens/screens.test.tsx
+pnpm --filter @dezin/web test src/screens/screens.test.tsx
 ```
 
 Expected: FAIL because the Home rail still follows the textarea and still passes `density="hero"`.
@@ -395,7 +395,7 @@ Delete the old post-textarea rail. Do not change pending image/reference seriali
 Run:
 
 ```bash
-pnpm --filter @dezin/web test -- src/screens/screens.test.tsx src/screens/HomeScreen.sharingan.test.tsx
+pnpm --filter @dezin/web test src/screens/screens.test.tsx src/screens/HomeScreen.sharingan.test.tsx
 ```
 
 Expected: PASS with context-only Design enabled, top ordering, compact cards, removal, and hidden Sharingan behavior.
@@ -476,7 +476,7 @@ Add a second canvas item (`canvas-node:image-2`, title `Texture crop`, node type
 Run:
 
 ```bash
-pnpm --filter @dezin/web test -- src/screens/workspace.test.tsx src/moodboard/moodboard-ui.test.tsx
+pnpm --filter @dezin/web test src/screens/workspace.test.tsx src/moodboard/moodboard-ui.test.tsx
 ```
 
 Expected: FAIL because both rails still follow their action rows.
@@ -522,7 +522,7 @@ The existing `<textarea ref={textareaRef} aria-label="Message">` must immediatel
 Run:
 
 ```bash
-pnpm --filter @dezin/web test -- src/components/AgentComposerContext.test.tsx src/screens/workspace.test.tsx src/moodboard/moodboard-ui.test.tsx
+pnpm --filter @dezin/web test src/components/AgentComposerContext.test.tsx src/screens/workspace.test.tsx src/moodboard/moodboard-ui.test.tsx
 ```
 
 Expected: PASS with rail ordering, sorting, context-only send, removal focus/caret, drag/drop isolation, and serialization unchanged.
