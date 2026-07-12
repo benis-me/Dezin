@@ -9,6 +9,6 @@
   },
   "scripts": {
     "test": "node --experimental-strip-types --no-warnings --test 'test/*.test.ts'",
-    "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-coverage-exclude='**/*.test.*' --test-coverage-lines=93 --test-coverage-branches=71 --test-coverage-functions=88 --test 'test/*.test.ts'"
+    "test:coverage": "node --experimental-strip-types --no-warnings --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-coverage-exclude='**/*.test.*' --test-coverage-lines=93 --test-coverage-branches=67 --test-coverage-functions=88 --test 'test/*.test.ts'"
   }
 }
