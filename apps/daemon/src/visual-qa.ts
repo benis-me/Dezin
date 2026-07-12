@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { unzlibSync } from "fflate";
@@ -10,6 +10,7 @@ import { detectComputedFindings, markCorroboration, type ComputedContext, type C
 import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
 import { findChrome } from "./capture-cover.ts";
 import { buildAgentEnv } from "./agent-env.ts";
+import { captureFullPageScreenshot } from "./full-page-capture.ts";
 
 export interface VisualQaInput {
   htmlPath: string;
@@ -235,16 +236,17 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
         'Return JSON only, exactly: {"findings":[{"kind":"defect","selector":"exact selector or omit","message":"...","fix":"..."}]}.',
       ]
     : [
-        "Report findings in two clearly separated kinds — do not conflate them:",
+        "Report findings in three clearly separated kinds — do not conflate them:",
         '- kind "defect" (severity P0/P1): an OBJECTIVE breakage you can PROVE from the pixels themselves. It must be one of: (1) overlap that makes something illegible or unusable; (2) text or a control sliced through its glyphs or bounds by a container edge; (3) an element the layout clearly means to show in the initial view (the primary action, the latest message, the composer) pushed off-screen or unreachable; (4) content wider than the viewport (horizontal overflow); (5) text unreadable from contrast or size; (6) a runtime/console error, broken image, or leaked placeholder (undefined, lorem, "no artifact"); (7) a copy bug in the text itself (duplicated, concatenated, or template tokens). Before filing a defect, apply this test: could a correct, deliberate implementation produce this exact screenshot? If yes, it is NOT a defect — at most an advisory improvement. Describe the visible breakage, never a cause you are inferring — do NOT file scroll position, mount behaviour, or "should be pinned to bottom": you cannot verify runtime scroll state from one static frame. Do NOT file taste, palette, or aesthetic preferences as defects — colour and style are the user\'s call, not a bug.',
-        '- kind "improvement" (severity P2): concrete, actionable design SUGGESTIONS — hierarchy, spacing/rhythm, composition, type scale, restraint, and how well the result matches the brief and chosen direction (e.g. if the direction implies near-monochrome and the build leans on a saturated accent, suggest the change). Positioning and scroll polish, affordance discoverability, and "feels unpolished or crowded" all belong here too — as suggestions, not defects. These are ADVISORY — the user decides whether to take them. Be specific, never vague taste talk.',
+        '- kind "contract" (severity P1): a directly visible contradiction of an EXPLICIT user brief requirement, must-have, must-avoid, or the CHOSEN DIRECTION. Quote the concrete contract in the message and name the visible contradiction. This is not a place for inferred intent or subjective taste: if the requirement was not explicit, classify it as an advisory improvement instead.',
+        '- kind "improvement" (severity P2): concrete, actionable design SUGGESTIONS — hierarchy, spacing/rhythm, composition, type scale, restraint, positioning and scroll polish, affordance discoverability, and overall craft. These are ADVISORY and may include subjective taste; the user decides whether to take them. Be specific, never vague taste talk.',
         "For EVERY finding, set \"selector\" to the ONE element it is about, copied EXACTLY from the ON-PAGE ELEMENTS list above — this lets the fix target that element precisely. Omit selector only for a genuinely page-wide finding. Make each fix a concrete, verifiable change to that element.",
         "Report as many of each as genuinely matter — several, or none. Do NOT invent findings to hit a count; if nothing is objectively broken and nothing would clearly improve it, return an empty findings list.",
-        'Return JSON only, exactly: {"findings":[{"kind":"defect|improvement","severity":"P0|P1|P2","selector":"exact selector or omit","message":"...","fix":"..."}]}.',
+        'Return JSON only, exactly: {"findings":[{"kind":"defect|contract|improvement","severity":"P0|P1|P2","selector":"exact selector or omit","message":"...","fix":"..."}]}.',
       ];
   return [
     "You are a senior product designer reviewing the latest rendered result for the current Dezin conversation.",
-    `Rendered screenshot (the page as the browser first painted it): ${screenshotRel}`,
+    `Rendered screenshot (the captured visual surface used for review): ${screenshotRel}`,
     `Final artifact: ${artifactRel}`,
     ref ? `Source screenshot (the ORIGINAL site you are RECONSTRUCTING — the build should match its layout, hierarchy, image slots, type scale, and palette): ${sourceRel}` : "",
     sourceRenderMapRel ? `Source render map (browser-measured bounding boxes and computed styles for source-vs-result fidelity): ${sourceRenderMapRel}` : "",
@@ -257,7 +259,7 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
     elementList
       ? `ON-PAGE ELEMENTS you can target — use these EXACT selector strings (tag "text" WxH at x,y):\n${elementList}`
       : "",
-    "Use the screenshot as primary evidence. It is the page as first painted: for a plain document that is the whole page top-to-bottom, but for an app-shell layout (a fixed header/footer with a scrolling region between them) it is the initial viewport, and that scrolling region may hold more content above or below what you can see. Content that is merely scrolled out of view — e.g. an earlier message clipped at the top edge of a thread that is pinned to its latest turn — is NORMAL, not missing or broken. You may read the artifact and assets for context, but do not create, edit, or write files.",
+    "Use the screenshot as primary evidence. The capture attempts the full visual surface: a normal document is captured top-to-bottom, and a dominant vertical scroller in an app shell is temporarily expanded before capture, so the result is not limited to the initial viewport. Smaller nested panes, carousels, and secondary scrollers may remain at their current scroll position; do not infer hidden interaction state beyond the pixels. You may read the artifact and assets for context, but do not create, edit, or write files.",
     ...findingInstructions,
   ]
     .filter(Boolean)
@@ -545,7 +547,28 @@ function readSourceRenderMap(path?: string): SourceRenderMap | null {
   if (!path || !existsSync(path)) return null;
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as SourceRenderMap;
-    return parsed && typeof parsed === "object" ? parsed : null;
+    const positive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (!positive(parsed.viewport?.width) || !positive(parsed.viewport?.height)) return null;
+    if (!positive(parsed.document?.width) || !positive(parsed.document?.height)) return null;
+    if (!Array.isArray(parsed.elements) || parsed.elements.length === 0 || parsed.elements.length > 700) return null;
+    const usable = parsed.elements.every((element) =>
+      !!element
+      && typeof element === "object"
+      && typeof element.selector === "string"
+      && element.selector.length > 0
+      && typeof element.tag === "string"
+      && element.tag.length > 0
+      && typeof element.box?.x === "number"
+      && Number.isFinite(element.box.x)
+      && typeof element.box?.y === "number"
+      && Number.isFinite(element.box.y)
+      && positive(element.box?.w)
+      && positive(element.box?.h)
+      && !!element.style
+      && typeof element.style === "object"
+      && !Array.isArray(element.style));
+    return usable ? parsed : null;
   } catch {
     return null;
   }
@@ -632,15 +655,38 @@ function decodePng(path: string): DecodedPng | null {
 
 export function sourceScreenshotDiffFindings(sourcePath?: string, generatedPath?: string): QualityFinding[] {
   if (!sourcePath || !generatedPath) return [];
-  let source: DecodedPng | null;
-  let generated: DecodedPng | null;
+  let source: DecodedPng | null = null;
   try {
     source = decodePng(sourcePath);
+  } catch {
+    // Handled below as missing/corrupt source evidence.
+  }
+  if (!source) {
+    return [
+      {
+        severity: "P0",
+        id: "visual-source-evidence-invalid",
+        message: "Sharingan source screenshot evidence is missing, unreadable, or not a supported PNG, so source fidelity cannot be verified.",
+        fix: "Re-capture the Sharingan source page before accepting or repairing the generated artifact.",
+      },
+    ];
+  }
+  let generated: DecodedPng | null = null;
+  try {
     generated = decodePng(generatedPath);
   } catch {
-    return [];
+    // Handled below as missing/corrupt generated evidence.
   }
-  if (!source || !generated) return [];
+  if (!generated) {
+    return [
+      {
+        severity: "P0",
+        id: "visual-generated-evidence-invalid",
+        message: "The generated QA screenshot is missing, unreadable, or not a supported PNG, so source fidelity cannot be verified.",
+        fix: "Re-render and capture the generated artifact before accepting or repairing it.",
+      },
+    ];
+  }
   const width = Math.min(source.width, generated.width);
   const height = Math.min(source.height, generated.height);
   if (width < 1 || height < 1) return [];
@@ -648,8 +694,8 @@ export function sourceScreenshotDiffFindings(sourcePath?: string, generatedPath?
   const step = Math.max(1, Math.ceil(Math.sqrt((width * height) / targetSamples)));
   let samples = 0;
   let mean = 0;
-  let luma32 = 0;
-  let luma64 = 0;
+  let color32 = 0;
+  let color64 = 0;
   for (let y = 0; y < height; y += step) {
     for (let x = 0; x < width; x += step) {
       const si = (y * source.width + x) * 4;
@@ -660,26 +706,30 @@ export function sourceScreenshotDiffFindings(sourcePath?: string, generatedPath?
       const gr = generated.rgba[gi] ?? 0;
       const gg = generated.rgba[gi + 1] ?? 0;
       const gb = generated.rgba[gi + 2] ?? 0;
-      const diff = Math.abs(0.2126 * (sr - gr) + 0.7152 * (sg - gg) + 0.0722 * (sb - gb));
+      // Per-channel RMS catches hue changes whose weighted luminance is equal (for example red
+      // replaced by a darker green), which a signed luma delta cancels out almost completely.
+      const diff = Math.sqrt(((sr - gr) ** 2 + (sg - gg) ** 2 + (sb - gb) ** 2) / 3);
       mean += diff;
-      if (diff >= 32) luma32 += 1;
-      if (diff >= 64) luma64 += 1;
+      if (diff >= 32) color32 += 1;
+      if (diff >= 64) color64 += 1;
       samples += 1;
     }
   }
   if (!samples) return [];
   const meanDiff = mean / samples;
-  const pct32 = luma32 / samples;
-  const pct64 = luma64 / samples;
+  const pct32 = color32 / samples;
+  const pct64 = color64 / samples;
   const sourceArea = source.width * source.height;
   const generatedArea = generated.width * generated.height;
   const sizeDrift = sourceArea > 0 ? Math.abs(sourceArea - generatedArea) / sourceArea : 0;
-  if (pct32 < 0.08 && pct64 < 0.03 && meanDiff < 18 && sizeDrift < 0.04) return [];
+  const widthDrift = Math.abs(source.width - generated.width) / source.width;
+  const heightDrift = Math.abs(source.height - generated.height) / source.height;
+  if (pct32 < 0.08 && pct64 < 0.03 && meanDiff < 18 && sizeDrift < 0.04 && widthDrift < 0.04 && heightDrift < 0.04) return [];
   return [
     {
       severity: "P1",
       id: "visual-source-screenshot-diff",
-      message: `Sharingan screenshot regression is too high: ${Math.round(pct32 * 1000) / 10}% of sampled pixels differ by >=32 luma, ${Math.round(pct64 * 1000) / 10}% differ by >=64, mean luma delta ${Math.round(meanDiff * 10) / 10}.`,
+      message: `Sharingan screenshot regression is too high: ${Math.round(pct32 * 1000) / 10}% of sampled pixels differ by >=32 color distance, ${Math.round(pct64 * 1000) / 10}% differ by >=64, mean color delta ${Math.round(meanDiff * 10) / 10}; width drift ${Math.round(widthDrift * 1000) / 10}%, height drift ${Math.round(heightDrift * 1000) / 10}%.`,
       fix: "Run a source-vs-result visual regression repair pass against the source screenshot: correct global layout first (viewport, top offsets, major section sizes), then patch the largest local regions without adding new content.",
     },
   ];
@@ -738,38 +788,92 @@ export function parseVisualReview(text: string, options: { isSharingan?: boolean
   const obj = parsed as { findings?: unknown };
   const findingsRaw = obj?.findings;
   if (!Array.isArray(findingsRaw)) return [];
+  type RawFinding = {
+    severity?: unknown;
+    message?: unknown;
+    fix?: unknown;
+    snippet?: unknown;
+    kind?: unknown;
+    selector?: unknown;
+  };
+  const parsedFindings: Array<{
+    kind: "defect" | "contract" | "improvement";
+    severity: QualityFinding["severity"];
+    message: string;
+    fix: string;
+    selector?: string;
+    snippet?: string;
+  }> = [];
+  for (const item of findingsRaw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const finding = item as RawFinding;
+    if (finding.kind !== "defect" && finding.kind !== "contract" && finding.kind !== "improvement") return [];
+    if (typeof finding.message !== "string" || !finding.message.trim()) return [];
+    if (typeof finding.fix !== "string" || !finding.fix.trim()) return [];
+    if (finding.selector !== undefined && typeof finding.selector !== "string") return [];
+    if (finding.snippet !== undefined && typeof finding.snippet !== "string") return [];
+
+    let severity: QualityFinding["severity"];
+    if (options.isSharingan) {
+      if (finding.severity !== undefined && !isSeverity(finding.severity)) return [];
+      severity = finding.severity === "P0" ? "P0" : "P1";
+    } else {
+      if (!isSeverity(finding.severity)) return [];
+      if (finding.kind === "defect" && finding.severity === "P2") return [];
+      if (finding.kind === "contract" && finding.severity !== "P1") return [];
+      if (finding.kind === "improvement" && finding.severity !== "P2") return [];
+      severity = finding.severity;
+    }
+    parsedFindings.push({
+      kind: finding.kind,
+      severity,
+      message: finding.message.trim(),
+      fix: finding.fix.trim(),
+      selector: typeof finding.selector === "string" && finding.selector.trim() ? finding.selector.trim().slice(0, 200) : undefined,
+      snippet: typeof finding.snippet === "string" && finding.snippet.trim() ? finding.snippet.trim() : undefined,
+    });
+  }
+
   const normalized: QualityFinding[] = [];
   let defectN = 0;
+  let contractN = 0;
   let improveN = 0;
-  for (const item of findingsRaw) {
-    const f = item as { severity?: unknown; message?: unknown; fix?: unknown; snippet?: unknown; kind?: unknown; selector?: unknown };
-    const severity: QualityFinding["severity"] | null = isSeverity(f.severity) ? f.severity : options.isSharingan ? "P1" : null;
-    if (!severity || typeof f.message !== "string") continue;
-    const selector = typeof f.selector === "string" && f.selector.trim() ? f.selector.trim().slice(0, 200) : undefined;
+  for (const finding of parsedFindings) {
     // "A few" of each — however many genuinely matter (or none). Sane caps guard against a
     // runaway response, but there is no forced count. Defects (P0/P1) vs design improvements (P2).
-    const isImprovement = options.isSharingan ? false : f.kind === "improvement" || (f.kind !== "defect" && severity === "P2");
+    const isImprovement = !options.isSharingan && finding.kind === "improvement";
     if (isImprovement) {
       if (improveN >= 8) continue;
       improveN += 1;
       normalized.push({
         severity: "P2",
         id: `visual-improve-${improveN}`,
-        message: f.message,
-        fix: typeof f.fix === "string" && f.fix ? f.fix : "Apply the design improvement described.",
-        selector,
-        snippet: typeof f.snippet === "string" ? f.snippet : undefined,
+        message: finding.message,
+        fix: finding.fix,
+        selector: finding.selector,
+        snippet: finding.snippet,
+      });
+    } else if (!options.isSharingan && finding.kind === "contract") {
+      if (contractN >= 6) continue;
+      contractN += 1;
+      normalized.push({
+        severity: "P1",
+        id: `visual-contract-drift-${contractN}`,
+        message: finding.message,
+        fix: finding.fix,
+        selector: finding.selector,
+        snippet: finding.snippet,
       });
     } else {
       if (defectN >= 6) continue;
       defectN += 1;
       normalized.push({
-        severity: options.isSharingan && severity === "P2" ? "P1" : severity,
+        severity: finding.severity,
         id: `visual-ai-review-${defectN}`,
-        message: f.message,
-        fix: typeof f.fix === "string" && f.fix ? f.fix : "Adjust the layout and visual hierarchy in the screenshot.",
-        selector,
-        snippet: typeof f.snippet === "string" ? f.snippet : undefined,
+        message: finding.message,
+        fix: finding.fix,
+        selector: finding.selector,
+        snippet: finding.snippet,
       });
     }
   }
@@ -803,7 +907,7 @@ async function collectGeometry(
     return {
       findings: [
         {
-          severity: "P2",
+          severity: "P1",
           id: "visual-chrome-unavailable",
           message: "Visual QA could not run because Chrome was not found on this machine.",
           fix: "Install Chrome/Chromium or disable Visual QA in Settings for this environment.",
@@ -1071,7 +1175,7 @@ async function collectGeometry(
         if (screenshotPath) {
           await mkdir(dirname(screenshotPath), { recursive: true });
           // Bound the capture too — full-page screenshot of a wedged/animating page can hang.
-          await withTimeout(15_000, page.screenshot({ path: screenshotPath as `${string}.png`, type: "png", fullPage: true }));
+          await withTimeout(15_000, captureFullPageScreenshot(page, { path: screenshotPath }));
         }
       }
       await page.close().catch(() => {});
@@ -1096,7 +1200,7 @@ async function collectGeometry(
     return {
       findings: [
         {
-          severity: "P2",
+          severity: "P1",
           id: "visual-render-failed",
           message: "Visual QA could not render the final artifact in headless Chrome.",
           fix: "Open the preview and check for script errors, blocked local assets, or markup that prevents first paint.",
@@ -1136,8 +1240,8 @@ function spawnAgentText(command: string, args: string[], cwd: string, timeoutMs:
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (stdout.trim()) resolve(stdout);
-      else reject(new Error(stderr.trim().slice(0, 200) || `${command} exited with ${code}`));
+      if (code === 0 && stdout.trim()) resolve(stdout);
+      else reject(new Error(stderr.trim().slice(0, 200) || stdout.trim().slice(0, 200) || `${command} exited with ${code}`));
     });
   });
 }
@@ -1157,7 +1261,15 @@ export async function reviewWithRetry(reviewOnce: () => Promise<QualityFinding[]
   const first = await reviewOnce();
   if (wasReviewed(first)) return first;
   const second = await reviewOnce();
-  return wasReviewed(second) || second.length > first.length ? second : first;
+  if (wasReviewed(second)) return second;
+  return [
+    {
+      severity: "P1",
+      id: "visual-review-unassessed",
+      message: "Automated design review returned malformed or empty output twice, so this artifact was not visually assessed.",
+      fix: "Rerun Visual QA with a working reviewer before treating the design as passed.",
+    },
+  ];
 }
 
 export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshotPath: string): Promise<QualityFinding[]> {
@@ -1166,7 +1278,7 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
     return withScreenshotReviewMetadata(
       [
         {
-          severity: "P2",
+          severity: "P1",
           id: "visual-screenshot-missing",
           message: "Agent visual review could not run because the rendered screenshot was not produced.",
           fix: "Open Preview and check whether the page can be captured, then rerun the generation.",
@@ -1192,7 +1304,7 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
     return withScreenshotReviewMetadata(
       [
         {
-          severity: "P2",
+          severity: "P1",
           id: "visual-agent-review-failed",
           message: `Agent visual review failed: ${err instanceof Error ? err.message : "request error"}.`,
           fix: "Check that the selected Agent can read the generated screenshot and project files, or disable Visual QA in Settings.",
@@ -1207,19 +1319,51 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
 
 export async function auditVisualArtifact(input: VisualQaInput): Promise<QualityFinding[]> {
   if (!input.settings.visualQaEnabled) return [];
+  const projectDir = input.projectRoot ?? dirname(input.htmlPath);
+  const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
+  // A screenshot is evidence for exactly one audit attempt. Clear the mutable capture target
+  // before every enabled audit so a failed render cannot be reviewed or persisted as if it were
+  // the current artifact.
+  await rm(screenshotPath, { force: true });
+  if (input.isSharingan && !input.sharinganReference) {
+    return [
+      {
+        severity: "P0",
+        id: "visual-source-evidence-missing",
+        message: "Sharingan source screenshot and render-map evidence are unavailable, so reconstruction fidelity cannot be verified.",
+        fix: "Re-capture the intended Sharingan source entry before generating or accepting a reconstruction.",
+      },
+    ];
+  }
   if (!existsSync(input.htmlPath)) {
     return [
       {
-        severity: "P2",
+        severity: "P1",
         id: "visual-artifact-missing",
         message: "Visual QA could not run because the final artifact file is missing.",
         fix: "Rerun generation and confirm the selected Agent writes the expected project files.",
       },
     ];
   }
-  const projectDir = input.projectRoot ?? dirname(input.htmlPath);
-  const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
   const sourceMap = input.isSharingan ? readSourceRenderMap(input.sharinganReference?.renderMapPath) : null;
+  if (input.isSharingan) {
+    let sourceScreenshotValid = false;
+    try {
+      sourceScreenshotValid = !!decodePng(input.sharinganReference?.screenshotPath ?? "");
+    } catch {
+      sourceScreenshotValid = false;
+    }
+    if (!sourceMap || !sourceScreenshotValid) {
+      return [
+        {
+          severity: "P0",
+          id: "visual-source-evidence-invalid",
+          message: "Sharingan source screenshot or render-map evidence is missing, corrupt, or structurally unusable, so reconstruction fidelity cannot be verified.",
+          fix: "Re-capture the intended Sharingan source entry before generating, repairing, or accepting the reconstruction.",
+        },
+      ];
+    }
+  }
   const geometry = await collectGeometry(
     input.htmlPath,
     screenshotPath,

@@ -1,5 +1,6 @@
 import puppeteer from "puppeteer-core";
 import { findChrome } from "./capture-cover.ts";
+import { captureFullPageScreenshot } from "./full-page-capture.ts";
 
 export interface Viewport { width: number; height: number; label: string }
 export const VIEWPORTS: Viewport[] = [
@@ -233,7 +234,10 @@ export class SharinganSession {
   async setViewport(v: Viewport): Promise<void> { await this.page.setViewport({ width: v.width, height: v.height, deviceScaleFactor: 1 }); }
 
   async screenshot(opts: { fullPage?: boolean } = {}): Promise<Buffer> {
-    return (await this.page.screenshot({ fullPage: opts.fullPage ?? false, type: "png" })) as Buffer;
+    const shot = opts.fullPage
+      ? await captureFullPageScreenshot(this.page)
+      : await this.page.screenshot({ fullPage: false, type: "png" });
+    return Buffer.from(shot);
   }
 
   async readDom(maxNodes = 1500): Promise<DomNode[]> {

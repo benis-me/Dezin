@@ -152,7 +152,7 @@ imagery, not just prose.
   has failed, even if searches were dispatched.
 - ${NEVER_INVENT}
 - **Authority.** Prefer PRIMARY / authoritative sources: official docs, the actual product, first-party data, reputable publications. Distrust SEO content farms, AI-generated listicles, and unsourced statistics — do not cite them. Tag each source in \`${SOURCES_FILE}\` with \`"authority": "primary" | "secondary"\`.
-- **Cite everything.** Every factual claim in the report must trace to a source id in \`${SOURCES_FILE}\`. State genuinely-unknown things as an explicit ASSUMPTION — never as fact.
+- **Cite everything.** Every factual claim in the report must cite its source id as \`[source-id]\` from \`${SOURCES_FILE}\`. State genuinely-unknown things as an explicit ASSUMPTION — never as fact.
 - Download every referenced image into \`${ASSETS_DIRNAME}/\`; the report must render offline.
 - Be thorough but decisive — enough to design confidently, not an encyclopedia.${brandLine}${userRefs}
 - Write in the user's language.
@@ -232,6 +232,7 @@ If one report is missing, synthesize from whichever exists.
   rich visual/interactive treatment, say so concretely (and name the technique the build should
   reach for); if they point at something restrained, do NOT manufacture spectacle. Directions are
   grounded understanding, not a menu of unrelated styles.
+  Use these exact sections in every file: \`## Concept\`, \`## Structure\`, and \`## Distinctive move\`.
 
 ## Rules
 - Finish WITHIN this turn — the direction files must exist on disk before you return.

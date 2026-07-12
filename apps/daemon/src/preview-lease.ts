@@ -26,11 +26,13 @@ export interface PreviewChild {
 export interface PreviewSpawnInput {
   projectDir: string;
   port: number;
+  configPath?: string;
   onLog?: (message: string, level: "info" | "error") => void;
 }
 
 export interface PreviewAcquireOptions {
   fingerprint?: string;
+  configPath?: string;
   signal?: AbortSignal;
   onLog?: PreviewSpawnInput["onLog"];
 }
@@ -64,6 +66,8 @@ export interface PreviewLeaseManager {
   stopScope(scope: RuntimeScope): Promise<void>;
   stopAll(): Promise<void>;
   activeCount(): number;
+  /** True while a scope owns a live client lease; maintenance must not evict its files. */
+  hasActiveLease?(scope: RuntimeScope): boolean;
 }
 
 interface LeaseState {
@@ -95,6 +99,7 @@ interface PreviewFlight {
   scope: RuntimeScope;
   projectDir: string;
   fingerprint: string;
+  configPath?: string;
   controller: AbortController;
   waiters: number;
   entry?: PreviewEntry;
@@ -166,9 +171,11 @@ async function allocateFreePort(): Promise<number> {
 }
 
 function spawnPreviewProcess(input: PreviewSpawnInput): PreviewChild {
+  const args = ["run", "dev", "--", "--port", String(input.port), "--strictPort", "--host", "127.0.0.1"];
+  if (input.configPath) args.push("--config", input.configPath);
   const child = spawn(
     "npm",
-    ["run", "dev", "--", "--port", String(input.port), "--strictPort", "--host", "127.0.0.1"],
+    args,
     {
       cwd: input.projectDir,
       stdio: ["ignore", "pipe", "pipe"],
@@ -467,7 +474,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     const port = await allocatePort();
     assertAdmission(flight.scope);
     flight.controller.signal.throwIfAborted();
-    const child = spawnProcess({ projectDir: flight.projectDir, port, onLog });
+    const child = spawnProcess({ projectDir: flight.projectDir, port, configPath: flight.configPath, onLog });
     const url = `http://127.0.0.1:${port}/`;
     let readyTimer: Timer | undefined;
     const timeout = new Error(`Preview readiness timed out after ${readyTimeoutMs}ms`);
@@ -544,6 +551,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     scope: RuntimeScope,
     projectDir: string,
     fingerprint: string,
+    configPath: string | undefined,
     onLog?: PreviewSpawnInput["onLog"],
   ): PreviewFlight {
     assertAdmission(scope);
@@ -554,6 +562,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
       scope: { ...scope },
       projectDir: resolve(projectDir),
       fingerprint,
+      configPath,
       controller: new AbortController(),
       waiters: 0,
       promise: undefined as unknown as Promise<PreviewEntry>,
@@ -661,7 +670,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
       try {
         assertAdmission(scope);
         const fingerprint = acquireOptions.fingerprint ?? "";
-        const identity = identityKey(scope, projectDir, fingerprint);
+        const identity = `${identityKey(scope, projectDir, fingerprint)}\u0000${acquireOptions.configPath ?? ""}`;
         const cached = entries.get(identity);
         if (cached && !cached.stopping && !cached.teardownFailed && isProcessGroupAlive(cached.child)) {
           try {
@@ -683,7 +692,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
           assertAdmission(scope);
         }
 
-        const flight = getOrCreateFlight(identity, scope, projectDir, fingerprint, acquireOptions.onLog);
+        const flight = getOrCreateFlight(identity, scope, projectDir, fingerprint, acquireOptions.configPath, acquireOptions.onLog);
         flight.waiters += 1;
         if (flight.entry) flight.entry.pendingHandoffs += 1;
         try {
@@ -755,6 +764,10 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
 
     activeCount() {
       return entries.size;
+    },
+
+    hasActiveLease(scope) {
+      return [...entries.values()].some((entry) => matchesScope(entry.scope, scope) && entry.leases.size > 0);
     },
   };
 

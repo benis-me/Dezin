@@ -8,7 +8,7 @@ export interface ResultMeta {
   error?: boolean;
   status?: "done" | "stopped" | "failed";
   materialSources?: string[];
-  /** False when Visual Review was on but the critic never rendered/judged (only anti-slop ran). */
+  /** True when Visual Review judged the pixels, false when enabled but unassessed, absent when not run. */
   designReviewed?: boolean;
   /** Count of defects the auto-fixer repeatedly failed to resolve (gave up on). */
   unresolved?: number;

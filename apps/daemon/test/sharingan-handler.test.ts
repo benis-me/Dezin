@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type ServerResponse } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { Store } from "../../../packages/core/src/index.ts";
 import { createApp } from "../src/index.ts";
@@ -12,6 +12,8 @@ import {
   SHARINGAN_RELEASE_GRACE_MS,
   cancelSharinganProject,
   ensureProbeSession,
+  handleSharinganCapture,
+  handleSharinganNavigate,
   handleSharinganEvents,
   handleSharinganReadDom,
   peekSharinganStatus,
@@ -21,6 +23,7 @@ import {
   sharinganCaptureRegistrySizeForTests,
 } from "../src/sharingan-handler.ts";
 import type { SharinganSession } from "../src/sharingan-browser.ts";
+import { projectDir } from "../src/serve-static.ts";
 
 test("POST /start begins a capture and GET /status reports progress", { skip: !findChrome() && "no Chrome" }, async () => {
   const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><title>T</title><h1>Acme</h1><p>" + "w ".repeat(60) + "</p>"); });
@@ -62,6 +65,422 @@ function statusServer(id: string, dataDir = mkdtempSync(join(tmpdir(), "shar-sta
     });
   });
 }
+
+function probeCaptureServer(id: string, dataDir: string): Promise<{ base: string; close: () => Promise<void> }> {
+  return new Promise((resolve) => {
+    const server = createServer((req, res) => { void handleSharinganCapture(req, res, id, dataDir); });
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({ base: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(() => r())) });
+    });
+  });
+}
+
+function probeNavigationServer(id: string, dataDir: string): Promise<{ base: string; close: () => Promise<void> }> {
+  return new Promise((resolve) => {
+    const server = createServer((req, res) => {
+      if (req.url === "/navigate") void handleSharinganNavigate(req, res, id, dataDir);
+      else void handleSharinganCapture(req, res, id, dataDir);
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({ base: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(() => r())) });
+    });
+  });
+}
+
+function fakeProbeCaptureSession(options: { screenshotError?: Error; url?: string; finalUrl?: string } = {}): SharinganSession {
+  return {
+    currentUrl: () => options.finalUrl ?? options.url ?? "https://x.test/",
+    navigate: async (url: string) => ({ status: 200, finalUrl: options.finalUrl ?? url }),
+    readDom: async () => [{ tag: "main", classes: "", text: "Captured source page", box: { x: 0, y: 0, w: 100, h: 100 } }],
+    hasPasswordField: async () => false,
+    setViewport: async () => {},
+    settle: async () => {},
+    screenshot: async () => {
+      if (options.screenshotError) throw options.screenshotError;
+      return Buffer.from("png");
+    },
+    readRenderMap: async () => ({ viewport: { width: 1440, height: 900 }, document: { width: 1440, height: 900 }, elements: [] }),
+    readDomTree: async () => [],
+    styleTokens: async () => ({ colors: [], fontFamilies: [], fontSizes: [], radii: [], shadows: [] }),
+    assets: async () => [],
+    fetchAsset: async () => null,
+    discoverLinks: async () => [],
+    close: async () => {},
+  } as unknown as SharinganSession;
+}
+
+test("entry capture persists requested and real final identities for an allowed canonical redirect", async () => {
+  const id = `entry-canonical-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-entry-canonical-"));
+  const requestedUrl = "https://x.test/products";
+  const finalUrl = "https://x.test/products/";
+
+  await startCapture(
+    id,
+    requestedUrl,
+    dataDir,
+    "/tmp/unused-profile",
+    async () => fakeProbeCaptureSession({ url: requestedUrl, finalUrl }),
+  );
+
+  try {
+    assert.equal(peekSharinganStatus(id, dataDir)?.phase, "captured");
+    const manifest = JSON.parse(
+      readFileSync(join(projectDir(dataDir, id), ".sharingan", "pages.json"), "utf8"),
+    ) as {
+      requestedSourceUrl?: string;
+      sourceUrl?: string;
+      pages?: Array<{ requestedUrl?: string; url?: string }>;
+    };
+    assert.equal(manifest.requestedSourceUrl, requestedUrl);
+    assert.equal(manifest.sourceUrl, finalUrl, "the manifest source identity follows the pixels actually captured");
+    assert.equal(manifest.pages?.[0]?.requestedUrl, requestedUrl);
+    assert.equal(manifest.pages?.[0]?.url, finalUrl);
+  } finally {
+    await releaseSharinganProject(id);
+  }
+});
+
+function seedProbeManifest(root: string, sourceUrl: string): void {
+  mkdirSync(join(root, ".sharingan"), { recursive: true });
+  writeFileSync(join(root, ".sharingan", "pages.json"), JSON.stringify({ sourceUrl, pages: [] }));
+}
+
+function seedProbeDerivedArtifacts(root: string): string[] {
+  const staleFiles = [
+    join(".sharingan", "source-scaffold", "index.html"),
+    join(".sharingan", "region-plan.json"),
+    join(".sharingan", "region-build.json"),
+    join(".sharingan", "region-work", "state.json"),
+    join("src", "sharingan-regions", "Hero.tsx"),
+  ];
+  for (const rel of staleFiles) {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), "stale");
+  }
+  return staleFiles;
+}
+
+test("probe entry recapture invalidates stale Sharingan derivatives after success", async () => {
+  const id = `probe-recapture-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-recapture-"));
+  const root = projectDir(dataDir, id);
+  const staleFiles = seedProbeDerivedArtifacts(root);
+  const sourceUrl = "https://x.test/entry";
+  seedProbeManifest(root, sourceUrl);
+  await ensureProbeSession(id, dataDir, async () => fakeProbeCaptureSession({ url: sourceUrl }));
+  const endpoint = await probeCaptureServer(id, dataDir);
+  try {
+    const response = await fetch(endpoint.base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 200);
+    for (const rel of staleFiles) assert.equal(existsSync(join(root, rel)), false, `${rel} is invalidated`);
+    const manifest = JSON.parse(readFileSync(join(root, ".sharingan", "pages.json"), "utf8")) as {
+      requestedSourceUrl?: string;
+      sourceUrl?: string;
+      pages?: Array<{ requestedUrl?: string; url?: string }>;
+    };
+    assert.equal(manifest.requestedSourceUrl, sourceUrl);
+    assert.equal(manifest.sourceUrl, sourceUrl);
+    assert.equal(manifest.pages?.[0]?.requestedUrl, sourceUrl, "a no-navigation entry recapture retains a verifiable requested identity");
+    assert.equal(manifest.pages?.[0]?.url, sourceUrl);
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
+
+test("probe secondary-page capture preserves entry-derived Sharingan artifacts", async () => {
+  const id = `probe-secondary-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-secondary-"));
+  const root = projectDir(dataDir, id);
+  const staleFiles = seedProbeDerivedArtifacts(root);
+  const sourceUrl = "https://x.test/entry";
+  seedProbeManifest(root, sourceUrl);
+  await ensureProbeSession(id, dataDir, async () => fakeProbeCaptureSession({ url: "https://x.test/secondary" }));
+  const endpoint = await probeCaptureServer(id, dataDir);
+  try {
+    const response = await fetch(endpoint.base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 200);
+    for (const rel of staleFiles) assert.equal(existsSync(join(root, rel)), true, `${rel} remains for a secondary capture`);
+    const manifest = JSON.parse(readFileSync(join(root, ".sharingan", "pages.json"), "utf8")) as { sourceUrl?: string };
+    assert.equal(manifest.sourceUrl, sourceUrl, "capturing a secondary page keeps the entry sourceUrl");
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
+
+test("probe capture rejects a cross-origin navigation redirect before persisting redirected pixels", async () => {
+  const id = `probe-cross-origin-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-cross-origin-"));
+  const root = projectDir(dataDir, id);
+  seedProbeManifest(root, "https://x.test/entry");
+  await ensureProbeSession(id, dataDir, async () => fakeProbeCaptureSession({ finalUrl: "https://evil.test/landing" }));
+  const endpoint = await probeCaptureServer(id, dataDir);
+  try {
+    const response = await fetch(endpoint.base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "https://x.test/products" }),
+    });
+    assert.equal(response.status, 409);
+    assert.match(await response.text(), /cross-origin redirect/i);
+    const manifest = JSON.parse(readFileSync(join(root, ".sharingan", "pages.json"), "utf8")) as { pages?: unknown[] };
+    assert.deepEqual(manifest.pages, [], "the redirected page never enters the evidence manifest");
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
+
+test("probe capture refuses a cross-origin current page reached by a prior navigation", async () => {
+  const id = `probe-cross-origin-current-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-cross-origin-current-"));
+  const root = projectDir(dataDir, id);
+  seedProbeManifest(root, "https://x.test/entry");
+  await ensureProbeSession(id, dataDir, async () => fakeProbeCaptureSession({ url: "https://evil.test/landing" }));
+  const endpoint = await probeCaptureServer(id, dataDir);
+  try {
+    const response = await fetch(endpoint.base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 409);
+    assert.match(await response.text(), /outside the entry origin/i);
+    const manifest = JSON.parse(readFileSync(join(root, ".sharingan", "pages.json"), "utf8")) as { pages?: unknown[] };
+    assert.deepEqual(manifest.pages, []);
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
+
+test("probe capture records requested and final identities for an allowed canonical navigation redirect", async () => {
+  const id = `probe-canonical-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-canonical-"));
+  const root = projectDir(dataDir, id);
+  const requestedUrl = "https://x.test/products";
+  const finalUrl = "https://x.test/products/";
+  seedProbeManifest(root, "https://x.test/entry");
+  await ensureProbeSession(id, dataDir, async () => fakeProbeCaptureSession({ finalUrl }));
+  const endpoint = await probeCaptureServer(id, dataDir);
+  try {
+    const response = await fetch(endpoint.base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: requestedUrl }),
+    });
+    assert.equal(response.status, 200);
+    const captured = (await response.json()) as { requestedUrl?: string; url?: string };
+    assert.equal(captured.requestedUrl, requestedUrl);
+    assert.equal(captured.url, finalUrl);
+    const manifest = JSON.parse(readFileSync(join(root, ".sharingan", "pages.json"), "utf8")) as {
+      sourceUrl?: string;
+      pages?: Array<{ requestedUrl?: string; url?: string }>;
+    };
+    assert.equal(manifest.sourceUrl, "https://x.test/entry", "a secondary canonical redirect cannot replace the entry contract");
+    assert.equal(manifest.pages?.[0]?.requestedUrl, requestedUrl);
+    assert.equal(manifest.pages?.[0]?.url, finalUrl);
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
+
+test("probe navigate rejects and remembers a non-canonical redirect so capture-current cannot relabel it", async () => {
+  const id = `probe-pending-reject-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-pending-reject-"));
+  const root = projectDir(dataDir, id);
+  seedProbeManifest(root, "https://x.test/entry");
+  await ensureProbeSession(id, dataDir, async () => fakeProbeCaptureSession({ finalUrl: "https://x.test/dashboard" }));
+  const endpoint = await probeNavigationServer(id, dataDir);
+  try {
+    const navigate = await fetch(`${endpoint.base}/navigate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "https://x.test/products" }),
+    });
+    assert.equal(navigate.status, 409);
+    assert.match(await navigate.text(), /non-canonical redirect.*retry.*final URL/i);
+
+    const capture = await fetch(`${endpoint.base}/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(capture.status, 409, "capture-current cannot erase the rejected A to B navigation identity");
+    assert.match(await capture.text(), /non-canonical redirect/i);
+    const manifest = JSON.parse(readFileSync(join(root, ".sharingan", "pages.json"), "utf8")) as { pages?: unknown[] };
+    assert.deepEqual(manifest.pages, []);
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
+
+test("probe navigate carries an allowed canonical requested identity into capture-current", async () => {
+  const id = `probe-pending-canonical-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-pending-canonical-"));
+  const root = projectDir(dataDir, id);
+  const requestedUrl = "https://x.test/products";
+  const finalUrl = "https://x.test/products/";
+  seedProbeManifest(root, "https://x.test/entry");
+  await ensureProbeSession(id, dataDir, async () => fakeProbeCaptureSession({ finalUrl }));
+  const endpoint = await probeNavigationServer(id, dataDir);
+  try {
+    const navigate = await fetch(`${endpoint.base}/navigate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: requestedUrl }),
+    });
+    assert.equal(navigate.status, 200);
+
+    const capture = await fetch(`${endpoint.base}/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(capture.status, 200);
+    const page = (await capture.json()) as { requestedUrl?: string; url?: string };
+    assert.equal(page.requestedUrl, requestedUrl);
+    assert.equal(page.url, finalUrl);
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
+
+test("a failed probe navigate clears the prior requested identity before capture-current", async () => {
+  const id = `probe-pending-navigate-failure-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-pending-navigate-failure-"));
+  const root = projectDir(dataDir, id);
+  const requestedUrl = "https://x.test/products";
+  const finalUrl = "https://x.test/products/";
+  seedProbeManifest(root, "https://x.test/entry");
+  let navigationCount = 0;
+  const session = {
+    ...fakeProbeCaptureSession({ finalUrl }),
+    navigate: async () => {
+      navigationCount += 1;
+      if (navigationCount === 1) return { status: 200, finalUrl };
+      throw new Error("probe navigation failed");
+    },
+  } as unknown as SharinganSession;
+  await ensureProbeSession(id, dataDir, async () => session);
+  const endpoint = await probeNavigationServer(id, dataDir);
+  try {
+    const firstNavigate = await fetch(`${endpoint.base}/navigate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: requestedUrl }),
+    });
+    assert.equal(firstNavigate.status, 200);
+
+    const failedNavigate = await fetch(`${endpoint.base}/navigate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "https://x.test/other" }),
+    });
+    assert.equal(failedNavigate.status, 409);
+    assert.match(await failedNavigate.text(), /probe navigation failed/i);
+
+    const capture = await fetch(`${endpoint.base}/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(capture.status, 200);
+    const page = (await capture.json()) as { requestedUrl?: string; url?: string };
+    assert.equal(page.requestedUrl, finalUrl, "capture-current self-labels after the newer navigation attempt failed");
+    assert.equal(page.url, finalUrl);
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
+
+test("a failed explicit capture navigation clears the prior requested identity", async () => {
+  const id = `probe-pending-capture-failure-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-pending-capture-failure-"));
+  const root = projectDir(dataDir, id);
+  const requestedUrl = "https://x.test/products";
+  const finalUrl = "https://x.test/products/";
+  seedProbeManifest(root, "https://x.test/entry");
+  let navigationCount = 0;
+  const session = {
+    ...fakeProbeCaptureSession({ finalUrl }),
+    navigate: async () => {
+      navigationCount += 1;
+      if (navigationCount === 1) return { status: 200, finalUrl };
+      throw new Error("capture navigation failed");
+    },
+  } as unknown as SharinganSession;
+  await ensureProbeSession(id, dataDir, async () => session);
+  const endpoint = await probeNavigationServer(id, dataDir);
+  try {
+    const firstNavigate = await fetch(`${endpoint.base}/navigate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: requestedUrl }),
+    });
+    assert.equal(firstNavigate.status, 200);
+
+    const failedCapture = await fetch(`${endpoint.base}/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: "https://x.test/other" }),
+    });
+    assert.equal(failedCapture.status, 409);
+    assert.match(await failedCapture.text(), /capture navigation failed/i);
+
+    const captureCurrent = await fetch(`${endpoint.base}/capture`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(captureCurrent.status, 200);
+    const page = (await captureCurrent.json()) as { requestedUrl?: string; url?: string };
+    assert.equal(page.requestedUrl, finalUrl, "capture-current does not inherit the superseded navigation identity");
+    assert.equal(page.url, finalUrl);
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
+
+test("probe capture preserves Sharingan derivatives when recapture fails", async () => {
+  const id = `probe-recapture-failed-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-probe-recapture-failed-"));
+  const root = projectDir(dataDir, id);
+  const staleFiles = seedProbeDerivedArtifacts(root);
+  const sourceUrl = "https://x.test/entry";
+  seedProbeManifest(root, sourceUrl);
+  await ensureProbeSession(id, dataDir, async () => fakeProbeCaptureSession({ screenshotError: new Error("capture failed"), url: sourceUrl }));
+  const endpoint = await probeCaptureServer(id, dataDir);
+  try {
+    const response = await fetch(endpoint.base, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 409);
+    for (const rel of staleFiles) assert.equal(existsSync(join(root, rel)), true, `${rel} remains after a failed capture`);
+  } finally {
+    await endpoint.close();
+    await releaseSharinganProject(id);
+  }
+});
 
 test("GET /status peeks at an idle project without allocating capture ownership", async () => {
   const before = sharinganCaptureRegistrySizeForTests();

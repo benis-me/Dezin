@@ -4,8 +4,9 @@ import { Dialog, Segmented } from "./ui/index.ts";
 import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 
 interface Side {
-  url: string;
+  url?: string;
   label: string;
+  error?: string;
 }
 
 function frameDocument(frame: HTMLIFrameElement | null): Document | null {
@@ -102,6 +103,11 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
   const bRef = useRef<HTMLIFrameElement>(null);
   const handleRef = useRef<HTMLButtonElement>(null);
   const syncingScrollRef = useRef(false);
+  const hasUnavailablePane = Boolean(a.error || b.error || !a.url || !b.url);
+
+  useEffect(() => {
+    if (hasUnavailablePane) setMode("split");
+  }, [hasUnavailablePane]);
 
   useEffect(() => {
     if (!open) return;
@@ -152,6 +158,18 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
     };
   }, [open, mode, a.url, b.url]);
 
+  const frame = (side: Side, ref: MutableRefObject<HTMLIFrameElement | null>) =>
+    side.url ? (
+      <iframe key={side.url} ref={ref} src={side.url} title={side.label} sandbox={previewSandboxForSrc(side.url)} className="h-full w-full bg-white" />
+    ) : (
+      <div className="grid h-full place-items-center p-8">
+        <div className="max-w-sm rounded-lg border border-border bg-card p-4 text-center">
+          <div className="text-sm font-semibold text-foreground">Preview unavailable</div>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{side.error ?? "This saved version could not be prepared."}</p>
+        </div>
+      </div>
+    );
+
   // Drive the drag through the DOM directly (no per-frame React re-render of the iframes),
   // and turn off the iframes' hit-testing so fast drags don't get swallowed by them.
   const drag = (e: ReactMouseEvent): void => {
@@ -192,25 +210,27 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
             size="sm"
             value={mode}
             onChange={(v) => setMode(v as typeof mode)}
-            options={[
-              { value: "slider", title: "Before / after slider", icon: <SlidersHorizontal size={14} strokeWidth={1.75} /> },
-              { value: "split", title: "Side by side", icon: <Columns2 size={14} strokeWidth={1.75} /> },
-            ]}
+            options={hasUnavailablePane
+              ? [{ value: "split", title: "Side by side", icon: <Columns2 size={14} strokeWidth={1.75} /> }]
+              : [
+                  { value: "slider", title: "Before / after slider", icon: <SlidersHorizontal size={14} strokeWidth={1.75} /> },
+                  { value: "split", title: "Side by side", icon: <Columns2 size={14} strokeWidth={1.75} /> },
+                ]}
           />
           <span className="truncate text-sm font-medium">
             {a.label} <span className="text-muted-foreground">↔</span> {b.label}
           </span>
         </div>
         <div ref={wrapRef} className="relative flex-1 overflow-hidden bg-surface-2">
-          {mode === "split" ? (
+          {mode === "split" || hasUnavailablePane ? (
             <div className="flex h-full">
               <div className="relative h-full flex-1 border-r border-border">
                 <span className={`${tag} left-2.5`}>{a.label}</span>
-                <iframe key={a.url} ref={aRef} src={a.url} title={a.label} sandbox={previewSandboxForSrc(a.url)} className="h-full w-full bg-white" />
+                {frame(a, aRef)}
               </div>
               <div className="relative h-full flex-1">
                 <span className={`${tag} left-2.5`}>{b.label}</span>
-                <iframe key={b.url} ref={bRef} src={b.url} title={b.label} sandbox={previewSandboxForSrc(b.url)} className="h-full w-full bg-white" />
+                {frame(b, bRef)}
               </div>
             </div>
           ) : (

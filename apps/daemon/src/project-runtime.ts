@@ -4,11 +4,13 @@
  * (on demand) run a Vite dev server we can preview. This module owns that lifecycle.
  */
 
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { agentSpawnEnv } from "../../../packages/agent/src/index.ts";
 import {
   previewLeaseManager,
@@ -38,6 +40,32 @@ interface Runtime {
   children: Set<ChildProcess>;
   operation?: Promise<void>;
   stopPromise?: Promise<void>;
+  historicalPreviewConfig?: { dir: string; path: string; projectDir: string };
+}
+
+const DEPENDENCY_MANIFESTS = ["package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"] as const;
+const DEPENDENCY_STAMP = ".dezin-dependency-fingerprint";
+
+async function dependencyManifestFingerprint(projectDir: string): Promise<string> {
+  const hash = createHash("sha256");
+  let found = false;
+  for (const name of DEPENDENCY_MANIFESTS) {
+    const bytes = await readFile(join(projectDir, name)).catch(() => null);
+    if (!bytes) continue;
+    found = true;
+    hash.update(name);
+    hash.update("\0");
+    hash.update(bytes);
+    hash.update("\0");
+  }
+  if (!found) throw new Error("dependencies not installed yet");
+  return hash.digest("hex");
+}
+
+async function writeDependencyStamp(projectDir: string): Promise<void> {
+  const nodeModules = join(projectDir, "node_modules");
+  if (!existsSync(nodeModules)) return;
+  await writeFile(join(nodeModules, DEPENDENCY_STAMP), `${await dependencyManifestFingerprint(projectDir)}\n`, "utf8");
 }
 
 const runtimes = new Map<string, Runtime>();
@@ -47,6 +75,19 @@ export const DEV_SERVER_IDLE_MS = 60_000;
 const PICKER_BRIDGE_BLOCK = /const PICKER_BRIDGE = `[\s\S]*?<\/script>`;/;
 const PICKER_BRIDGE_START = "const PICKER_BRIDGE = ";
 const PICKER_PLUGIN_START = "\nfunction dezinPicker";
+const PICKER_CONFIG_EXPORT_START = "\nexport default defineConfig";
+const VITE_CONFIG_FILES = [
+  "vite.config.js",
+  "vite.config.mjs",
+  "vite.config.ts",
+  "vite.config.cjs",
+  "vite.config.mts",
+  "vite.config.cts",
+] as const;
+
+function findViteConfig(projectDir: string): string | undefined {
+  return VITE_CONFIG_FILES.map((name) => join(projectDir, name)).find(existsSync);
+}
 
 function waitForChildExit(child: ChildProcess, timeoutMs = 1_000): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -155,6 +196,54 @@ export async function ensureProjectPickerBridge(projectDir: string): Promise<boo
   return true;
 }
 
+async function historicalPreviewConfig(projectDir: string, rt: Runtime): Promise<string | undefined> {
+  const current = rt.historicalPreviewConfig;
+  if (current?.projectDir === projectDir && existsSync(current.path)) return current.path;
+  if (current) await rm(current.dir, { recursive: true, force: true });
+
+  const viteConfig = findViteConfig(projectDir);
+  if (!viteConfig) return undefined;
+  const template = await readFile(join(templateDir(), "vite.config.js"), "utf8");
+  const instrumentationStart = template.indexOf(PICKER_BRIDGE_START);
+  const instrumentationEnd = template.indexOf(PICKER_CONFIG_EXPORT_START, instrumentationStart);
+  if (instrumentationStart < 0 || instrumentationEnd <= instrumentationStart) return undefined;
+
+  const configDir = await mkdtemp(join(tmpdir(), "dezin-version-preview-"));
+  const configPath = join(configDir, "vite.config.mjs");
+  const originalConfigUrl = pathToFileURL(viteConfig).href;
+  const instrumentation = template.slice(instrumentationStart, instrumentationEnd);
+  await writeFile(
+    configPath,
+    `import originalConfig from ${JSON.stringify(originalConfigUrl)};
+${instrumentation}
+
+function withoutStaleDezinPicker(plugin) {
+  if (Array.isArray(plugin)) return plugin.map(withoutStaleDezinPicker).filter(Boolean);
+  return plugin && plugin.name === "dezin-picker" ? null : plugin;
+}
+
+export default async function dezinHistoricalPreviewConfig(env) {
+  const exported = await originalConfig;
+  const resolved = typeof exported === "function" ? await exported(env) : exported;
+  const config = resolved && typeof resolved === "object" ? resolved : {};
+  const plugins = (Array.isArray(config.plugins) ? config.plugins : [])
+    .map(withoutStaleDezinPicker)
+    .filter(Boolean);
+  return { ...config, plugins: [...plugins, dezinPicker()] };
+}
+`,
+    "utf8",
+  );
+  rt.historicalPreviewConfig = { dir: configDir, path: configPath, projectDir };
+  return configPath;
+}
+
+async function removeHistoricalPreviewConfig(rt: Runtime): Promise<void> {
+  const config = rt.historicalPreviewConfig;
+  rt.historicalPreviewConfig = undefined;
+  if (config) await rm(config.dir, { recursive: true, force: true });
+}
+
 function appendLog(rt: Runtime, message: string, level: RuntimeLog["level"] = "info"): void {
   const lines = message
     .split("\n")
@@ -222,7 +311,10 @@ export async function setupStandardProject(projectId: string, projectDir: string
     appendLog(rt, "Installing dependencies");
     const code = await run("npm", ["install", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install");
     assertRuntimeActive(projectId, rt, signal);
-    if (code === 0) await gitCommit(projectDir, "Dezin: install dependencies");
+    if (code === 0) {
+      await writeDependencyStamp(projectDir);
+      await gitCommit(projectDir, "Dezin: install dependencies");
+    }
     assertRuntimeActive(projectId, rt, signal);
     rt.phase = code === 0 ? "ready" : "error";
     appendLog(rt, rt.phase === "ready" ? "Standard project is ready" : "Standard project setup failed", rt.phase === "ready" ? "info" : "error");
@@ -256,7 +348,10 @@ export async function setupImportedStandardProject(projectId: string, projectDir
     assertRuntimeActive(projectId, rt, signal);
     const code = await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install --ignore-scripts");
     assertRuntimeActive(projectId, rt, signal);
-    if (code === 0) await gitCommit(projectDir, "Dezin: install dependencies");
+    if (code === 0) {
+      await writeDependencyStamp(projectDir);
+      await gitCommit(projectDir, "Dezin: install dependencies");
+    }
     assertRuntimeActive(projectId, rt, signal);
     rt.phase = code === 0 ? "ready" : "error";
     appendLog(rt, rt.phase === "ready" ? "Imported standard project is ready" : "Imported standard project setup failed", rt.phase === "ready" ? "info" : "error");
@@ -291,16 +386,20 @@ export function getSetup(projectId: string, projectDir: string): { phase: SetupP
 
 async function ensurePreviewDependencies(projectDir: string, runtimeKey: string, rt: Runtime, signal?: AbortSignal): Promise<void> {
   assertRuntimeActive(runtimeKey, rt, signal);
-  if (existsSync(join(projectDir, "node_modules"))) {
+  if (!existsSync(join(projectDir, "package.json"))) throw new Error("dependencies not installed yet");
+  const expectedFingerprint = await dependencyManifestFingerprint(projectDir);
+  const nodeModules = join(projectDir, "node_modules");
+  const installedFingerprint = await readFile(join(nodeModules, DEPENDENCY_STAMP), "utf8").catch(() => "");
+  if (existsSync(nodeModules) && installedFingerprint.trim() === expectedFingerprint) {
     rt.phase = "ready";
     rt.error = undefined;
     return;
   }
-  if (!existsSync(join(projectDir, "package.json"))) throw new Error("dependencies not installed yet");
 
   rt.phase = "installing";
   rt.error = undefined;
-  appendLog(rt, "Installing preview dependencies");
+  appendLog(rt, existsSync(nodeModules) ? "Refreshing preview dependencies after manifest change" : "Installing preview dependencies");
+  await rm(nodeModules, { recursive: true, force: true });
   const code = await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install --ignore-scripts");
   assertRuntimeActive(runtimeKey, rt, signal);
   if (code !== 0) {
@@ -308,6 +407,7 @@ async function ensurePreviewDependencies(projectDir: string, runtimeKey: string,
     rt.error = "npm install failed";
     throw new Error(rt.error);
   }
+  await writeDependencyStamp(projectDir);
   rt.phase = "ready";
   appendLog(rt, "Preview dependencies are ready");
 }
@@ -342,24 +442,37 @@ export async function ensureDevServer(
     detach = attachRuntimeSignal(rt, signal);
   }
   try {
-  assertRuntimeActive(runtimeKey, rt, signal);
-  const statusBeforeBridgeUpdate = existsSync(join(projectDir, ".git")) ? await workingTreeFingerprint(projectDir) : "";
-  assertRuntimeActive(runtimeKey, rt, signal);
-  const bridgeUpdated = await ensureProjectPickerBridge(projectDir).catch(() => false);
-  assertRuntimeActive(runtimeKey, rt, signal);
-  if (bridgeUpdated) {
-    appendLog(rt, "Updated preview inspect bridge");
-    if (!statusBeforeBridgeUpdate) await gitCommit(projectDir, "Dezin: update preview inspect bridge");
-  }
-  await ensurePreviewDependencies(projectDir, runtimeKey, rt, signal);
-  const currentFingerprint = await devServerFingerprint(projectDir);
-  assertRuntimeActive(runtimeKey, rt, signal);
-  appendLog(rt, "Acquiring ready preview server");
-  return await leaseManager.acquire(previewRuntimeScope(projectId, runtimeKey), projectDir, {
-    fingerprint: currentFingerprint,
-    signal,
-    onLog: (message, level) => appendLog(rt!, message, level),
-  });
+    assertRuntimeActive(runtimeKey, rt, signal);
+    const scope = previewRuntimeScope(projectId, runtimeKey);
+    const isHistoricalVersion = scope.runId !== undefined;
+    const hasGit = existsSync(join(projectDir, ".git"));
+    const sourceStatus = hasGit ? await workingTreeFingerprint(projectDir) : "";
+    if (isHistoricalVersion && sourceStatus) throw new Error("historical preview source is not clean");
+    assertRuntimeActive(runtimeKey, rt, signal);
+    if (!isHistoricalVersion) {
+      const bridgeUpdated = await ensureProjectPickerBridge(projectDir).catch(() => false);
+      assertRuntimeActive(runtimeKey, rt, signal);
+      if (bridgeUpdated) {
+        appendLog(rt, "Updated preview inspect bridge");
+        if (!sourceStatus) await gitCommit(projectDir, "Dezin: update preview inspect bridge", { skipHooks: true });
+      }
+    }
+    await ensurePreviewDependencies(projectDir, runtimeKey, rt, signal);
+    if (isHistoricalVersion && hasGit && await workingTreeFingerprint(projectDir) !== sourceStatus) {
+      await run("git", ["reset", "--hard", "HEAD"], projectDir, rt, "git reset --hard HEAD");
+      await run("git", ["clean", "-fd"], projectDir, rt, "git clean -fd");
+      if (await workingTreeFingerprint(projectDir) !== sourceStatus) throw new Error("historical preview preparation changed source files");
+    }
+    const configPath = isHistoricalVersion ? await historicalPreviewConfig(projectDir, rt) : undefined;
+    const currentFingerprint = await devServerFingerprint(projectDir);
+    assertRuntimeActive(runtimeKey, rt, signal);
+    appendLog(rt, "Acquiring ready preview server");
+    return await leaseManager.acquire(scope, projectDir, {
+      fingerprint: currentFingerprint,
+      configPath,
+      signal,
+      onLog: (message, level) => appendLog(rt!, message, level),
+    });
   } finally {
     detach();
   }
@@ -370,6 +483,8 @@ export async function releaseDevServer(runtimeKey: string): Promise<boolean> {
   const projectId = runtimeKey.split(":", 1)[0];
   if (!projectId) return false;
   await previewLeaseManager.stopScope(previewRuntimeScope(projectId, runtimeKey));
+  const rt = runtimes.get(runtimeKey);
+  if (rt) await removeHistoricalPreviewConfig(rt);
   return true;
 }
 
@@ -388,15 +503,35 @@ async function devServerFingerprint(projectDir: string): Promise<string> {
 }
 
 /** Commit the project's current state as a version. */
-export async function gitCommit(projectDir: string, message: string): Promise<{ changed: boolean; committed: boolean; commitHash: string | null }> {
+export async function gitCommit(
+  projectDir: string,
+  message: string,
+  options: { skipHooks?: boolean } = {},
+): Promise<{ changed: boolean; committed: boolean; commitHash: string | null }> {
   if (!existsSync(join(projectDir, ".git"))) return { changed: false, committed: false, commitHash: null };
   await run("git", ["add", "-A"], projectDir);
   const status = await workingTreeFingerprint(projectDir);
   if (!status) return { changed: false, committed: false, commitHash: null };
-  const code = await run("git", [...GIT_IDENTITY, "commit", "-q", "-m", message.replace(/\s+/g, " ").slice(0, 72) || "Dezin update"], projectDir);
-  if (code !== 0) return { changed: true, committed: false, commitHash: null };
-  const head = await capture("git", ["rev-parse", "HEAD"], projectDir);
-  return { changed: true, committed: true, commitHash: head.code === 0 ? head.out.trim() : null };
+  const emptyHooksDir = options.skipHooks ? await mkdtemp(join(tmpdir(), "dezin-empty-hooks-")) : null;
+  try {
+    const code = await run(
+      "git",
+      [
+        ...GIT_IDENTITY,
+        ...(emptyHooksDir ? ["-c", `core.hooksPath=${emptyHooksDir}`] : []),
+        "commit",
+        "-q",
+        "-m",
+        message.replace(/\s+/g, " ").slice(0, 72) || "Dezin update",
+      ],
+      projectDir,
+    );
+    if (code !== 0) return { changed: true, committed: false, commitHash: null };
+    const head = await capture("git", ["rev-parse", "HEAD"], projectDir);
+    return { changed: true, committed: true, commitHash: head.code === 0 ? head.out.trim() : null };
+  } finally {
+    if (emptyHooksDir) await rm(emptyHooksDir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -438,6 +573,7 @@ export async function releaseProjectRuntime(projectId: string): Promise<void> {
     if (runtimes.get(key) === rt) runtimes.delete(key);
   }
   await previewLeaseManager.stopScope({ projectId });
+  await Promise.allSettled(owned.map(removeHistoricalPreviewConfig));
 }
 
 /** Stop and forget one variant runtime plus version previews owned by its Runs. */
@@ -456,6 +592,7 @@ export async function releaseVariantRuntime(projectId: string, variantId: string
     previewLeaseManager.stopScope({ projectId, variantId }),
     ...runIds.map((runId) => previewLeaseManager.stopScope({ projectId, runId })),
   ]);
+  await Promise.allSettled(owned.map(removeHistoricalPreviewConfig));
 }
 
 /** Stop all runtime resources and await bounded child settlement. */
@@ -468,6 +605,7 @@ export async function stopAllProjectRuntimes(): Promise<void> {
   }
   retiredRuntimes.clear();
   await previewLeaseManager.stopAll();
+  await Promise.allSettled(entries.map(removeHistoricalPreviewConfig));
 }
 
 /** Await teardown of every legacy dev/setup resource. */

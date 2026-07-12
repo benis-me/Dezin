@@ -69,11 +69,34 @@ function styleSummary(s) {
   return p.length ? " {" + p.join(" ") + "}" : "";
 }
 
+function captureUrlKey(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (!/^#[!/]/.test(url.hash)) url.hash = "";
+    return url.href.replace(/\/$/, "");
+  } catch {
+    return raw.replace(/#(?![!/]).*$/, "").replace(/\/$/, "");
+  }
+}
+
+function manifestEntryPage(manifest) {
+  const pages = manifest && Array.isArray(manifest.pages) ? manifest.pages : [];
+  if (!manifest || typeof manifest !== "object") return null;
+  if (Object.prototype.hasOwnProperty.call(manifest, "sourceUrl")) {
+    if (typeof manifest.sourceUrl !== "string" || !manifest.sourceUrl.trim()) return null;
+    const sourceKey = captureUrlKey(manifest.sourceUrl);
+    return pages.find((page) => page && typeof page.url === "string" && captureUrlKey(page.url) === sourceKey) || null;
+  }
+  return pages[0] || null;
+}
+
 function outline(domPathArg) {
   let domPath = domPathArg;
   if (!domPath) {
     const manifest = JSON.parse(readFileSync(join(".sharingan", "pages.json"), "utf8"));
-    domPath = manifest.pages && manifest.pages[0] && manifest.pages[0].dom;
+    domPath = manifestEntryPage(manifest)?.dom;
     if (!domPath) fail("no captured page in .sharingan/pages.json");
   }
   const root = JSON.parse(readFileSync(domPath, "utf8"));
@@ -97,7 +120,7 @@ function renderMap(mapPathArg) {
   let mapPath = mapPathArg;
   if (!mapPath) {
     const manifest = JSON.parse(readFileSync(join(".sharingan", "pages.json"), "utf8"));
-    mapPath = manifest.pages && manifest.pages[0] && manifest.pages[0].renderMap;
+    mapPath = manifestEntryPage(manifest)?.renderMap;
     if (!mapPath) fail("no render-map.json in .sharingan/pages.json");
   }
   const map = JSON.parse(readFileSync(mapPath, "utf8"));
@@ -267,7 +290,7 @@ function shiftTextBoxForInlineMedia(item, mediaSlots) {
 
 function sourceSummary() {
   const manifest = readJson(join(".sharingan", "pages.json"), null);
-  const page = manifest && manifest.pages && manifest.pages[0];
+  const page = manifestEntryPage(manifest);
   if (!page) fail("no captured page in .sharingan/pages.json");
   const map = readJson(page.renderMap, {});
   const styles = readJson(page.styles, {});
@@ -545,7 +568,7 @@ function sourceRegionPlan(page, manifest, data) {
 
 function sourceScaffold() {
   const manifest = readJson(join(".sharingan", "pages.json"), null);
-  const page = manifest && manifest.pages && manifest.pages[0];
+  const page = manifestEntryPage(manifest);
   if (!page) fail("no captured page in .sharingan/pages.json");
   const map = readJson(page.renderMap, {});
   const assetsRaw = readJson(page.assets, []);

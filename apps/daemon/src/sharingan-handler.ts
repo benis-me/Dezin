@@ -11,7 +11,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { SharinganSession, SHARINGAN_PAGE_BUDGET } from "./sharingan-browser.ts";
-import { capturePage, captureCurrentPage, writePagesManifest, upsertPage, readCapturedPages, captureUrlKey, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
+import { capturePage, captureCurrentPage, invalidateSharinganDerivedArtifacts, writePagesManifest, upsertPage, readCapturedPages, readCapturedSourceUrl, readCapturedRequestedSourceUrl, captureUrlKey, isAllowedCaptureRedirect, type CaptureStep, type CapturedPage } from "./sharingan-capture.ts";
 import { projectDir, safeJoin } from "./serve-static.ts";
 import { sendJson, readJsonBody } from "./http-util.ts";
 
@@ -27,6 +27,8 @@ interface Capture {
   operations: Set<CaptureOperation>;
   listeners: Set<ServerResponse>;
   url?: string;
+  requestedUrl?: string;
+  pendingNavigation?: { requestedUrl: string; finalUrl: string; error?: string };
   error?: string;
   probeTimer?: ReturnType<typeof setTimeout>;
   keepForProbe?: boolean;
@@ -77,6 +79,29 @@ function get(id: string): Capture {
     captures.set(id, c);
   }
   return c;
+}
+
+function probeNavigationError(entryUrl: string | undefined, requestedUrl: string, finalUrl: string): string | undefined {
+  let requestedOrigin: string;
+  let finalOrigin: string;
+  let entryOrigin: string | undefined;
+  try {
+    requestedOrigin = new URL(requestedUrl).origin;
+    finalOrigin = new URL(finalUrl).origin;
+    entryOrigin = entryUrl ? new URL(entryUrl).origin : undefined;
+  } catch {
+    return `Sharingan capture refused an invalid redirect from ${requestedUrl} to ${finalUrl}. Retry with the final URL after verifying it.`;
+  }
+  if (requestedOrigin !== finalOrigin) {
+    return `Sharingan capture refused a cross-origin redirect from ${requestedUrl} to ${finalUrl}. Retry with the final URL as a new verified source if it is intended.`;
+  }
+  if (entryOrigin && requestedOrigin !== entryOrigin) {
+    return `Sharingan capture refused a URL outside the entry origin (${entryOrigin}): ${requestedUrl}. Retry with a same-origin final URL.`;
+  }
+  if (!isAllowedCaptureRedirect(requestedUrl, finalUrl)) {
+    return `Sharingan capture refused a non-canonical redirect from ${requestedUrl} to ${finalUrl}. Retry capture with the final URL if that page is intended.`;
+  }
+  return undefined;
 }
 
 function captureArtifactDir(id: string, dataDir: string): string {
@@ -227,7 +252,7 @@ function releaseProbeSession(id: string): Promise<void> {
   return retainCaptureOperation(c, async () => {
     if (c.probeTimer) { clearTimeout(c.probeTimer); c.probeTimer = undefined; }
     if (c.phase !== "probing") return;
-    const s = claimEstablishedSession(c); c.phase = "captured";
+    const s = claimEstablishedSession(c); c.phase = "captured"; c.pendingNavigation = undefined;
     if (s) await s.close().catch(() => {});
   });
 }
@@ -251,9 +276,13 @@ export function ensureProbeSession(
   return retainCaptureOperation(c, async (signal, operation) => {
     // Seed from the on-disk manifest so re-captures dedup against what's already there (e.g. after a
     // daemon restart, when the in-memory page list is empty but the entry page is on disk).
-    if (!c.pages.length) c.pages = readCapturedPages(captureArtifactDir(id, dataDir));
+    const artifactDir = captureArtifactDir(id, dataDir);
+    if (!c.pages.length) c.pages = readCapturedPages(artifactDir);
+    if (!c.url) c.url = readCapturedSourceUrl(artifactDir);
+    if (!c.requestedUrl) c.requestedUrl = readCapturedRequestedSourceUrl(artifactDir) ?? c.url;
     if (!c.session) {
       if (!c.opening) {
+        c.pendingNavigation = undefined;
         const profileDir = sharinganProfileDir(id, dataDir);
         c.profileDir = profileDir;
         let opening!: Promise<SharinganSession>;
@@ -292,7 +321,12 @@ export function ensureProbeSession(
  *  build Agent to reuse as a probe (phase "probing", idle-released) or close it (phase "captured").
  *  Keeping it open avoids reopening Chrome mid-build and preserves the just-authenticated session. */
 async function finishCapturedSession(id: string, dataDir: string, c: Capture, page: CapturedPage | null): Promise<void> {
-  if (page) { upsertPage(c.pages, page); writePagesManifest(captureArtifactDir(id, dataDir), c.url ?? page.url, c.pages); }
+  if (page) {
+    c.url = page.url;
+    c.requestedUrl ??= page.requestedUrl ?? page.url;
+    upsertPage(c.pages, page);
+    writePagesManifest(captureArtifactDir(id, dataDir), page.url, c.pages, c.requestedUrl);
+  }
   if (c.keepForProbe && c.session) {
     c.phase = "probing";
     armProbeIdle(id);
@@ -319,7 +353,7 @@ export function startCapture(
   // Seed from the on-disk manifest (not []): after a daemon restart the in-memory map is empty, so
   // re-running the entry capture would otherwise clobber pages.json + discard prior probe captures.
   // The entry capture then upserts into this, preserving them.
-  c.phase = "capturing"; c.steps = []; c.pages = readCapturedPages(captureArtifactDir(id, dataDir)); c.error = undefined;
+  c.phase = "capturing"; c.steps = []; c.pages = readCapturedPages(captureArtifactDir(id, dataDir)); c.error = undefined; c.pendingNavigation = undefined;
   c.profileDir = profileDir;
   const generation = c.generation;
   return retainCaptureOperation(c, async (signal, operation) => {
@@ -342,6 +376,7 @@ export function startCapture(
       }
       c.session = session;
       c.url = url;
+      c.requestedUrl = url;
       const { page, loginRequired } = await capturePage(session, captureArtifactDir(id, dataDir), url, (s) => emit(c, s));
       if (!isActive(id, c, generation)) return;
       if (loginRequired) { c.phase = "login-required"; return; }
@@ -433,7 +468,7 @@ export function continueCapture(id: string, dataDir: string): Promise<void> {
   if (c.phase !== "login-required" || !c.session || !c.url) return Promise.resolve();
   const generation = c.generation;
   const session = c.session;
-  const url = c.url;
+  const url = c.requestedUrl ?? c.url;
   c.phase = "capturing";
   return retainCaptureOperation(c, async () => {
     try {
@@ -474,7 +509,13 @@ export async function handleSharinganNavigate(req: IncomingMessage, res: ServerR
     const session = await ensureProbeSession(id, dataDir);
     const c = get(id);
     emit(c, { at: Date.now(), kind: "navigate", text: `Agent navigating to ${url}` });
+    // A new navigation attempt supersedes any prior requested/final identity even when Puppeteer
+    // rejects before returning a final URL. Capture-current must never inherit the older attempt.
+    c.pendingNavigation = undefined;
     const nav = await session.navigate(url);
+    const error = probeNavigationError(c.url, url, nav.finalUrl);
+    c.pendingNavigation = { requestedUrl: url, finalUrl: nav.finalUrl, ...(error ? { error } : {}) };
+    if (error) { sendJson(res, 409, { error }); return; }
     sendJson(res, 200, nav);
   } catch (err) {
     sendJson(res, 409, { error: err instanceof Error ? err.message : "navigate failed" });
@@ -499,13 +540,52 @@ export async function handleSharinganCapture(req: IncomingMessage, res: ServerRe
   }
   try {
     const session = await ensureProbeSession(id, dataDir);
+    let requestedUrl: string | undefined;
+    let finalUrl = session.currentUrl();
     if (typeof body.url === "string" && /^https?:\/\//i.test(body.url)) {
-      emit(c, { at: Date.now(), kind: "navigate", text: `Agent navigating to ${body.url}` });
-      await session.navigate(body.url.trim());
+      requestedUrl = body.url.trim();
+      emit(c, { at: Date.now(), kind: "navigate", text: `Agent navigating to ${requestedUrl}` });
+      // Explicit capture navigation also supersedes a prior probe navigation before it starts.
+      c.pendingNavigation = undefined;
+      const nav = await session.navigate(requestedUrl);
+      finalUrl = nav.finalUrl;
+      const error = probeNavigationError(c.url, requestedUrl, finalUrl);
+      c.pendingNavigation = { requestedUrl, finalUrl, ...(error ? { error } : {}) };
+      if (error) throw new Error(error);
+    } else if (c.pendingNavigation) {
+      if (c.pendingNavigation.error) throw new Error(c.pendingNavigation.error);
+      if (captureUrlKey(finalUrl) !== captureUrlKey(c.pendingNavigation.finalUrl)) {
+        throw new Error(`Sharingan capture current URL changed after navigation (${c.pendingNavigation.finalUrl} -> ${finalUrl}). Retry capture with the final URL.`);
+      }
+      requestedUrl = c.pendingNavigation.requestedUrl;
     }
-    const page = await captureCurrentPage(session, captureArtifactDir(id, dataDir), session.currentUrl(), (s) => emit(c, s));
+    if (c.url) {
+      let sourceOrigin: string;
+      let finalOrigin: string;
+      try {
+        sourceOrigin = new URL(c.url).origin;
+        finalOrigin = new URL(finalUrl).origin;
+      } catch {
+        throw new Error(`Sharingan capture refused an invalid current page URL: ${finalUrl}.`);
+      }
+      if (sourceOrigin !== finalOrigin) {
+        throw new Error(`Sharingan capture refused a current page outside the entry origin (${sourceOrigin}): ${finalUrl}.`);
+      }
+    }
+    const artifactDir = captureArtifactDir(id, dataDir);
+    const sourceUrl = c.url;
+    const pageRequestedUrl = requestedUrl
+      ?? (sourceUrl && captureUrlKey(finalUrl) === captureUrlKey(sourceUrl) ? c.requestedUrl ?? sourceUrl : finalUrl);
+    const page = {
+      ...(await captureCurrentPage(session, artifactDir, finalUrl, (s) => emit(c, s))),
+      requestedUrl: pageRequestedUrl,
+    };
+    if (sourceUrl && captureUrlKey(page.url) === captureUrlKey(sourceUrl)) {
+      invalidateSharinganDerivedArtifacts(artifactDir);
+    }
     upsertPage(c.pages, page); // dedup by URL — re-capturing the same page updates it, never appends a dup
-    writePagesManifest(captureArtifactDir(id, dataDir), c.url ?? page.url, c.pages);
+    writePagesManifest(artifactDir, sourceUrl ?? page.url, c.pages, c.requestedUrl ?? sourceUrl ?? page.url);
+    c.pendingNavigation = undefined;
     armProbeIdle(id);
     sendJson(res, 200, page);
   } catch (err) {

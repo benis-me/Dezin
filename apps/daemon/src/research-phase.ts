@@ -11,19 +11,21 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
 import {
   buildResearchPrompt,
   buildVisualResearchPrompt,
   buildSynthesisPrompt,
   ensureResearchScaffold,
-  researchExists,
-  visualResearchExists,
-  directionsExist,
+  resetResearchBundle,
+  directionsDir,
+  chosenPath,
   visualAssetsDir,
+  validateResearchBundle,
   parseResearchActivity,
   type ResearchActivity,
+  type ResearchBundleIssue,
 } from "../../../packages/research/src/index.ts";
 
 export interface ResearchPhaseInput {
@@ -47,6 +49,8 @@ export interface ResearchPhaseInput {
   onActivity?: (activity: TrackedResearchActivity) => void;
   /** Optional wall-clock cap. Omitted = no timeout (research is an explicit opt-in). */
   timeoutMs?: number;
+  /** Explicit user refresh: discard the prior generated bundle and research this brief again. */
+  force?: boolean;
 }
 
 /** A research activity tagged with which track (product/visual) produced it. */
@@ -59,6 +63,10 @@ export interface ResearchPhaseResult {
   produced: boolean;
   /** Whether .research/visual/visual.md exists after the phase. */
   visualProduced: boolean;
+  /** Whether the full evidence bundle is safe to consume as a build input. */
+  complete: boolean;
+  /** Concrete product, visual, or direction gaps that keep the bundle incomplete. */
+  issues: ResearchBundleIssue[];
   error?: string;
 }
 
@@ -84,11 +92,24 @@ export async function runResearchPhase(
   input: ResearchPhaseInput,
   spawner: SpawnResearchFn = spawnResearch,
 ): Promise<ResearchPhaseResult> {
-  const productDone = researchExists(input.dir);
-  const visualDone = visualResearchExists(input.dir);
-  if (productDone && visualDone && directionsExist(input.dir)) return { ran: false, produced: true, visualProduced: true };
+  if (input.force) await resetResearchBundle(input.dir);
+  const initialValidation = await validateResearchBundle(input.dir);
+  const areaComplete = (issues: ResearchBundleIssue[], area: ResearchBundleIssue["area"]): boolean =>
+    !issues.some((issue) => issue.area === area);
+  const productDone = areaComplete(initialValidation.issues, "product");
+  const visualDone = areaComplete(initialValidation.issues, "visual");
+  if (initialValidation.complete) {
+    return { ran: false, produced: true, visualProduced: true, complete: true, issues: [] };
+  }
   await ensureResearchScaffold(input.dir);
   await mkdir(visualAssetsDir(input.dir), { recursive: true });
+  if (!productDone || !visualDone) {
+    await Promise.all([
+      rm(directionsDir(input.dir), { recursive: true, force: true }),
+      rm(chosenPath(input.dir), { force: true }),
+    ]);
+    await mkdir(directionsDir(input.dir), { recursive: true });
+  }
 
   const provider = getProvider(input.agentCommand);
   // Stream-json so we can surface the agent's live steps as they happen; the (long)
@@ -107,7 +128,10 @@ export async function runResearchPhase(
     prompt: string,
     alreadyDone: boolean,
   ): Promise<{ produced: boolean; reason?: string }> => {
-    const exists = (): boolean => (track === "product" ? researchExists(input.dir) : visualResearchExists(input.dir));
+    const exists = async (): Promise<boolean> => {
+      const validation = await validateResearchBundle(input.dir);
+      return areaComplete(validation.issues, track);
+    };
     if (alreadyDone) return { produced: true };
     // Last-seen failure reason, so a track that never produces still explains why (thrown error
     // message, or a non-zero exit's reason) instead of surfacing silence.
@@ -126,15 +150,19 @@ export async function runResearchPhase(
         }
       } catch (err) {
         lastReason = err instanceof Error ? err.message : String(err);
-        if (exists()) return { produced: true };
+        if (await exists()) return { produced: true };
         if (err instanceof Error && /aborted/i.test(err.message)) break;
       }
-      if (exists()) return { produced: true };
+      if (await exists()) return { produced: true };
       if (attempt < MAX_ATTEMPTS && !input.signal?.aborted) {
         input.onActivity?.({ kind: "note", text: `${track} research produced nothing — retrying once.`, track });
       }
     }
-    return { produced: exists(), reason: exists() ? undefined : lastReason };
+    const produced = await exists();
+    if (produced) return { produced: true };
+    const validation = await validateResearchBundle(input.dir);
+    const issueReason = validation.issues.filter((issue) => issue.area === track).map((issue) => issue.message).join("; ");
+    return { produced: false, reason: lastReason ?? (issueReason || undefined) };
   };
 
   const [product, visual] = await Promise.all([
@@ -153,7 +181,8 @@ export async function runResearchPhase(
 
   // Synthesis: read BOTH reports + the brief and produce the candidate directions from the
   // comprehensive understanding. Sequential (needs both tracks). Does not re-open the images.
-  if (!directionsExist(input.dir) && (product.produced || visual.produced) && !input.signal?.aborted) {
+  let directionsComplete = areaComplete((await validateResearchBundle(input.dir)).issues, "directions");
+  if (!directionsComplete && product.produced && visual.produced && !input.signal?.aborted) {
     const synthArgs = argsFor(
       buildSynthesisPrompt({
         brief: input.brief,
@@ -170,10 +199,12 @@ export async function runResearchPhase(
           timeoutMs: input.timeoutMs,
         });
       } catch (err) {
-        if (directionsExist(input.dir)) break;
+        directionsComplete = areaComplete((await validateResearchBundle(input.dir)).issues, "directions");
+        if (directionsComplete) break;
         if (err instanceof Error && /aborted/i.test(err.message)) break;
       }
-      if (directionsExist(input.dir)) break;
+      directionsComplete = areaComplete((await validateResearchBundle(input.dir)).issues, "directions");
+      if (directionsComplete) break;
     }
   }
 
@@ -183,10 +214,13 @@ export async function runResearchPhase(
     !product.produced ? `product: ${product.reason ?? "no report was produced"}` : null,
     !visual.produced ? `visual: ${visual.reason ?? "no report was produced"}` : null,
   ].filter((r): r is string => r !== null);
+  const validation = await validateResearchBundle(input.dir);
   return {
     ran: true,
-    produced: product.produced,
-    visualProduced: visual.produced,
+    produced: areaComplete(validation.issues, "product"),
+    visualProduced: areaComplete(validation.issues, "visual"),
+    complete: validation.complete,
+    issues: validation.issues,
     error: reasons.length ? reasons.join("; ") : undefined,
   };
 }

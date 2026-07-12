@@ -19,6 +19,7 @@ import { setupImportedStandardProject } from "./project-runtime.ts";
 import type { MessageRole, Project, QualityFinding, RunStatus } from "../../../packages/core/src/index.ts";
 import type { ProjectMode } from "../../../packages/core/src/types.ts";
 import { BoundedTextBuffer, ProcessGroupCleanupError, terminateOwnedProcessGroup } from "../../../packages/agent/src/index.ts";
+import { isPrototypeVersionRenderAssetPath } from "./prototype-version-snapshot.ts";
 
 export interface FileRef {
   rel: string;
@@ -794,7 +795,13 @@ async function prepareExport(
       if (!dir) continue;
       entries.push(...await fileEntries(`variants/${variant.id}`, dir, budget, signal));
     }
-    entries.push(...await fileEntries("versions", join(root, ".versions"), budget, signal));
+    const versionEntries = await fileEntries("versions", join(root, ".versions"), budget, signal);
+    entries.push(...versionEntries.filter((entry) => {
+      const rel = entry.path.slice("versions/".length);
+      if (/^[^/]+\.html$/.test(rel)) return true;
+      const filesMatch = /^[^/]+\.files\/(.+)$/.exec(rel);
+      return !!filesMatch && isPrototypeVersionRenderAssetPath(filesMatch[1]!);
+    }));
     for (const run of runs) {
       signal?.throwIfAborted();
       const log = join(deps.dataDir, ".runs", `${run.id}.jsonl`);
@@ -1331,10 +1338,19 @@ async function completeImportRequest(
 
   for (const file of versionFiles) {
     signal?.throwIfAborted();
-    const oldRunId = file.rel.endsWith(".html") ? file.rel.slice(0, -".html".length) : file.rel;
+    const htmlMatch = /^([^/]+)\.html$/.exec(file.rel);
+    const filesMatch = /^([^/]+)\.files\/(.+)$/.exec(file.rel);
+    if (filesMatch && !isPrototypeVersionRenderAssetPath(filesMatch[2]!)) continue;
+    const oldRunId = htmlMatch?.[1] ?? filesMatch?.[1];
+    if (!oldRunId) continue;
     const newRunId = runMap.get(oldRunId);
     if (!newRunId) continue;
-    const target = safeJoin(root, join(".versions", `${newRunId}.html`));
+    const target = safeJoin(
+      root,
+      htmlMatch
+        ? join(".versions", `${newRunId}.html`)
+        : join(".versions", `${newRunId}.files`, filesMatch![2]!),
+    );
     if (!target) return sendError(res, 422, "invalid source path");
     await mkdir(dirname(target), { recursive: true });
     signal?.throwIfAborted();

@@ -5,9 +5,19 @@ import { mkdtempSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { detectLoginWall, looksLikeLoginWall, capturePage, captureCurrentPage, writePagesManifest, sharinganReviewReference, upsertPage, captureUrlKey, readCapturedPages, type CaptureStep, type CapturedPage } from "../src/sharingan-capture.ts";
+import { detectLoginWall, looksLikeLoginWall, capturePage, captureCurrentPage, writePagesManifest, sharinganReviewReference, upsertPage, captureUrlKey, readCapturedPages, pageDir, type CaptureStep, type CapturedPage } from "../src/sharingan-capture.ts";
 import { SharinganSession, type DomNode } from "../src/sharingan-browser.ts";
 import { findChrome } from "../src/capture-cover.ts";
+
+const VALID_SOURCE_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==", "base64");
+
+function writeValidRenderMap(path: string): void {
+  writeFileSync(path, JSON.stringify({
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 900 },
+    elements: [{ selector: "body", tag: "body", text: "", box: { x: 0, y: 0, w: 1440, h: 900 }, style: {} }],
+  }));
+}
 
 test("upsertPage dedups by normalized URL — re-capturing a page updates it, never duplicates", () => {
   const mk = (url: string, title: string): CapturedPage => ({ url, title, screenshots: {}, dom: "", styles: "", assets: "", links: [] });
@@ -31,15 +41,47 @@ test("captureUrlKey strips a plain anchor + trailing slash, but keeps hash-ROUTE
   assert.notEqual(captureUrlKey("https://x.com/#!/x"), captureUrlKey("https://x.com/#!/y"));
 });
 
-test("readCapturedPages round-trips the manifest written by writePagesManifest", () => {
+test("readCapturedPages round-trips requested and final page identities written by writePagesManifest", () => {
   const dir = mkdtempSync(join(tmpdir(), "sgpg-"));
-  const pages: CapturedPage[] = [{ url: "https://x.com/home", title: "H", screenshots: { desktop: ".sharingan/x/shot.png" }, dom: ".sharingan/x/dom.json", styles: ".sharingan/x/styles.json", assets: ".sharingan/x/assets.json", links: ["https://x.com/a"] }];
-  writePagesManifest(dir, "https://x.com/home", pages);
+  const pages: CapturedPage[] = [{ requestedUrl: "https://x.com/home", url: "https://x.com/home/", title: "H", screenshots: { desktop: ".sharingan/x/shot.png" }, dom: ".sharingan/x/dom.json", styles: ".sharingan/x/styles.json", assets: ".sharingan/x/assets.json", links: ["https://x.com/a"] }];
+  writePagesManifest(dir, "https://x.com/home/", pages, "https://x.com/home");
   const back = readCapturedPages(dir);
   assert.equal(back.length, 1);
-  assert.equal(back[0]!.url, "https://x.com/home");
+  assert.equal(back[0]!.requestedUrl, "https://x.com/home");
+  assert.equal(back[0]!.url, "https://x.com/home/");
   assert.deepEqual(back[0]!.links, ["https://x.com/a"]);
   assert.deepEqual(readCapturedPages(mkdtempSync(join(tmpdir(), "empty-"))), [], "no manifest → empty");
+});
+
+test("writePagesManifest safely upgrades a legacy entry before appending a secondary capture", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-legacy-upgrade-"));
+  const sourceUrl = "https://x.test/entry";
+  const entryRel = join(".sharingan", "legacy-entry");
+  mkdirSync(join(dir, entryRel), { recursive: true });
+  writeFileSync(join(dir, entryRel, "shot.png"), VALID_SOURCE_PNG);
+  writeValidRenderMap(join(dir, entryRel, "render-map.json"));
+  const pages: CapturedPage[] = [
+    {
+      url: sourceUrl,
+      title: "Legacy entry",
+      screenshots: { desktop: join(entryRel, "shot.png") },
+      dom: join(entryRel, "dom.json"),
+      styles: join(entryRel, "styles.json"),
+      assets: join(entryRel, "assets.json"),
+      renderMap: join(entryRel, "render-map.json"),
+      links: [],
+    },
+    { url: "https://x.test/secondary", title: "Secondary", screenshots: {}, dom: "", styles: "", assets: "", links: [] },
+  ];
+
+  writePagesManifest(dir, sourceUrl, pages, sourceUrl);
+
+  const manifest = JSON.parse(readFileSync(join(dir, ".sharingan", "pages.json"), "utf8")) as {
+    pages?: Array<{ requestedUrl?: string; url?: string }>;
+  };
+  assert.equal(manifest.pages?.[0]?.requestedUrl, sourceUrl, "the legacy entry gains the original requested identity");
+  assert.equal(manifest.pages?.[1]?.requestedUrl, "https://x.test/secondary", "an unknown legacy secondary page is honestly self-identified");
+  assert.ok(sharinganReviewReference(dir), "upgrading the manifest cannot invalidate the existing entry evidence");
 });
 
 test("detectLoginWall flags 401, auth redirects, and password-only shells", () => {
@@ -79,6 +121,17 @@ test("detectLoginWall folds in the OAuth content heuristic via the dom field", (
   assert.equal(detectLoginWall({ status: 200, finalUrl: "https://app.x/home", hasPasswordField: false, textLength: 4000, dom: CONTENT_PAGE }), false);
   // Existing 4-field callers (no dom) still behave exactly as before.
   assert.equal(detectLoginWall({ status: 200, finalUrl: "https://x/", hasPasswordField: false, textLength: 2000 }), false);
+});
+
+test("detectLoginWall recognizes a cross-origin OAuth authorize redirect before the strict origin gate", () => {
+  assert.equal(detectLoginWall({
+    status: 200,
+    requestedUrl: "https://app.x.test/workspace",
+    finalUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=abc",
+    hasPasswordField: false,
+    textLength: 480,
+    dom: [node("h1", "Sign in"), node("button", "Next"), node("a", "Sign-in options")],
+  }), true);
 });
 
 test("looksLikeLoginWall does not flag short landing/waitlist pages that only repeat Sign up / Log in", () => {
@@ -131,6 +184,128 @@ test("capturePage writes screenshots + dom + styles into .sharingan and reports 
     await s.close();
     await new Promise<void>((r) => server.close(() => r()));
   }
+});
+
+function fakeCaptureSession(options: { screenshotError?: Error; finalUrl?: string; status?: number; dom?: DomNode[] } = {}): SharinganSession {
+  return {
+    navigate: async (url: string) => ({ status: options.status ?? 200, finalUrl: options.finalUrl ?? url }),
+    readDom: async () => options.dom ?? [node("main", "Captured entry page with enough source content")],
+    hasPasswordField: async () => false,
+    setViewport: async () => {},
+    settle: async () => {},
+    screenshot: async () => {
+      if (options.screenshotError) throw options.screenshotError;
+      return Buffer.from("png");
+    },
+    readRenderMap: async () => ({ viewport: { width: 1440, height: 900 }, document: { width: 1440, height: 900 }, elements: [] }),
+    readDomTree: async () => [],
+    styleTokens: async () => ({ colors: [], fontFamilies: [], fontSizes: [], radii: [], shadows: [] }),
+    assets: async () => [],
+    fetchAsset: async () => null,
+    discoverLinks: async () => [],
+  } as unknown as SharinganSession;
+}
+
+test("capturePage rejects a cross-origin redirect before writing source evidence", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "shar-cross-origin-redirect-"));
+
+  await assert.rejects(
+    capturePage(
+      fakeCaptureSession({ finalUrl: "https://evil.test/products/" }),
+      projectDir,
+      "https://x.test/products",
+      () => {},
+    ),
+    /cross-origin redirect/i,
+  );
+
+  assert.equal(existsSync(join(projectDir, ".sharingan")), false, "redirected pixels are never written under the requested source identity");
+});
+
+test("capturePage rejects a same-origin redirect that changes the requested resource identity", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "shar-noncanonical-redirect-"));
+
+  await assert.rejects(
+    capturePage(
+      fakeCaptureSession({ finalUrl: "https://x.test/dashboard" }),
+      projectDir,
+      "https://x.test/products",
+      () => {},
+    ),
+    /non-canonical redirect/i,
+  );
+
+  assert.equal(existsSync(join(projectDir, ".sharingan")), false);
+});
+
+test("capturePage accepts a same-origin canonical redirect and labels evidence with its real final URL", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "shar-canonical-redirect-"));
+  const requestedUrl = "https://x.test/products?view=grid#details";
+  const finalUrl = "https://x.test/products/?view=grid";
+
+  const { page, loginRequired } = await capturePage(
+    fakeCaptureSession({ finalUrl }),
+    projectDir,
+    requestedUrl,
+    () => {},
+  );
+
+  assert.equal(loginRequired, false);
+  assert.equal(page?.url, finalUrl, "pixels, DOM, and render-map use the browser's final URL identity");
+  assert.equal(page?.requestedUrl, requestedUrl, "the capture retains the user-requested source identity for verification");
+  assert.match(page?.dom ?? "", new RegExp(pageDir(finalUrl).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("capturePage preserves a login wall reached through a redirect instead of treating it as source evidence", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "shar-login-redirect-"));
+
+  const result = await capturePage(
+    fakeCaptureSession({ status: 401, finalUrl: "https://login.vendor.test/session" }),
+    projectDir,
+    "https://x.test/products",
+    () => {},
+  );
+
+  assert.equal(result.loginRequired, true);
+  assert.equal(result.page, null);
+  assert.equal(existsSync(join(projectDir, ".sharingan")), false);
+});
+
+function seedDerivedSharinganArtifacts(projectDir: string): string[] {
+  const staleFiles = [
+    join(".sharingan", "source-scaffold", "index.html"),
+    join(".sharingan", "region-plan.json"),
+    join(".sharingan", "region-build.json"),
+    join(".sharingan", "region-work", "state.json"),
+    join("src", "sharingan-regions", "Hero.tsx"),
+  ];
+  for (const rel of staleFiles) {
+    mkdirSync(join(projectDir, rel, ".."), { recursive: true });
+    writeFileSync(join(projectDir, rel), "stale");
+  }
+  return staleFiles;
+}
+
+test("capturePage invalidates stale Sharingan derivatives after a successful entry recapture", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "shar-recapture-derived-"));
+  const staleFiles = seedDerivedSharinganArtifacts(projectDir);
+
+  const result = await capturePage(fakeCaptureSession(), projectDir, "https://x.test/", () => {});
+
+  assert.ok(result.page);
+  for (const rel of staleFiles) assert.equal(existsSync(join(projectDir, rel)), false, `${rel} is invalidated`);
+});
+
+test("capturePage preserves Sharingan derivatives when entry recapture fails", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "shar-recapture-failed-"));
+  const staleFiles = seedDerivedSharinganArtifacts(projectDir);
+
+  await assert.rejects(
+    capturePage(fakeCaptureSession({ screenshotError: new Error("capture failed") }), projectDir, "https://x.test/", () => {}),
+    /capture failed/,
+  );
+
+  for (const rel of staleFiles) assert.equal(existsSync(join(projectDir, rel)), true, `${rel} remains after a failed capture`);
 });
 
 test("captureCurrentPage captures the current page without navigating + records links", { skip: !findChrome() && "no Chrome" }, async () => {
@@ -292,9 +467,9 @@ test("sharinganReviewReference resolves the entry screenshot + an asset summary 
   const dir = mkdtempSync(join(tmpdir(), "shar-ref-"));
   const pageRel = join(".sharingan", "home-abcd1234");
   mkdirSync(join(dir, pageRel), { recursive: true });
-  writeFileSync(join(dir, pageRel, "shot-desktop.png"), "png");
+  writeFileSync(join(dir, pageRel, "shot-desktop.png"), VALID_SOURCE_PNG);
   writeFileSync(join(dir, pageRel, "assets.json"), JSON.stringify([{ url: "https://x/a.png", kind: "img", alt: "logo" }, { url: "https://x/b.png", kind: "background" }]));
-  writeFileSync(join(dir, pageRel, "render-map.json"), JSON.stringify({ viewport: { width: 1440, height: 900 }, document: { width: 1440, height: 900 }, elements: [] }));
+  writeValidRenderMap(join(dir, pageRel, "render-map.json"));
   writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
     sourceUrl: "https://x/",
     pages: [{ url: "https://x/", title: "Home", screenshots: { desktop: join(pageRel, "shot-desktop.png"), mobile: join(pageRel, "shot-mobile.png") }, dom: join(pageRel, "dom.json"), styles: join(pageRel, "styles.json"), assets: join(pageRel, "assets.json"), renderMap: join(pageRel, "render-map.json"), links: [] }],
@@ -306,6 +481,174 @@ test("sharinganReviewReference resolves the entry screenshot + an asset summary 
   assert.match(ref!.assetsSummary ?? "", /2 image/);
   // No bundle -> undefined.
   assert.equal(sharinganReviewReference(mkdtempSync(join(tmpdir(), "shar-empty-"))), undefined);
+});
+
+test("sharinganReviewReference selects the manifest sourceUrl page instead of pages[0]", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-ref-entry-"));
+  const firstRel = join(".sharingan", "first");
+  const entryRel = join(".sharingan", "entry");
+  mkdirSync(join(dir, firstRel), { recursive: true });
+  mkdirSync(join(dir, entryRel), { recursive: true });
+  writeFileSync(join(dir, firstRel, "shot.png"), VALID_SOURCE_PNG);
+  writeFileSync(join(dir, entryRel, "shot.png"), VALID_SOURCE_PNG);
+  writeValidRenderMap(join(dir, firstRel, "render-map.json"));
+  writeValidRenderMap(join(dir, entryRel, "render-map.json"));
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    requestedSourceUrl: "https://x.test/entry",
+    sourceUrl: "https://x.test/entry/",
+    pages: [
+      { url: "https://x.test/other", screenshots: { desktop: join(firstRel, "shot.png") }, renderMap: join(firstRel, "render-map.json") },
+      { requestedUrl: "https://x.test/entry", url: "https://x.test/entry/", screenshots: { desktop: join(entryRel, "shot.png") }, renderMap: join(entryRel, "render-map.json") },
+    ],
+  }));
+
+  assert.equal(sharinganReviewReference(dir)?.screenshotPath, join(dir, entryRel, "shot.png"));
+});
+
+test("sharinganReviewReference rejects a manifest whose requested and final source identities are not a canonical redirect", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-ref-redirect-contract-"));
+  const pageRel = join(".sharingan", "dashboard");
+  mkdirSync(join(dir, pageRel), { recursive: true });
+  writeFileSync(join(dir, pageRel, "shot.png"), VALID_SOURCE_PNG);
+  writeValidRenderMap(join(dir, pageRel, "render-map.json"));
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    requestedSourceUrl: "https://x.test/products",
+    sourceUrl: "https://x.test/dashboard",
+    pages: [{
+      requestedUrl: "https://x.test/products",
+      url: "https://x.test/dashboard",
+      screenshots: { desktop: join(pageRel, "shot.png") },
+      renderMap: join(pageRel, "render-map.json"),
+    }],
+  }));
+
+  assert.equal(sharinganReviewReference(dir), undefined, "tampered redirect identity cannot authorize unrelated pixels as source evidence");
+});
+
+test("current-schema Sharingan evidence cannot downgrade itself to legacy by deleting redirect identity", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-ref-schema-downgrade-"));
+  const requestedUrl = "https://x.test/entry";
+  const finalUrl = "https://x.test/entry/";
+  const pageRel = join(".sharingan", "entry-current");
+  mkdirSync(join(dir, pageRel), { recursive: true });
+  writeFileSync(join(dir, pageRel, "shot.png"), VALID_SOURCE_PNG);
+  writeValidRenderMap(join(dir, pageRel, "render-map.json"));
+  writePagesManifest(dir, finalUrl, [{
+    requestedUrl,
+    url: finalUrl,
+    title: "Entry",
+    screenshots: { desktop: join(pageRel, "shot.png") },
+    dom: join(pageRel, "dom.json"),
+    styles: join(pageRel, "styles.json"),
+    assets: join(pageRel, "assets.json"),
+    renderMap: join(pageRel, "render-map.json"),
+    links: [],
+  }], requestedUrl);
+  const manifestPath = join(dir, ".sharingan", "pages.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    schemaVersion?: number;
+    requestedSourceUrl?: string;
+    pages: Array<{ requestedUrl?: string }>;
+  };
+  assert.equal(manifest.schemaVersion, 2);
+  assert.ok(sharinganReviewReference(dir, { expectedRequestedUrl: requestedUrl, requireCurrentSchema: true }));
+
+  delete manifest.schemaVersion;
+  delete manifest.requestedSourceUrl;
+  delete manifest.pages[0]!.requestedUrl;
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+  assert.equal(
+    sharinganReviewReference(dir, { expectedRequestedUrl: requestedUrl, requireCurrentSchema: true }),
+    undefined,
+    "a fresh run cannot bypass its contract by masquerading as a legacy manifest",
+  );
+});
+
+test("sharinganReviewReference binds current evidence to the expected project source URL", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-ref-expected-source-"));
+  const pageRel = join(".sharingan", "other-entry");
+  mkdirSync(join(dir, pageRel), { recursive: true });
+  writeFileSync(join(dir, pageRel, "shot.png"), VALID_SOURCE_PNG);
+  writeValidRenderMap(join(dir, pageRel, "render-map.json"));
+  writePagesManifest(dir, "https://x.test/other/", [{
+    requestedUrl: "https://x.test/other",
+    url: "https://x.test/other/",
+    title: "Other",
+    screenshots: { desktop: join(pageRel, "shot.png") },
+    dom: "",
+    styles: "",
+    assets: "",
+    renderMap: join(pageRel, "render-map.json"),
+    links: [],
+  }], "https://x.test/other");
+
+  assert.equal(
+    sharinganReviewReference(dir, { expectedRequestedUrl: "https://x.test/entry", requireCurrentSchema: true }),
+    undefined,
+  );
+});
+
+test("sharinganReviewReference fails closed when sourceUrl has no matching page", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-ref-missing-entry-"));
+  const otherRel = join(".sharingan", "other");
+  mkdirSync(join(dir, otherRel), { recursive: true });
+  writeFileSync(join(dir, otherRel, "shot.png"), VALID_SOURCE_PNG);
+  writeValidRenderMap(join(dir, otherRel, "render-map.json"));
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    sourceUrl: "https://x.test/entry",
+    pages: [{ url: "https://x.test/other", screenshots: { desktop: join(otherRel, "shot.png") }, renderMap: join(otherRel, "render-map.json") }],
+  }));
+
+  assert.equal(sharinganReviewReference(dir), undefined);
+});
+
+test("sharinganReviewReference keeps pages[0] compatibility for legacy manifests without sourceUrl", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-ref-legacy-"));
+  const legacyRel = join(".sharingan", "legacy");
+  mkdirSync(join(dir, legacyRel), { recursive: true });
+  writeFileSync(join(dir, legacyRel, "shot.png"), VALID_SOURCE_PNG);
+  writeValidRenderMap(join(dir, legacyRel, "render-map.json"));
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    pages: [{ url: "https://x.test/legacy", screenshots: { desktop: join(legacyRel, "shot.png") }, renderMap: join(legacyRel, "render-map.json") }],
+  }));
+
+  assert.equal(sharinganReviewReference(dir)?.screenshotPath, join(dir, legacyRel, "shot.png"));
+});
+
+test("sharinganReviewReference rejects missing or corrupt source render evidence", () => {
+  const dir = mkdtempSync(join(tmpdir(), "shar-ref-corrupt-evidence-"));
+  const pageRel = join(".sharingan", "entry");
+  mkdirSync(join(dir, pageRel), { recursive: true });
+  writeFileSync(join(dir, pageRel, "shot.png"), VALID_SOURCE_PNG);
+  writeFileSync(join(dir, pageRel, "render-map.json"), "{not-json");
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    sourceUrl: "https://x.test/entry",
+    pages: [{
+      url: "https://x.test/entry",
+      screenshots: { desktop: join(pageRel, "shot.png") },
+      renderMap: join(pageRel, "render-map.json"),
+    }],
+  }));
+
+  assert.equal(sharinganReviewReference(dir), undefined, "a corrupt render map cannot become review evidence");
+  writeFileSync(join(dir, pageRel, "render-map.json"), JSON.stringify({ viewport: {}, document: {}, elements: "bad" }));
+  assert.equal(sharinganReviewReference(dir), undefined, "a structurally invalid render map fails closed");
+  writeValidRenderMap(join(dir, pageRel, "render-map.json"));
+  writeFileSync(join(dir, pageRel, "shot.png"), "not-a-png");
+  assert.equal(sharinganReviewReference(dir), undefined, "a corrupt source screenshot fails closed");
+});
+
+test("sharinganReviewReference rejects manifest paths that escape the project", () => {
+  const parent = mkdtempSync(join(tmpdir(), "shar-ref-escape-"));
+  const dir = join(parent, "project");
+  mkdirSync(join(dir, ".sharingan"), { recursive: true });
+  writeFileSync(join(parent, "outside.png"), "outside");
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    sourceUrl: "https://x.test/",
+    pages: [{ url: "https://x.test/", screenshots: { desktop: "../outside.png" } }],
+  }));
+
+  assert.equal(sharinganReviewReference(dir), undefined);
 });
 
 test("sharinganReviewReference returns undefined for a malformed (null) manifest instead of throwing", () => {

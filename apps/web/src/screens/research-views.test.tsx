@@ -61,6 +61,19 @@ test("ResearchCard header shows plain-text status after the title, an open arrow
   expect(screen.getByTestId("research-card").textContent).not.toContain("Open");
 });
 
+test("ResearchCard never labels a report-only incomplete evidence bundle as grounded", () => {
+  const incomplete = {
+    ...doneResearch,
+    complete: false,
+    error: "Visual research assets and a second meaningful direction are missing.",
+  };
+  render(<ResearchCard research={incomplete} onOpen={() => {}} />);
+
+  expect(screen.getByTestId("research-status")).toHaveTextContent("incomplete");
+  expect(screen.getByTestId("research-card")).toHaveTextContent("Required evidence is missing");
+  expect(screen.getByTestId("research-status")).not.toHaveTextContent("grounded");
+});
+
 test("ResearchCard renders directions as cards carrying a one-line summary", () => {
   const research: ResearchCardData = {
     ...doneResearch,
@@ -198,6 +211,29 @@ test("ResearchPanel puts each expanded direction body in a bounded scroll contai
   expect(scroller!.className).toMatch(/max-h-/);
 });
 
+test("ResearchPanel surfaces incomplete validation state and its concrete issues above existing artifacts", () => {
+  const research = {
+    exists: true,
+    complete: false,
+    issues: [
+      { area: "visual", code: "visual-assets-missing", message: "Visual research has no local reference assets." },
+      { area: "directions", code: "directions-count", message: "Research must produce 2–3 meaningful directions; found 1." },
+    ],
+    report: "# Product research\n\nUseful product findings still exist.",
+    directions: [directions[0]],
+    sources: [],
+    assets: [],
+  };
+
+  render(<ResearchPanel research={research as any} assetUrl={(path) => `/a/${path}`} />);
+
+  const incomplete = screen.getByTestId("research-incomplete");
+  expect(incomplete).toHaveTextContent("Research incomplete");
+  expect(incomplete).toHaveTextContent("Visual research has no local reference assets.");
+  expect(incomplete).toHaveTextContent("Research must produce 2–3 meaningful directions; found 1.");
+  expect(screen.getByText("Useful product findings still exist.")).toBeTruthy();
+});
+
 test("ResearchPanel shows Product and Visual sub-tabs; Visual renders the collected imagery + sources", async () => {
   const research = {
     exists: true, report: "# Product\n\nUsers skim.", sources: [], directions: [], assets: [],
@@ -218,6 +254,25 @@ test("ResearchPanel shows Product and Visual sub-tabs; Visual renders the collec
   await findByText(/Mono palette/);
   getByText(/dribbble/i);
   getByText(/Jane/);
+});
+
+test("ResearchPanel does not claim a visual source was reached when reachability is unknown", async () => {
+  const research = {
+    exists: true,
+    report: "",
+    visual: {
+      exists: true,
+      report: "# Visual",
+      sources: [{ id: "unknown", title: "Unverified source", url: "https://example.com/reference" }],
+      assets: [],
+    },
+  };
+  render(<ResearchPanel research={research as any} assetUrl={(p) => p} />);
+
+  fireEvent.click(screen.getByRole("tab", { name: /visual/i }));
+
+  expect(await screen.findByText("unverified")).toBeTruthy();
+  expect(screen.queryByText("reached")).toBeNull();
 });
 
 test("ResearchCard splits activities into product and visual lanes", () => {

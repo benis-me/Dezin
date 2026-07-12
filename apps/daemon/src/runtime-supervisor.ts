@@ -177,6 +177,7 @@ export class RuntimeSupervisor {
         rm(join(this.options.dataDir, ".runs", runId), { recursive: true, force: true }),
         rm(join(this.options.dataDir, "run-worktrees", projectId, runId), { recursive: true, force: true }),
         rm(join(this.options.dataDir, "version-worktrees", projectId, runId), { recursive: true, force: true }),
+        rm(join(this.options.dataDir, "version-evidence", projectId, runId), { recursive: true, force: true }),
         rm(
           join(
             this.options.dataDir,
@@ -184,6 +185,16 @@ export class RuntimeSupervisor {
             projectId,
             ".versions",
             `${runId.replace(/[^a-zA-Z0-9-]/g, "")}.html`,
+          ),
+          { recursive: true, force: true },
+        ),
+        rm(
+          join(
+            this.options.dataDir,
+            "projects",
+            projectId,
+            ".versions",
+            `${runId.replace(/[^a-zA-Z0-9-]/g, "")}.files`,
           ),
           { recursive: true, force: true },
         ),
@@ -207,6 +218,7 @@ export class RuntimeSupervisor {
       rm(join(this.options.dataDir, "worktrees", projectId), { recursive: true, force: true }),
       rm(join(this.options.dataDir, "run-worktrees", projectId), { recursive: true, force: true }),
       rm(join(this.options.dataDir, "version-worktrees", projectId), { recursive: true, force: true }),
+      rm(join(this.options.dataDir, "version-evidence", projectId), { recursive: true, force: true }),
       rm(join(this.options.dataDir, "projects", projectId), { recursive: true, force: true }),
       ...runIds.flatMap((runId) => [
         rm(join(this.options.dataDir, ".runs", `${runId}.jsonl`), { recursive: true, force: true }),

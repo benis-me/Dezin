@@ -65,6 +65,7 @@ export interface MessageForkResult {
   conversationId: string;
   variantId: string;
   variants: Variant[];
+  assetsRestored?: boolean;
 }
 
 export interface Message {
@@ -215,6 +216,9 @@ export interface ResearchSourceItem {
 /** The .research/ deliverables for the Research tab. `exists:false` → hide the tab. */
 export interface ResearchDetail {
   exists: boolean;
+  /** Full Research evidence/directions validation; partial artifacts may still exist when false. */
+  complete?: boolean;
+  issues?: Array<{ area: "product" | "visual" | "directions"; code: string; message: string; path?: string }>;
   report?: string;
   sources?: ResearchSourceItem[];
   directions?: Array<{ slug: string; title: string; markdown: string }>;
@@ -591,6 +595,14 @@ export interface RunSummary {
 }
 
 export type VersionDiffLine = { t: "ctx" | "add" | "del"; text: string };
+export interface VersionRestoreResult {
+  ok: boolean;
+  commitHash?: string;
+  runId?: string;
+  historyRecorded?: boolean;
+  evidenceCopied?: boolean;
+  assetsRestored?: boolean;
+}
 export interface PreviewLeaseInfo {
   leaseId: string;
   url: string;
@@ -657,7 +669,7 @@ export interface ApiClient {
   getVersionPreview(id: string, runId: string): Promise<VersionPreview>;
   getVersionText(id: string, runId: string): Promise<string>;
   getVersionDiff(id: string, runId: string): Promise<VersionDiffLine[]>;
-  restoreVersion(id: string, runId: string): Promise<void>;
+  restoreVersion(id: string, runId: string): Promise<VersionRestoreResult>;
   setVersionCover(id: string, runId: string): Promise<{ captured: boolean }>;
   uploadRef(id: string, name: string, contentBase64: string): Promise<{ name: string; path: string }>;
   /** Parse a Figma .fig file into an agent-ready design summary. */
@@ -901,14 +913,14 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     versionPreviewUrl: (id, runId) => `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`,
     getVersionPreview: (id, runId) => json<VersionPreview>(`/api/projects/${enc(id)}/versions/${enc(runId)}/preview-url`),
     getVersionText: async (id, runId) => {
-      const url = `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`;
+      const url = `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}/source`;
       const init = initWithDaemonToken();
       const res = init ? await f(url, init) : await f(url);
       if (!res.ok) throw new ApiError(res.status, await safeText(res));
       return res.text();
     },
     getVersionDiff: (id, runId) => json<VersionDiffLine[]>(`/api/projects/${enc(id)}/versions/${enc(runId)}/diff`),
-    restoreVersion: (id, runId) => json<void>(`/api/projects/${enc(id)}/versions/${enc(runId)}/restore`, { method: "POST" }),
+    restoreVersion: (id, runId) => json<VersionRestoreResult>(`/api/projects/${enc(id)}/versions/${enc(runId)}/restore`, { method: "POST" }),
     setVersionCover: (id, runId) => json<{ captured: boolean }>(`/api/projects/${enc(id)}/versions/${enc(runId)}/cover`, { method: "POST" }),
     uploadRef: (id, name, contentBase64) =>
       json<{ name: string; path: string }>(`/api/projects/${enc(id)}/refs`, {

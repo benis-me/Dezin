@@ -33,6 +33,8 @@ export interface ResearchActivityItem {
 export interface ResearchCardData {
   status: "running" | "done";
   activities: ResearchActivityItem[];
+  /** Explicit bundle validation result. Absent on legacy cards. */
+  complete?: boolean;
   report?: boolean;
   sources?: number;
   assets?: number;
@@ -120,9 +122,15 @@ export function ResearchCard({
    *  Submit button commits the pick (nothing runs until Submit). */
   onPick?: (slug: string) => void;
 }) {
-  const { status, activities, report, sources = 0, assets = 0, directions = [], error, visual } = research;
+  const { status, activities, complete, report, sources = 0, assets = 0, directions = [], error, visual } = research;
   const showVisual = !!visual && (visual.produced || visual.assets > 0 || visual.sources > 0);
   const running = status === "running";
+  const completionLabel = running ? "researching" : complete === false ? "incomplete" : report ? "grounded" : "no report";
+  const completionDetail = running
+    ? "Studying competitors, audience & references"
+    : complete === false
+      ? "Required evidence is missing"
+      : "Discovery complete";
   const recent = activities.slice(-14);
   const hasTracks = activities.some((a) => !!a.track);
   const [selected, setSelected] = useState<string | null>(null);
@@ -169,10 +177,10 @@ export function ResearchCard({
               {/* Run status as plain text after the title, separated by "·" — no tag. */}
               <span data-testid="research-status" className="inline-flex items-center gap-1 font-medium text-muted-foreground">
                 <span aria-hidden>·</span>
-                {running ? "researching" : report ? "grounded" : "no report"}
+                {completionLabel}
               </span>
             </div>
-            <div className="truncate text-[11px] text-muted-foreground">{running ? "Studying competitors, audience & references" : "Discovery complete"}</div>
+            <div className="truncate text-[11px] text-muted-foreground">{completionDetail}</div>
           </div>
         </div>
         {/* Far end: a right arrow signalling the card opens the Research tab. */}
@@ -307,9 +315,27 @@ export function ResearchPanel({
   const visualReportMd = visualAssetUrl
     ? (visual?.report ?? "").replace(/(!\[[^\]]*\]\()(?:\.\/)?(assets\/[^)\s]+)(\))/g, (_m, pre, path, post) => `${pre}${visualAssetUrl(path)}${post}`)
     : (visual?.report ?? "");
+  const validationIssues = research.issues ?? [];
+  const incomplete = research.complete === false || validationIssues.length > 0;
   return (
     <div className="h-full overflow-auto bg-surface">
       <div className="mx-auto max-w-3xl space-y-6 p-4">
+        {incomplete ? (
+          <section data-testid="research-incomplete" role="status" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4">
+            <h3 className="text-sm font-semibold text-foreground">Research incomplete</h3>
+            <p className="mt-1 text-xs text-muted-foreground">Existing artifacts remain visible, but this evidence bundle is not ready to ground a build.</p>
+            {validationIssues.length ? (
+              <ul className="mt-3 space-y-2">
+                {validationIssues.map((issue, index) => (
+                  <li key={`${issue.area}:${issue.code}:${issue.path ?? index}`} className="flex items-start gap-2 text-xs text-foreground">
+                    <span className="mt-0.5 shrink-0 rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium uppercase text-destructive">{issue.area}</span>
+                    <span>{issue.message}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </section>
+        ) : null}
         {hasVisual ? (
           <Tabs
             aria-label="Research track"
@@ -365,10 +391,14 @@ export function ResearchPanel({
                       <span
                         className={cn(
                           "ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                          s.reached === false ? "bg-destructive/10 text-destructive" : "bg-primary/10 text-primary",
+                          s.reached === true
+                            ? "bg-primary/10 text-primary"
+                            : s.reached === false
+                              ? "bg-destructive/10 text-destructive"
+                              : "bg-surface-2 text-muted-foreground",
                         )}
                       >
-                        {s.reached === false ? "blocked" : "reached"}
+                        {s.reached === true ? "reached" : s.reached === false ? "blocked" : "unverified"}
                       </span>
                     </li>
                   ))}

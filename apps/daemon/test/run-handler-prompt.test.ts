@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { standardRepairableDefects, standardRepairPolicy, standardRepairPrompt, standardRunPassed } from "../src/run-policy.ts";
+import { shouldAutoRepair, standardRepairableDefects, standardRepairPolicy, standardRepairPrompt, standardRunPassed } from "../src/run-policy.ts";
 import type { QualityFinding } from "../../../packages/core/src/index.ts";
 import type { Settings } from "../../../packages/core/src/index.ts";
 
@@ -59,7 +59,46 @@ test("standardRunPassed treats every unresolved Sharingan finding as not passed"
   assert.equal(standardRunPassed([{ severity: "P2", id: "visual-reviewed", message: "reviewed", fix: "" }], true), true);
 });
 
-test("standardRepairableDefects sends every Sharingan finding except the review marker into auto-repair", () => {
+test("standardRunPassed does not report a normal design as passed while an objective P1 defect remains", () => {
+  const defects: QualityFinding[] = [
+    {
+      severity: "P1",
+      id: "visual-horizontal-overflow",
+      message: "Desktop viewport has horizontal overflow.",
+      fix: "Constrain the widest element to the viewport.",
+    },
+  ];
+
+  assert.equal(standardRunPassed(defects, false), false);
+  assert.equal(standardRunPassed([{ severity: "P2", id: "visual-improve-1", message: "Tighten hierarchy.", fix: "Adjust type scale." }], false), true);
+  assert.equal(standardRunPassed([{ severity: "P2", id: "visual-reviewed", message: "Reviewed.", fix: "" }], false), true);
+});
+
+test("quality infrastructure failures block acceptance without sending the builder into a repair loop", () => {
+  const infra: QualityFinding[] = [
+    { severity: "P1", id: "visual-review-unassessed", message: "critic malformed twice", fix: "rerun QA" },
+    { severity: "P1", id: "visual-devserver-unavailable", message: "preview unavailable", fix: "repair preview infra" },
+    { severity: "P0", id: "visual-source-evidence-missing", message: "capture missing", fix: "recapture source" },
+  ];
+  const settings = { autoImproveEnabled: true, autoImproveMaxRounds: 3 } as Settings;
+
+  assert.equal(standardRunPassed(infra, false), false);
+  assert.equal(standardRunPassed(infra, true), false);
+  assert.equal(
+    standardRunPassed([{ ...infra[0]!, severity: "P2" }], false),
+    false,
+    "legacy persisted infrastructure findings remain blocking even if their old severity was advisory",
+  );
+  assert.deepEqual(standardRepairableDefects(infra, false), []);
+  assert.deepEqual(standardRepairableDefects(infra, true), []);
+  assert.equal(shouldAutoRepair(settings, infra, 0, 3), false);
+  assert.equal(
+    shouldAutoRepair(settings, [{ severity: "P1", id: "visual-text-clipped", message: "clipped", fix: "allow wrapping" }], 0, 3),
+    true,
+  );
+});
+
+test("standardRepairableDefects sends artifact defects, but not review markers, into auto-repair", () => {
   const findings: QualityFinding[] = [
     { severity: "P1", id: "visual-below-fold-strip", message: "mobile strip", fix: "fix layout" },
     { severity: "P1", id: "visual-text-clipped", message: "clipped title", fix: "fix text box" },

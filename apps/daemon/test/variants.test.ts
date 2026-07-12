@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -11,7 +11,11 @@ import { FakeRunner, abortError } from "../../../packages/agent/src/index.ts";
 import type { AgentRunner, AgentTurnInput } from "../../../packages/agent/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 import { removeStandardVariantWorktree, standardVersionArtifactDir, standardWorktreeDir } from "../src/variant-workspaces.ts";
-import { standardRunBranchName, standardRunWorktreeDir } from "../src/standard-run-transaction.ts";
+import {
+  standardRunBranchName,
+  standardRunWorktreeDir,
+  withStandardSourceMutationLock,
+} from "../src/standard-run-transaction.ts";
 
 interface Ctx {
   base: string;
@@ -353,6 +357,75 @@ test("variant deletion unregisters a real Git version worktree before removing i
   store.close();
 });
 
+test("Standard version worktrees are bounded without evicting a leased preview", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-version-worktree-lru-"));
+  const store = new Store(":memory:");
+  try {
+    const project = store.createProject({ name: "Version LRU", mode: "standard" });
+    const root = initStandardProject(dataDir, project.id);
+    const variant = store.ensureMainVariant(project.id);
+    const conversation = store.createConversation(project.id);
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    const runs = Array.from({ length: 10 }, () => store.createRun(project.id, conversation.id, variant.id));
+    const leasedRunId = runs[0]!.id;
+    const stopped: string[] = [];
+    const previewLeaseManager: NonNullable<AppDeps["previewLeaseManager"]> = {
+      acquire: async () => { throw new Error("not used"); },
+      renew: async () => null,
+      release: async () => false,
+      stopScope: async (scope) => { if (scope.runId) stopped.push(scope.runId); },
+      stopAll: async () => {},
+      activeCount: () => 1,
+      hasActiveLease: (scope) => scope.runId === leasedRunId,
+    };
+    const deps = { store, dataDir, previewLeaseManager } as AppDeps;
+
+    for (const run of runs) {
+      await standardVersionArtifactDir(deps, project.id, run.id, commit);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+
+    const versionRoot = join(dataDir, "version-worktrees", project.id);
+    const remaining = readdirSync(versionRoot).filter((name) => existsSync(join(versionRoot, name, ".git")));
+    assert.equal(remaining.length, 8);
+    assert.ok(remaining.includes(leasedRunId), "a live compare/view lease protects its historical worktree");
+    assert.equal(stopped.length, 2);
+  } finally {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Standard version worktree creation bypasses checkout hooks and clears ignored residue", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-version-worktree-exact-"));
+  const store = new Store(":memory:");
+  try {
+    const project = store.createProject({ name: "Exact historical worktree", mode: "standard" });
+    const root = initStandardProject(dataDir, project.id);
+    writeFileSync(join(root, ".gitignore"), ".env\n");
+    commitAll(root, "ignore local env");
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    const hook = join(root, ".git", "hooks", "post-checkout");
+    writeFileSync(hook, "#!/bin/sh\nprintf HOOKED > src/App.jsx\n", { mode: 0o755 });
+    const conversation = store.createConversation(project.id);
+    const run = store.createRun(project.id, conversation.id, store.ensureMainVariant(project.id).id);
+    const deps = { store, dataDir } as AppDeps;
+
+    const dir = await standardVersionArtifactDir(deps, project.id, run.id, commit);
+    assert.doesNotMatch(readFileSync(join(dir, "src", "App.jsx"), "utf8"), /HOOKED/);
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" }), "");
+    writeFileSync(join(dir, ".env"), "POISONED HISTORICAL PREVIEW");
+
+    await standardVersionArtifactDir(deps, project.id, run.id, commit);
+
+    assert.equal(existsSync(join(dir, ".env")), false);
+    assert.equal(execFileSync("git", ["status", "--porcelain", "--ignored"], { cwd: dir, encoding: "utf8" }).includes(".env"), false);
+  } finally {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("Standard variant cleanup prunes stale worktree metadata and retries branch deletion", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-stale-variant-worktree-delete-"));
   const store = new Store(":memory:");
@@ -403,14 +476,14 @@ async function runProject(base: string, body: Record<string, unknown>): Promise<
   return parseSse(await res.text());
 }
 
-async function forkMessage(base: string, projectId: string, messageId: string, name = "Forked here"): Promise<{ conversationId: string; variantId: string }> {
+async function forkMessage(base: string, projectId: string, messageId: string, name = "Forked here"): Promise<{ conversationId: string; variantId: string; assetsRestored?: boolean }> {
   const res = await fetch(`${base}/api/projects/${projectId}/messages/${messageId}/fork`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name }),
   });
   assert.equal(res.status, 200);
-  return (await res.json()) as { conversationId: string; variantId: string };
+  return (await res.json()) as { conversationId: string; variantId: string; assetsRestored?: boolean };
 }
 
 async function assertPrototypeMessageForkDeletionRace(
@@ -495,16 +568,20 @@ test("Prototype message fork restores root when target deletion aborts after ove
   await assertPrototypeMessageForkDeletionRace("after-root-overwrite");
 });
 
-test("prototype branch can fork from a specific assistant message snapshot", async () => {
-  const firstHtml = "<main><h1>First snapshot</h1><p>Keep this version.</p></main>";
-  const secondHtml = "<main><h1>Second snapshot</h1><p>Do not fork this one.</p></main>";
+test("prototype branch can fork from a specific assistant message and asset snapshot", async () => {
+  const firstHtml = "<main><h1>First snapshot</h1><img src=\"assets/hero.png\"><p>Keep this version.</p></main>";
+  const secondHtml = "<main><h1>Second snapshot</h1><img src=\"assets/hero.png\"><p>Do not fork this one.</p></main>";
   const runner = new FakeRunner({ artifacts: [firstHtml, secondHtml], texts: ["first answer", "second answer"] });
 
   await withServer(
-    async ({ base, store }) => {
+    async ({ base, dataDir, store }) => {
       const project = store.createProject({ name: "Proto" });
+      const asset = join(dataDir, "projects", project.id, "assets", "hero.png");
+      mkdirSync(join(asset, ".."), { recursive: true });
+      writeFileSync(asset, "first asset bytes");
       const firstEvents = await runProject(base, { projectId: project.id, brief: "first" });
       const conversationId = firstEvents.find((e) => e.type === "run-start")!.conversationId as string;
+      writeFileSync(asset, "second asset bytes");
       await runProject(base, { projectId: project.id, conversationId, brief: "second" });
 
       const firstAssistant = store.listMessages(conversationId).filter((m) => m.role === "assistant")[0]!;
@@ -512,12 +589,41 @@ test("prototype branch can fork from a specific assistant message snapshot", asy
 
       const active = store.listVariants(project.id).find((v) => v.active);
       assert.equal(active?.id, fork.variantId);
+      assert.equal(fork.assetsRestored, true);
       const preview = await fetch(`${base}/projects/${project.id}/preview/`);
       assert.match(await preview.text(), /First snapshot/);
+      assert.equal(readFileSync(asset, "utf8"), "first asset bytes");
 
       const forkedTranscript = store.listMessages(fork.conversationId).map((m) => m.content);
       assert.ok(forkedTranscript.includes("first answer"));
       assert.ok(!forkedTranscript.includes("second"));
+    },
+    { runner, visualQa: async () => [] },
+  );
+});
+
+test("prototype message fork rejects a legacy snapshot without captured assets", async () => {
+  const runner = new FakeRunner({ artifacts: ["<main>Legacy snapshot</main>"], texts: ["legacy answer"] });
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Legacy fork" });
+      const events = await runProject(base, { projectId: project.id, brief: "legacy" });
+      const conversationId = events.find((event) => event.type === "run-start")!.conversationId as string;
+      const run = store.listRuns(project.id)[0]!;
+      const assistant = store.listMessages(conversationId).find((message) => message.role === "assistant")!;
+      rmSync(join(dataDir, "projects", project.id, ".versions", `${run.id}.files`), { recursive: true, force: true });
+      const before = readFileSync(join(dataDir, "projects", project.id, "index.html"), "utf8");
+
+      const response = await fetch(`${base}/api/projects/${project.id}/messages/${assistant.id}/fork`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "Unsafe legacy fork" }),
+      });
+
+      assert.equal(response.status, 409);
+      assert.match(await response.text(), /no captured local asset bundle/);
+      assert.equal(readFileSync(join(dataDir, "projects", project.id, "index.html"), "utf8"), before);
+      assert.equal(store.listVariants(project.id).length, 1);
     },
     { runner, visualQa: async () => [] },
   );
@@ -851,6 +957,92 @@ test("prototype variants keep root snapshot switching behavior", async () => {
     assert.match(await inactivePreview.text(), /Variant prototype/);
     assert.ok(existsSync(join(root, ".variants", variant.id, "index.html")), "prototype keeps inactive snapshots");
   });
+});
+
+test("Prototype variant creation waits for shared-root mutations before taking its branch snapshot", async () => {
+  const snapshotReached = deferred();
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Serialized create", mode: "prototype" });
+      const root = join(dataDir, "projects", project.id);
+      mkdirSync(root, { recursive: true });
+      writeFileSync(join(root, "index.html"), "<main>Stable root</main>");
+      store.ensureMainVariant(project.id);
+      const mutationEntered = deferred();
+      const releaseMutation = deferred();
+      const heldMutation = withStandardSourceMutationLock(`prototype:${project.id}`, async () => {
+        mutationEntered.resolve();
+        await releaseMutation.promise;
+      });
+      await mutationEntered.promise;
+
+      const creating = fetch(`${base}/api/projects/${project.id}/variants`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "After mutation" }),
+      });
+      const whileRootIsOwned = await Promise.race([
+        snapshotReached.promise.then(() => "snapshot-reached" as const),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 50)),
+      ]);
+      releaseMutation.resolve();
+      const response = await creating;
+      await heldMutation;
+
+      assert.equal(whileRootIsOwned, "blocked", "Create cannot snapshot a root owned by Restore, Activate, Run, or Fork");
+      assert.equal(response.status, 200);
+    },
+    {
+      variantMutationCheckpoint: async (_projectId, _variantId, phase) => {
+        if (phase === "created") snapshotReached.resolve();
+      },
+    },
+  );
+});
+
+test("Prototype variant fan-out waits for shared-root mutations before seeding every branch", async () => {
+  const firstSnapshotReached = deferred();
+  await withServer(
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Serialized fanout", mode: "prototype" });
+      const root = join(dataDir, "projects", project.id);
+      mkdirSync(root, { recursive: true });
+      writeFileSync(join(root, "index.html"), "<main>Stable fanout source</main>");
+      store.ensureMainVariant(project.id);
+      const mutationEntered = deferred();
+      const releaseMutation = deferred();
+      const heldMutation = withStandardSourceMutationLock(`prototype:${project.id}`, async () => {
+        mutationEntered.resolve();
+        await releaseMutation.promise;
+      });
+      await mutationEntered.promise;
+
+      const fanningOut = fetch(`${base}/api/projects/${project.id}/variants/fanout`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ count: 2 }),
+      });
+      const whileRootIsOwned = await Promise.race([
+        firstSnapshotReached.promise.then(() => "snapshot-reached" as const),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 50)),
+      ]);
+      releaseMutation.resolve();
+      const response = await fanningOut;
+      const body = (await response.json()) as { created: string[] };
+      await heldMutation;
+
+      assert.equal(whileRootIsOwned, "blocked", "Fan-out cannot read a root while another project mutation owns it");
+      assert.equal(response.status, 200);
+      for (const variantId of body.created) {
+        assert.match(readFileSync(join(root, ".variants", variantId, "index.html"), "utf8"), /Stable fanout source/);
+      }
+    },
+    {
+      variantMutationCheckpoint: async (_projectId, _variantId, phase) => {
+        if (phase === "created") firstSnapshotReached.resolve();
+      },
+    },
+  );
 });
 
 test("variant fan-out forks N seeded variations without stealing the active variant", async () => {

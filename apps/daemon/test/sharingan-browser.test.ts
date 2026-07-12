@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { SharinganSession, sharinganLaunchOptions, applyStealth } from "../src/sharingan-browser.ts";
 import { findChrome } from "../src/capture-cover.ts";
+import { captureFullPageScreenshot } from "../src/full-page-capture.ts";
 
 const FIXTURE = `<!doctype html><html><head><style>:root{--x:0}body{font-family:Inter,sans-serif;color:#111}h1{font-size:40px}.btn{background:#2563eb;border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.1)}</style></head>
 <body><h1>Acme</h1><p>Real copy that describes the product in a sentence or two.</p><a class="btn" href="/pricing">Pricing</a><a href="https://external.example/x">Ext</a></body></html>`;
@@ -39,6 +40,43 @@ test("SharinganSession captures screenshot, DOM, style tokens, and same-origin l
     await s.close();
     await fx.close();
   }
+});
+
+test("SharinganSession full-page capture expands a dominant inner scroller and restores it", { skip: !findChrome() && "no Chrome" }, async () => {
+  const fx = await fixtureServer(`<!doctype html><html><head><style>
+    html,body{width:100%;height:100%;margin:0;overflow:hidden}
+    #app{height:100%;overflow:hidden}
+    #feed{height:100%;overflow-y:auto;background:#111;color:#fff}
+    #content{height:1800px;padding:20px;box-sizing:border-box}
+  </style></head><body><div id="app"><main id="feed"><div id="content">Tall inner-scroller content<div style="margin-top:1650px">Bottom marker</div></div></main></div></body></html>`);
+  const dir = mkdtempSync(join(tmpdir(), "shar-inner-scroll-"));
+  const s = await SharinganSession.open(fx.url, { userDataDir: dir, headless: true });
+  try {
+    const shot = await s.screenshot({ fullPage: true });
+    assert.ok(Buffer.from(shot).readUInt32BE(20) >= 1750, "PNG includes the inner scroller's full content height");
+    const after = await s.readRenderMap();
+    assert.ok(after.document.height <= 950, "temporary expansion is restored after the screenshot");
+  } finally {
+    await s.close();
+    await fx.close();
+  }
+});
+
+test("captureFullPageScreenshot attempts restoration when screenshot capture fails", async () => {
+  const calls: string[] = [];
+  const page = {
+    evaluate: async () => {
+      calls.push("evaluate");
+      return true;
+    },
+    screenshot: async () => {
+      calls.push("screenshot");
+      throw new Error("capture failed");
+    },
+  };
+
+  await assert.rejects(captureFullPageScreenshot(page as any), /capture failed/);
+  assert.deepEqual(calls, ["evaluate", "screenshot", "evaluate"]);
 });
 
 test("sharinganLaunchOptions strips the automation tells", () => {

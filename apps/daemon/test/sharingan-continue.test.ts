@@ -61,6 +61,34 @@ test("continueCapture resumes only from a login pause; focus raises the browser"
   assert.equal(s2.json.phase, "captured", "continue re-runs the capture on the authenticated session");
 });
 
+test("continueCapture preserves a cross-origin OAuth authorize login wall and resumes the original source", async () => {
+  const id = `oauth-continue-${Date.now()}`;
+  const dataDir = mkdtempSync(join(tmpdir(), "shar-oauth-cont-"));
+  const requestedUrl = "https://app.x.test/workspace";
+  let navigations = 0;
+  const { session } = makeFake({
+    navigate: async () => navigations++ === 0
+      ? { status: 200, finalUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=abc" }
+      : { status: 200, finalUrl: requestedUrl },
+    readDom: async () => navigations === 1
+      ? [
+          { tag: "h1", classes: "", text: "Sign in", box: { x: 0, y: 0, w: 10, h: 10 } },
+          { tag: "button", classes: "", text: "Next", box: { x: 0, y: 0, w: 10, h: 10 } },
+          { tag: "p", classes: "", text: "Use your work account to continue securely. ".repeat(12), box: { x: 0, y: 0, w: 10, h: 10 } },
+        ]
+      : [{ tag: "h1", classes: "", text: "Workspace", box: { x: 0, y: 0, w: 10, h: 10 } }],
+  });
+
+  await startCapture(id, requestedUrl, dataDir, "/tmp/unused", async () => session);
+  const paused = await callHandler((res) => handleSharinganStatus(res, id, dataDir));
+  assert.equal(paused.json.phase, "login-required");
+
+  await continueCapture(id, dataDir);
+  const complete = await callHandler((res) => handleSharinganStatus(res, id, dataDir));
+  assert.equal(complete.json.phase, "captured");
+  await releaseSharinganProject(id);
+});
+
 test("project release closes an established session exactly once when continue concurrently fails", async () => {
   let navigations = 0;
   let continuationEntered!: () => void;

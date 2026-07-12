@@ -33,7 +33,7 @@ import {
   handleRenameVariant,
   handleDeleteVariant,
 } from "./variants-handler.ts";
-import { handleGetVersion, handleGetVersionPreviewUrl, handleGetVersionDiff, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
+import { handleGetVersion, handleGetVersionFile, handleGetVersionPreviewUrl, handleGetVersionDiff, handleGetVersionSource, handleRestoreVersion, handleSetVersionCover } from "./versions-handler.ts";
 import { handleUploadRef } from "./refs-handler.ts";
 import {
   setupStandardProject,
@@ -904,6 +904,19 @@ const routes: Route[] = [
     },
   },
   {
+    // Immutable, run-scoped Visual QA evidence. The run ownership check prevents a valid
+    // project id from being combined with another project's run id; serveFileFromBase keeps
+    // evidence outside generated Git repositories and rejects filename traversal.
+    method: "GET",
+    pattern: "/api/projects/:id/runs/:runId/evidence/*rest",
+    publicRead: true,
+    handler: (_req, res, { id, runId, rest }, deps) => {
+      const run = deps.store.getRun(runId!);
+      if (!deps.store.getProject(id!) || !run || run.projectId !== id) return sendError(res, 404, "run evidence not found");
+      return serveFileFromBase(res, join(deps.dataDir, "version-evidence", id!, runId!, "visual"), rest ?? "");
+    },
+  },
+  {
     method: "GET",
     pattern: "/api/projects/:id/quality-ignores",
     handler: (_req, res, params, deps) => {
@@ -1007,6 +1020,31 @@ const routes: Route[] = [
   },
   {
     method: "GET",
+    pattern: "/api/projects/:id/versions/:runId/files/*rest",
+    publicRead: true,
+    handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      {
+        projectId: params.id!,
+        variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
+        runId: params.runId!,
+      },
+      () => handleGetVersionFile(res, params, deps),
+    ),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/versions/:runId/source",
+    handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      {
+        projectId: params.id!,
+        variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
+        runId: params.runId!,
+      },
+      () => handleGetVersionSource(res, params, deps),
+    ),
+  },
+  {
+    method: "GET",
     pattern: "/api/projects/:id/versions/:runId",
     publicRead: true,
     handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
@@ -1057,13 +1095,13 @@ const routes: Route[] = [
   {
     method: "POST",
     pattern: "/api/projects/:id/versions/:runId/cover",
-    handler: (_req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
       {
         projectId: params.id!,
         variantId: deps.store.getRun(params.runId!)?.variantId ?? undefined,
         runId: params.runId!,
       },
-      (signal) => handleSetVersionCover(res, params, deps, signal),
+      (signal) => handleSetVersionCover(req, res, params, deps, signal),
     ),
   },
   {

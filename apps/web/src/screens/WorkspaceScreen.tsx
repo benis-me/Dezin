@@ -26,7 +26,7 @@ import {
   TooltipProvider,
   type TabItem,
 } from "../components/ui/index.ts";
-import { diffLines, diffStat, type DiffLine } from "../lib/diff.ts";
+import { diffStat, type DiffLine } from "../lib/diff.ts";
 import { composeVariationBrief } from "../lib/variation-brief.ts";
 import { PreviewModal } from "../components/PreviewModal.tsx";
 import { AttachMenu } from "../components/AttachMenu.tsx";
@@ -275,7 +275,14 @@ function isVisualFinding(finding: QualityFinding): boolean {
 }
 
 function isAgentVisualFinding(finding: QualityFinding): boolean {
-  return finding.id.startsWith("visual-ai-review-") || finding.id === "visual-agent-review-failed" || finding.id === "visual-screenshot-missing";
+  return (
+    finding.id.startsWith("visual-ai-review-") ||
+    finding.id.startsWith("visual-improve-") ||
+    finding.id.startsWith("visual-contract-drift-") ||
+    finding.id === "visual-review-unassessed" ||
+    finding.id === "visual-agent-review-failed" ||
+    finding.id === "visual-screenshot-missing"
+  );
 }
 
 /** Internal "the critic ran" marker — carries the review summary/screenshot, but is not itself an
@@ -297,6 +304,10 @@ function isVisualFailureFinding(finding: QualityFinding): boolean {
     "visual-screenshot-missing",
     "visual-agent-review-failed",
     "visual-artifact-missing",
+    "visual-review-unassessed",
+    "visual-source-evidence-missing",
+    "visual-source-evidence-invalid",
+    "visual-generated-evidence-invalid",
   ].includes(finding.id);
 }
 
@@ -305,7 +316,15 @@ function reviewerLabel(input: { agentCommand?: string; model?: string }): string
 }
 
 function firstVisualReviewFinding(findings: QualityFinding[]): QualityFinding | undefined {
-  return findings.find((finding) => isAgentVisualFinding(finding) && (finding.screenshotUrl || finding.screenshotPath || finding.reviewSummary));
+  return findings.find(
+    (finding) =>
+      (isAgentVisualFinding(finding) || isVisualReviewMarker(finding)) &&
+      (finding.screenshotUrl || finding.screenshotPath || finding.reviewSummary),
+  );
+}
+
+function visualReviewIssueFindings(findings: QualityFinding[]): QualityFinding[] {
+  return findings.filter((finding) => !isVisualReviewMarker(finding));
 }
 
 function visualReviewFindingSummary(findings: QualityFinding[]): string | undefined {
@@ -323,7 +342,8 @@ function visualReviewScreenshotPath(findings: QualityFinding[]): string | undefi
 function visualReviewStatusText(review: VisualReviewState): string {
   if (review.status === "running") return "Running";
   if (review.enabled === false) return "Skipped";
-  if (review.findings.length > 0) return `${review.findings.length} issue${review.findings.length === 1 ? "" : "s"}`;
+  const issues = visualReviewIssueFindings(review.findings);
+  if (issues.length > 0) return `${issues.length} issue${issues.length === 1 ? "" : "s"}`;
   return "Clean";
 }
 
@@ -333,7 +353,8 @@ function visualReviewResultText(review: VisualReviewState): string {
   if (review.summary) return review.summary;
   const findingSummary = visualReviewFindingSummary(review.findings);
   if (findingSummary) return findingSummary;
-  if (review.findings.length > 0) return `${review.findings.length} screenshot issue${review.findings.length === 1 ? "" : "s"} reported.`;
+  const issues = visualReviewIssueFindings(review.findings);
+  if (issues.length > 0) return `${issues.length} screenshot issue${issues.length === 1 ? "" : "s"} reported.`;
   return "Screenshot review completed with no visible layout issues reported.";
 }
 
@@ -416,6 +437,7 @@ function buildQualityLanes(input: {
   const visualFindings = input.findings.filter(isVisualFinding); // includes the "reviewed" marker → visual QA counts as having run
   const geometryFindings = visualFindings.filter((finding) => !isAgentVisualFinding(finding) && !isVisualReviewMarker(finding));
   const agentFindings = visualFindings.filter(isAgentVisualFinding);
+  const agentReviewFindings = visualFindings.filter((finding) => isAgentVisualFinding(finding) || isVisualReviewMarker(finding));
   const activeGeometryFindings = geometryFindings.filter((finding) => !isResolvedVisualReviewFinding(finding));
   const activeAgentFindings = agentFindings.filter((finding) => !isResolvedVisualReviewFinding(finding));
   const staticRan = input.checks.staticRan || input.score !== null || staticFindings.length > 0;
@@ -458,7 +480,7 @@ function buildQualityLanes(input: {
         failure: activeAgentFindings.some(isVisualFailureFinding),
       }),
       findings: activeAgentFindings,
-      reviewFindings: agentFindings,
+      reviewFindings: agentReviewFindings,
     },
   ];
 }
@@ -601,6 +623,7 @@ function toMsg(m: Message, id: number): Msg {
           research: {
             status: r.status === "running" ? "running" : "done",
             activities: parseResearchActivities(r.activities),
+            complete: typeof r.complete === "boolean" ? r.complete : undefined,
             report: r.report === true,
             sources: typeof r.sources === "number" ? r.sources : 0,
             assets: typeof r.assets === "number" ? r.assets : 0,
@@ -910,6 +933,7 @@ function FilesPanel({
   activeFile,
   fileText,
   running,
+  emptyMessage,
   onOpen,
   imageUrlFor,
 }: {
@@ -917,12 +941,13 @@ function FilesPanel({
   activeFile: string | null;
   fileText: string;
   running: boolean;
+  emptyMessage?: string;
   onOpen: (path: string) => void;
   imageUrlFor: (path: string) => string;
 }) {
   const browserPercent = readPanelPercent(FILES_SPLIT_KEY, 38, 22, 58);
 
-  if (files.length === 0) return emptyPane(running ? "Generating…" : "No files yet. Run to generate.");
+  if (files.length === 0) return emptyPane(running ? "Generating…" : emptyMessage ?? "No files yet. Run to generate.");
   return (
     <Group
       id="dezin-files-layout"
@@ -1051,6 +1076,7 @@ function VisualReviewRecord({
 }) {
   const [open, setOpen] = useState(false);
   const status = visualReviewStatusText(review);
+  const issueFindings = visualReviewIssueFindings(review.findings);
   const reviewer = reviewerLabel(review);
   const processItems = review.process.length
     ? review.process
@@ -1074,7 +1100,7 @@ function VisualReviewRecord({
             "shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium",
             review.status === "running"
               ? "border-accent/25 bg-accent/10 text-accent-foreground"
-              : review.findings.length > 0
+              : issueFindings.length > 0
                 ? "border-border-strong bg-surface-2 text-foreground"
                 : "border-success/25 bg-success/10 text-success",
           )}
@@ -1082,9 +1108,9 @@ function VisualReviewRecord({
           {status}
         </span>
       </div>
-      {review.findings.length > 0 ? (
+      {issueFindings.length > 0 ? (
         <ul className="space-y-1.5 border-t border-border px-3 py-2">
-          {review.findings.map((finding, index) => (
+          {issueFindings.map((finding, index) => (
             <li key={`${finding.id}-${index}`} className="rounded-md bg-surface px-2 py-1.5 text-xs leading-snug text-foreground-2">
               {finding.message}
             </li>
@@ -1280,10 +1306,10 @@ function ResultCard({
           <div className="flex shrink-0 items-center gap-2">
             {meta?.designReviewed === false && !stopped ? (
               <span
-                title="The automated design review could not render this project — only the anti-slop checks ran, so design quality was not assessed."
+                title="The automated design review was not fully assessed. See Quality for the exact review failure before treating the design as approved."
                 className="rounded-md border border-border bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
               >
-                design review skipped
+                design review incomplete
               </span>
             ) : null}
             {meta?.unresolved && !stopped ? (
@@ -1295,7 +1321,7 @@ function ResultCard({
               </span>
             ) : null}
             {typeof score === "number" ? (
-              <span className="tnum rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">{score}/100</span>
+              <span title="Objective quality-gate score" className="tnum rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-foreground-2">{score}/100 gate</span>
             ) : null}
             {runId && onFeedback && !stopped ? <FeedbackButtons onFeedback={(v) => onFeedback(runId, v)} /> : null}
             <button
@@ -1457,6 +1483,23 @@ function AgentVisualReviewSummary({ findings }: { findings: QualityFinding[] }) 
   );
 }
 
+function ResolvedQualityHistory({ findings }: { findings: QualityFinding[] }) {
+  const resolved = findings.filter(isResolvedVisualReviewFinding);
+  if (!resolved.length) return null;
+  return (
+    <div className="border-t border-border px-3 py-2.5">
+      <div className="label-mono text-muted-foreground">Resolved in this run</div>
+      <ul className="mt-1.5 space-y-1">
+        {resolved.map((finding, index) => (
+          <li key={`${finding.id}-${index}`} className="rounded-md bg-surface px-2 py-1.5 text-xs leading-snug text-foreground-2">
+            {finding.message}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function VersionHistoryPopover({
   groups,
   currentRun,
@@ -1524,6 +1567,7 @@ function VersionHistoryPopover({
                       const isCurrent = currentRun?.id === run.id;
                       const isSelected = selectedRunId === run.id;
                       const statusLabel = versionStatusLabel(run.status);
+                      const assetsIncomplete = normalizeFindings(run.findings).some((finding) => finding.id === "version-assets-unavailable");
                       const actionsDisabled = disabled || run.status !== "succeeded";
                       return (
                         <li
@@ -1551,6 +1595,14 @@ function VersionHistoryPopover({
                             {statusLabel ? (
                               <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                                 {statusLabel}
+                              </span>
+                            ) : null}
+                            {assetsIncomplete ? (
+                              <span
+                                title="This legacy version has no captured local asset bundle."
+                                className="shrink-0 rounded-md border border-border-strong bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-foreground"
+                              >
+                                assets incomplete
                               </span>
                             ) : null}
                             {run.score !== null ? (
@@ -2000,13 +2052,18 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [versionFiles, setVersionFiles] = useState<ProjectFile[]>([]);
   const [versionActiveFile, setVersionActiveFile] = useState<string | null>(null);
   const [versionFileText, setVersionFileText] = useState("");
+  const [versionFileLoading, setVersionFileLoading] = useState(false);
+  const [versionFileError, setVersionFileError] = useState<string | null>(null);
   const [lintFindings, setLintFindings] = useState<QualityFinding[]>([]);
   const [ranOnce, setRanOnce] = useState(false);
   const [score, setScore] = useState<number | null>(null);
   const [qualityChecks, setQualityChecks] = useState<QualityCheckState>({ staticRan: false, visualRan: false, visualEnabled: null, source: "none" });
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [variants, setVariants] = useState<Variant[]>([]);
-  const [compare, setCompare] = useState<{ a: { url: string; label: string }; b: { url: string; label: string } } | null>(null);
+  const [compare, setCompare] = useState<{
+    a: { url?: string; label: string; error?: string };
+    b: { url?: string; label: string; error?: string };
+  } | null>(null);
   const { agents, rescan: rescanAgents } = useAgents();
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
   const [settingsModel, setSettingsModel] = useState("");
@@ -2044,6 +2101,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   useEffect(() => () => { abortRef.current?.abort(); }, []);
   const selectionModeRef = useRef<"markup" | "inspect" | null>(null);
   const versionPreviewRequestRef = useRef(0);
+  const versionSourceRequestRef = useRef(0);
+  const versionPreviewTargetRunIdRef = useRef<string | null>(null);
   const comparePreviewRequestRef = useRef(0);
   const mainPreviewRequestRef = useRef(0);
   const mainPreviewLeaseRef = useRef<OwnedPreviewLease | null>(null);
@@ -2097,6 +2156,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     return () => {
       workspaceDisposedRef.current = true;
       versionPreviewRequestRef.current += 1;
+      versionSourceRequestRef.current += 1;
       comparePreviewRequestRef.current += 1;
       mainPreviewRequestRef.current += 1;
       window.clearInterval(renewTimer);
@@ -2200,6 +2260,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const clearVersionPreviewState = (): void => {
     versionPreviewRequestRef.current += 1;
+    versionSourceRequestRef.current += 1;
+    versionPreviewTargetRunIdRef.current = null;
     const lease = versionPreviewLeaseRef.current;
     versionPreviewLeaseRef.current = null;
     releaseOwnedPreviewLease(lease);
@@ -2207,6 +2269,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     setVersionFiles([]);
     setVersionActiveFile(null);
     setVersionFileText("");
+    setVersionFileLoading(false);
+    setVersionFileError(null);
     setPreviewBusy(null);
   };
 
@@ -2282,24 +2346,29 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
    * directly (the iframe loads its URL with allow-same-origin, so JSX is transpiled
    * and there's no CORS — see the sandbox keyed off an absolute src below).
    */
-  const loadDevPreview = async (): Promise<void> => {
+  const loadDevPreview = async (): Promise<boolean> => {
     const requestId = mainPreviewRequestRef.current + 1;
     mainPreviewRequestRef.current = requestId;
     try {
+      let ready = false;
       for (let i = 0; i < 160; i++) {
         const s = await api.getSetup(projectId);
         setSetupPhase(s.phase);
         setSetupError(s.error ?? null);
         setSetupLogs(s.logs ?? []);
-        if (s.phase === "ready") break;
-        if (s.phase === "error") return;
+        if (s.phase === "ready") {
+          ready = true;
+          break;
+        }
+        if (s.phase === "error") return false;
         await new Promise((r) => setTimeout(r, 1500));
       }
+      if (!ready) return false;
       const preview = await api.getDevServerUrl(projectId);
       const acquiredLease = preview.leaseId ? { leaseId: preview.leaseId, expiresAt: preview.expiresAt } : null;
       if (workspaceDisposedRef.current || mainPreviewRequestRef.current !== requestId) {
         releaseOwnedPreviewLease(acquiredLease);
-        return;
+        return false;
       }
       clearVersionPreviewState();
       replaceOwnedPreviewLease(mainPreviewLeaseRef, acquiredLease);
@@ -2310,8 +2379,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         setSetupLogs(s.logs ?? []);
       }).catch(() => {});
       void api.captureProjectCover(projectId).catch(() => {});
+      return true;
     } catch {
       // setup not ready; the user can retry
+      return false;
     }
   };
 
@@ -2329,21 +2400,25 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     return { ...preview, url: cacheBustPreviewUrl(preview.url) };
   };
 
+  const resolveLiveComparisonPreview = async (): Promise<VersionPreview> => {
+    if (modeRef.current === "standard") {
+      const preview = await api.getDevServerUrl(projectId);
+      return { ...preview, mode: "standard", url: cacheBustPreviewUrl(preview.url) };
+    }
+    return { mode: "prototype", url: cacheBustPreviewUrl(api.previewUrl(projectId)) };
+  };
+
   const viewVersion = async (runId: string): Promise<void> => {
     mainPreviewRequestRef.current += 1;
     const requestId = versionPreviewRequestRef.current + 1;
     versionPreviewRequestRef.current = requestId;
-    setPreviewVersionRunId(runId);
-    setVersionFiles([{ path: "index.html", size: 0 }]);
-    setVersionActiveFile("index.html");
-    setVersionFileText("");
+    const previousTargetRunId = versionPreviewTargetRunIdRef.current;
+    versionPreviewTargetRunIdRef.current = runId;
+    const isStandardVersion = modeRef.current === "standard";
     setPreviewBusy({ title: "Loading version preview", detail: "Preparing the saved snapshot and starting its preview server." });
     setTab("Preview");
     try {
-      const [preview, text] = await Promise.all([
-        resolveVersionPreview(runId),
-        api.getVersionText(projectId, runId).catch(() => ""),
-      ]);
+      const preview = await resolveVersionPreview(runId);
       const acquiredLease = preview.leaseId ? { leaseId: preview.leaseId, expiresAt: preview.expiresAt } : null;
       if (workspaceDisposedRef.current || versionPreviewRequestRef.current !== requestId) {
         releaseOwnedPreviewLease(acquiredLease);
@@ -2354,38 +2429,50 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       releaseOwnedPreviewLease(mainLease);
       if (!mainLease?.leaseId && modeRef.current === "standard") void api.releaseDevServer(projectId).catch(() => {});
       replaceOwnedPreviewLease(versionPreviewLeaseRef, acquiredLease);
+      setPreviewVersionRunId(runId);
       setPreviewSrc(preview.url);
-      setVersionFileText(text);
-      setVersionFiles(text ? [{ path: "index.html", size: text.length }] : []);
+      const sourceRequestId = versionSourceRequestRef.current + 1;
+      versionSourceRequestRef.current = sourceRequestId;
+      setVersionFiles([]);
+      setVersionActiveFile(null);
+      setVersionFileText("");
+      setVersionFileLoading(!isStandardVersion);
+      setVersionFileError(null);
       setPreviewBusy(null);
+
+      if (isStandardVersion) return;
+      const source = await api.getVersionText(projectId, runId).then(
+        (text) => ({ ok: true as const, text }),
+        () => ({ ok: false as const }),
+      );
+      if (workspaceDisposedRef.current || versionSourceRequestRef.current !== sourceRequestId) return;
+      setVersionFileLoading(false);
+      if (!source.ok) {
+        setVersionFileError("This saved version's Preview is available, but its source file couldn't be loaded.");
+        return;
+      }
+      setVersionFileText(source.text);
+      setVersionFiles([{ path: "index.html", size: source.text.length }]);
+      setVersionActiveFile("index.html");
     } catch {
       if (versionPreviewRequestRef.current === requestId) {
+        versionPreviewTargetRunIdRef.current = previousTargetRunId;
         setPreviewBusy(null);
-        clearVersionPreviewState();
+        toast("Couldn't load that version preview.", { variant: "error" });
       }
-      toast("Couldn't load that version preview.", { variant: "error" });
     }
   };
 
   const openVersionCompare = async (runId: string, label: string): Promise<void> => {
-    if (!currentRun) return;
     const requestId = comparePreviewRequestRef.current + 1;
     comparePreviewRequestRef.current = requestId;
     setPreviewBusy({ title: "Loading version comparison", detail: "Preparing both saved snapshots for visual comparison." });
     try {
-      const results = await Promise.allSettled([resolveVersionPreview(runId), resolveVersionPreview(currentRun.id)]);
-      const fulfilled = results
+      const results = await Promise.allSettled([resolveVersionPreview(runId), resolveLiveComparisonPreview()]);
+      const previews = results
         .filter((result): result is PromiseFulfilledResult<VersionPreview> => result.status === "fulfilled")
         .map((result) => result.value);
-      if (results.some((result) => result.status === "rejected")) {
-        for (const preview of fulfilled) {
-          if (preview.leaseId) releaseOwnedPreviewLease({ leaseId: preview.leaseId, expiresAt: preview.expiresAt });
-        }
-        throw new Error("version comparison preview unavailable");
-      }
-      const [versionPreview, currentPreview] = fulfilled;
-      if (!versionPreview || !currentPreview) throw new Error("version comparison preview unavailable");
-      const acquiredLeases = [versionPreview, currentPreview]
+      const acquiredLeases = previews
         .filter((preview): preview is VersionPreview & { leaseId: string } => Boolean(preview.leaseId))
         .map((preview) => ({ leaseId: preview.leaseId, expiresAt: preview.expiresAt }));
       if (workspaceDisposedRef.current || comparePreviewRequestRef.current !== requestId) {
@@ -2394,14 +2481,25 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       }
       releaseComparePreviewLeases();
       comparePreviewLeasesRef.current = acquiredLeases;
+      const unavailable = (result: PromiseRejectedResult): string =>
+        result.reason instanceof Error ? result.reason.message : "This saved preview could not be prepared.";
+      const versionResult = results[0]!;
+      const currentResult = results[1]!;
       setCompare({
-        a: { url: versionPreview.url, label },
-        b: { url: currentPreview.url, label: `${activeVersionGroup?.name ?? "Current branch"} current` },
+        a: versionResult.status === "fulfilled"
+          ? { url: versionResult.value.url, label }
+          : { label, error: unavailable(versionResult) },
+        b: currentResult.status === "fulfilled"
+          ? { url: currentResult.value.url, label: `${activeVersionGroup?.name ?? "Current branch"} live` }
+          : { label: `${activeVersionGroup?.name ?? "Current branch"} live`, error: unavailable(currentResult) },
       });
+      if (results.some((result) => result.status === "rejected")) {
+        toast("Loaded the available side of the comparison; the unavailable pane shows its error.");
+      }
     } catch {
       toast("Couldn't load that comparison.", { variant: "error" });
     } finally {
-      setPreviewBusy(null);
+      if (comparePreviewRequestRef.current === requestId) setPreviewBusy(null);
     }
   };
 
@@ -2413,15 +2511,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const openDiff = async (runId: string, label: string): Promise<void> => {
     try {
-      if (modeRef.current === "standard") {
-        setDiff({ label: `${label} → current`, lines: await api.getVersionDiff(projectId, runId) });
-        return;
-      }
-      const [versionHtml, currentHtml] = await Promise.all([
-        api.getVersionText(projectId, runId),
-        api.getFileText(projectId, "index.html").catch(() => ""),
-      ]);
-      setDiff({ label: `${label} → current`, lines: diffLines(versionHtml, currentHtml) });
+      setDiff({ label: `${label} → current`, lines: await api.getVersionDiff(projectId, runId) });
     } catch {
       toast("Couldn't load that diff.", { variant: "error" });
     }
@@ -2429,11 +2519,30 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const restoreVersion = async (runId: string): Promise<void> => {
     try {
-      await api.restoreVersion(projectId, runId);
-      toast("Restored that version as the current design.");
-      clearVersionPreviewState();
-      setPreviewSrc(`${api.previewUrl(projectId)}?t=${Date.now()}`);
+      const restored = await api.restoreVersion(projectId, runId);
       setTab("Preview");
+      if (modeRef.current === "standard") {
+        const loaded = await loadDevPreview();
+        if (!loaded) {
+          toast("Restored the design, but the current preview couldn't restart. The saved version remains open.");
+          void loadFiles();
+          void loadRuns();
+          return;
+        }
+      } else {
+        clearVersionPreviewState();
+        setPreviewSrc(`${api.previewUrl(projectId)}?t=${Date.now()}`);
+      }
+      if (restored.historyRecorded === false) {
+        toast("Restored the design, but version history couldn't be recorded.", { variant: "error" });
+      } else if (restored.assetsRestored === false) {
+        toast("Restored the legacy document. Its historical local assets were unavailable, so no current assets were substituted.");
+      } else if (restored.evidenceCopied === false) {
+        toast("Restored that version. Historical screenshot evidence was unavailable for the new version identity.");
+      } else {
+        toast("Restored that version as the current design.");
+      }
+      void loadFiles();
       void loadRuns();
     } catch {
       toast("Couldn't restore that version.", { variant: "error" });
@@ -2533,7 +2642,11 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       setActive(fork.conversationId);
       await loadMessages(fork.conversationId);
       reloadArtifact(fork.variants);
-      toast("Forked from that message.");
+      toast(
+        fork.assetsRestored === false
+          ? "Forked the legacy document without substituting assets from the current branch."
+          : "Forked from that message.",
+      );
     } catch {
       toast("Couldn't fork from that message.", { variant: "error" });
     }
@@ -2885,6 +2998,30 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         void loadRuns();
         break;
       }
+      case "run-persistence-error": {
+        terminalEventRef.current = true;
+        activeRunIdRef.current = null;
+        stopRequestRef.current = null;
+        setLiveStatus(null);
+        materializeLive();
+        pushResult(
+          ev.published === true
+            ? "Published, but Dezin couldn't save this Run's status. Reload to reconcile version history."
+            : "Dezin couldn't save this Run's status. Reload to reconcile version history.",
+          { error: true },
+          typeof ev.runId === "string" ? ev.runId : undefined,
+        );
+        if (ev.published === true) {
+          if (modeRef.current === "standard") void loadDevPreview();
+          else {
+            clearVersionPreviewState();
+            setPreviewSrc(`${api.previewUrl(id)}?t=${Date.now()}`);
+          }
+          void loadFiles();
+        }
+        void loadRuns();
+        break;
+      }
       case "run-error":
         terminalEventRef.current = true;
         activeRunIdRef.current = null;
@@ -2977,6 +3114,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         const directions = parseResearchDirections(ev.directions);
         const done = {
           status: "done" as const,
+          complete: typeof ev.complete === "boolean" ? ev.complete : undefined,
           report: ev.report === true,
           sources: typeof ev.sources === "number" ? ev.sources : 0,
           assets: typeof ev.assets === "number" ? ev.assets : 0,
@@ -3454,20 +3592,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   useEffect(() => {
     if (tab !== "Files") return;
     let alive = true;
-    if (previewVersionRunId) {
-      if (!versionActiveFile) return;
-      void api.getVersionText(projectId, previewVersionRunId).then(
-        (t) => {
-          if (!alive) return;
-          setVersionFileText(t);
-          setVersionFiles(t ? [{ path: versionActiveFile, size: t.length }] : []);
-        },
-        () => alive && setVersionFileText(""),
-      );
-      return () => {
-        alive = false;
-      };
-    }
+    if (previewVersionRunId) return;
     if (!activeFile) return;
     if (isImagePath(activeFile)) {
       // Images render via ImageFileView, not decoded text — skip the byte fetch.
@@ -3484,7 +3609,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, activeFile, versionActiveFile, previewVersionRunId, projectId]);
+  }, [tab, activeFile, previewVersionRunId, projectId]);
 
   const switchTo = async (convId: string): Promise<void> => {
     setActive(convId);
@@ -3963,8 +4088,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const refreshPreview = () => {
     setRefreshSpin((n) => n + 1);
-    if (previewVersionRunId) {
-      void viewVersion(previewVersionRunId);
+    const versionRunId = versionPreviewTargetRunIdRef.current ?? previewVersionRunId;
+    if (versionRunId) {
+      void viewVersion(versionRunId);
       return;
     }
     if (isVersionPreviewSrc(projectId, previewSrc)) {
@@ -3986,10 +4112,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const fixRuntimeErrors = useCallback(
     (errors: RuntimeError[]) => {
       if (errors.length === 0) return;
+      if (previewVersionRunId) {
+        toast("Restore or fork this version before fixing preview errors.");
+        return;
+      }
       // Repairs are targeted code fixes — never route them through Research / the direction gate.
       void runBrief(buildRuntimeErrorRepairPrompt(errors, { mode: projectMode, projectPath: project?.projectPath ?? undefined }), undefined, undefined, [], [], undefined, { research: false });
     },
-    [projectMode, project?.projectPath],
+    [previewVersionRunId, projectMode, project?.projectPath],
   );
   const autoFixedSigsRef = useRef<Set<string>>(new Set());
   // Reset the auto-fix cap/dedupe set whenever the active conversation changes, so the
@@ -3999,12 +4129,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   }, [activeConvId]);
   useEffect(() => {
     const fatal = runtimeErrors.fatal;
-    if (!autoFixLive || !fatal || running) return;
+    if (previewVersionRunId || !autoFixLive || !fatal || running) return;
     if (autoFixedSigsRef.current.has(fatal.sig)) return;
     if (autoFixedSigsRef.current.size >= AUTO_FIX_MAX_PER_CONVERSATION) return;
     autoFixedSigsRef.current.add(fatal.sig);
     fixRuntimeErrors([fatal]);
-  }, [runtimeErrors.fatal, autoFixLive, running, fixRuntimeErrors]);
+  }, [runtimeErrors.fatal, autoFixLive, running, fixRuntimeErrors, previewVersionRunId]);
 
   const canExport = previewSrc !== null && projectId !== "new";
   const isExisting = projectId !== "new";
@@ -4012,7 +4142,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const canOpenProjectPath = Boolean((project?.projectPath || projectPath) && native?.openPath);
   const versionGroups = buildVersionGroups(runs, variants);
   const activeVersionGroup = versionGroups.find((group) => group.active) ?? versionGroups[0] ?? null;
-  const currentRun = activeVersionGroup?.runs[0] ?? null;
+  // Failed attempts and partially-recorded restore rows are evidence, not a published version
+  // identity. Keep Current anchored to the newest succeeded snapshot in both modes.
+  const currentRun = activeVersionGroup?.runs.find((run) => run.status === "succeeded") ?? null;
   const selectedVersion = findVersionSelection(versionGroups, previewVersionRunId);
   const selectedVersionRun = selectedVersion?.run ?? null;
   const selectedVersionFindings = normalizeFindings(selectedVersionRun?.findings);
@@ -4040,6 +4172,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     checks: displayQualityChecks,
   });
   const qualityHasFindings = qualityLanes.some((lane) => lane.findings.length > 0);
+  const activeQualityIssueCount = qualityLanes.reduce((count, lane) => count + lane.findings.length, 0);
   const qualityHasDetails = qualityHasFindings || qualityLanes.some((lane) => (lane.reviewFindings?.length ?? 0) > 0);
   const qualityRecorded = qualityLanes.some((lane) => lane.status === "passed" || lane.status === "issues" || lane.status === "failed");
   const qualityClean =
@@ -4059,8 +4192,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       <>
         {TAB_ICON[t]}
         <span>{t}</span>
-        {t === "Quality" && displayFindings.length > 0 ? (
-          <span className="rounded-full bg-surface-2 px-1 text-[10px] leading-tight text-muted-foreground">{displayFindings.length}</span>
+        {t === "Quality" && activeQualityIssueCount > 0 ? (
+          <span className="rounded-full bg-surface-2 px-1 text-[10px] leading-tight text-muted-foreground">{activeQualityIssueCount}</span>
         ) : null}
       </>
     ),
@@ -4776,15 +4909,31 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 <Panel id={PREVIEW_CANVAS_PANEL} minSize="300px">
                   <div className="relative flex h-full min-w-0 justify-center overflow-auto">
                     {renderPreviewFrame()}
-                    <PreviewRuntimeErrorOverlay
-                      fatal={runtimeErrors.fatal}
-                      nonFatal={runtimeErrors.nonFatal}
-                      onFixFatal={() => runtimeErrors.fatal && fixRuntimeErrors([runtimeErrors.fatal])}
-                      onFixNonFatal={() => fixRuntimeErrors(runtimeErrors.nonFatal)}
-                      onReload={refreshPreview}
-                      onDismissFatal={runtimeErrors.dismissFatal}
-                      onDismissNonFatal={runtimeErrors.dismissNonFatal}
-                    />
+                    {previewVersionRunId && (runtimeErrors.fatal || runtimeErrors.nonFatal.length > 0) ? (
+                      <div className="pointer-events-none absolute bottom-3 right-3 z-20 w-[min(22rem,calc(100%-1.5rem))]">
+                        <div role="status" aria-live="polite" className="pointer-events-auto rounded-lg border border-border bg-card p-3 shadow-lg">
+                          <div className="mb-1.5 flex items-center gap-1.5 text-destructive">
+                            <CircleAlert size={14} strokeWidth={2} />
+                            <span className="text-xs font-semibold">Saved version preview error</span>
+                          </div>
+                          <p className="mb-2 text-xs leading-relaxed text-foreground">Restore or fork this version before fixing preview errors.</p>
+                          <button type="button" onClick={refreshPreview} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-[11px] text-foreground hover:bg-surface-2">
+                            <RotateCw size={11} strokeWidth={1.8} />
+                            Reload
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <PreviewRuntimeErrorOverlay
+                        fatal={runtimeErrors.fatal}
+                        nonFatal={runtimeErrors.nonFatal}
+                        onFixFatal={() => runtimeErrors.fatal && fixRuntimeErrors([runtimeErrors.fatal])}
+                        onFixNonFatal={() => fixRuntimeErrors(runtimeErrors.nonFatal)}
+                        onReload={refreshPreview}
+                        onDismissFatal={runtimeErrors.dismissFatal}
+                        onDismissNonFatal={runtimeErrors.dismissNonFatal}
+                      />
+                    )}
                   </div>
                 </Panel>
                 {inspectOpen ? (
@@ -4820,12 +4969,28 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           ) : tab === "Research" ? (
             <ResearchPanel research={research} assetUrl={(p) => api.researchAssetUrl(projectId, p)} visualAssetUrl={(p) => api.researchVisualAssetUrl(projectId, p)} />
           ) : tab === "Files" ? (
-            <FilesPanel files={displayFiles} activeFile={displayActiveFile} fileText={displayFileText} running={displayRunning} onOpen={openDisplayedFile} imageUrlFor={(p) => `${api.previewUrl(projectId)}${p.split("/").map(encodeURIComponent).join("/")}`} />
+            <FilesPanel
+              files={displayFiles}
+              activeFile={displayActiveFile}
+              fileText={displayFileText}
+              running={displayRunning}
+              emptyMessage={
+                selectedVersionRun && projectMode === "standard"
+                  ? "Source files aren't available for saved Standard versions yet."
+                  : selectedVersionRun
+                    ? versionFileLoading
+                      ? "Loading saved version source…"
+                      : versionFileError ?? undefined
+                    : undefined
+              }
+              onOpen={openDisplayedFile}
+              imageUrlFor={(p) => `${api.previewUrl(projectId)}${p.split("/").map(encodeURIComponent).join("/")}`}
+            />
           ) : tab === "Quality" ? (
             <div className="flex h-full flex-col bg-surface">
               {displayRanOnce && displayScore !== null ? (
                 <PanelBar className="gap-1.5">
-                  Quality score
+                  Quality gate
                   <span className="tnum font-mono font-semibold text-foreground">{displayScore}/100</span>
                 </PanelBar>
               ) : null}
@@ -4849,6 +5014,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                           </span>
                         </div>
                         {lane.key === "agent" ? <AgentVisualReviewSummary findings={lane.reviewFindings ?? lane.findings} /> : null}
+                        {lane.key === "geometry" ? <ResolvedQualityHistory findings={lane.reviewFindings ?? lane.findings} /> : null}
                         {lane.findings.length > 0 ? (
                           <ul className="space-y-2 border-t border-border px-3 py-2.5">
                             {lane.findings.map((f, idx) => (

@@ -517,11 +517,16 @@ test("full import/export v2 migrates variants, runs, artifacts, run logs, and ve
     const dir = join(dataDir, "projects", project.id);
     mkdirSync(join(dir, ".variants", main.id), { recursive: true });
     mkdirSync(join(dir, ".versions"), { recursive: true });
+    mkdirSync(join(dir, ".versions", `${run.id}.files`, "assets"), { recursive: true });
+    mkdirSync(join(dir, ".versions", `${run.id}.files`, ".refs"), { recursive: true });
     mkdirSync(join(dataDir, ".runs"), { recursive: true });
     mkdirSync(join(dataDir, ".runs", run.id, "moodboards", "boards", "board-1", "asset-files"), { recursive: true });
     writeFileSync(join(dir, "index.html"), "<main>active variant</main>");
     writeFileSync(join(dir, ".variants", main.id, "index.html"), "<main>main variant</main>");
     writeFileSync(join(dir, ".versions", `${run.id}.html`), "<main>version snapshot</main>");
+    writeFileSync(join(dir, ".versions", `${run.id}.files`, "assets", "gen-0.png"), "immutable-version-image");
+    writeFileSync(join(dir, ".versions", `${run.id}.files`, ".env"), "PRIVATE_TOKEN=legacy-unsafe-snapshot");
+    writeFileSync(join(dir, ".versions", `${run.id}.files`, ".refs", "private.png"), "legacy-private-reference");
     writeFileSync(
       join(dataDir, ".runs", `${run.id}.jsonl`),
       `${JSON.stringify({ type: "run-start", runId: run.id, conversationId: conv.id, seq: 1 })}\n${JSON.stringify({ type: "run-done", runId: run.id, seq: 2 })}\n`,
@@ -570,6 +575,9 @@ test("full import/export v2 migrates variants, runs, artifacts, run logs, and ve
     assert.deepEqual(manifest.artifacts, [{ path: "index.html", lintPassed: true, createdAt: manifest.artifacts?.[0]?.createdAt }]);
     assert.equal(exportedEntries.find((e) => e.path === `variants/${main.id}/index.html`)?.data.toString("utf8"), "<main>main variant</main>");
     assert.equal(exportedEntries.find((e) => e.path === `versions/${run.id}.html`)?.data.toString("utf8"), "<main>version snapshot</main>");
+    assert.equal(exportedEntries.find((e) => e.path === `versions/${run.id}.files/assets/gen-0.png`)?.data.toString("utf8"), "immutable-version-image");
+    assert.equal(exportedEntries.some((e) => e.path === `versions/${run.id}.files/.env`), false);
+    assert.equal(exportedEntries.some((e) => e.path.includes(`versions/${run.id}.files/.refs/`)), false);
     assert.match(exportedEntries.find((e) => e.path === `runs/${run.id}.jsonl`)?.data.toString("utf8") ?? "", /run-start/);
     assert.match(exportedEntries.find((e) => e.path === `runs/${run.id}/moodboards/manifest.json`)?.data.toString("utf8") ?? "", /dezin-moodboard-run-bundle/);
     assert.match(exportedEntries.find((e) => e.path === `runs/${run.id}/moodboards/boards/board-1/nodes.json`)?.data.toString("utf8") ?? "", /portable board snapshot/);
@@ -603,6 +611,10 @@ test("full import/export v2 migrates variants, runs, artifacts, run logs, and ve
     assert.deepEqual(store.listArtifacts(importedProject.id).map((a) => [a.path, a.lintPassed]), [["index.html", true]]);
     const importedDir = join(dataDir, "projects", importedProject.id);
     assert.equal(readFileSync(join(importedDir, ".versions", `${importedRuns[0]!.id}.html`), "utf8"), "<main>version snapshot</main>");
+    assert.equal(
+      readFileSync(join(importedDir, ".versions", `${importedRuns[0]!.id}.files`, "assets", "gen-0.png"), "utf8"),
+      "immutable-version-image",
+    );
     const importedLog = readFileSync(join(dataDir, ".runs", `${importedRuns[0]!.id}.jsonl`), "utf8");
     assert.match(importedLog, new RegExp(importedRuns[0]!.id));
     assert.doesNotMatch(importedLog, new RegExp(run.id));

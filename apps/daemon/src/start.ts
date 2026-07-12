@@ -15,6 +15,7 @@ import { Store } from "../../../packages/core/src/index.ts";
 import { DesignRegistry, BUNDLED_DESIGN_SYSTEMS, loadDesignSystems, userDesignDir } from "../../../packages/design/src/index.ts";
 import { createApp, createRuntimeSupervisor } from "./app.ts";
 import { shutdownDaemon } from "./daemon-shutdown.ts";
+import { cleanupPrototypeVersionSnapshotResidue } from "./prototype-version-snapshot.ts";
 
 const HOST = process.env.DEZIN_HOST ?? "127.0.0.1";
 // 0 = ephemeral (portless). Set DEZIN_PORT to pin a fixed port.
@@ -75,6 +76,7 @@ function acquireDaemonLock(): () => void {
 
 function main(): void {
   const releaseLock = acquireDaemonLock();
+  cleanupPrototypeVersionSnapshotResidue(DATA_DIR);
   mkdirSync(join(DATA_DIR, "projects"), { recursive: true });
   const store = new Store(join(DATA_DIR, "app.sqlite"));
   // A prior process died mid-run → sweep those to cancelled AND leave a terminal message: finished

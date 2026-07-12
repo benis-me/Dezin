@@ -92,6 +92,54 @@ test("probe source-summary prints component inventory, tokens, text, and assets 
   assert.match(out, /\/_assets\/card\.png/);
 });
 
+test("probe defaults select the manifest sourceUrl entry instead of pages[0]", () => {
+  const dir = mkdtempSync(join(tmpdir(), "probe-source-entry-"));
+  writeProbeCli(dir, "http://127.0.0.1:9999/api/sharingan/x");
+  const probe = join(dir, ".sharingan", "probe.mjs");
+  const decoyDir = join(dir, ".sharingan", "decoy");
+  const entryDir = join(dir, ".sharingan", "entry");
+  mkdirSync(decoyDir, { recursive: true });
+  mkdirSync(entryDir, { recursive: true });
+
+  const writePage = (pageDir: string, label: string) => {
+    const dom = join(pageDir, "dom.json");
+    const renderMap = join(pageDir, "render-map.json");
+    const styles = join(pageDir, "styles.json");
+    const assets = join(pageDir, "assets.json");
+    writeFileSync(dom, JSON.stringify([{ tag: "h1", classes: label.toLowerCase(), text: label, box: { x: 20, y: 20, w: 400, h: 48 }, style: {}, children: [] }]));
+    writeFileSync(renderMap, JSON.stringify({
+      viewport: { width: 1440, height: 900 },
+      document: { width: 1440, height: 900 },
+      elements: [{ selector: `h1.${label.toLowerCase()}`, tag: "h1", text: label, box: { x: 20, y: 20, w: 400, h: 48 }, style: { fontSize: "40px" } }],
+    }));
+    writeFileSync(styles, JSON.stringify({ colors: [], fontFamilies: [], fontSizes: ["40px"], radii: [] }));
+    writeFileSync(assets, JSON.stringify([]));
+    return { dom, renderMap, styles, assets };
+  };
+  const decoy = writePage(decoyDir, "DECOY HERO");
+  const entry = writePage(entryDir, "ENTRY HERO");
+  writeFileSync(join(dir, ".sharingan", "pages.json"), JSON.stringify({
+    sourceUrl: "https://example.test/entry/",
+    pages: [
+      { url: "https://example.test/decoy", ...decoy },
+      { url: "https://example.test/entry", ...entry },
+    ],
+  }));
+
+  const summary = execFileSync("node", [probe, "source-summary"], { cwd: dir, encoding: "utf8" });
+  const outline = execFileSync("node", [probe, "outline"], { cwd: dir, encoding: "utf8" });
+  const renderMap = execFileSync("node", [probe, "render-map"], { cwd: dir, encoding: "utf8" });
+  execFileSync("node", [probe, "source-scaffold"], { cwd: dir, encoding: "utf8" });
+  const scaffold = readFileSync(join(dir, ".sharingan", "source-scaffold", "App.jsx"), "utf8");
+  const regionPlan = JSON.parse(readFileSync(join(dir, ".sharingan", "region-plan.json"), "utf8")) as { sourceUrl?: string };
+
+  for (const output of [summary, outline, renderMap, scaffold]) {
+    assert.match(output, /ENTRY HERO/, "every default source input comes from the sourceUrl entry");
+    assert.doesNotMatch(output, /DECOY HERO/, "pages[0] cannot leak into the generation inputs");
+  }
+  assert.equal(regionPlan.sourceUrl, "https://example.test/entry");
+});
+
 test("probe source-scaffold writes a measured reference without replacing the Standard app", () => {
   const dir = mkdtempSync(join(tmpdir(), "probe-source-scaffold-"));
   const rel = writeProbeCli(dir, "http://127.0.0.1:9999/api/sharingan/x");

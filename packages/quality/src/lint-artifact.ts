@@ -781,6 +781,342 @@ function stripSharinganReferenceScaffoldSections(html: string): string {
   return html.replace(/\/\*\s*file:\s*\.sharingan\/source-scaffold\/(?:App\.jsx|index\.css)\s*\*\/[\s\S]*?(?=\n\s*\/\*\s*file:|$)/g, "\n");
 }
 
+function stripSourceComments(source: string): string {
+  let out = "";
+  let quote: "'" | '"' | "`" | null = null;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index]!;
+    const next = source[index + 1];
+    if (quote) {
+      out += char;
+      if (char === "\\" && next !== undefined) {
+        out += next;
+        index += 1;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      out += char;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      index += 2;
+      while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) {
+        if (source[index] === "\n") out += "\n";
+        index += 1;
+      }
+      index += 1;
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      const previous = out.match(/\S(?=\s*$)/)?.[0];
+      // Protocols and unquoted CSS url(//...) are data, not source comments.
+      if (previous === ":" || previous === "(") {
+        out += "//";
+        index += 1;
+        continue;
+      }
+      index += 2;
+      while (index < source.length && source[index] !== "\n") index += 1;
+      if (source[index] === "\n") out += "\n";
+      continue;
+    }
+    out += char;
+  }
+  return out;
+}
+
+function sharinganDynamicMediaExpressions(surface: string): string[] {
+  const expressions: string[] = [];
+  for (const match of surface.matchAll(/["']?\b(?:src|srcset|poster)\b["']?\s*=\s*\{([^}]*)\}/gi)) {
+    expressions.push(match[1] ?? "");
+  }
+  // A media-shaped property in an arbitrary data object is not itself a render sink. Only inspect
+  // background values inside a JSX style object; imported content data is followed from an actual
+  // src/srcSet/poster expression below.
+  for (const style of surface.matchAll(/\bstyle\s*=\s*\{\{([\s\S]*?)\}\}/gi)) {
+    for (const match of (style[1] ?? "").matchAll(/["']?\b(?:background|backgroundImage|background-image)\b["']?\s*:\s*([^,}\n]+)/gi)) {
+      expressions.push(match[1] ?? "");
+    }
+  }
+  return expressions;
+}
+
+interface SharinganLintFileSegment {
+  path: string;
+  surface: string;
+}
+
+function sharinganLintFileSegments(surface: string): SharinganLintFileSegment[] {
+  const marker = /^[ \t]*\/\*\s*file:\s*([^*\r\n]+?)\s*\*\/[ \t]*$/gm;
+  const matches = Array.from(surface.matchAll(marker));
+  if (matches.length === 0) return [{ path: "<artifact>", surface }];
+  const segments: SharinganLintFileSegment[] = [];
+  const prefix = surface.slice(0, matches[0]!.index);
+  if (prefix.trim()) segments.push({ path: "<artifact>", surface: prefix });
+  for (let index = 0; index < matches.length; index += 1) {
+    const start = matches[index]!.index + matches[index]![0].length;
+    const end = matches[index + 1]?.index ?? surface.length;
+    segments.push({
+      path: (matches[index]![1] ?? `<artifact-${index}>`).trim().replaceAll("\\", "/"),
+      surface: surface.slice(start, end),
+    });
+  }
+  return segments;
+}
+
+function readSharinganCollectionInitializer(surface: string, start: number): string | undefined {
+  const opening = surface[start];
+  if (opening !== "[" && opening !== "{") return undefined;
+  const closing: Record<string, string> = { "[": "]", "{": "}", "(": ")" };
+  const stack = [opening];
+  let quote: "'" | '"' | "`" | null = null;
+  for (let index = start + 1; index < surface.length; index += 1) {
+    const char = surface[index]!;
+    const next = surface[index + 1];
+    if (quote) {
+      if (char === "\\" && next !== undefined) {
+        index += 1;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "[" || char === "{" || char === "(") {
+      stack.push(char);
+      continue;
+    }
+    if (char !== "]" && char !== "}" && char !== ")") continue;
+    const current = stack.at(-1);
+    if (!current || closing[current] !== char) return undefined;
+    stack.pop();
+    if (stack.length === 0) return surface.slice(start, index + 1);
+  }
+  return undefined;
+}
+
+interface SharinganMediaImport {
+  imported: string;
+  source: string;
+}
+
+interface SharinganMediaFile extends SharinganLintFileSegment {
+  declarations: Map<string, string>;
+  imports: Map<string, SharinganMediaImport>;
+}
+
+function readSharinganExpressionInitializer(surface: string, start: number): string {
+  const stack: string[] = [];
+  const closing: Record<string, string> = { "[": "]", "{": "}", "(": ")" };
+  let quote: "'" | '"' | "`" | null = null;
+  let began = false;
+  for (let index = start; index < surface.length; index += 1) {
+    const char = surface[index]!;
+    const next = surface[index + 1];
+    if (quote) {
+      if (char === "\\" && next !== undefined) index += 1;
+      else if (char === quote) quote = null;
+      began = true;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      began = true;
+      continue;
+    }
+    if (char === "[" || char === "{" || char === "(") {
+      stack.push(char);
+      began = true;
+      continue;
+    }
+    if (char === "]" || char === "}" || char === ")") {
+      const current = stack.at(-1);
+      if (current && closing[current] === char) stack.pop();
+      began = true;
+      continue;
+    }
+    if (stack.length === 0 && (char === ";" || (char === "\n" && began))) {
+      return surface.slice(start, index).trim();
+    }
+    if (!/\s/.test(char)) began = true;
+  }
+  return surface.slice(start).trim();
+}
+
+function sharinganMediaDeclarations(surface: string): Map<string, string> {
+  const declarations = new Map<string, string>();
+  const declaration = /\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*/g;
+  for (const match of surface.matchAll(declaration)) {
+    const name = match[1]!;
+    const start = (match.index ?? 0) + match[0].length;
+    const initializer = surface[start] === "[" || surface[start] === "{"
+      ? readSharinganCollectionInitializer(surface, start) ?? readSharinganExpressionInitializer(surface, start)
+      : readSharinganExpressionInitializer(surface, start);
+    if (initializer) declarations.set(name, initializer);
+  }
+  return declarations;
+}
+
+function sharinganMediaImports(surface: string): Map<string, SharinganMediaImport> {
+  const imports = new Map<string, SharinganMediaImport>();
+  for (const match of surface.matchAll(/\bimport\s*\{([^}]+)\}\s*from\s*["']([^"']+)["']/g)) {
+    const source = match[2]!;
+    for (const item of (match[1] ?? "").split(",")) {
+      const binding = /^\s*([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*$/.exec(item);
+      if (!binding) continue;
+      imports.set(binding[2] ?? binding[1]!, { imported: binding[1]!, source });
+    }
+  }
+  for (const match of surface.matchAll(/\bimport\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*["']([^"']+)["']/g)) {
+    imports.set(match[1]!, { imported: "*", source: match[2]! });
+  }
+  return imports;
+}
+
+function normalizeSharinganModulePath(path: string): string {
+  const parts: string[] = [];
+  for (const part of path.replaceAll("\\", "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return parts.join("/");
+}
+
+function resolveSharinganImport(files: SharinganMediaFile[], importer: SharinganMediaFile, specifier: string): SharinganMediaFile | undefined {
+  if (!specifier.startsWith(".")) return undefined;
+  const slash = importer.path.lastIndexOf("/");
+  const base = normalizeSharinganModulePath(`${slash >= 0 ? importer.path.slice(0, slash) : ""}/${specifier}`);
+  const candidates = new Set([
+    base,
+    ...[".js", ".jsx", ".ts", ".tsx", ".json"].map((extension) => `${base}${extension}`),
+    ...["index.js", "index.jsx", "index.ts", "index.tsx"].map((file) => `${base}/${file}`),
+  ]);
+  return files.find((file) => candidates.has(normalizeSharinganModulePath(file.path)));
+}
+
+function sharinganExternalLiteral(expression: string): string | undefined {
+  return /["'`]\s*(?:https?:)?\/\//i.exec(expression)?.[0]
+    ?? /\burl\(\s*["']?\s*(?:https?:)?\/\//i.exec(expression)?.[0];
+}
+
+function sharinganReferenceSelector(expression: string, name: string): string | undefined {
+  const reference = new RegExp(`(?:^|[^\\w$.])${escapeRe(name)}(?=$|[^\\w$])`);
+  const match = reference.exec(expression);
+  if (!match) return undefined;
+  const nameOffset = match.index + match[0].lastIndexOf(name);
+  const tail = expression.slice(nameOffset + name.length);
+  const selector = /^(?:\s*\[[^\]]+\])*\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*["'`]([^"'`]+)["'`]\s*\])/.exec(tail);
+  const property = selector?.[1] ?? selector?.[2];
+  return property && !SHARINGAN_COLLECTION_METHODS.has(property) ? property : "";
+}
+
+const SHARINGAN_COLLECTION_METHODS = new Set(["join", "map", "filter", "flatMap", "at", "slice"]);
+
+function sharinganPropertyValues(initializer: string, property: string): string[] {
+  const values: string[] = [];
+  const binding = new RegExp(`(?:^|[{,])\\s*["']?${escapeRe(property)}["']?\\s*:\\s*([^,}\\n]+)`, "gim");
+  for (const match of initializer.matchAll(binding)) {
+    const value = match[1]?.trim();
+    if (value) values.push(value);
+  }
+  return values;
+}
+
+function resolveSharinganMediaBinding(
+  files: SharinganMediaFile[],
+  file: SharinganMediaFile,
+  name: string,
+  selector: string,
+  seen: Set<string>,
+): string | undefined {
+  const key = `${file.path}\0${name}\0${selector}`;
+  if (seen.has(key)) return undefined;
+  const nextSeen = new Set(seen).add(key);
+  const imported = file.imports.get(name);
+  if (imported) {
+    const sourceFile = resolveSharinganImport(files, file, imported.source);
+    if (!sourceFile) return undefined;
+    if (imported.imported === "*") {
+      return selector ? resolveSharinganMediaBinding(files, sourceFile, selector, "", nextSeen) : undefined;
+    }
+    return resolveSharinganMediaBinding(files, sourceFile, imported.imported, selector, nextSeen);
+  }
+
+  const initializer = file.declarations.get(name);
+  if (!initializer) return undefined;
+  if (!selector) return findSharinganExternalMediaBinding(files, file, initializer, nextSeen);
+
+  const alias = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(initializer)?.[1];
+  if (alias) return resolveSharinganMediaBinding(files, file, alias, selector, nextSeen);
+  for (const value of sharinganPropertyValues(initializer, selector)) {
+    const result = findSharinganExternalMediaBinding(files, file, value, nextSeen);
+    if (result) return result;
+  }
+  return undefined;
+}
+
+function findSharinganExternalMediaBinding(
+  files: SharinganMediaFile[],
+  file: SharinganMediaFile,
+  expression: string,
+  seen = new Set<string>(),
+): string | undefined {
+  const literal = sharinganExternalLiteral(expression);
+  if (literal) return literal;
+
+  const names = new Set([...file.declarations.keys(), ...file.imports.keys()]);
+  for (const name of names) {
+    const selector = sharinganReferenceSelector(expression, name);
+    if (selector === undefined) continue;
+    const result = resolveSharinganMediaBinding(files, file, name, selector, seen);
+    if (result) return result;
+  }
+  return undefined;
+}
+
+function checkSharinganExternalMedia(html: string): Finding[] {
+  const source = stripSharinganReferenceScaffoldSections(html);
+  const files: SharinganMediaFile[] = sharinganLintFileSegments(source).map((segment) => {
+    const surface = stripSourceComments(segment.surface);
+    return {
+      ...segment,
+      surface,
+      declarations: sharinganMediaDeclarations(surface),
+      imports: sharinganMediaImports(surface),
+    };
+  });
+  let externalMedia: string | undefined;
+  for (const file of files) {
+    const staticMedia = /\b(?:src|srcset|poster)\b\s*=\s*["'`]\s*(?:https?:)?\/\//i.exec(file.surface)?.[0];
+    const cssMedia = /\.css$/i.test(file.path)
+      ? /\burl\(\s*["']?\s*(?:https?:)?\/\//i.exec(file.surface)?.[0]
+      : undefined;
+    externalMedia = staticMedia ?? cssMedia;
+    if (externalMedia) break;
+    for (const expression of sharinganDynamicMediaExpressions(file.surface)) {
+      externalMedia = findSharinganExternalMediaBinding(files, file, expression);
+      if (externalMedia) break;
+    }
+    if (externalMedia) break;
+  }
+  if (!externalMedia) return [];
+  return [{
+    severity: "P0",
+    id: "sharingan-external-media",
+    message: "Sharingan output references external media instead of the captured local source assets.",
+    fix: "Replace every external src, srcSet, poster, and CSS url() with the matching captured /_assets/ path; if capture lacks it, keep the measured box neutral rather than adding a fallback.",
+    snippet: externalMedia.slice(0, 200),
+  }];
+}
+
 function checkSharinganSourceReplayFinal(html: string): Finding[] {
   const surface = stripSharinganReferenceScaffoldSections(html);
   const hasSourceObject = /\bconst\s+SOURCE\s*=/.test(surface) && /\bSOURCE\.(?:boxes|images|vectors|texts)\b/.test(surface);
@@ -815,6 +1151,7 @@ export function lintArtifact(html: string, options: LintOptions = {}): Finding[]
     // reference replay unchanged instead of rebuilding the Standard project.
     const findings: Finding[] = [
       ...checkSharinganSourceReplayFinal(html),
+      ...checkSharinganExternalMedia(html),
       ...checkRegexList(html, FILLER_PATTERNS, {
         severity: "P0",
         id: "filler-copy",

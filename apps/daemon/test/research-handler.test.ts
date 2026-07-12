@@ -59,6 +59,23 @@ test("GET /api/projects/:id/research returns {exists:false} before any research"
   });
 });
 
+test("GET /api/projects/:id/research exposes validation issues for a pre-report partial bundle", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Partial evidence" });
+    const root = join(dataDir, "projects", project.id, ".research");
+    mkdirSync(join(root, "assets"), { recursive: true });
+    writeFileSync(join(root, "assets", "reference.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    writeFileSync(join(root, "sources.json"), JSON.stringify([{ id: "partial", title: "Partial source", url: "https://example.com", assets: ["assets/reference.png"] }]));
+
+    const res = await fetch(`${base}/api/projects/${project.id}/research`);
+    const body = (await res.json()) as { exists: boolean; complete?: boolean; issues?: Array<{ code: string }> };
+
+    assert.equal(body.exists, true);
+    assert.equal(body.complete, false);
+    assert.ok(body.issues?.some((issue) => issue.code === "product-report-missing"));
+  });
+});
+
 test("GET /api/projects/:id/research returns the deliverables when .research exists", async () => {
   await withServer(async ({ base, dataDir, store }) => {
     const project = seedResearch(dataDir, store);
@@ -79,6 +96,25 @@ test("GET /api/projects/:id/research returns the deliverables when .research exi
     assert.equal(body.directions[0]!.slug, "bold");
     assert.equal(body.directions[0]!.title, "Bold direction");
     assert.deepEqual(body.assets, ["assets/stripe.png"]);
+  });
+});
+
+test("GET /api/projects/:id/research exposes incomplete validation state and concrete issues", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = seedResearch(dataDir, store);
+    const res = await fetch(`${base}/api/projects/${project.id}/research`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      exists: boolean;
+      complete?: boolean;
+      issues?: Array<{ area: string; code: string; message: string; path?: string }>;
+    };
+
+    assert.equal(body.exists, true);
+    assert.equal(body.complete, false);
+    assert.ok(body.issues?.length, "partial deliverables must expose their validation failures");
+    assert.ok(body.issues?.some((issue) => issue.area === "visual" && issue.code === "visual-report-missing"));
+    assert.ok(body.issues?.every((issue) => issue.message.trim().length > 0));
   });
 });
 
@@ -106,6 +142,29 @@ test("GET /api/projects/:id/research includes the visual track's deliverables al
     assert.equal(body.visual!.sources[0]!.designer, "Jane");
     assert.deepEqual(body.visual!.assets, ["visual/assets/mono.png"]);
     assert.equal(body.visual!.boardId, "board-123");
+  });
+});
+
+test("GET /api/projects/:id/research keeps a visual-only partial bundle visible", async () => {
+  await withServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Visual only" });
+    seedVisualResearch(dataDir, project.id);
+
+    const res = await fetch(`${base}/api/projects/${project.id}/research`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      exists: boolean;
+      report?: string;
+      sources?: unknown[];
+      visual?: { exists: boolean; report: string; sources: unknown[] };
+    };
+
+    assert.equal(body.exists, true, "one durable Research track keeps the tab discoverable");
+    assert.equal(body.report, "");
+    assert.deepEqual(body.sources, []);
+    assert.equal(body.visual?.exists, true);
+    assert.match(body.visual?.report ?? "", /brutalist mono/);
+    assert.equal(body.visual?.sources.length, 1);
   });
 });
 

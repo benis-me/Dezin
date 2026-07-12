@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zlibSync } from "fflate";
@@ -339,7 +339,7 @@ test("parseVisualReview marks a clean review even with no findings", () => {
   assert.deepEqual(findings.map((f) => f.id), ["visual-reviewed"]);
 });
 
-test("parseVisualReview normalizes model-returned findings", () => {
+test("parseVisualReview rejects a partially malformed model response as unreviewed", () => {
   const findings = parseVisualReview(
     JSON.stringify({
       findings: [
@@ -349,10 +349,7 @@ test("parseVisualReview normalizes model-returned findings", () => {
     }),
   );
 
-  assert.equal(findings.filter((f) => f.id.startsWith("visual-ai-review")).length, 1);
-  assert.equal(findings[0]?.id, "visual-ai-review-1");
-  assert.equal(findings[0]?.severity, "P1");
-  assert.match(findings[0]?.message ?? "", /CTA overlaps/);
+  assert.deepEqual(findings, []);
 });
 
 test("agentReviewPrompt supplies the direction and separates objective defects from advisory suggestions, with no score", () => {
@@ -363,7 +360,7 @@ test("agentReviewPrompt supplies the direction and separates objective defects f
     directionSpec: "# Console\n\n## Visual language\n- Near-monochrome base; quiet mono blocks.",
   } as unknown as VisualQaInput;
   const prompt = agentReviewPrompt(input, "/proj/.visual-qa/shot.png");
-  // The chosen direction is supplied so the critic can reference it — as ADVISORY suggestions.
+  // The chosen direction is supplied so explicit contradictions can become contract findings.
   assert.match(prompt, /Near-monochrome base/);
   assert.match(prompt, /CHOSEN DIRECTION/);
   // Defects are OBJECTIVE only; taste/palette is an advisory improvement, not a defect.
@@ -389,10 +386,11 @@ test("agentReviewPrompt gates defects to provable pixel breakage and rejects inf
   assert.match(prompt, /not a defect/i);
   // Describe the visible breakage, never an inferred runtime cause (the scroll false-positive class).
   assert.match(prompt, /do NOT file scroll position/i);
-  // The capture is described honestly — no false unconditional "full page" claim, and content that is
-  // merely scrolled out of view is explicitly NORMAL, not missing.
-  assert.ok(!/full page, top to bottom/i.test(prompt), "must not claim an unconditional full-page capture");
-  assert.match(prompt, /scrolled out of view/i);
+  // The capture contract matches the shared full-surface helper: normal document fullPage plus a
+  // temporarily expanded dominant app-shell scroller, while smaller nested panes stay stateful.
+  assert.match(prompt, /dominant vertical scroller/i);
+  assert.match(prompt, /not limited to the initial viewport/i);
+  assert.match(prompt, /smaller nested/i);
 });
 
 test("agentReviewPrompt adds a source-fidelity section when a Sharingan reference is present", () => {
@@ -555,6 +553,88 @@ test("sourceScreenshotDiffFindings reports large first-viewport pixel drift as a
   assert.equal(findings[0]?.severity, "P1");
   assert.match(findings[0]?.message ?? "", /pixel|screenshot|source/i);
   assert.match(findings[0]?.fix ?? "", /visual regression|source screenshot/i);
+});
+
+test("sourceScreenshotDiffFindings detects equal-luminance hue drift", () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-hue-diff-"));
+  const sourcePath = join(root, "source.png");
+  const generatedPath = join(root, "generated.png");
+  const red = Buffer.alloc(4 * 4 * 4);
+  const equalLumaGreen = Buffer.alloc(4 * 4 * 4);
+  for (let i = 0; i < red.length; i += 4) {
+    red[i] = 255; red[i + 3] = 255;
+    equalLumaGreen[i + 1] = 76; equalLumaGreen[i + 3] = 255;
+  }
+  writeFileSync(sourcePath, rgbaPng(4, 4, red));
+  writeFileSync(generatedPath, rgbaPng(4, 4, equalLumaGreen));
+
+  assert.equal(sourceScreenshotDiffFindings(sourcePath, generatedPath)[0]?.id, "visual-source-screenshot-diff");
+});
+
+test("sourceScreenshotDiffFindings detects equal-area width and height drift", () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-dimension-diff-"));
+  const sourcePath = join(root, "source.png");
+  const generatedPath = join(root, "generated.png");
+  writeFileSync(sourcePath, rgbaPng(100, 100, Buffer.alloc(100 * 100 * 4, 255)));
+  writeFileSync(generatedPath, rgbaPng(50, 200, Buffer.alloc(50 * 200 * 4, 255)));
+
+  const finding = sourceScreenshotDiffFindings(sourcePath, generatedPath)[0];
+  assert.equal(finding?.id, "visual-source-screenshot-diff");
+  assert.match(finding?.message ?? "", /width|height|dimension/i);
+});
+
+test("sourceScreenshotDiffFindings blocks when explicitly supplied source evidence is missing or corrupt", () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-invalid-source-"));
+  const generatedPath = join(root, "generated.png");
+  const corruptSourcePath = join(root, "source.png");
+  const pixels = Buffer.alloc(4 * 4 * 4, 255);
+  writeFileSync(generatedPath, rgbaPng(4, 4, pixels));
+  writeFileSync(corruptSourcePath, "not a png");
+
+  const corrupt = sourceScreenshotDiffFindings(corruptSourcePath, generatedPath);
+  const missing = sourceScreenshotDiffFindings(join(root, "missing.png"), generatedPath);
+  assert.equal(corrupt[0]?.id, "visual-source-evidence-invalid");
+  assert.equal(corrupt[0]?.severity, "P0");
+  assert.equal(missing[0]?.id, "visual-source-evidence-invalid");
+  assert.deepEqual(sourceScreenshotDiffFindings(undefined, generatedPath), [], "optional calls without a source path stay non-blocking");
+});
+
+test("sourceScreenshotDiffFindings blocks when explicitly supplied generated evidence is missing or corrupt", () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-invalid-generated-"));
+  const sourcePath = join(root, "source.png");
+  const corruptGeneratedPath = join(root, "generated.png");
+  writeFileSync(sourcePath, rgbaPng(4, 4, Buffer.alloc(4 * 4 * 4, 255)));
+  writeFileSync(corruptGeneratedPath, "not a png");
+
+  const corrupt = sourceScreenshotDiffFindings(sourcePath, corruptGeneratedPath);
+  const missing = sourceScreenshotDiffFindings(sourcePath, join(root, "missing.png"));
+  assert.equal(corrupt[0]?.id, "visual-generated-evidence-invalid");
+  assert.equal(corrupt[0]?.severity, "P0");
+  assert.equal(missing[0]?.id, "visual-generated-evidence-invalid");
+  assert.deepEqual(sourceScreenshotDiffFindings(sourcePath, undefined), [], "optional calls without a generated path stay non-blocking");
+});
+
+test("auditVisualArtifact fails closed with P0 when Sharingan render-map evidence is corrupt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-corrupt-render-map-"));
+  const htmlPath = join(root, "index.html");
+  const sourcePath = join(root, "source.png");
+  const renderMapPath = join(root, "render-map.json");
+  writeFileSync(htmlPath, "<main>Generated clone</main>");
+  writeFileSync(sourcePath, rgbaPng(4, 4, Buffer.alloc(4 * 4 * 4, 255)));
+  writeFileSync(renderMapPath, JSON.stringify({ viewport: {}, document: {}, elements: "corrupt" }));
+
+  const findings = await auditVisualArtifact({
+    htmlPath,
+    projectRoot: root,
+    settings: { visualQaEnabled: true, agentCommand: "/usr/bin/true" } as any,
+    agentCommand: "/usr/bin/true",
+    isSharingan: true,
+    sharinganReference: { screenshotPath: sourcePath, renderMapPath },
+  });
+
+  assert.equal(findings[0]?.id, "visual-source-evidence-invalid");
+  assert.equal(findings[0]?.severity, "P0");
+  assert.equal(findings.length, 1, "unverifiable source evidence stops the audit before generic review noise");
 });
 
 test("sourceFidelityFindings matches text to the specific generated element, not the root wrapper", () => {
@@ -753,6 +833,29 @@ test("auditVisualArtifact is disabled by settings", async () => {
   assert.deepEqual(findings, []);
 });
 
+test("auditVisualArtifact discards a stale screenshot before a failed render", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-stale-shot-"));
+  const htmlPath = join(root, "index.html");
+  const screenshotPath = join(root, ".visual-qa", "screenshot.png");
+  mkdirSync(join(root, ".visual-qa"), { recursive: true });
+  writeFileSync(htmlPath, "<main>Current artifact content that must fail to render.</main>", "utf8");
+  writeFileSync(screenshotPath, Buffer.from("stale screenshot from an earlier audit"));
+
+  const findings = await auditVisualArtifact({
+    htmlPath,
+    projectRoot: root,
+    screenshotPath,
+    renderUrl: "file:///this-path-must-not-exist/dezin-visual-qa.html",
+    settings: { visualQaEnabled: true, agentCommand: "/usr/bin/true" } as any,
+    agentCommand: "/usr/bin/true",
+  });
+
+  assert.ok(findings.some((finding) => finding.id === "visual-render-failed"));
+  assert.ok(findings.some((finding) => finding.id === "visual-screenshot-missing"));
+  assert.ok(!findings.some((finding) => finding.id === "visual-reviewed" || finding.id === "visual-review-unassessed"));
+  assert.equal(existsSync(screenshotPath), false, "failed capture must not leave the prior audit screenshot available for evidence persistence");
+});
+
 test("auditVisualArtifact limits Sharingan geometry QA to the captured source viewport", async () => {
   const root = mkdtempSync(join(tmpdir(), "dezin-sharingan-source-viewport-"));
   const htmlPath = join(root, "index.html");
@@ -787,6 +890,43 @@ test("auditVisualArtifact limits Sharingan geometry QA to the captured source vi
   });
 
   assert.ok(!findings.some((f) => f.id === "visual-below-fold-strip" && /mobile/i.test(f.message)), "desktop-only source capture should not trigger synthetic mobile repairs");
+});
+
+test("auditVisualArtifact full-page screenshot expands an inner app-shell scroller", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-inner-scroll-"));
+  const htmlPath = join(root, "index.html");
+  const screenshotPath = join(root, ".visual-qa", "screenshot.png");
+  const sourcePath = join(root, "source.png");
+  const renderMapPath = join(root, "render-map.json");
+  writeFileSync(sourcePath, rgbaPng(4, 4, Buffer.alloc(4 * 4 * 4, 255)));
+  writeFileSync(renderMapPath, JSON.stringify({
+    viewport: { width: 1440, height: 900 },
+    document: { width: 1440, height: 1800 },
+    elements: [{ selector: "body", tag: "body", text: "", box: { x: 0, y: 0, w: 1440, h: 1800 }, style: {} }],
+  }));
+  writeFileSync(
+    htmlPath,
+    [
+      "<html><head><style>",
+      "html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#111;color:#fff}",
+      "#app{height:100%;overflow:hidden}#feed{height:100%;overflow-y:auto}",
+      "#content{height:1800px;padding:20px;box-sizing:border-box}",
+      "</style></head><body><div id='app'><main id='feed'><div id='content'>Tall generated content with enough real text to paint.<div style='margin-top:1650px'>Bottom marker</div></div></main></div></body></html>",
+    ].join(""),
+  );
+
+  await auditVisualArtifact({
+    htmlPath,
+    projectRoot: root,
+    screenshotPath,
+    settings: { visualQaEnabled: true, agentCommand: "/usr/bin/true" } as any,
+    agentCommand: "/usr/bin/true",
+    isSharingan: true,
+    sharinganReference: { screenshotPath: sourcePath, renderMapPath },
+  });
+
+  const screenshot = readFileSync(screenshotPath);
+  assert.ok(screenshot.readUInt32BE(20) >= 1750, "generated QA screenshot uses the same inner-scroller expansion as source capture");
 });
 
 test("reviewScreenshotWithAgent reports when screenshot capture never happened", async () => {
@@ -937,4 +1077,63 @@ console.log(JSON.stringify({ findings: [{ kind: "defect", severity: "P1", messag
   assert.equal(findings[0]?.message, "Text clips.");
   assert.equal(findings[0]?.screenshotPath, ".visual-qa/screenshot.png");
   assert.match(findings[0]?.reviewSummary ?? "", /1 issue/i);
+});
+
+test("reviewScreenshotWithAgent rejects valid-looking stdout from a failed critic process", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-review-exit-"));
+  const screenshot = join(root, ".visual-qa", "screenshot.png");
+  const agent = join(root, "failed-agent.js");
+  mkdirSync(join(root, ".visual-qa"), { recursive: true });
+  writeFileSync(join(root, "index.html"), "<h1>Pricing</h1>", "utf8");
+  writeFileSync(screenshot, Buffer.from([1, 2, 3, 4]));
+  writeFileSync(
+    agent,
+    `#!/usr/bin/env node
+console.log(JSON.stringify({ findings: [{ kind: "defect", severity: "P1", message: "Looks valid.", fix: "But process failed." }] }));
+process.exit(7);
+`,
+    { mode: 0o755 },
+  );
+
+  const findings = await reviewScreenshotWithAgent(
+    {
+      htmlPath: join(root, "index.html"),
+      settings: {
+        agentCommand: agent,
+        model: "",
+        apiBaseUrl: "",
+        apiKey: "",
+        defaultDesignSystemId: "modern-minimal",
+        customInstructions: "",
+        imageApiBaseUrl: "",
+        imageApiKey: "",
+        imageModel: "",
+        removeBackgroundModel: "",
+        editRegionModel: "",
+        extractLayerModel: "",
+        videoApiBaseUrl: "",
+        videoApiKey: "",
+        videoModel: "",
+        aiProviderId: "openai",
+        aiProviderEnabled: false,
+        aiProviderModels: "gpt-image-1",
+        aiProviderOrganization: "",
+        aiProviderProfiles: "",
+        visualQaEnabled: true,
+        autoFixLiveRuntimeErrors: false,
+        sharinganAffirmed: false,
+        researchEnabled: false,
+        researchAgentCommand: "",
+        researchModel: "",
+        visualQaAgentCommand: "",
+        visualQaModel: "",
+        autoImproveEnabled: false,
+        autoImproveMaxRounds: 0,
+      },
+    },
+    screenshot,
+  );
+
+  assert.equal(findings[0]?.id, "visual-agent-review-failed");
+  assert.ok(!findings.some((finding) => finding.id === "visual-reviewed"));
 });

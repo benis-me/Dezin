@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -8,11 +9,14 @@ import { ensureDevServer, ensureProjectPickerBridge, gitRestoreTree, getSetup, r
 import {
   StandardRunPublishConflictError,
   StandardRunSourceDirtyError,
+  assertStandardRunSourceClean,
   beginStandardRunTransaction,
   standardRunBranchName,
   standardRunWorktreeDir,
+  withStandardSourceMutationLock,
   type StandardRunTransactionDeps,
 } from "../src/standard-run-transaction.ts";
+import { restoreStandardArtifactDirFromCommit } from "../src/variant-workspaces.ts";
 
 async function waitForPortDown(url: string): Promise<void> {
   for (let i = 0; i < 20; i++) {
@@ -97,6 +101,135 @@ test("ensureProjectPickerBridge repairs a bridge corrupted by replacement tokens
     assert.equal(await ensureProjectPickerBridge(dir), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a historical dev server instruments preview HTML without committing or dirtying its source", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-historical-runtime-"));
+  const runtimeKey = "historical-project:version:run-v1";
+  try {
+    const template = readFileSync(join(templateDir(), "vite.config.js"), "utf8");
+    const staleConfig = template
+      .replace(/const PICKER_BRIDGE = `[\s\S]*?<\/script>`;/, "const PICKER_BRIDGE = `<script data-dezin-bridge>window.__oldPicker = true;</script>`;")
+      .replace(/const RUNTIME_PROBE = `[\s\S]*?<\/script>`;/, "const RUNTIME_PROBE = `<script data-dezin-runtime-probe>window.__oldProbe = true;</script>`;");
+    writeFileSync(join(dir, "vite.config.js"), staleConfig);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({
+      private: true,
+      type: "module",
+      scripts: { dev: "vite" },
+      dependencies: { react: "*", "react-dom": "*" },
+      devDependencies: { vite: "*", "@vitejs/plugin-react": "*" },
+    }));
+    writeFileSync(join(dir, "index.html"), '<!doctype html><html><head></head><body><main id="root">Historical</main></body></html>');
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src", "App.jsx"), "export default function App(){ return <main>Historical source</main> }\n");
+    mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
+    mkdirSync(join(dir, "node_modules", "@vitejs"), { recursive: true });
+    const webModules = join(templateDir(), "..", "..", "..", "apps", "web", "node_modules");
+    symlinkSync(join(webModules, "vite"), join(dir, "node_modules", "vite"), "dir");
+    symlinkSync(join(webModules, "@vitejs", "plugin-react"), join(dir, "node_modules", "@vitejs", "plugin-react"), "dir");
+    symlinkSync(join(webModules, "react"), join(dir, "node_modules", "react"), "dir");
+    symlinkSync(join(webModules, "react-dom"), join(dir, "node_modules", "react-dom"), "dir");
+    symlinkSync(join(webModules, "vite", "bin", "vite.js"), join(dir, "node_modules", ".bin", "vite"));
+    const manifest = readFileSync(join(dir, "package.json"));
+    const fingerprint = createHash("sha256").update("package.json").update("\0").update(manifest).update("\0").digest("hex");
+    writeFileSync(join(dir, "node_modules", ".dezin-dependency-fingerprint"), `${fingerprint}\n`);
+    writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
+
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    const head = commitFixture(dir, "historical snapshot");
+    const appBefore = readFileSync(join(dir, "src", "App.jsx"), "utf8");
+    const hook = join(dir, ".git", "hooks", "post-commit");
+    writeFileSync(hook, "#!/bin/sh\nprintf 'HOOKED\\n' > src/App.jsx\nprintf 'ran\\n' > hook-ran.txt\n");
+    chmodSync(hook, 0o755);
+
+    const lease = await ensureDevServer("historical-project", dir, runtimeKey);
+    const firstHtml = await waitForText(lease.url);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const settledHtml = await waitForText(lease.url);
+
+    assert.match(firstHtml, /data-dezin-runtime-probe/);
+    assert.match(firstHtml, /attrs:attrs\(el\)/, "the external runtime config carries the current picker bridge");
+    assert.match(settledHtml, /attrs:attrs\(el\)/, "instrumentation remains after Vite has settled");
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), head);
+    assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), appBefore);
+    assert.equal(existsSync(join(dir, "hook-ran.txt")), false);
+    assert.equal(execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+  } finally {
+    await stopAllDevServers();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("historical preview instrumentation supports every Vite config extension without touching source history", async (t) => {
+  for (const extension of [".ts", ".mjs", ".mts", ".cjs", ".cts"]) {
+    await t.test(`vite.config${extension}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), `dezin-historical-runtime-${extension.slice(1)}-`));
+      const projectId = `historical-${extension.slice(1)}`;
+      const runtimeKey = `${projectId}:version:run-v1`;
+      try {
+        const template = readFileSync(join(templateDir(), "vite.config.js"), "utf8");
+        const staleConfig = extension === ".cjs" || extension === ".cts"
+          ? `const PICKER_BRIDGE = \`<script data-dezin-bridge>window.__oldPicker = true;</script>\`;
+const RUNTIME_PROBE = \`<script data-dezin-runtime-probe>window.__oldProbe = true;</script>\`;
+function dezinPicker() {
+  return { name: "dezin-picker", apply: "serve", transformIndexHtml(html) {
+    const head = html.match(/<head[^>]*>/i);
+    const withProbe = head ? html.slice(0, head.index + head[0].length) + RUNTIME_PROBE + html.slice(head.index + head[0].length) : RUNTIME_PROBE + html;
+    return withProbe.replace("</body>", PICKER_BRIDGE + "</body>");
+  } };
+}
+module.exports = { plugins: [dezinPicker()], server: { host: "127.0.0.1", allowedHosts: true } };
+`
+          : template
+              .replace(/const PICKER_BRIDGE = `[\s\S]*?<\/script>`;/, "const PICKER_BRIDGE = `<script data-dezin-bridge>window.__oldPicker = true;</script>`;")
+              .replace(/const RUNTIME_PROBE = `[\s\S]*?<\/script>`;/, "const RUNTIME_PROBE = `<script data-dezin-runtime-probe>window.__oldProbe = true;</script>`;");
+        writeFileSync(join(dir, `vite.config${extension}`), staleConfig);
+        writeFileSync(join(dir, "package.json"), JSON.stringify({
+          private: true,
+          type: "module",
+          scripts: { dev: "vite" },
+          dependencies: { react: "*", "react-dom": "*" },
+          devDependencies: { vite: "*", "@vitejs/plugin-react": "*" },
+        }));
+        writeFileSync(join(dir, "index.html"), '<!doctype html><html><head></head><body><main id="root">Historical</main></body></html>');
+        mkdirSync(join(dir, "src"));
+        writeFileSync(join(dir, "src", "App.jsx"), "export default function App(){ return <main>Historical source</main> }\n");
+        mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
+        mkdirSync(join(dir, "node_modules", "@vitejs"), { recursive: true });
+        const webModules = join(templateDir(), "..", "..", "..", "apps", "web", "node_modules");
+        symlinkSync(join(webModules, "vite"), join(dir, "node_modules", "vite"), "dir");
+        symlinkSync(join(webModules, "@vitejs", "plugin-react"), join(dir, "node_modules", "@vitejs", "plugin-react"), "dir");
+        symlinkSync(join(webModules, "react"), join(dir, "node_modules", "react"), "dir");
+        symlinkSync(join(webModules, "react-dom"), join(dir, "node_modules", "react-dom"), "dir");
+        symlinkSync(join(webModules, "vite", "bin", "vite.js"), join(dir, "node_modules", ".bin", "vite"));
+        const manifest = readFileSync(join(dir, "package.json"));
+        const fingerprint = createHash("sha256").update("package.json").update("\0").update(manifest).update("\0").digest("hex");
+        writeFileSync(join(dir, "node_modules", ".dezin-dependency-fingerprint"), `${fingerprint}\n`);
+        writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
+
+        execFileSync("git", ["init", "-q"], { cwd: dir });
+        const head = commitFixture(dir, `historical ${extension} snapshot`);
+        const appBefore = readFileSync(join(dir, "src", "App.jsx"), "utf8");
+        const hook = join(dir, ".git", "hooks", "post-commit");
+        writeFileSync(hook, "#!/bin/sh\nprintf 'HOOKED\\n' > src/App.jsx\nprintf 'ran\\n' > hook-ran.txt\n");
+        chmodSync(hook, 0o755);
+
+        const lease = await ensureDevServer(projectId, dir, runtimeKey);
+        const html = await waitForText(lease.url);
+
+        assert.match(html, /data-dezin-runtime-probe/);
+        assert.match(html, /attrs:attrs\(el\)/);
+        assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), head);
+        assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), appBefore);
+        assert.equal(existsSync(join(dir, "hook-ran.txt")), false);
+        assert.equal(execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+        await lease.release();
+      } finally {
+        await stopAllDevServers();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   }
 });
 
@@ -239,6 +372,55 @@ setInterval(() => {}, 1000);
   }
 });
 
+test("ensureDevServer reinstalls dependencies when a restored manifest changes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-runtime-dependency-restore-"));
+  const dir = join(root, "project");
+  const firstDep = join(root, "dep-first");
+  const secondDep = join(root, "dep-second");
+  mkdirSync(dir, { recursive: true });
+  for (const [depDir, marker] of [[firstDep, "first dependency"], [secondDep, "restored dependency"]] as const) {
+    mkdirSync(depDir, { recursive: true });
+    writeFileSync(join(depDir, "package.json"), JSON.stringify({ name: "dezin-runtime-marker", version: "1.0.0", type: "module", main: "index.js" }));
+    writeFileSync(join(depDir, "index.js"), `export const marker = ${JSON.stringify(marker)};\n`);
+  }
+  writeFileSync(join(dir, ".gitignore"), "node_modules/\npackage-lock.json\n");
+  writeFileSync(
+    join(dir, "server.mjs"),
+    `import http from "node:http";
+import { marker } from "dezin-runtime-marker";
+const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
+http.createServer((_req, res) => res.end(marker)).listen(port, "127.0.0.1");
+setInterval(() => {}, 1000);
+`,
+  );
+  const packageJson = (depDir: string) => JSON.stringify({
+    type: "module",
+    scripts: { dev: "node server.mjs" },
+    dependencies: { "dezin-runtime-marker": `file:${depDir}` },
+  });
+
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "t@t.dev"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    writeFileSync(join(dir, "package.json"), packageJson(firstDep));
+    commitFixture(dir, "first dependency manifest");
+
+    const first = await ensureDevServer("dependency-restore", dir, "runtime-dependency-restore");
+    assert.equal(await waitForText(first.url), "first dependency");
+
+    writeFileSync(join(dir, "package.json"), packageJson(secondDep));
+    commitFixture(dir, "restored dependency manifest");
+    const restored = await ensureDevServer("dependency-restore", dir, "runtime-dependency-restore");
+
+    assert.equal(await waitForText(restored.url), "restored dependency");
+    assert.equal(readFileSync(join(dir, "node_modules", "dezin-runtime-marker", "index.js"), "utf8").includes("restored dependency"), true);
+  } finally {
+    await stopAllDevServers();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("setupImportedStandardProject installs without running imported package scripts", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-imported-standard-"));
   const marker = join(dir, "postinstall-ran.txt");
@@ -319,6 +501,57 @@ function initTransactionRepository(): { dataDir: string; sourceDir: string; sour
   return { dataDir, sourceDir, sourceHead };
 }
 
+function commitFixture(dir: string, message: string): string {
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", message], { cwd: dir });
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+}
+
+test("standard source mutation lock serializes operations for the same artifact", async () => {
+  const order: string[] = [];
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const first = withStandardSourceMutationLock("/tmp/dezin-same-source", async () => {
+    order.push("first:start");
+    await firstGate;
+    order.push("first:end");
+  });
+  const second = withStandardSourceMutationLock("/tmp/dezin-same-source", async () => {
+    order.push("second:start");
+    order.push("second:end");
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["first:start"]);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(order, ["first:start", "first:end", "second:start", "second:end"]);
+});
+
+test("a non-root Standard variant transaction receives project-root reference sidecars", async () => {
+  const { dataDir, sourceDir } = initTransactionRepository();
+  const variantDir = join(dataDir, "worktrees", "project-1", "variant-1");
+  let transaction: Awaited<ReturnType<typeof beginStandardRunTransaction>> | undefined;
+  try {
+    mkdirSync(join(dataDir, "worktrees", "project-1"), { recursive: true });
+    execFileSync("git", ["worktree", "add", "-q", "-b", "dezin/variant/variant-1", variantDir, "HEAD"], { cwd: sourceDir });
+    mkdirSync(join(sourceDir, ".refs"), { recursive: true });
+    writeFileSync(join(sourceDir, ".refs", "reference.txt"), "root-sidecar evidence");
+
+    transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "variant-1", runId: "variant-ref-run", sourceDir: variantDir },
+    );
+
+    assert.equal(readFileSync(join(transaction.dir, ".refs", "reference.txt"), "utf8"), "root-sidecar evidence");
+  } finally {
+    await transaction?.dispose();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("standard Run transaction rejects tracked and untracked source changes without touching bytes or HEAD", async () => {
   const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
   try {
@@ -388,6 +621,243 @@ test("standard Run transaction publishes only committed agent changes and dispos
     assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), committed);
     assert.equal(existsSync(transaction.dir), false);
     assert.equal(execFileSync("git", ["branch", "--list", standardRunBranchName("success-run")], { cwd: sourceDir, encoding: "utf8" }).trim(), "");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run publication rejects candidate collisions with ignored source files", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  let transaction: Awaited<ReturnType<typeof beginStandardRunTransaction>> | undefined;
+  try {
+    writeFileSync(join(sourceDir, ".gitignore"), "secret.txt\n");
+    commitFixture(sourceDir, "ignore local secret");
+    const cleanHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim();
+    writeFileSync(join(sourceDir, "secret.txt"), "PRIVATE LOCAL BYTES");
+
+    transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId: "ignored-collision", sourceDir },
+    );
+    rmSync(join(transaction.dir, ".gitignore"));
+    writeFileSync(join(transaction.dir, "secret.txt"), "agent-owned bytes");
+    await transaction.commit("track formerly ignored secret");
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+    assert.equal(readFileSync(join(sourceDir, "secret.txt"), "utf8"), "PRIVATE LOCAL BYTES");
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), cleanHead);
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceDir, encoding: "utf8" }), "");
+    assert.notEqual(cleanHead, sourceHead);
+  } finally {
+    await transaction?.dispose();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run worktree, restoreBest, and publish bypass checkout and merge hooks", async () => {
+  const { dataDir, sourceDir } = initTransactionRepository();
+  let transaction: Awaited<ReturnType<typeof beginStandardRunTransaction>> | undefined;
+  try {
+    const hooksDir = join(sourceDir, ".git", "hooks");
+    mkdirSync(hooksDir, { recursive: true });
+    writeFileSync(join(hooksDir, "post-checkout"), "#!/bin/sh\nprintf HOOKED > src/App.jsx\n", { mode: 0o755 });
+    writeFileSync(join(hooksDir, "post-merge"), "#!/bin/sh\nprintf MERGE-HOOK > src/App.jsx\n", { mode: 0o755 });
+
+    transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId: "hook-isolation", sourceDir },
+    );
+    assert.equal(readFileSync(join(transaction.dir, "src", "App.jsx"), "utf8"), "v1");
+
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "best exact tree");
+    const best = await transaction.commit("best");
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "later worse tree");
+    await transaction.commit("later");
+    await transaction.restoreBest(best);
+    assert.equal(readFileSync(join(transaction.dir, "src", "App.jsx"), "utf8"), "best exact tree");
+
+    await transaction.publish();
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "best exact tree");
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceDir, encoding: "utf8" }), "");
+  } finally {
+    await transaction?.dispose();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed Standard fast-forward promotion restores the source tree before reporting conflict", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  let transaction: Awaited<ReturnType<typeof beginStandardRunTransaction>> | undefined;
+  try {
+    transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId: "failed-checkout-cleanup", sourceDir },
+    );
+    execFileSync("git", ["config", "filter.boom.clean", "cat"], { cwd: sourceDir });
+    execFileSync("git", ["config", "filter.boom.smudge", "false"], { cwd: sourceDir });
+    execFileSync("git", ["config", "filter.boom.required", "true"], { cwd: sourceDir });
+    writeFileSync(join(transaction.dir, ".gitattributes"), "*.txt filter=boom\n");
+    writeFileSync(join(transaction.dir, "payload.txt"), "candidate payload");
+    await transaction.commit("candidate with failing checkout filter");
+
+    await assert.rejects(transaction.publish(), StandardRunPublishConflictError);
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: sourceDir, encoding: "utf8" }), "");
+    assert.equal(existsSync(join(sourceDir, ".gitattributes")), false);
+    assert.equal(existsSync(join(sourceDir, "payload.txt")), false);
+  } finally {
+    await transaction?.dispose();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("legacy runtime sidecar migration bypasses repository signing and preserves current bytes", async () => {
+  const { dataDir, sourceDir } = initTransactionRepository();
+  try {
+    writeFileSync(join(sourceDir, ".cover.png"), "current cover bytes");
+    commitFixture(sourceDir, "legacy tracked cover");
+    execFileSync("git", ["config", "commit.gpgSign", "true"], { cwd: sourceDir });
+    execFileSync("git", ["config", "user.signingkey", "definitely-missing-key"], { cwd: sourceDir });
+
+    await assertStandardRunSourceClean(sourceDir);
+
+    assert.equal(readFileSync(join(sourceDir, ".cover.png"), "utf8"), "current cover bytes");
+    assert.equal(execFileSync("git", ["ls-files", "--", ".cover.png"], { cwd: sourceDir, encoding: "utf8" }), "");
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceDir, encoding: "utf8" }), "");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed legacy sidecar migration restores its index entries and bytes", async () => {
+  const { dataDir, sourceDir } = initTransactionRepository();
+  try {
+    writeFileSync(join(sourceDir, ".cover.png"), "live cover bytes");
+    commitFixture(sourceDir, "legacy tracked cover");
+    execFileSync("git", ["config", "commit.cleanup", "definitely-invalid"], { cwd: sourceDir });
+
+    await assert.rejects(assertStandardRunSourceClean(sourceDir), /commit.*failed/i);
+
+    assert.equal(readFileSync(join(sourceDir, ".cover.png"), "utf8"), "live cover bytes");
+    assert.equal(execFileSync("git", ["ls-files", "--", ".cover.png"], { cwd: sourceDir, encoding: "utf8" }).trim(), ".cover.png");
+    assert.equal(execFileSync("git", ["diff", "--cached", "--name-only"], { cwd: sourceDir, encoding: "utf8" }), "");
+    execFileSync("git", ["config", "--unset", "commit.cleanup"], { cwd: sourceDir });
+    await assertStandardRunSourceClean(sourceDir);
+    assert.equal(execFileSync("git", ["ls-files", "--", ".cover.png"], { cwd: sourceDir, encoding: "utf8" }), "");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Standard Restore rejects ignored target collisions without changing private bytes", async () => {
+  const { dataDir, sourceDir } = initTransactionRepository();
+  try {
+    mkdirSync(join(sourceDir, "private"), { recursive: true });
+    writeFileSync(join(sourceDir, ".env"), "HISTORICAL");
+    writeFileSync(join(sourceDir, "private", "config.json"), "historical config");
+    const target = commitFixture(sourceDir, "historical tracked private files");
+    rmSync(join(sourceDir, ".env"));
+    rmSync(join(sourceDir, "private"), { recursive: true, force: true });
+    writeFileSync(join(sourceDir, ".gitignore"), ".env\nprivate/\n");
+    const current = commitFixture(sourceDir, "make private files local");
+    mkdirSync(join(sourceDir, "private"), { recursive: true });
+    writeFileSync(join(sourceDir, ".env"), "PRIVATE CURRENT BYTES");
+    writeFileSync(join(sourceDir, "private", "config.json"), "private current config");
+
+    await assert.rejects(restoreStandardArtifactDirFromCommit(sourceDir, target), /overwrite ignored local paths/);
+
+    assert.equal(readFileSync(join(sourceDir, ".env"), "utf8"), "PRIVATE CURRENT BYTES");
+    assert.equal(readFileSync(join(sourceDir, "private", "config.json"), "utf8"), "private current config");
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), current);
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceDir, encoding: "utf8" }), "");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Standard Restore preserves live sidecars and strips legacy sidecars from the restored tree", async () => {
+  const { dataDir, sourceDir } = initTransactionRepository();
+  try {
+    mkdirSync(join(sourceDir, ".refs"), { recursive: true });
+    mkdirSync(join(sourceDir, ".visual-qa"), { recursive: true });
+    writeFileSync(join(sourceDir, "src", "App.jsx"), "historical app");
+    writeFileSync(join(sourceDir, ".cover.png"), "historical cover");
+    writeFileSync(join(sourceDir, ".refs", "source.png"), "historical ref");
+    writeFileSync(join(sourceDir, ".visual-qa", "screen.png"), "historical evidence");
+    const target = commitFixture(sourceDir, "historical tracked sidecars");
+
+    rmSync(join(sourceDir, ".cover.png"));
+    rmSync(join(sourceDir, ".refs"), { recursive: true, force: true });
+    rmSync(join(sourceDir, ".visual-qa"), { recursive: true, force: true });
+    writeFileSync(join(sourceDir, "src", "App.jsx"), "current app");
+    commitFixture(sourceDir, "current app without sidecars");
+    const exclude = join(sourceDir, ".git", "info", "exclude");
+    writeFileSync(exclude, "/.cover.png\n/.refs/\n/.visual-qa/\n");
+    mkdirSync(join(sourceDir, ".refs"), { recursive: true });
+    mkdirSync(join(sourceDir, ".visual-qa"), { recursive: true });
+    writeFileSync(join(sourceDir, ".cover.png"), "live cover");
+    writeFileSync(join(sourceDir, ".refs", "source.png"), "live ref");
+    writeFileSync(join(sourceDir, ".visual-qa", "screen.png"), "live evidence");
+
+    const restored = await restoreStandardArtifactDirFromCommit(sourceDir, target);
+
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "historical app");
+    assert.equal(readFileSync(join(sourceDir, ".cover.png"), "utf8"), "live cover");
+    assert.equal(readFileSync(join(sourceDir, ".refs", "source.png"), "utf8"), "live ref");
+    assert.equal(readFileSync(join(sourceDir, ".visual-qa", "screen.png"), "utf8"), "live evidence");
+    assert.equal(execFileSync("git", ["ls-tree", "-r", "--name-only", restored, "--", ".cover.png", ".refs", ".visual-qa"], { cwd: sourceDir, encoding: "utf8" }), "");
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceDir, encoding: "utf8" }), "");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Standard Restore fails closed when a clean filter cannot materialize the exact target", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  try {
+    writeFileSync(join(sourceDir, "src", "App.jsx"), "current tree");
+    const current = commitFixture(sourceDir, "current tree");
+    mkdirSync(join(sourceDir, ".git", "info"), { recursive: true });
+    writeFileSync(join(sourceDir, ".git", "info", "attributes"), "src/App.jsx filter=audit\n");
+    execFileSync("git", ["config", "filter.audit.clean", "sed s/v1/FILTERED/g"], { cwd: sourceDir });
+    execFileSync("git", ["config", "filter.audit.smudge", "cat"], { cwd: sourceDir });
+    execFileSync("git", ["config", "filter.audit.required", "true"], { cwd: sourceDir });
+
+    await assert.rejects(
+      restoreStandardArtifactDirFromCommit(sourceDir, sourceHead),
+      /version restore failed|could not materialize.*clean worktree/,
+    );
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), current);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "current tree");
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: sourceDir, encoding: "utf8" }), "");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("standard Run transaction can retain an exact quality-gate recovery commit without publishing it", async () => {
+  const { dataDir, sourceDir, sourceHead } = initTransactionRepository();
+  const runId = "quality-gate-recovery";
+  try {
+    const transaction = await beginStandardRunTransaction(
+      { dataDir },
+      { projectId: "project-1", variantId: "main", runId, sourceDir },
+    );
+    writeFileSync(join(transaction.dir, "src", "App.jsx"), "high-fidelity candidate needing review");
+    const candidate = await transaction.commit("candidate blocked by quality gate");
+
+    assert.equal(await transaction.preserveRecovery(), standardRunBranchName(runId));
+    await transaction.dispose();
+
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: sourceDir, encoding: "utf8" }).trim(), sourceHead);
+    assert.equal(readFileSync(join(sourceDir, "src", "App.jsx"), "utf8"), "v1");
+    assert.equal(existsSync(transaction.dir), false);
+    assert.equal(
+      execFileSync("git", ["rev-parse", standardRunBranchName(runId)], { cwd: sourceDir, encoding: "utf8" }).trim(),
+      candidate,
+    );
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

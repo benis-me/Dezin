@@ -291,6 +291,192 @@ test("lintArtifact in Sharingan mode allows SOURCE replay only inside the refere
   assert.ok(has(lintArtifact(copiedIntoSrc, { mode: "standard", isSharingan: true }), "sharingan-source-replay-final"));
 });
 
+test("lintArtifact in Sharingan mode blocks external media fallbacks across markup and CSS", () => {
+  const external = `
+    /* file: src/App.jsx */
+    export default function App() {
+      return <main style={{ backgroundImage: "url(https://cdn.example.test/hero.webp)" }}>
+        <img src="https://cdn.example.test/card.png" srcSet="https://cdn.example.test/card@2x.png 2x" />
+        <video poster="https://cdn.example.test/poster.jpg" />
+      </main>;
+    }
+  `;
+
+  const findings = lintArtifact(external, { mode: "standard", isSharingan: true });
+  const blocked = findings.find((finding) => finding.id === "sharingan-external-media");
+  assert.equal(blocked?.severity, "P0");
+  assert.match(blocked?.message ?? "", /external|captured local/i);
+});
+
+test("lintArtifact in Sharingan mode allows local captured assets and ignores external URLs inside the reference scaffold", () => {
+  const local = `
+    /* file: .sharingan/source-scaffold/App.jsx */
+    const SOURCE = { images: [{ src: "https://source.example.test/reference-only.png" }] };
+    /* file: src/App.jsx */
+    export default function App() {
+      return <main style={{ backgroundImage: "url('/_assets/hero.webp')" }}>
+        <img src="/_assets/card.png" srcSet="/_assets/card.png 1x, /_assets/card@2x.png 2x" />
+        <video poster="/_assets/poster.jpg" />
+      </main>;
+    }
+  `;
+
+  assert.ok(!has(lintArtifact(local, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows object/variable media data and protocol-relative URLs without scanning comments", () => {
+  const objectData = `
+    /* file: src/data.js */
+    export const cards = [{ src: "https://cdn.example.test/card.webp" }];
+    /* file: src/App.jsx */
+    import { cards } from "./data";
+    export default function App(){ return <img src={cards[0].src} />; }
+  `;
+  const variable = `
+    const hero = "https://images.example.test/hero.jpg";
+    export default function App(){ return <img src={hero} />; }
+  `;
+  const protocolRelative = `export default function App(){ return <video poster="//cdn.example.test/poster">x</video>; }`;
+  const jsonSurface = `/* file: src/content.json */\n{"hero":{"src":"https://cdn.example.test/hero"}}`;
+  const commentOnly = `
+    // old <img src="https://cdn.example.test/old.png" />
+    /* retired: background-image:url(https://cdn.example.test/old.webp) */
+    export default function App(){ return <img src="/_assets/local.png" />; }
+  `;
+
+  for (const surface of [objectData, variable, protocolRelative]) {
+    assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+  }
+  assert.ok(!has(lintArtifact(jsonSurface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+  assert.ok(!has(lintArtifact(commentOnly, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows an extensionless external URL variable into an image src", () => {
+  const surface = `
+    const hero = "https://images.example.test/render?id=42";
+    export default function App(){ return <img src={hero} />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows an external object URL property into an image src", () => {
+  const surface = `
+    const cards = [{ url: "https://images.example.test/render?id=42" }];
+    export default function App(){ return <img src={cards[0].url} />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint does not correlate an unrelated external docs link with a local media variable", () => {
+  const surface = `
+    const local = "/_assets/card.png";
+    export default function App(){
+      return <main><img src={local} /><a href="https://docs.example.test/guide.png">Docs</a></main>;
+    }
+  `;
+
+  assert.ok(!has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint does not conflate the same property name across unrelated objects", () => {
+  const surface = `
+    const docs = { url: "https://docs.example.test/guide.png" };
+    const cards = [{ url: "/_assets/card.png" }];
+    export default function App(){ return <img src={cards[0].url} />; }
+  `;
+
+  assert.ok(!has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint catches an extensionless URL literal in a logical media fallback", () => {
+  const surface = `
+    const local = "/_assets/card.png";
+    export default function App(){ return <img src={local || "https://images.example.test/render?id=42"} />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint catches an extensionless URL literal in a ternary media expression", () => {
+  const surface = `
+    const local = "/_assets/card.png";
+    export default function App({ remote }){
+      return <img src={remote ? "https://images.example.test/render?id=42" : local} />;
+    }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint keeps same-name bindings local to each concatenated file", () => {
+  const surface = `
+    /* file: src/docs.ts */
+    const hero = "https://docs.example.test/render?id=42";
+    export const docsHero = hero;
+    /* file: src/App.tsx */
+    const hero = "/_assets/local.png";
+    export default function App(){ return <img src={hero} />; }
+  `;
+
+  assert.ok(!has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows same-file aliases into a render sink", () => {
+  const surface = `
+    const remote = "https://images.example.test/render?id=42";
+    const hero = remote;
+    export default function App(){ return <img src={hero} />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows imported aliases into a render sink", () => {
+  const surface = `
+    /* file: src/media.ts */
+    export const remoteHero = "https://images.example.test/render?id=42";
+    /* file: src/App.tsx */
+    import { remoteHero as hero } from "./media";
+    export default function App(){ return <img src={hero} />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows external srcSet arrays joined at the render sink", () => {
+  const surface = `
+    const local = "/_assets/card.png 1x";
+    const candidates = [local, "https://images.example.test/render?id=42 2x"];
+    export default function App(){ return <img src="/_assets/card.png" srcSet={candidates.join(", ")} />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint ignores unused external media-shaped object properties", () => {
+  const surface = `
+    const docs = { src: "https://docs.example.test/guide.png" };
+    const local = "/_assets/card.png";
+    export default function App(){ return <img src={local} alt="Card" />; }
+  `;
+
+  assert.ok(!has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows only the object property used by the render sink", () => {
+  const surface = `
+    const content = {
+      src: "https://docs.example.test/guide.png",
+      thumbnail: "/_assets/card.png",
+    };
+    export default function App(){ return <img src={content.thumbnail} alt="Card" />; }
+  `;
+
+  assert.ok(!has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
 test("accent-overuse counts the bare --accent token, not --accent-fg / --accent-2", () => {
   const fg = `<body><div style="color:var(--accent-fg)">a</div><div style="border-color:var(--accent-fg)">b</div><div style="background:var(--accent-fg)">c</div><div style="outline-color:var(--accent-fg)">d</div></body>`;
   assert.ok(!has(lintArtifact(fg), "accent-overuse"), "4x var(--accent-fg) is not accent-overuse");

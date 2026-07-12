@@ -170,14 +170,18 @@ test("releaseVariant stops resources and removes only variant-owned paths before
     join(dataDir, ".runs", targetRun.id, "bundle.txt"),
     join(dataDir, "worktrees", project.id, target.id, "artifact.txt"),
     join(dataDir, "version-worktrees", project.id, targetRun.id, "artifact.txt"),
+    join(dataDir, "version-evidence", project.id, targetRun.id, "visual", "round-0.png"),
     join(dataDir, "projects", project.id, ".variants", target.id, "index.html"),
     join(dataDir, "projects", project.id, ".versions", `${targetRun.id.replace(/[^a-zA-Z0-9-]/g, "")}.html`),
+    join(dataDir, "projects", project.id, ".versions", `${targetRun.id.replace(/[^a-zA-Z0-9-]/g, "")}.files`, "assets", "gen-0.png"),
   ];
   const retainedPaths = [
     join(dataDir, ".runs", `${mainRun.id}.jsonl`),
     join(dataDir, "version-worktrees", project.id, mainRun.id, "artifact.txt"),
+    join(dataDir, "version-evidence", project.id, mainRun.id, "visual", "round-0.png"),
     join(dataDir, "projects", project.id, "index.html"),
     join(dataDir, "projects", project.id, ".versions", `${mainRun.id.replace(/[^a-zA-Z0-9-]/g, "")}.html`),
+    join(dataDir, "projects", project.id, ".versions", `${mainRun.id.replace(/[^a-zA-Z0-9-]/g, "")}.files`, "assets", "gen-0.png"),
   ];
   for (const path of [...targetPaths, ...retainedPaths]) {
     mkdirSync(join(path, ".."), { recursive: true });
@@ -227,10 +231,12 @@ test("releaseProject waits, releases resources, and removes all project-owned st
     join(dataDir, ".runs", branchRun.id, "bundle.txt"),
     join(dataDir, "worktrees", project.id, branch.id, "artifact.txt"),
     join(dataDir, "version-worktrees", project.id, branchRun.id, "artifact.txt"),
+    join(dataDir, "version-evidence", project.id, branchRun.id, "visual", "round-0.png"),
     join(dataDir, "projects", project.id, "index.html"),
   ];
   const retainedPaths = [
     join(dataDir, ".runs", `${otherRun.id}.jsonl`),
+    join(dataDir, "version-evidence", otherProject.id, otherRun.id, "visual", "round-0.png"),
     join(dataDir, "projects", otherProject.id, "index.html"),
   ];
   for (const path of [...targetPaths, ...retainedPaths]) {

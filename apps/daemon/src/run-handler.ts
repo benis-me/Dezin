@@ -5,7 +5,7 @@
  * (@dezin/core Store) → write the artifact to disk so /projects/:id/preview/ serves it.
  */
 
-import { appendFile, mkdir, readdir, readFile, writeFile, stat } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rm, writeFile, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -29,6 +29,13 @@ import { lintArtifact, applyIgnores } from "../../../packages/quality/src/index.
 import { generateImages } from "./image-gen.ts";
 import { captureCover, captureCoverUrl } from "./capture-cover.ts";
 import { auditVisualArtifact, type VisualQaInput } from "./visual-qa.ts";
+import { persistVisualEvidence } from "./visual-evidence.ts";
+import {
+  prototypeVersionFilesDir,
+  prototypeVersionHtmlPath,
+  restorePrototypeVersionSnapshot,
+  writePrototypeVersionSnapshot,
+} from "./prototype-version-snapshot.ts";
 import { ensureDevServer, releaseVariantRuntime, workingTreeFingerprint } from "./project-runtime.ts";
 import { bestVersion } from "./best-version.ts";
 import type { QualityFinding, Run, Settings } from "../../../packages/core/src/index.ts";
@@ -37,8 +44,10 @@ import { projectDir } from "./serve-static.ts";
 import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import {
   StandardRunSourceDirtyError,
+  acquireStandardSourceMutationLock,
   assertStandardRunSourceClean,
   beginStandardRunTransaction,
+  type StandardSourceMutationLease,
   type StandardRunTransaction,
 } from "./standard-run-transaction.ts";
 import { createRun, pushEvent, finishRun, cancelRun, subscribe } from "./run-manager.ts";
@@ -51,10 +60,11 @@ import { runResearchPhase } from "./research-phase.ts";
 import { syncVisualResearchMoodboard } from "./visual-research-moodboard.ts";
 import {
   buildResearchContext,
-  directionPath,
   directionTitle,
   directionBlurb,
   listDirections,
+  readCandidateDirection,
+  isSafeDirectionSlug,
   listAssets,
   readSources,
   researchExists,
@@ -62,6 +72,8 @@ import {
   readChosenDirection,
   listVisualAssets,
   readVisualSources,
+  validateResearchBundle,
+  type ResearchBundleIssue,
 } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
@@ -173,10 +185,10 @@ function startPreviewPoller(file: string, onChange: (mtimeMs: number) => void): 
   };
 }
 
-const STANDARD_LINT_EXTENSIONS = new Set([".css", ".html", ".js", ".jsx", ".ts", ".tsx"]);
+const STANDARD_LINT_EXTENSIONS = new Set([".css", ".html", ".js", ".json", ".jsx", ".ts", ".tsx"]);
 const STANDARD_LINT_SKIP_DIRS = new Set([".git", ".sharingan", "dist", "node_modules", "version-worktrees"]);
 
-async function collectStandardLintSurface(root: string, maxBytes = 2_000_000): Promise<string> {
+export async function collectStandardLintSurface(root: string, maxBytes = 2_000_000): Promise<string> {
   const chunks: string[] = [];
   let used = 0;
   const walk = async (dir: string): Promise<void> => {
@@ -246,6 +258,8 @@ function directionGateMessage(directions: Array<{ slug: string; title: string; m
 /** What the Research phase produced on disk — powers the workspace's Research card. */
 export interface ResearchSummary {
   produced: boolean;
+  complete: boolean;
+  issues: ResearchBundleIssue[];
   error?: string;
   report: boolean;
   sources: number;
@@ -256,7 +270,10 @@ export interface ResearchSummary {
 }
 
 /** Read the .research/ tree into a compact summary for the UI (best-effort). */
-async function summarizeResearch(dir: string, visualProduced: boolean): Promise<Omit<ResearchSummary, "produced" | "error">> {
+async function summarizeResearch(
+  dir: string,
+  visualProduced: boolean,
+): Promise<Omit<ResearchSummary, "produced" | "complete" | "issues" | "error">> {
   const [sources, assets, directions, visualAssets, visualSources] = await Promise.all([
     readSources(dir).catch(() => []),
     listAssets(dir).catch(() => []),
@@ -496,7 +513,7 @@ async function runVisualQa(
   } catch (err) {
     return [
       {
-        severity: "P2",
+        severity: "P1",
         id: "visual-qa-failed",
         message: `Visual QA failed: ${err instanceof Error ? err.message : "unknown error"}.`,
         fix: "Open Preview and inspect the generated layout manually.",
@@ -564,8 +581,23 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   let standardSourceError: unknown = null;
   let standardTransaction: StandardRunTransaction | null = null;
   let sharinganCaptureId: string | null = null;
+  let prototypeMutationLease: StandardSourceMutationLease | null = null;
+  const prototypeRoundSnapshotIds = new Set<string>();
 
   try {
+    if (project.mode === "prototype") {
+      prototypeMutationLease = await acquireStandardSourceMutationLock(`prototype:${project.id}`);
+      const lockedTarget = store.getActiveVariantId(project.id) ?? store.ensureMainVariant(project.id).id;
+      const lockedVariant = store.getVariant(targetVariantId);
+      if (!lockedVariant || lockedVariant.projectId !== project.id || lockedTarget !== targetVariantId) {
+        sendError(res, 409, "the active Prototype branch changed before this Run could start; retry on the current branch");
+        return;
+      }
+      if (store.findActiveRun(project.id, targetVariantId)) {
+        sendError(res, 409, "run already in progress for this project variant");
+        return;
+      }
+    }
     if (project.mode === "standard") {
       try {
         standardSourceDir = await standardVariantArtifactDir(deps, project.id, targetVariantId);
@@ -729,7 +761,8 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   // user message + the research card TWICE on reload — so detect it and skip that duplicate work.
   const buildingChosenDirection = !!body.directionSlug?.trim();
   const researchOnDisk = researchExists(dir);
-  const alreadyResearched = buildingChosenDirection && researchOnDisk;
+  const existingResearchComplete = researchOnDisk ? (await validateResearchBundle(dir)).complete : false;
+  const alreadyResearched = buildingChosenDirection && existingResearchComplete && body.research !== true;
   const userMessage = alreadyResearched ? null : store.addMessage(conversation.id, "user", visibleBrief);
   store.updateRun(run.id, userMessage ? { status: "running", userMessageId: userMessage.id } : { status: "running" });
 
@@ -782,15 +815,24 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     dir = standardTransaction.dir;
   };
 
+  const requireChosenDirection = async (chosenDirection: string): Promise<string> => {
+    if (!isSafeDirectionSlug(chosenDirection)) {
+      throw new Error("Direction slug must name a safe candidate direction.");
+    }
+    const markdown = await readCandidateDirection(dir, chosenDirection);
+    if (!markdown) throw new Error(`Selected candidate direction does not exist or could not be read: ${chosenDirection}.`);
+    return markdown;
+  };
+
   // Optional pre-design Research phase (opt-in via body.research). It writes the
   // research/ directory, then its report is prepended to the brief so the build is
-  // grounded in real discovery. Idempotent; a soft failure just proceeds without it.
+  // grounded in real discovery. An incomplete bundle stops here so Build cannot run ungrounded.
   // Auto-Research (Settings toggle / env) runs ONLY on a project not yet researched. A follow-up
   // turn on an already-researched project must not auto-re-enter it: research would only flash
   // "Researching" (the phase early-returns since the report/directions already exist), then
   // re-surface the old direction gate and cancel the run. An explicit body.research === true still
   // forces it. Sharingan projects skip Research entirely — the URL brief is not a research topic.
-  const autoResearch = (settings.researchEnabled || process.env.DEZIN_RESEARCH === "1") && !researchOnDisk;
+  const autoResearch = (settings.researchEnabled || process.env.DEZIN_RESEARCH === "1") && !existingResearchComplete;
   if (!alreadyResearched && body.research !== false && (body.research === true || autoResearch) && !project.sharingan) {
     sse({ type: "research-start", runId: run.id });
     // Persist the research card from the START (not just its done-summary), updated per activity, so
@@ -813,6 +855,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         model: researchModel(settings, runModel),
         env: agentEnv,
         signal: ctrl.signal,
+        force: body.research === true,
         onActivity: (activity) => {
           const persisted = researchActivity.append(activity);
           sse({ type: "research-activity", runId: run.id, kind: persisted.kind, text: persisted.text, track: persisted.track });
@@ -829,15 +872,22 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     await syncVisualResearchMoodboard({ store: deps.store, dataDir: deps.dataDir, projectDir: dir }).catch(() => {});
     const researchSummary: ResearchSummary = {
       produced: research.produced,
-      error: research.error,
+      complete: research.complete,
+      issues: research.issues,
+      error: [research.error, research.issues.map((issue) => issue.message).join("; ")].filter(Boolean).join("; ") || undefined,
       ...(await summarizeResearch(dir, research.visualProduced)),
     };
     sse({ type: "research-done", runId: run.id, ...researchSummary });
     // Finalize the SAME card (created at research-start) with the done-summary — not a new message,
     // so the card isn't duplicated on reload.
     store.updateMessage(researchCardMsg.id, researchSummaryMessage(researchSummary));
+    if (!research.complete) {
+      const detail = research.issues.map((issue) => issue.message).join("; ") || research.error || "required Research artifacts are missing";
+      throw new Error(`Research incomplete: ${detail}`);
+    }
     if (research.produced) {
       const chosenDirection = body.directionSlug?.trim() || undefined;
+      const selectedDirectionSpec = chosenDirection ? await requireChosenDirection(chosenDirection) : undefined;
       // Direction gate: when research produced 2+ candidate directions and the caller
       // hasn't chosen one, surface them and end the run (like the ask-user question). The
       // user's next run passes directionSlug to build the chosen direction.
@@ -862,26 +912,29 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       }
       // Record the pick so the workspace can show which direction was chosen (survives reload).
       if (chosenDirection) await checkpointChosenDirection(chosenDirection);
-      if (chosenDirection) chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
+      if (selectedDirectionSpec) chosenDirectionSpec = selectedDirectionSpec;
       const researchContext = await buildResearchContext(dir, chosenDirection);
       if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
     }
+  } else if (buildingChosenDirection && !existingResearchComplete) {
+    throw new Error("Research incomplete: a selected direction can only be built from a complete evidence bundle.");
   } else if (alreadyResearched) {
     // The prior run already researched + produced the directions. Wire the chosen direction into
     // THIS build (its spec for the critic + the research context in the brief) WITHOUT re-running
     // research — re-running it re-persists the user message + research card and redoes the work.
     const chosenDirection = body.directionSlug!.trim();
+    const selectedDirectionSpec = await requireChosenDirection(chosenDirection);
     await checkpointChosenDirection(chosenDirection);
-    chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
+    chosenDirectionSpec = selectedDirectionSpec;
     const researchContext = await buildResearchContext(dir, chosenDirection);
     if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
-  } else if (researchOnDisk) {
+  } else if (existingResearchComplete) {
     // A follow-up turn on an already-researched project: we deliberately did NOT re-run research
     // above (that would re-surface the direction gate and cancel the run). But still re-wire the
     // previously-chosen direction's spec (the critic's aesthetic contract) and the research context
     // into this build, so follow-ups stay grounded in the same direction/discovery as the first build.
     const chosenDirection = (await readChosenDirection(dir).catch(() => null)) ?? undefined;
-    if (chosenDirection) chosenDirectionSpec = await readFile(directionPath(dir, chosenDirection), "utf8").catch(() => undefined);
+    if (chosenDirection) chosenDirectionSpec = await requireChosenDirection(chosenDirection);
     const researchContext = await buildResearchContext(dir, chosenDirection);
     if (researchContext) agentBrief = `${researchContext}\n\n---\n\n${agentBrief}`;
   }
@@ -897,15 +950,24 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   if (project.sharingan && project.sourceUrl) {
     sharinganCaptureId = sharinganRunCaptureId(project.id, run.id);
     const sharinganSignal = ctrl.signal;
-    // Best-effort: never fail the build on a capture hiccup — the agent can still probe live.
-    await ensureCaptured(sharinganCaptureId, deps.dataDir, project.sourceUrl, {
-      signal: sharinganSignal,
-      keepSessionForProbe: true,
-      artifactDir: dir,
-      open: deps.sharinganOpen,
-    }).catch((error) => {
+    let capturePhase: Awaited<ReturnType<typeof ensureCaptured>>;
+    try {
+      capturePhase = await ensureCaptured(sharinganCaptureId, deps.dataDir, project.sourceUrl, {
+        signal: sharinganSignal,
+        keepSessionForProbe: true,
+        artifactDir: dir,
+        open: deps.sharinganOpen,
+      });
+    } catch (error) {
       if (sharinganSignal.aborted || isAbortError(error)) throw error;
-    });
+      throw new Error(`Sharingan source capture failed: ${error instanceof Error ? error.message : "capture failed"}.`);
+    }
+    if (capturePhase !== "captured" && capturePhase !== "probing") {
+      throw new Error(`Sharingan source capture did not complete (phase: ${capturePhase}).`);
+    }
+    if (!sharinganReviewReference(dir, { expectedRequestedUrl: project.sourceUrl, requireCurrentSchema: true })) {
+      throw new Error("Sharingan source capture completed without a valid entry screenshot and render evidence.");
+    }
     // Write the dezin-probe CLI into .sharingan/ so the agent drives capture with a real tool, not curl.
     const probeBase = `${(origin ?? "").replace(/\/+$/, "")}/api/sharingan/${project.id}`;
     try { writeProbeCli(dir, probeBase, run.id); } catch { /* best-effort */ }
@@ -1193,6 +1255,11 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         if (staticFindings.length) sse({ type: "static-quality", round, findings: staticFindings });
         let visualFindings: QualityFinding[] = [];
         if (visualQaEnabledForRun) {
+          const visualScreenshotPath = join(dir, ".visual-qa", "screenshot.png");
+          // The mutable capture target belongs to this round only. Clear it before preview
+          // acquisition too: a dev-server failure skips auditVisualArtifact, so the audit-level
+          // cleanup alone cannot prevent prior pixels from becoming current evidence.
+          await rm(visualScreenshotPath, { force: true });
           const screenshotUrl = `/api/projects/${project.id}/variants/${targetVariantId}/preview/.visual-qa/screenshot.png`;
           sse({ ...visualQaStartPayload(round, visualQaSettings, runAgentCommand, runModel, screenshotUrl), runId: run.id });
           let renderUrl: string | undefined;
@@ -1213,7 +1280,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             } catch (err) {
               visualFindings = [
                 {
-                  severity: "P2",
+                  severity: "P1",
                   id: "visual-devserver-unavailable",
                   message: `Visual QA could not open the standard project preview: ${err instanceof Error ? err.message : "dev server unavailable"}.`,
                   fix: "Wait for dependencies to finish installing, refresh the preview, and rerun visual QA.",
@@ -1227,17 +1294,30 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
                 projectRoot: dir,
                 renderUrl,
                 directionSpec: chosenDirectionSpec,
-                sharinganReference: project.sharingan ? sharinganReviewReference(dir) : undefined,
+                sharinganReference: project.sharingan
+                  ? sharinganReviewReference(dir, { expectedRequestedUrl: project.sourceUrl ?? undefined, requireCurrentSchema: !!project.sourceUrl })
+                  : undefined,
                 isSharingan: project.sharingan,
               });
             }
           } finally {
             await temporaryQaLease?.release?.();
           }
-          visualFindings = suppress(markVisualReviewRound(withVisualScreenshotUrl(visualFindings, screenshotUrl), round));
+          const evidence = await persistVisualEvidence({
+            dataDir: deps.dataDir,
+            projectId: project.id,
+            runId: run.id,
+            round,
+            sourcePath: visualScreenshotPath,
+          });
+          // The immutable copy is the durable review artifact. Never leave mutable QA pixels in
+          // the Git transaction, where they would dirty or accidentally enter the next commit.
+          await rm(visualScreenshotPath, { force: true });
+          if (evidence) visualFindings = withVisualScreenshotUrl(visualFindings, evidence.url);
+          visualFindings = suppress(markVisualReviewRound(visualFindings, round));
           visualReviewHistory = [...visualReviewHistory, ...visualFindings];
           sse({ type: "visual-qa", runId: run.id, round, enabled: visualQaEnabledForRun, findings: visualFindings });
-          queueVisualReviewRecord(round, visualQaEnabledForRun, visualFindings, screenshotUrl);
+          queueVisualReviewRecord(round, visualQaEnabledForRun, visualFindings, evidence?.url);
         }
         findings = [...staticFindings, ...visualFindings];
         score = floorScore(findings);
@@ -1328,8 +1408,39 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         }
       }
 
+      // The source capture is part of the candidate's immutable acceptance evidence, not merely
+      // critic context. Re-check it at the publication boundary because an Agent turn can delete
+      // or corrupt files after the pre-build capture gate. This guard is independent of the visual
+      // critic implementation, so a disabled/failing/overridden critic cannot publish an
+      // unverifiable reconstruction.
+      if (project.sharingan && !sharinganReviewReference(dir, { expectedRequestedUrl: project.sourceUrl ?? undefined, requireCurrentSchema: !!project.sourceUrl })) {
+        findings = [
+          ...findings.filter((finding) => finding.id !== "visual-source-evidence-missing"),
+          {
+            severity: "P0",
+            id: "visual-source-evidence-missing",
+            message: "Sharingan source screenshot or render-map evidence is missing or corrupt, so reconstruction fidelity cannot be verified.",
+            fix: "Re-capture the intended Sharingan source entry before accepting or publishing the reconstruction.",
+          },
+        ];
+        score = floorScore(findings);
+        passed = false;
+      }
+
       if (ctrl.signal.aborted) throw abortError();
       if (!commitHash) throw new Error("The selected Agent did not leave any project changes to publish.");
+      if (project.sharingan && !passed) {
+        commitHash = standardTransaction!.head;
+        store.updateRun(run.id, {
+          commitHash,
+          repairRounds,
+          lintPassed: false,
+          score,
+          findings: withResolvedVisualReviewHistory(findings, visualReviewHistory),
+        });
+        const recoveryBranch = await standardTransaction!.preserveRecovery();
+        throw new Error(`Sharingan fidelity gate blocked publication. The inspected candidate remains on ${recoveryBranch}.`);
+      }
       commitHash = await standardTransaction!.publish();
       // Establish the published-success recovery invariant immediately after the irreversible
       // filesystem boundary. If any later computation throws, the catch path can only settle this
@@ -1350,14 +1461,14 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       await emitStandardPreviewUpdate(round).catch(() => {});
       let assistantMessageId: string | null = null;
       try { assistantMessageId = persistTranscript(finalAssistantText); } catch { /* best-effort after publication */ }
-      // Design review was ON but never actually judged (headless render/screenshot failed every
-      // round) — don't let the run read as a clean "reviewed" pass; the floor (anti-slop) passed,
-      // the ceiling simply didn't run, and the user must know.
-      const designReviewSkipped = visualQaEnabledForRun && !producedDesignReview(visualReviewHistory);
-      const quality = `, quality ${score}/100`;
+      // Design review was ON but never produced a valid judgement. The exact reason may be render,
+      // screenshot, source-evidence, or critic-contract infrastructure; Quality retains the detail.
+      const designReviewed = producedDesignReview(visualReviewHistory) ? true : visualQaEnabledForRun ? false : undefined;
+      const designReviewSkipped = designReviewed === false;
+      const quality = `, quality gate ${score}/100`;
       const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
       const reviewNote = designReviewSkipped
-        ? " Note: the automated design review could not render this project, so only the anti-slop checks ran — design quality was not assessed."
+        ? " Note: the automated design review was not fully assessed. See Quality for the exact review failure before treating the design as approved."
         : "";
       const stuckNote = stuckDefectKeys.size
         ? ` ${stuckDefectKeys.size} issue${stuckDefectKeys.size > 1 ? "s" : ""} the auto-fixer couldn't resolve after repeated tries — see Quality for the specifics.`
@@ -1365,7 +1476,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const message =
         (passed ? `Done${quality}${fixes}. Updated the project; the dev preview reflects it live.` : `Done, with remaining visual issues${quality}.`) + reviewNote + stuckNote;
       try {
-        store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped, unresolved: stuckDefectKeys.size }));
+        store.addMessage(conversation.id, "system", resultMessage(message, { passed, score, rounds: repairRounds, designReviewed, unresolved: stuckDefectKeys.size }));
       } catch { /* best-effort after publication */ }
       const persistedFindings = withResolvedVisualReviewHistory(findings, visualReviewHistory);
       publishedSuccessPatch = {
@@ -1376,7 +1487,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         assistantMessageId,
         commitHash,
         finishedAt: Date.now(),
-        event: { type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", designReviewed: !designReviewSkipped, findings: persistedFindings },
+        event: { type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", designReviewed, findings: persistedFindings },
       };
       settlePublishedSuccess(publishedSuccessPatch);
       handedOffLivePreviewLease = true;
@@ -1500,6 +1611,16 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     let finalFindings: QualityFinding[] = result.findings as QualityFinding[];
     let visualReviewHistory: QualityFinding[] = [];
     let score = floorScore(finalFindings);
+    const prototypeVersions: Array<{
+      score: number;
+      snapshotRunId: string;
+      html: string;
+      artifactPath: string;
+      findings: QualityFinding[];
+      assistantText: string;
+      assistantMessageId: string | null;
+      generatedTotal: number;
+    }> = [];
     const maxRepairRounds = autoImproveMaxRounds(settings, body.maxRounds);
     const repairHistory: Array<{ role: "user" | "assistant"; content: string }> = [
       ...history,
@@ -1507,7 +1628,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       ...(assistantText ? [{ role: "assistant" as const, content: assistantText }] : []),
     ];
     const renderUrl = origin ? `${origin}/projects/${project.id}/preview/` : undefined;
-    const writeCurrentArtifact = async (): Promise<void> => {
+    const writeCurrentArtifact = async (round: number): Promise<void> => {
       const media = await generateImages(
         currentHtml,
         {
@@ -1524,32 +1645,72 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       generatedTotal += media.generated;
       if (media.generated > 0) sse({ type: "images", count: media.generated });
       await writeFile(join(dir, artifactPath), currentHtml, "utf8");
-      await mkdir(join(dir, ".versions"), { recursive: true });
-      await writeFile(join(dir, ".versions", `${run.id}.html`), currentHtml, "utf8");
+      // Each reviewed round owns a private immutable snapshot. The public Run identity is written
+      // exactly once, after the best round is selected, so an online Viewer can never cross asset
+      // generations while repair is still in flight.
+      const snapshotRunId = `${run.id}-visual-round-${round}`;
+      prototypeRoundSnapshotIds.add(snapshotRunId);
+      await writePrototypeVersionSnapshot({
+        dataDir: deps.dataDir,
+        projectId: project.id,
+        runId: snapshotRunId,
+        projectRoot: dir,
+        html: currentHtml,
+      });
     };
     const reviewCurrentArtifact = async (round: number, staticFindings: QualityFinding[]): Promise<void> => {
+      const visualScreenshotPath = join(dir, ".visual-qa", "screenshot.png");
+      // Prototype runs share one project directory across Runs. Remove the prior Run's mutable
+      // screenshot even when review is disabled, and never create immutable evidence for a
+      // disabled review.
+      await rm(visualScreenshotPath, { force: true });
       const screenshotUrl = `${previewUrl}.visual-qa/screenshot.png`;
       if (settings.visualQaEnabled) sse({ ...visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl), runId: run.id });
-      const visualFindings = suppress(markVisualReviewRound(withVisualScreenshotUrl(await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
+      let visualFindings = await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
         projectRoot: dir,
         renderUrl,
         directionSpec: chosenDirectionSpec,
-      }), screenshotUrl), round));
+      });
+      const evidence = settings.visualQaEnabled
+        ? await persistVisualEvidence({
+            dataDir: deps.dataDir,
+            projectId: project.id,
+            runId: run.id,
+            round,
+            sourcePath: visualScreenshotPath,
+          })
+        : undefined;
+      if (evidence) visualFindings = withVisualScreenshotUrl(visualFindings, evidence.url);
+      visualFindings = suppress(markVisualReviewRound(visualFindings, round));
       visualReviewHistory = [...visualReviewHistory, ...visualFindings];
       sse({ type: "visual-qa", runId: run.id, round, enabled: settings.visualQaEnabled, findings: visualFindings });
-      queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, screenshotUrl);
+      queueVisualReviewRecord(round, settings.visualQaEnabled, visualFindings, evidence?.url);
       finalFindings = [...staticFindings, ...visualFindings];
       score = floorScore(finalFindings);
     };
 
-    await writeCurrentArtifact();
+    await writeCurrentArtifact(0);
     await reviewCurrentArtifact(0, result.findings as QualityFinding[]);
+    prototypeVersions.push({
+      score,
+      snapshotRunId: `${run.id}-visual-round-0`,
+      html: currentHtml,
+      artifactPath,
+      findings: finalFindings,
+      assistantText,
+      assistantMessageId: null,
+      generatedTotal,
+    });
 
     while (shouldAutoRepair(settings, finalFindings, repairRounds, maxRepairRounds)) {
       const nextRound = repairRounds + 1;
       const repairPrompt = prototypeRepairPrompt(finalFindings, nextRound, maxRepairRounds, score, visibleBrief);
       if (!repairPrompt) break;
-      if (visualReviewRecords.length) persistTranscript(assistantText);
+      if (visualReviewRecords.length) {
+        const assistantMessageId = persistTranscript(assistantText);
+        const candidate = prototypeVersions.at(-1);
+        if (candidate && assistantMessageId) candidate.assistantMessageId = assistantMessageId;
+      }
       processStartedAt = Date.now();
       sse({ type: "turn-start", round: nextRound, isRepair: true });
       const repaired = await runTurnWithRetry(
@@ -1597,26 +1758,68 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       artifactPath = repaired.artifactPath ?? artifactPath;
       currentHtml = repaired.artifactHtml || currentHtml;
       repairRounds = nextRound;
-      await writeCurrentArtifact();
+      await writeCurrentArtifact(nextRound);
       const staticFindings = suppress(lintArtifact(currentHtml, { provider: runProviderFamily, isSharingan: project.sharingan }) as QualityFinding[]);
       await reviewCurrentArtifact(nextRound, staticFindings);
+      prototypeVersions.push({
+        score,
+        snapshotRunId: `${run.id}-visual-round-${nextRound}`,
+        html: currentHtml,
+        artifactPath,
+        findings: finalFindings,
+        assistantText,
+        assistantMessageId: null,
+        generatedTotal,
+      });
     }
 
     if (ctrl.signal.aborted) throw abortError();
-    const passed = !finalFindings.some((f) => f.severity === "P0");
+    // Publish the best reviewed candidate, not merely the last attempted repair. Restore through
+    // the rollback-safe snapshot path even when the best candidate is the last round: this keeps
+    // the accepted HTML and its asset bytes tied to the exact surface the critic assessed.
+    const bestPrototypeVersion = bestVersion(prototypeVersions);
+    if (bestPrototypeVersion) {
+      await restorePrototypeVersionSnapshot({
+        dataDir: deps.dataDir,
+        projectId: project.id,
+        sourceRunId: bestPrototypeVersion.snapshotRunId,
+        projectRoot: dir,
+        html: bestPrototypeVersion.html,
+      });
+      currentHtml = bestPrototypeVersion.html;
+      artifactPath = bestPrototypeVersion.artifactPath;
+      finalFindings = bestPrototypeVersion.findings;
+      score = bestPrototypeVersion.score;
+      assistantText = bestPrototypeVersion.assistantText;
+      generatedTotal = bestPrototypeVersion.generatedTotal;
+      await writePrototypeVersionSnapshot({
+        dataDir: deps.dataDir,
+        projectId: project.id,
+        runId: run.id,
+        projectRoot: dir,
+        html: currentHtml,
+      });
+    }
+    const passed = standardRunPassed(finalFindings, project.sharingan);
     store.recordArtifact(project.id, artifactPath, passed);
-    const assistantMessageId = persistTranscript(assistantText);
-    const designReviewSkipped = settings.visualQaEnabled && !producedDesignReview(visualReviewHistory);
+    // A candidate is transcripted before the next repair begins. If that earlier candidate wins,
+    // reuse its message identity and only flush later review/process records; the rejected repair
+    // must not become the Run's apparent final answer.
+    const assistantMessageId = bestPrototypeVersion?.assistantMessageId
+      ? (persistTranscript(), bestPrototypeVersion.assistantMessageId)
+      : persistTranscript(assistantText);
+    const designReviewed = producedDesignReview(visualReviewHistory) ? true : settings.visualQaEnabled ? false : undefined;
+    const designReviewSkipped = designReviewed === false;
     const fixes = repairRounds ? ` after ${repairRounds} fix${repairRounds > 1 ? "es" : ""}` : "";
-    const quality = `, quality ${score}/100`;
+    const quality = `, quality gate ${score}/100`;
     const reviewNote = designReviewSkipped
-      ? " Note: the automated design review could not render this artifact, so only the anti-slop checks ran — design quality was not assessed."
+      ? " Note: the automated design review was not fully assessed. See Quality for the exact review failure before treating the design as approved."
       : "";
     const text = (passed ? `Done${quality}${fixes}.` : `Done, with remaining issues${quality}.`) + reviewNote;
     store.addMessage(
       conversation.id,
       "system",
-      resultMessage(text, { passed, score, rounds: repairRounds, designReviewed: !designReviewSkipped, materialSources: generatedTotal > 0 ? [`Generated image assets (${generatedTotal})`] : [] }),
+      resultMessage(text, { passed, score, rounds: repairRounds, designReviewed, materialSources: generatedTotal > 0 ? [`Generated image assets (${generatedTotal})`] : [] }),
     );
     const persistedFindings = withResolvedVisualReviewHistory(finalFindings, visualReviewHistory);
     sse({ type: "done", rounds: repairRounds, passed });
@@ -1633,7 +1836,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         passed,
         rounds: repairRounds,
         score,
-        designReviewed: !designReviewSkipped,
+        designReviewed,
         previewUrl: `/projects/${project.id}/preview/`,
         findings: persistedFindings,
       },
@@ -1709,6 +1912,10 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
     startingRuns.delete(startKey);
     try {
       stopPoll?.();
+      for (const snapshotRunId of prototypeRoundSnapshotIds) {
+        await rm(prototypeVersionHtmlPath(deps.dataDir, project.id, snapshotRunId), { force: true }).catch(() => {});
+        await rm(prototypeVersionFilesDir(deps.dataDir, project.id, snapshotRunId), { recursive: true, force: true }).catch(() => {});
+      }
       if (sharinganCaptureId) {
         await releaseSharinganProject(sharinganCaptureId, { dataDir: deps.dataDir, profileCleanup: "capture" }).catch(() => {});
       }
@@ -1720,6 +1927,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       }
     } finally {
       execution?.dispose();
+      prototypeMutationLease?.release();
     }
   }
 }

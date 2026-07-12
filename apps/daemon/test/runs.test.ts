@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -13,17 +13,30 @@ import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 import type { SharinganSession } from "../src/sharingan-browser.ts";
-import { standardRunBranchName, standardRunWorktreeDir } from "../src/standard-run-transaction.ts";
+import {
+  standardRunBranchName,
+  standardRunWorktreeDir,
+  withStandardSourceMutationLock,
+} from "../src/standard-run-transaction.ts";
 
 const CLEAN =
   `<style>:root{--accent:#2563eb}</style>\n` +
   `<section data-dezin-id="x"><h1>Hi there</h1><p>Real copy describing the thing.</p></section>`;
 const SLOPPY = `<style>.hero{background:#6366f1}</style><h1>🚀 Launch</h1><p>10x faster.</p>`;
+const VALID_SOURCE_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==", "base64");
 
 interface RunCtx {
   base: string;
   dataDir: string;
   store: Store;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 async function withRunServer(
@@ -79,6 +92,59 @@ function commitAll(dir: string, message: string): string {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
 }
 
+const VALID_PRODUCT_RESEARCH_REPORT =
+  "# Research\n\nFindings from prior product comparisons show that users scan proof, compare alternatives, and need one clear primary action before committing. [product-source]\n";
+const VALID_VISUAL_RESEARCH_REPORT =
+  "# Visual research\n\nInspected references use restrained contrast, deliberate type hierarchy, and one focused accent to create a calm but distinctive interface. [visual-source]\n";
+const VALID_ALPHA_DIRECTION =
+  "# Alpha — bold\n\nConcept: Bold direction for alpha, grounded in the product and visual evidence.\n\nStructure: Lead with the primary task, then proof, detail, and one clear next action.\n\nDistinctive move: Use a precise editorial transition and decisive type scale without adding noise.\n";
+const VALID_BETA_DIRECTION =
+  "# Beta — calm\n\nConcept: Calm direction for beta, grounded in the product and visual evidence.\n\nStructure: Build a measured sequence from context to comparison, confidence, and action.\n\nDistinctive move: Use quiet tonal layers and tightly controlled spacing to make the experience memorable.\n";
+
+function writeValidatedResearchBundle(dir: string): void {
+  const researchDir = join(dir, ".research");
+  const visualDir = join(researchDir, "visual");
+  const directionsDir = join(researchDir, "directions");
+  mkdirSync(join(researchDir, "assets"), { recursive: true });
+  mkdirSync(join(visualDir, "assets"), { recursive: true });
+  mkdirSync(join(directionsDir, "alpha"), { recursive: true });
+  mkdirSync(join(directionsDir, "beta"), { recursive: true });
+  writeFileSync(join(researchDir, "research.md"), VALID_PRODUCT_RESEARCH_REPORT);
+  writeFileSync(join(researchDir, "assets", "product.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  writeFileSync(
+    join(researchDir, "sources.json"),
+    JSON.stringify([
+      {
+        id: "product-source",
+        kind: "inspiration",
+        title: "Product source",
+        url: "https://example.com/product",
+        authority: "primary",
+        takeaways: ["Users need comparison evidence before the primary action."],
+        assets: ["assets/product.png"],
+      },
+    ]),
+  );
+  writeFileSync(join(visualDir, "visual.md"), VALID_VISUAL_RESEARCH_REPORT);
+  writeFileSync(join(visualDir, "assets", "visual.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  writeFileSync(
+    join(visualDir, "sources.json"),
+    JSON.stringify([
+      {
+        id: "visual-source",
+        kind: "inspiration",
+        title: "Visual source",
+        url: "https://example.com/visual",
+        reached: true,
+        takeaways: ["A restrained palette and deliberate hierarchy keep the surface focused."],
+        assets: ["assets/visual.png"],
+      },
+    ]),
+  );
+  writeFileSync(join(directionsDir, "alpha", "direction.md"), VALID_ALPHA_DIRECTION);
+  writeFileSync(join(directionsDir, "beta", "direction.md"), VALID_BETA_DIRECTION);
+}
+
 function initStandardRunProject(dataDir: string, store: Store): { project: ReturnType<Store["createProject"]>; dir: string; head: string } {
   const project = store.createProject({ name: "Std", mode: "standard" });
   const dir = join(dataDir, "projects", project.id);
@@ -114,11 +180,15 @@ function fakeFreshSharinganSession(): SharinganSession {
     },
     readDom: async () => [{ tag: "h1", classes: "", text: "Captured source", box: { x: 0, y: 0, w: 320, h: 48 } }],
     readDomTree: async () => [{ tag: "h1", classes: "", text: "Captured source", box: { x: 0, y: 0, w: 320, h: 48 }, style: {}, children: [] }],
-    readRenderMap: async () => ({ viewport: { width: 1440, height: 900 }, document: { width: 1440, height: 900 }, elements: [] }),
+    readRenderMap: async () => ({
+      viewport: { width: 1440, height: 900 },
+      document: { width: 1440, height: 900 },
+      elements: [{ selector: "body", tag: "body", text: "Captured source", box: { x: 0, y: 0, w: 1440, h: 900 }, style: {} }],
+    }),
     hasPasswordField: async () => false,
     setViewport: async () => {},
     settle: async () => {},
-    screenshot: async () => Buffer.from("captured"),
+    screenshot: async () => VALID_SOURCE_PNG,
     styleTokens: async () => ({ colors: [], fontFamilies: [], fontSizes: [], radii: [], shadows: [] }),
     assets: async () => [],
     discoverLinks: async () => [],
@@ -143,6 +213,43 @@ function terminalEvents(events: Array<Record<string, unknown>>): Array<Record<st
   return events.filter((event) => event.type === "run-done" || event.type === "run-error" || event.type === "run-cancelled");
 }
 
+function writeValidSharinganEvidence(dir: string, sourceUrl = "https://example.com"): void {
+  const sharinganDir = join(dir, ".sharingan");
+  const screenshotPath = join(sharinganDir, "source-desktop.png");
+  const renderMapPath = join(sharinganDir, "source-render-map.json");
+  mkdirSync(sharinganDir, { recursive: true });
+  writeFileSync(screenshotPath, VALID_SOURCE_PNG);
+  writeFileSync(
+    renderMapPath,
+    JSON.stringify({
+      viewport: { width: 1200, height: 800 },
+      document: { width: 1200, height: 800 },
+      elements: [
+        {
+          selector: "body",
+          tag: "body",
+          text: "Captured source",
+          box: { x: 0, y: 0, w: 1200, h: 800 },
+          style: {},
+        },
+      ],
+    }),
+  );
+  writeFileSync(
+    join(sharinganDir, "pages.json"),
+    JSON.stringify({
+      sourceUrl,
+      pages: [
+        {
+          url: sourceUrl,
+          screenshots: { desktop: ".sharingan/source-desktop.png" },
+          renderMap: ".sharingan/source-render-map.json",
+        },
+      ],
+    }),
+  );
+}
+
 function createSharinganRegionFixture(dataDir: string, store: Store, regions: unknown[]): { project: ReturnType<Store["createProject"]>; dir: string } {
   const project = store.createProject({ name: "Clone", mode: "standard", sharingan: true });
   const dir = join(dataDir, "projects", project.id);
@@ -153,6 +260,7 @@ function createSharinganRegionFixture(dataDir: string, store: Store, regions: un
   writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
   writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>Before</main> }`);
   writeFileSync(join(dir, ".sharingan", "region-plan.json"), JSON.stringify({ version: 1, sourceUrl: "https://example.com", regions }));
+  writeValidSharinganEvidence(dir);
   commitAll(dir, "base");
   return { project, dir };
 }
@@ -170,7 +278,7 @@ test("research:false opts out of the Research phase even when it is enabled in S
   let researchCalls = 0;
   const researchPhase = async () => {
     researchCalls++;
-    return { ran: true, produced: false, visualProduced: false };
+    return { ran: true, produced: false, visualProduced: false, complete: false, issues: [] };
   };
   await withRunServer(
     new FakeRunner({ artifacts: [CLEAN, CLEAN], texts: ["done", "done"] }),
@@ -293,21 +401,57 @@ test("a run whose critic could not render is NOT reported as a design-reviewed p
   await withRunServer(
     runner,
     async ({ base, store }) => {
-      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: false });
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: true, autoImproveMaxRounds: 3 });
       const project = await createProject(base);
       const res = await fetch(`${base}/api/runs`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, brief: "make a hero" }) });
       const done = parseSse(await res.text()).find((e) => e.type === "run-done")!;
-      // The floor (anti-slop) still passed, but the ceiling never actually judged — the run must
-      // not read as a design-reviewed pass.
-      assert.equal(done.passed, true);
+      // Review infrastructure is part of the acceptance contract: unassessed must not read as a
+      // clean pass, even when the artifact's static floor has no findings.
+      assert.equal(done.passed, false);
       assert.equal(done.designReviewed, false);
+      assert.equal(runner.calls.length, 1, "QA infrastructure failures must not be sent back to the builder as artifact repairs");
       // The persisted result message says so, so the user isn't misled.
       const sys = store
         .listMessages(store.listConversations(project.id)[0]!.id)
-        .find((m) => m.role === "system" && /design quality was not assessed/i.test(m.content));
+        .find((m) => m.role === "system" && /not fully assessed/i.test(m.content));
       assert.ok(sys, "expected the result message to note design review did not run");
     },
     { visualQa: async () => [{ severity: "P2", id: "visual-render-failed", message: "Could not render in headless Chrome.", fix: "Check the preview." }] },
+  );
+});
+
+test("a malformed critic result is reported as unassessed without claiming the page failed to render", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(
+    runner,
+    async ({ base, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: false });
+      const project = await createProject(base);
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+      });
+      const done = parseSse(await response.text()).find((event) => event.type === "run-done")!;
+      const result = store
+        .listMessages(store.listConversations(project.id)[0]!.id)
+        .find((message) => message.role === "system" && /automated design review/i.test(message.content));
+
+      assert.equal(done.passed, false);
+      assert.equal(done.designReviewed, false);
+      assert.match(result?.content ?? "", /not fully assessed/i);
+      assert.doesNotMatch(result?.content ?? "", /could not render|only the anti-slop checks ran/i);
+    },
+    {
+      visualQa: async () => [
+        {
+          severity: "P1",
+          id: "visual-review-unassessed",
+          message: "The visual critic returned malformed JSON twice.",
+          fix: "Run the visual review again.",
+        },
+      ],
+    },
   );
 });
 
@@ -324,6 +468,28 @@ test("a run whose critic judged the design reports designReviewed=true", async (
     },
     { visualQa: async () => [{ severity: "P2", id: "visual-reviewed", message: "Automated design review completed.", fix: "" }] },
   );
+});
+
+test("a run with Visual Review disabled reports review status as not run, not approved", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["done"] });
+  await withRunServer(runner, async ({ base, store }) => {
+    store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "make a hero" }),
+    });
+    const done = parseSse(await res.text()).find((event) => event.type === "run-done")!;
+    const result = store
+      .listMessages(store.listConversations(project.id)[0]!.id)
+      .find((message) => message.role === "system" && message.content.includes('"result"'))!;
+    const meta = (JSON.parse(result.content) as { result: { meta: Record<string, unknown> } }).result.meta;
+
+    assert.equal(Object.hasOwn(done, "designReviewed"), false);
+    assert.equal(Object.hasOwn(meta, "designReviewed"), false);
+    assert.match(result.content, /quality gate/);
+  });
 });
 
 test("visual QA run persists a visual review transcript record", async () => {
@@ -365,12 +531,77 @@ test("visual QA run persists a visual review transcript record", async () => {
       assert.equal(parsed.visualReview?.status, "complete");
       assert.equal(parsed.visualReview?.agentCommand, "codebuddy");
       assert.equal(parsed.visualReview?.model, "hunyuan");
-      assert.match(parsed.visualReview?.screenshotUrl ?? "", /\.visual-qa\/screenshot\.png$/);
+      const run = store.listRuns(project.id)[0];
+      assert.ok(run);
+      assert.match(
+        parsed.visualReview?.screenshotUrl ?? "",
+        new RegExp(`/api/projects/${project.id}/runs/${run.id}/evidence/round-0-[a-f0-9]{12}\\.png$`),
+      );
+      const evidence = await fetch(`${base}${parsed.visualReview?.screenshotUrl}`);
+      assert.equal(evidence.status, 200);
+      assert.equal(await evidence.text(), "round zero pixels");
       assert.equal(parsed.visualReview?.findings?.[0]?.message, "CTA clips.");
       assert.match(parsed.visualReview?.process?.[1]?.summary ?? "", /codebuddy \/ hunyuan/);
     },
     {
-      visualQa: async () => [{ severity: "P2", id: "visual-ai-review-1", message: "CTA clips.", fix: "Allow wrapping." }],
+      visualQa: async (input) => {
+        const screenshot = join(input.projectRoot!, ".visual-qa", "screenshot.png");
+        mkdirSync(join(input.projectRoot!, ".visual-qa"), { recursive: true });
+        writeFileSync(screenshot, "round zero pixels");
+        return [{ severity: "P2", id: "visual-ai-review-1", message: "CTA clips.", fix: "Allow wrapping." }];
+      },
+    },
+  );
+});
+
+test("a disabled Prototype visual review cannot persist pixels from the prior enabled run", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN, CLEAN], texts: ["first done", "second done"] });
+  let visualQaCalls = 0;
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: false });
+      const project = await createProject(base);
+      const firstResponse = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "first enabled visual review" }),
+      });
+      const firstEvents = parseSse(await firstResponse.text());
+      const firstRunId = firstEvents.find((event) => event.type === "run-start")!.runId as string;
+      assert.equal(existsSync(join(dataDir, "version-evidence", project.id, firstRunId, "visual")), true);
+
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const secondResponse = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "second review disabled" }),
+      });
+      const secondEvents = parseSse(await secondResponse.text());
+      const secondStart = secondEvents.find((event) => event.type === "run-start")!;
+      const secondRunId = secondStart.runId as string;
+      const secondConversationId = secondStart.conversationId as string;
+
+      assert.equal(visualQaCalls, 1, "the disabled run does not invoke visual QA");
+      assert.equal(
+        existsSync(join(dataDir, "version-evidence", project.id, secondRunId, "visual")),
+        false,
+        "the disabled run must not copy the previous run's mutable screenshot into immutable evidence",
+      );
+      assert.equal(JSON.stringify(secondEvents).includes(`/runs/${secondRunId}/evidence/`), false);
+      assert.equal(
+        store.listMessages(secondConversationId).some((message) => message.role === "system" && message.content.includes('"visualReview"')),
+        false,
+        "the disabled run must not persist a visual-review record",
+      );
+    },
+    {
+      visualQa: async (input) => {
+        visualQaCalls += 1;
+        mkdirSync(join(input.projectRoot!, ".visual-qa"), { recursive: true });
+        writeFileSync(join(input.projectRoot!, ".visual-qa", "screenshot.png"), "pixels from the enabled run");
+        return [{ severity: "P2", id: "visual-reviewed", message: "Automated design review completed.", fix: "" }];
+      },
     },
   );
 });
@@ -488,7 +719,7 @@ test("exactly-once lifecycle terminalizes a research throw and accepts an immedi
       failResearch = false;
       throw new Error("research exploded");
     }
-    return { ran: true, produced: false, visualProduced: false };
+    return { ran: true, produced: false, visualProduced: false, complete: true, issues: [] };
   };
 
   await withRunServer(
@@ -519,6 +750,109 @@ test("exactly-once lifecycle terminalizes a research throw and accepts an immedi
     },
     { researchPhase },
   );
+});
+
+test("incomplete explicit or automatic Research stops before the build runner", async () => {
+  for (const mode of ["explicit", "automatic"] as const) {
+    const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["must not run"] });
+    const researchPhase: NonNullable<AppDeps["researchPhase"]> = async () => ({
+      ran: true,
+      produced: false,
+      visualProduced: true,
+      complete: false,
+      issues: [
+        { area: "product", code: "product-report-missing", message: "Product research report is missing." },
+        { area: "directions", code: "directions-count", message: "Research must produce 2–3 meaningful directions; found 0." },
+      ],
+      error: "product: no report was produced",
+    });
+
+    await withRunServer(
+      runner,
+      async ({ base, store }) => {
+        if (mode === "automatic") store.updateSettings({ researchEnabled: true });
+        const project = await createProject(base);
+        const response = await fetch(`${base}/api/runs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: project.id, brief: "research before building", ...(mode === "explicit" ? { research: true } : {}) }),
+        });
+        const events = await closedSse(response, `${mode} incomplete research`);
+        const runId = String(events.find((event) => event.type === "run-start")?.runId ?? "");
+        const researchDone = events.find((event) => event.type === "research-done");
+
+        assert.equal(runner.calls.length, 0, `${mode} Research must hard-gate the build runner`);
+        assert.equal(researchDone?.complete, false);
+        assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-error"]);
+        assert.equal(store.getRun(runId)?.status, "failed");
+      },
+      { researchPhase },
+    );
+  }
+});
+
+test("automatic Research revalidates a partial bundle left on disk instead of skipping to Build", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["must not run"] });
+  let researchCalls = 0;
+  const researchPhase: NonNullable<AppDeps["researchPhase"]> = async () => {
+    researchCalls += 1;
+    return {
+      ran: true,
+      produced: false,
+      visualProduced: false,
+      complete: false,
+      issues: [{ area: "visual", code: "visual-report-missing", message: "Visual research report is missing." }],
+    };
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ researchEnabled: true });
+      const project = await createProject(base);
+      const researchDir = join(dataDir, "projects", project.id, ".research");
+      mkdirSync(researchDir, { recursive: true });
+      writeFileSync(join(researchDir, "research.md"), "# Partial research\n\nThis leftover report exists, but the rest of the evidence bundle is incomplete.");
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "continue after partial research" }),
+      });
+      const events = await closedSse(response, "automatic partial research retry");
+
+      assert.equal(researchCalls, 1);
+      assert.equal(runner.calls.length, 0);
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-error"]);
+    },
+    { researchPhase },
+  );
+});
+
+test("an incomplete on-disk Research bundle cannot be used to build a selected direction", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["must not run"] });
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = await createProject(base);
+    const researchDir = join(dataDir, "projects", project.id, ".research");
+    mkdirSync(join(researchDir, "directions", "alpha"), { recursive: true });
+    writeFileSync(join(researchDir, "research.md"), "# Partial research\n\nThis report exists without its required sources, assets, visual evidence, or complete direction set.");
+    writeFileSync(
+      join(researchDir, "directions", "alpha", "direction.md"),
+      "# Alpha\n\nConcept: incomplete evidence.\n\nStructure: incomplete.\n\nDistinctive move: incomplete.",
+    );
+
+    const response = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "build alpha", research: false, directionSlug: "alpha" }),
+    });
+    const events = await closedSse(response, "incomplete direction build");
+    const runId = String(events.find((event) => event.type === "run-start")?.runId ?? "");
+
+    assert.equal(runner.calls.length, 0);
+    assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-error"]);
+    assert.equal(store.getRun(runId)?.status, "failed");
+  });
 });
 
 test("exactly-once lifecycle terminalizes broker creation failure and accepts an immediate retry", async () => {
@@ -887,6 +1221,72 @@ test("prototype run auto-improves visual QA findings after screenshot review", a
   );
 });
 
+test("prototype visual repair publishes the highest-scoring round with its matching assets", async () => {
+  const bestHtml = `${CLEAN}\n<img src="assets/hero.png" alt="Round zero"><p>best visual round</p>`;
+  const regressedHtml = `${CLEAN}\n<img src="assets/hero.png" alt="Round one"><p>regressed visual round</p>`;
+  const bestPixels = Buffer.concat([VALID_SOURCE_PNG, Buffer.from("best-round-pixels")]);
+  const regressedPixels = Buffer.concat([VALID_SOURCE_PNG, Buffer.from("regressed-round-pixels")]);
+  const runner = new FakeRunner({ artifacts: [bestHtml, regressedHtml], texts: ["draft", "worse repair"] });
+  let projectRoot = "";
+  let visualRound = 0;
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: true });
+      const project = await createProject(base);
+      projectRoot = join(dataDir, "projects", project.id);
+      mkdirSync(join(projectRoot, "assets"), { recursive: true });
+      writeFileSync(join(projectRoot, "assets", "hero.png"), bestPixels);
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "make a hero", maxRounds: 1 }),
+      });
+      const events = parseSse(await response.text());
+      const done = events.find((event) => event.type === "run-done")!;
+      const runId = done.runId as string;
+
+      assert.equal(done.rounds, 1, "the regressing repair was still attempted");
+      assert.equal(done.score, 92, "the returned quality state belongs to the better initial round");
+      assert.match(readFileSync(join(projectRoot, "index.html"), "utf8"), /best visual round/);
+      assert.deepEqual(readFileSync(join(projectRoot, "assets", "hero.png")), bestPixels);
+      assert.match(readFileSync(join(projectRoot, ".versions", `${runId}.html`), "utf8"), /best visual round/);
+      assert.deepEqual(readFileSync(join(projectRoot, ".versions", `${runId}.files`, "assets", "hero.png")), bestPixels);
+      assert.equal(
+        existsSync(join(projectRoot, ".versions", `${runId}-visual-round-0.html`)),
+        false,
+        "private repair-round snapshots are removed after publication",
+      );
+
+      const persisted = store.getRun(runId)!;
+      assert.equal(persisted.score, 92);
+      assert.equal(persisted.findings.filter((finding) => finding.reviewStatus !== "resolved")[0]?.id, "visual-round-zero");
+      assert.deepEqual(
+        store.listMessages(persisted.conversationId).filter((message) => message.role === "assistant").map((message) => message.content),
+        ["draft"],
+        "the transcript summary belongs to the published candidate, not the rejected repair",
+      );
+    },
+    {
+      visualQa: async () => {
+        visualRound += 1;
+        if (visualRound === 1) {
+          // The first round snapshot must already own these bytes before a later repair mutates
+          // the shared Prototype root.
+          writeFileSync(join(projectRoot, "assets", "hero.png"), regressedPixels);
+          return [{ severity: "P1", id: "visual-round-zero", message: "Initial issue.", fix: "Try one repair." }];
+        }
+        return [
+          { severity: "P1", id: "visual-round-one-a", message: "Repair regressed hierarchy.", fix: "Restore the stronger hierarchy." },
+          { severity: "P1", id: "visual-round-one-b", message: "Repair regressed spacing.", fix: "Restore the stronger spacing." },
+        ];
+      },
+    },
+  );
+});
+
 test("sloppy→clean run: closed loop repairs over SSE, serves the fixed artifact", async () => {
   await withRunServer(new FakeRunner({ artifacts: [SLOPPY, CLEAN] }), async ({ base, store }) => {
     const project = await createProject(base);
@@ -991,7 +1391,7 @@ test("final summary boundary separates persisted process from assistant summary"
 
 test("a run snapshots its artifact; versions can be served and restored", async () => {
   const runner = new FakeRunner({ artifacts: [CLEAN] });
-  let captured: { htmlPath: string; outPath: string } | null = null;
+  let captured: { url: string; outPath: string } | null = null;
   await withRunServer(runner, async ({ base, dataDir, store }) => {
     const project = store.createProject({ name: "P" });
     await (
@@ -1009,26 +1409,350 @@ test("a run snapshots its artifact; versions can be served and restored", async 
     const versionHtml = await v.text();
     assert.match(versionHtml, /Hi there/); // the CLEAN snapshot content
     assert.match(versionHtml, /data-dezin-bridge/);
+    assert.match(versionHtml, /data-dezin-runtime-probe/);
     assert.match(versionHtml, /sync-scroll/);
+    const rawSource = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/source`);
+    assert.equal(rawSource.status, 200);
+    assert.equal(await rawSource.text(), CLEAN, "Historical Files reads the immutable source without Viewer instrumentation");
+
+    const identicalDiff = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/diff`);
+    assert.equal(identicalDiff.status, 200);
+    assert.deepEqual(await identicalDiff.json(), [], "Prototype Diff compares raw snapshots, not injected Viewer scripts");
+    writeFileSync(join(dataDir, "projects", project.id, "index.html"), "<main>current raw document</main>");
+    const changedDiff = (await (await fetch(`${base}/api/projects/${project.id}/versions/${runId}/diff`)).json()) as Array<{ t: string; text: string }>;
+    assert.ok(changedDiff.some((line) => line.t === "del" && line.text.includes("Hi there")));
+    assert.ok(changedDiff.some((line) => line.t === "add" && line.text.includes("current raw document")));
 
     const restore = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/restore`, { method: "POST" });
     assert.equal(restore.status, 200);
+    const restored = (await restore.json()) as { runId?: string; historyRecorded?: boolean };
+    assert.equal(restored.historyRecorded, true);
+    assert.ok(restored.runId && restored.runId !== runId);
+    assert.equal(store.listRuns(project.id)[0]?.id, restored.runId, "Prototype Restore creates a durable Current version identity");
+    assert.equal(readFileSync(join(dataDir, "projects", project.id, ".versions", `${restored.runId}.html`), "utf8"), CLEAN);
 
     const cover = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/cover`, { method: "POST" });
     assert.equal(cover.status, 200);
     assert.deepEqual(await cover.json(), { captured: true });
-    assert.equal(captured?.htmlPath, join(dataDir, "projects", project.id, ".versions", `${runId}.html`));
+    assert.equal(captured?.url, `${base}/api/projects/${project.id}/versions/${runId}`);
     assert.equal(captured?.outPath, join(dataDir, "projects", project.id, ".cover.png"));
     assert.equal(existsSync(join(dataDir, "projects", project.id, ".cover.png")), true);
 
     const miss = await fetch(`${base}/api/projects/${project.id}/versions/nope`);
     assert.equal(miss.status, 404);
   }, {
-    captureCover: async (htmlPath, outPath) => {
-      captured = { htmlPath, outPath };
+    captureCoverUrl: async (url, outPath) => {
+      captured = { url, outPath };
       writeFileSync(outPath, "png");
       return true;
     },
+  });
+});
+
+test("a queued Prototype Restore records the branch that is active inside the project mutation lock", async () => {
+  const activationRestored = deferred();
+  const allowActivation = deferred();
+  await withRunServer(
+    undefined,
+    async ({ base, dataDir, store }) => {
+      const project = store.createProject({ name: "Prototype restore identity", mode: "prototype" });
+      const main = store.ensureMainVariant(project.id);
+      const target = store.createVariant(project.id, "Target");
+      store.setActiveVariant(project.id, main.id);
+      const root = join(dataDir, "projects", project.id);
+      mkdirSync(join(root, ".variants", target.id), { recursive: true });
+      mkdirSync(join(root, ".versions"), { recursive: true });
+      writeFileSync(join(root, "index.html"), "<main>Active A</main>");
+      writeFileSync(join(root, ".variants", target.id, "index.html"), "<main>Active B</main>");
+      const conversation = store.createConversation(project.id, "Historical version");
+      const sourceRun = store.createRun(project.id, conversation.id, main.id);
+      store.updateRun(sourceRun.id, { status: "succeeded", score: 94, lintPassed: true, finishedAt: Date.now() });
+      writeFileSync(join(root, ".versions", `${sourceRun.id}.html`), "<main>Historical pixels</main>");
+
+      const activating = fetch(`${base}/api/projects/${project.id}/variants/${target.id}/activate`, { method: "POST" });
+      await activationRestored.promise;
+
+      const restoreReadActive = deferred();
+      const originalGetActiveVariantId = store.getActiveVariantId.bind(store);
+      let observeRestoreRead = true;
+      store.getActiveVariantId = ((projectId: string) => {
+        const active = originalGetActiveVariantId(projectId);
+        if (observeRestoreRead) {
+          observeRestoreRead = false;
+          restoreReadActive.resolve();
+        }
+        return active;
+      }) as Store["getActiveVariantId"];
+      const restoring = fetch(`${base}/api/projects/${project.id}/versions/${sourceRun.id}/restore`, { method: "POST" });
+      await restoreReadActive.promise;
+      allowActivation.resolve();
+
+      const [activateResponse, restoreResponse] = await Promise.all([activating, restoring]);
+      assert.equal(activateResponse.status, 200);
+      assert.equal(restoreResponse.status, 200);
+      const restored = (await restoreResponse.json()) as { runId: string };
+      assert.equal(store.getRun(restored.runId)?.variantId, target.id, "Restore identity follows the branch active when its lock begins");
+      assert.equal(store.getActiveVariantId(project.id), target.id);
+      assert.match(readFileSync(join(root, "index.html"), "utf8"), /Historical pixels/);
+    },
+    {
+      prototypeVariantRestored: async () => {
+        activationRestored.resolve();
+        await allowActivation.promise;
+      },
+    },
+  );
+});
+
+test("a Prototype Run waits for the same project mutation lock used by Restore", async () => {
+  const runnerEntered = deferred();
+  const runner: AgentRunner = {
+    id: "prototype-lock-probe",
+    async runTurn() {
+      runnerEntered.resolve();
+      return { text: "done", artifactHtml: CLEAN, artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Prototype Run serialization", mode: "prototype" });
+    const root = join(dataDir, "projects", project.id);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "index.html"), "<main>Before restore lock</main>");
+    const mutationEntered = deferred();
+    const releaseMutation = deferred();
+    const heldMutation = withStandardSourceMutationLock(`prototype:${project.id}`, async () => {
+      mutationEntered.resolve();
+      await releaseMutation.promise;
+    });
+    await mutationEntered.promise;
+
+    const runRequest = fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "write after restore" }),
+    });
+    const whileRestoreOwnsRoot = await Promise.race([
+      runnerEntered.promise.then(() => "runner-entered" as const),
+      new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 50)),
+    ]);
+    releaseMutation.resolve();
+    const response = await runRequest;
+    await response.text();
+    await heldMutation;
+
+    assert.equal(whileRestoreOwnsRoot, "blocked", "the agent cannot read or write the shared Prototype root during Restore");
+    assert.equal(response.status, 200);
+    assert.match(readFileSync(join(root, "index.html"), "utf8"), /Hi there/);
+  });
+});
+
+test("a Prototype version serves immutable assets, external CSS, anchors, and runtime evidence", async () => {
+  const html = `<!doctype html><html><head><title>Asset version</title><link rel="stylesheet" href="/styles/site.css"><style>.hero{background-image:url('/assets/root.png')}</style></head><body><a href="#section">Jump</a><img data-kind="relative" src="assets/gen-0.png"><img data-kind="root" src="/assets/root.png"><img data-kind="extensionless-relative" src="assets/hero"><img data-kind="extensionless-root" src="/assets/hero"><img data-kind="external" src="https://cdn.example.test/external.png"><img data-kind="protocol-relative" src="//cdn.example.test/protocol.png"><section id="section">Target</section></body></html>`;
+  const runner = new FakeRunner({ artifacts: [html] });
+  let coverCapture: { url: string; relative: string; root: string; html: string } | null = null;
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Asset version" });
+    const assetPath = join(dataDir, "projects", project.id, "assets", "gen-0.png");
+    const rootAssetPath = join(dataDir, "projects", project.id, "assets", "root.png");
+    mkdirSync(join(assetPath, ".."), { recursive: true });
+    writeFileSync(assetPath, Buffer.from("original-run-asset"));
+    writeFileSync(rootAssetPath, Buffer.from("original-root-asset"));
+    writeFileSync(join(dataDir, "projects", project.id, "assets", "hero"), Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("extensionless-history"),
+    ]));
+    mkdirSync(join(dataDir, "projects", project.id, "styles"), { recursive: true });
+    writeFileSync(join(dataDir, "projects", project.id, "styles", "site.css"), `@import '/styles/theme.css';\n.hero{background:url('/assets/root.png')}`);
+    writeFileSync(join(dataDir, "projects", project.id, "styles", "theme.css"), ".hero{color:rebeccapurple}");
+    writeFileSync(join(dataDir, "projects", project.id, ".env"), "PRIVATE_TOKEN=must-not-be-snapshotted");
+    mkdirSync(join(dataDir, "projects", project.id, ".refs"), { recursive: true });
+    writeFileSync(join(dataDir, "projects", project.id, ".refs", "private-reference.png"), "private-reference");
+    mkdirSync(join(dataDir, "projects", project.id, ".research", "assets"), { recursive: true });
+    writeFileSync(join(dataDir, "projects", project.id, ".research", "assets", "private-research.png"), "private-research");
+    mkdirSync(join(dataDir, "projects", project.id, "src"), { recursive: true });
+    writeFileSync(join(dataDir, "projects", project.id, "src", "credentials.js"), "export const token = 'private-source';");
+
+    await (
+      await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "use the local image" }),
+      })
+    ).text();
+    const runId = store.listRuns(project.id)[0]!.id;
+
+    // The live Prototype keeps changing after a Run. Historical viewing must not read this byte.
+    writeFileSync(assetPath, Buffer.from("mutated-current-asset"));
+    writeFileSync(rootAssetPath, Buffer.from("mutated-current-root-asset"));
+    writeFileSync(join(dataDir, "projects", project.id, "assets", "hero"), Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("extensionless-current"),
+    ]));
+
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${runId}`);
+    assert.equal(response.status, 200);
+    const versionHtml = await response.text();
+    assert.doesNotMatch(versionHtml, /data-dezin-version-base/, "hash navigation is not redirected by a synthetic base element");
+    assert.match(versionHtml, /data-dezin-runtime-probe/, "historical runtime failures remain observable by the Viewer");
+    assert.match(versionHtml, /href="#section"/);
+    const relativeSrc = versionHtml.match(/data-kind="relative" src="([^"]+)"/)?.[1];
+    assert.ok(relativeSrc?.startsWith(`/api/projects/${project.id}/versions/${runId}/files/assets/`));
+    const resolvedAsset = new URL(relativeSrc!, base);
+    const assetResponse = await fetch(resolvedAsset);
+    assert.equal(assetResponse.status, 200);
+    assert.equal(assetResponse.headers.get("access-control-allow-origin"), "*", "sandboxed version documents may load allowed fonts and media");
+    assert.equal(Buffer.from(await assetResponse.arrayBuffer()).toString(), "original-run-asset");
+    const rootSrc = versionHtml.match(/data-kind="root" src="([^"]+)"/)?.[1];
+    assert.ok(rootSrc);
+    assert.ok(rootSrc.startsWith(`/api/projects/${project.id}/versions/${runId}/files/assets/`), "root-relative render assets are rewritten into the Run snapshot");
+    const rootAssetResponse = await fetch(new URL(rootSrc, base));
+    assert.equal(Buffer.from(await rootAssetResponse.arrayBuffer()).toString(), "original-root-asset");
+    for (const kind of ["extensionless-relative", "extensionless-root"]) {
+      const src = versionHtml.match(new RegExp(`data-kind="${kind}" src="([^"]+)"`))?.[1];
+      assert.ok(src?.includes(`/versions/${runId}/files/assets/hero`));
+      const bytes = Buffer.from(await (await fetch(new URL(src!, base))).arrayBuffer());
+      assert.equal(bytes.subarray(8).toString(), "extensionless-history");
+    }
+    assert.match(versionHtml, /src="https:\/\/cdn\.example\.test\/external\.png"/);
+    assert.match(versionHtml, /src="\/\/cdn\.example\.test\/protocol\.png"/);
+    assert.match(versionHtml, new RegExp(`background-image:url\\(['"]?/api/projects/${project.id}/versions/${runId}/files/assets/root\\.png`));
+    const stylesheetHref = versionHtml.match(/<link rel="stylesheet" href="([^"]+)"/)?.[1];
+    assert.ok(stylesheetHref?.startsWith(`/api/projects/${project.id}/versions/${runId}/files/styles/`));
+    const stylesheet = await (await fetch(new URL(stylesheetHref!, base))).text();
+    assert.match(stylesheet, new RegExp(`@import ['"]/api/projects/${project.id}/versions/${runId}/files/styles/theme\\.css`));
+    assert.match(stylesheet, new RegExp(`url\\(['"]?/api/projects/${project.id}/versions/${runId}/files/assets/root\\.png`));
+    const assetDiff = (await (await fetch(`${base}/api/projects/${project.id}/versions/${runId}/diff`)).json()) as Array<{ t: string; text: string }>;
+    assert.ok(assetDiff.some((line) => line.t === "del" && line.text.includes("[asset] assets/gen-0.png")));
+    assert.ok(assetDiff.some((line) => line.t === "add" && line.text.includes("[asset] assets/gen-0.png")));
+    const filesBase = new URL(`/api/projects/${project.id}/versions/${runId}/files/`, base);
+    for (const privatePath of [".env", ".refs/private-reference.png", ".research/assets/private-research.png", "src/credentials.js"]) {
+      const privateResponse = await fetch(new URL(privatePath, filesBase));
+      assert.equal(privateResponse.status, 404, `${privatePath} must never enter the public historical asset surface`);
+      assert.equal(
+        existsSync(join(dataDir, "projects", project.id, ".versions", `${runId}.files`, privatePath)),
+        false,
+        `${privatePath} must not be persisted in the historical asset snapshot`,
+      );
+    }
+
+    const coverResponse = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/cover`, { method: "POST" });
+    assert.equal(coverResponse.status, 200);
+    assert.deepEqual(await coverResponse.json(), { captured: true });
+    assert.equal(coverCapture?.url, `${base}/api/projects/${project.id}/versions/${runId}`);
+    assert.equal(coverCapture?.relative, "original-run-asset");
+    assert.equal(coverCapture?.root, "original-root-asset");
+
+    const restoreResponse = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/restore`, { method: "POST" });
+    const restored = (await restoreResponse.json()) as { runId?: string };
+    assert.ok(restored.runId && restored.runId !== runId);
+    const liveAsset = await fetch(`${base}/projects/${project.id}/preview/assets/gen-0.png`);
+    assert.equal(liveAsset.status, 200);
+    assert.equal(Buffer.from(await liveAsset.arrayBuffer()).toString(), "original-run-asset", "Restore immediately reinstates the historical asset bytes in live Preview");
+    assert.equal(readFileSync(join(dataDir, "projects", project.id, ".env"), "utf8"), "PRIVATE_TOKEN=must-not-be-snapshotted", "Restore preserves private project sidecars");
+    assert.equal(readFileSync(join(dataDir, "projects", project.id, ".refs", "private-reference.png"), "utf8"), "private-reference");
+    writeFileSync(
+      join(dataDir, "projects", project.id, ".versions", `${runId}.files`, "assets", "gen-0.png"),
+      Buffer.from("mutated-source-history"),
+    );
+    const restoredHtml = await (await fetch(`${base}/api/projects/${project.id}/versions/${restored.runId}`)).text();
+    const restoredRelativeSrc = restoredHtml.match(/data-kind="relative" src="([^"]+)"/)?.[1];
+    assert.ok(restoredRelativeSrc);
+    const restoredAsset = await fetch(new URL(restoredRelativeSrc, base));
+    assert.equal(restoredAsset.status, 200);
+    assert.equal(Buffer.from(await restoredAsset.arrayBuffer()).toString(), "original-run-asset", "restored history owns an independent asset snapshot");
+
+    const wrongOwner = store.createProject({ name: "Other project" });
+    const crossProject = await fetch(`${base}/api/projects/${wrongOwner.id}/versions/${runId}/files/assets/gen-0.png`);
+    assert.equal(crossProject.status, 404, "a Run id cannot expose files through another project");
+
+    const traversal = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/files/..%2F${runId}.html`);
+    assert.equal(traversal.status, 400, "the historical file route rejects paths outside its Run snapshot");
+  }, {
+    captureCoverUrl: async (url, outPath) => {
+      const historicalHtml = await (await fetch(url)).text();
+      const relativeSrc = historicalHtml.match(/data-kind="relative" src="([^"]+)"/)?.[1];
+      const rootSrc = historicalHtml.match(/data-kind="root" src="([^"]+)"/)?.[1];
+      assert.ok(relativeSrc && rootSrc);
+      const relative = Buffer.from(await (await fetch(new URL(relativeSrc, url))).arrayBuffer()).toString();
+      const root = Buffer.from(await (await fetch(new URL(rootSrc, url))).arrayBuffer()).toString();
+      coverCapture = { url, relative, root, html: historicalHtml };
+      writeFileSync(outPath, "cover");
+      return true;
+    },
+  });
+});
+
+test("a legacy HTML-only Prototype Restore never substitutes current assets", async () => {
+  await withRunServer(undefined, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Legacy Prototype" });
+    const root = join(dataDir, "projects", project.id);
+    const conversation = store.createConversation(project.id, "Legacy restore");
+    const run = store.createRun(project.id, conversation.id);
+    store.updateRun(run.id, { status: "succeeded", score: 100, lintPassed: true, finishedAt: Date.now() });
+    mkdirSync(join(root, ".versions"), { recursive: true });
+    mkdirSync(join(root, "assets"), { recursive: true });
+    writeFileSync(join(root, ".versions", `${run.id}.html`), '<main><img src="assets/legacy.png"><img src="media/secret.jpg">Historical</main>');
+    writeFileSync(join(root, "index.html"), '<main><img src="assets/legacy.png"><img src="media/secret.jpg">Current</main>');
+    const outsidePixels = join(dataDir, "outside-current-pixels.png");
+    writeFileSync(outsidePixels, "CURRENT ASSET MUST NOT LEAK");
+    symlinkSync(outsidePixels, join(root, "assets", "legacy.png"));
+    const outsideMedia = join(dataDir, "outside-media");
+    mkdirSync(outsideMedia);
+    writeFileSync(join(outsideMedia, "secret.jpg"), "DIRECTORY SYMLINK PIXELS");
+    symlinkSync(outsideMedia, join(root, "media"));
+    writeFileSync(join(root, ".env"), "PRIVATE=preserved");
+
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/restore`, { method: "POST" });
+    const restored = (await response.json()) as { assetsRestored?: boolean; historyRecorded?: boolean };
+
+    assert.equal(response.status, 200);
+    assert.equal(restored.historyRecorded, true);
+    assert.equal(restored.assetsRestored, false);
+    assert.match(readFileSync(join(root, "index.html"), "utf8"), /Historical/);
+    assert.equal(existsSync(join(root, "assets", "legacy.png")), false, "current pixels are removed instead of misattributed to history");
+    assert.equal(existsSync(join(root, "media")), false, "current symlink directories cannot leak pixels into a legacy version");
+    assert.equal(readFileSync(join(root, ".env"), "utf8"), "PRIVATE=preserved");
+    const current = store.listRuns(project.id)[0]!;
+    assert.equal(current.status, "succeeded");
+    assert.equal(current.score, null, "missing pixels cannot inherit a perfect historical score after reload");
+    assert.equal(current.lintPassed, false);
+    assert.ok(current.findings.some((finding) => finding.id === "version-assets-unavailable"));
+  });
+});
+
+test("a Prototype Restore rolls document and assets back when Current metadata cannot commit", async () => {
+  const runner = new FakeRunner({ artifacts: ['<main><img src="assets/hero.png">Historical</main>'] });
+  await withRunServer(runner, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Prototype atomic restore" });
+    const root = join(dataDir, "projects", project.id);
+    mkdirSync(join(root, "assets"), { recursive: true });
+    writeFileSync(join(root, "assets", "hero.png"), "HISTORICAL ASSET");
+    await (await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "snapshot" }),
+    })).text();
+    const sourceRun = store.listRuns(project.id)[0]!;
+    writeFileSync(join(root, "index.html"), '<main><img src="assets/hero.png">Current</main>');
+    rmSync(join(root, "assets", "hero.png"));
+    const currentPixels = join(dataDir, "current-pixels.png");
+    writeFileSync(currentPixels, "CURRENT ASSET");
+    symlinkSync(currentPixels, join(root, "assets", "hero.png"));
+    const originalUpdateRun = store.updateRun.bind(store);
+    store.updateRun = ((id, patch) => {
+      if (id !== sourceRun.id) throw new Error("injected Prototype metadata failure");
+      return originalUpdateRun(id, patch);
+    }) as Store["updateRun"];
+
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${sourceRun.id}/restore`, { method: "POST" });
+
+    assert.equal(response.status, 409);
+    assert.match(await response.text(), /metadata failure/);
+    assert.match(readFileSync(join(root, "index.html"), "utf8"), /Current/);
+    assert.equal(lstatSync(join(root, "assets", "hero.png")).isSymbolicLink(), true, "rollback restores the exact current symlink");
+    assert.equal(readFileSync(join(root, "assets", "hero.png"), "utf8"), "CURRENT ASSET");
+    assert.equal(store.listRuns(project.id).filter((run) => run.status === "succeeded").length, 1);
   });
 });
 
@@ -1599,6 +2323,156 @@ test("fresh Sharingan capture and agent probe writes stay transactional until a 
   );
 });
 
+test("a failed Sharingan entry capture stops before the build runner", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["must not build"] });
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const initialized = initFreshSharinganStandardProject(dataDir, store);
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: initialized.project.id, brief: "capture the source before building" }),
+      });
+      const events = await closedSse(response, "failed Sharingan capture gate");
+
+      assert.equal(runner.calls.length, 0);
+      assert.ok(events.some((event) => event.type === "run-error" && /source capture/i.test(String(event.message))));
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim(), initialized.head);
+    },
+    {
+      sharinganOpen: async () => {
+        throw new Error("Chrome profile could not be opened");
+      },
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("corrupt Sharingan render evidence stops before the build runner", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["must not build"] });
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const initialized = initFreshSharinganStandardProject(dataDir, store);
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: initialized.project.id, brief: "rebuild only from verified source evidence" }),
+      });
+      const events = await closedSse(response, "corrupt Sharingan evidence gate");
+
+      assert.equal(runner.calls.length, 0, "the builder cannot run from corrupt source geometry");
+      assert.ok(events.some((event) => event.type === "run-error" && /valid entry screenshot and render evidence/i.test(String(event.message))));
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim(), initialized.head);
+    },
+    {
+      sharinganOpen: async () => {
+        const session = fakeFreshSharinganSession();
+        session.readRenderMap = async () => ({
+          viewport: { width: 1440, height: 900 },
+          document: { width: 1440, height: 900 },
+          elements: "corrupt",
+        }) as never;
+        return session;
+      },
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("Sharingan source evidence corrupted during generation blocks publication independently of the critic", async () => {
+  const runner: AgentRunner = {
+    id: "corrupt-sharingan-evidence-after-build",
+    async runTurn(input) {
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "export default function App(){ return <main>candidate clone</main> }");
+      const manifest = JSON.parse(readFileSync(join(input.projectDir, ".sharingan", "pages.json"), "utf8")) as {
+        sourceUrl: string;
+        pages: Array<{ url: string; renderMap: string }>;
+      };
+      const entry = manifest.pages.find((page) => page.url === manifest.sourceUrl) ?? manifest.pages[0]!;
+      writeFileSync(join(input.projectDir, entry.renderMap), "{corrupt-after-build");
+      return { text: "candidate complete", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const initialized = initFreshSharinganStandardProject(dataDir, store);
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: initialized.project.id, brief: "generate without mutating source evidence" }),
+      });
+      const events = await closedSse(response, "post-build Sharingan evidence gate");
+
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-error"]);
+      assert.ok(events.some((event) => /fidelity gate blocked publication/i.test(String(event.message))));
+      assert.match(readFileSync(join(initialized.dir, "src", "App.jsx"), "utf8"), /source baseline/);
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim(), initialized.head);
+    },
+    {
+      sharinganOpen: async () => fakeFreshSharinganSession(),
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
+test("Sharingan publication rejects a fresh manifest downgraded to legacy during generation", async () => {
+  const runner: AgentRunner = {
+    id: "downgrade-sharingan-evidence-after-build",
+    async runTurn(input) {
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "export default function App(){ return <main>candidate clone</main> }");
+      const manifestPath = join(input.projectDir, ".sharingan", "pages.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        schemaVersion?: number;
+        requestedSourceUrl?: string;
+        pages: Array<{ requestedUrl?: string }>;
+      };
+      delete manifest.schemaVersion;
+      delete manifest.requestedSourceUrl;
+      for (const page of manifest.pages) delete page.requestedUrl;
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      return { text: "candidate complete", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const initialized = initFreshSharinganStandardProject(dataDir, store);
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: initialized.project.id, brief: "keep the fresh capture contract intact" }),
+      });
+      const events = await closedSse(response, "downgraded Sharingan evidence gate");
+
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-error"]);
+      assert.ok(events.some((event) => /fidelity gate blocked publication/i.test(String(event.message))));
+      assert.match(readFileSync(join(initialized.dir, "src", "App.jsx"), "utf8"), /source baseline/);
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: initialized.dir, encoding: "utf8" }).trim(), initialized.head);
+    },
+    {
+      sharinganOpen: async () => fakeFreshSharinganSession(),
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [],
+    },
+  );
+});
+
 test("fresh Sharingan capture is discarded with failed and aborted Standard Run transactions", async () => {
   for (const kind of ["failed", "aborted"] as const) {
     let transactionObserved = false;
@@ -1926,16 +2800,39 @@ test("standard version actions use commit snapshots instead of prototype html sn
       writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
       mkdirSync(join(dir, "src"), { recursive: true });
       writeFileSync(join(dir, "src", "App.jsx"), "export default function App(){ return <main>One</main> }");
+      writeFileSync(join(dir, "src", "first-only.txt"), "belongs to the first version");
       const firstCommit = commitAll(dir, "first");
 
+      execFileSync("git", ["rm", "-q", "src/first-only.txt"], { cwd: dir });
       writeFileSync(join(dir, "src", "App.jsx"), "export default function App(){ return <main>Two</main> }");
+      writeFileSync(join(dir, "src", "second-only.txt"), "belongs to the second version");
       const secondCommit = commitAll(dir, "second");
 
       const conversation = store.createConversation(project.id, "First");
-      const firstRun = store.createRun(project.id, conversation.id);
-      store.updateRun(firstRun.id, { status: "succeeded", commitHash: firstCommit, finishedAt: Date.now() });
-      const secondRun = store.createRun(project.id, conversation.id);
+      const mainVariant = store.ensureMainVariant(project.id);
+      const archivedVariant = store.createVariant(project.id, "Archived source branch");
+      const firstRun = store.createRun(project.id, conversation.id, archivedVariant.id);
+      const evidenceName = "round-0-sourceproof.png";
+      const evidenceDir = join(dataDir, "version-evidence", project.id, firstRun.id, "visual");
+      mkdirSync(evidenceDir, { recursive: true });
+      writeFileSync(join(evidenceDir, evidenceName), "source proof pixels");
+      const sourceEvidenceUrl = `/api/projects/${project.id}/runs/${firstRun.id}/evidence/${evidenceName}`;
+      store.updateRun(firstRun.id, {
+        status: "succeeded",
+        commitHash: firstCommit,
+        score: 98,
+        lintPassed: true,
+        findings: [{ severity: "P2", id: "visual-reviewed", message: "reviewed", fix: "", screenshotUrl: sourceEvidenceUrl }],
+        finishedAt: Date.now(),
+      });
+      const secondRun = store.createRun(project.id, conversation.id, mainVariant.id);
       store.updateRun(secondRun.id, { status: "succeeded", commitHash: secondCommit, finishedAt: Date.now() });
+      const failedRun = store.createRun(project.id, conversation.id);
+      store.updateRun(failedRun.id, { status: "failed", commitHash: firstCommit, finishedAt: Date.now() });
+
+      const rejectedRestore = await fetch(`${base}/api/projects/${project.id}/versions/${failedRun.id}/restore`, { method: "POST" });
+      assert.equal(rejectedRestore.status, 409, "failed quality attempts cannot be promoted through the Restore endpoint");
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), secondCommit);
 
       const view = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}`, { redirect: "manual" });
       assert.equal(view.status, 302);
@@ -1949,6 +2846,15 @@ test("standard version actions use commit snapshots instead of prototype html sn
       assert.equal(staleView.status, 302);
       assert.equal(readFileSync(join(devServers[1]!.dir, "src", "App.jsx"), "utf8"), "export default function App(){ return <main>One</main> }");
 
+      writeFileSync(join(devServers[1]!.dir, "src", "App.jsx"), "dirty historical worktree bytes");
+      const dirtySameHeadView = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}`, { redirect: "manual" });
+      assert.equal(dirtySameHeadView.status, 302);
+      assert.equal(
+        readFileSync(join(devServers[2]!.dir, "src", "App.jsx"), "utf8"),
+        "export default function App(){ return <main>One</main> }",
+        "reopening the same historical HEAD discards dirty worktree residue",
+      );
+
       const diff = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}/diff`);
       assert.equal(diff.status, 200);
       const lines = (await diff.json()) as Array<{ t: string; text: string }>;
@@ -1959,13 +2865,43 @@ test("standard version actions use commit snapshots instead of prototype html sn
       assert.equal(cover.status, 200);
       assert.deepEqual(await cover.json(), { captured: true });
       assert.deepEqual(captured, {
-        url: "http://127.0.0.1:6203/",
+        url: "http://127.0.0.1:6204/",
         outPath: join(dataDir, "projects", project.id, ".cover.png"),
       });
 
       const restore = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}/restore`, { method: "POST" });
       assert.equal(restore.status, 200);
+      const restored = (await restore.json()) as { ok: boolean; commitHash?: string; runId?: string };
+      assert.equal(restored.ok, true);
+      assert.match(restored.commitHash ?? "", /^[0-9a-f]{40}$/);
+      assert.match(restored.runId ?? "", /^[0-9a-z-]+$/i);
+      const restoredCommit = restored.commitHash!;
+      assert.notEqual(restoredCommit, firstCommit, "restore creates a new history-preserving commit");
+      assert.notEqual(restoredCommit, secondCommit, "restore does not leave HEAD at the prior current commit");
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), restoredCommit);
+      assert.equal(execFileSync("git", ["rev-parse", `${restoredCommit}^`], { cwd: dir, encoding: "utf8" }).trim(), secondCommit);
+      execFileSync("git", ["diff", "--quiet", firstCommit, restoredCommit, "--", "."], { cwd: dir });
       assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "export default function App(){ return <main>One</main> }");
+      assert.equal(readFileSync(join(dir, "src", "first-only.txt"), "utf8"), "belongs to the first version");
+      assert.equal(existsSync(join(dir, "src", "second-only.txt")), false, "files absent from the target tree are removed");
+      const restoredRun = store.getRun(restored.runId!);
+      assert.equal(restoredRun?.status, "succeeded");
+      assert.equal(restoredRun?.variantId, mainVariant.id, "cross-branch restore is recorded on the active target branch");
+      assert.equal(restoredRun?.commitHash, restoredCommit, "the newest version record names the exact checked-out HEAD");
+      assert.equal(store.listRuns(project.id)[0]?.id, restored.runId, "the restored snapshot becomes the durable Current version");
+      const restoredEvidenceUrl = restoredRun?.findings[0]?.screenshotUrl ?? "";
+      assert.match(restoredEvidenceUrl, new RegExp(`/runs/${restored.runId}/evidence/${evidenceName}$`));
+
+      const repeat = await fetch(`${base}/api/projects/${project.id}/versions/${firstRun.id}/restore`, { method: "POST" });
+      assert.equal(repeat.status, 200, "restoring an already-current tree is idempotent");
+      const repeated = (await repeat.json()) as { commitHash?: string; runId?: string };
+      assert.equal(repeated.commitHash, restoredCommit, "an identical restore reuses the current HEAD instead of failing or creating an empty commit");
+      assert.ok(repeated.runId && repeated.runId !== restored.runId, "the repeated user action still gets an auditable version identity");
+
+      store.deleteVariant(archivedVariant.id);
+      const durableEvidence = await fetch(`${base}${restoredEvidenceUrl}`);
+      assert.equal(durableEvidence.status, 200, "restored quality evidence survives deletion of the source branch Run");
+      assert.equal(await durableEvidence.text(), "source proof pixels");
     },
     {
       ensureDevServer: async (_projectId, dir, runtimeKey) => {
@@ -1979,6 +2915,271 @@ test("standard version actions use commit snapshots instead of prototype html sn
       },
     },
   );
+});
+
+test("standard version restore rejects tracked and untracked dirty worktrees before changing files", async () => {
+  await withRunServer(undefined, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Dirty restore", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "src", "App.jsx"), "first version");
+    const firstCommit = commitAll(dir, "first");
+    writeFileSync(join(dir, "src", "App.jsx"), "second version");
+    const secondCommit = commitAll(dir, "second");
+    const conversation = store.createConversation(project.id, "Restore");
+    const run = store.createRun(project.id, conversation.id);
+    store.updateRun(run.id, { status: "succeeded", commitHash: firstCommit, finishedAt: Date.now() });
+
+    writeFileSync(join(dir, "src", "App.jsx"), "user's tracked edit");
+    const tracked = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/restore`, { method: "POST" });
+    const trackedHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+    const trackedText = readFileSync(join(dir, "src", "App.jsx"), "utf8");
+
+    execFileSync("git", ["reset", "--hard", secondCommit], { cwd: dir, stdio: "ignore" });
+    writeFileSync(join(dir, "scratch.txt"), "user's untracked note");
+    const untracked = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/restore`, { method: "POST" });
+    const untrackedHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+    const untrackedApp = readFileSync(join(dir, "src", "App.jsx"), "utf8");
+
+    assert.equal(tracked.status, 409);
+    assert.equal(trackedHead, secondCommit);
+    assert.equal(trackedText, "user's tracked edit");
+    assert.equal(untracked.status, 409);
+    assert.equal(untrackedHead, secondCommit);
+    assert.equal(untrackedApp, "second version");
+    assert.equal(readFileSync(join(dir, "scratch.txt"), "utf8"), "user's untracked note");
+  });
+});
+
+test("a Standard restore isolates its mechanical commit from invalid local signing configuration", async () => {
+  await withRunServer(undefined, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Atomic restore", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "src", "App.jsx"), "first version");
+    const firstCommit = commitAll(dir, "first");
+    writeFileSync(join(dir, "src", "App.jsx"), "second version");
+    const secondCommit = commitAll(dir, "second");
+    const conversation = store.createConversation(project.id, "Restore");
+    const run = store.createRun(project.id, conversation.id);
+    store.updateRun(run.id, { status: "succeeded", commitHash: firstCommit, finishedAt: Date.now() });
+
+    execFileSync("git", ["config", "commit.gpgSign", "true"], { cwd: dir });
+    execFileSync("git", ["config", "user.signingkey", "missing-dezin-test-key"], { cwd: dir });
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/restore`, { method: "POST" });
+
+    assert.equal(response.status, 200);
+    assert.notEqual(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), secondCommit);
+    assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "first version");
+    assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+  });
+});
+
+test("a Standard Restore keeps the originally targeted branch identity when active branch changes mid-flight", async () => {
+  await withRunServer(undefined, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Restore target identity", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "src", "App.jsx"), "first version");
+    const firstCommit = commitAll(dir, "first");
+    writeFileSync(join(dir, "src", "App.jsx"), "second version");
+    commitAll(dir, "second");
+    const conversation = store.createConversation(project.id, "Restore");
+    const main = store.ensureMainVariant(project.id);
+    const other = store.createVariant(project.id, "Other");
+    store.setActiveVariant(project.id, main.id);
+    const sourceRun = store.createRun(project.id, conversation.id, main.id);
+    store.updateRun(sourceRun.id, {
+      status: "succeeded",
+      commitHash: firstCommit,
+      findings: [{
+        severity: "P2",
+        id: "visual-reviewed",
+        message: "Reviewed",
+        fix: "",
+        screenshotPath: ".visual-qa/screenshot.png",
+        screenshotUrl: `/api/projects/${project.id}/runs/${sourceRun.id}/evidence/visual/round-0.png`,
+      }],
+      finishedAt: Date.now(),
+    });
+
+    const originalFindActiveRun = store.findActiveRun.bind(store);
+    let switched = false;
+    store.findActiveRun = ((projectId: string, variantId?: string) => {
+      const activeRun = originalFindActiveRun(projectId, variantId);
+      if (!switched && projectId === project.id) {
+        switched = true;
+        store.setActiveVariant(project.id, other.id);
+      }
+      return activeRun;
+    }) as Store["findActiveRun"];
+
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${sourceRun.id}/restore`, { method: "POST" });
+    const restored = (await response.json()) as { runId?: string; evidenceCopied?: boolean };
+
+    assert.equal(response.status, 200);
+    assert.equal(store.getActiveVariantId(project.id), other.id, "the concurrent UI branch switch still wins");
+    assert.equal(store.getRun(restored.runId!)?.variantId, main.id, "Restore history stays attached to the branch whose tree was mutated");
+    assert.equal(restored.evidenceCopied, false, "missing source evidence is reported honestly");
+    assert.equal(store.getRun(restored.runId!)?.findings[0]?.screenshotUrl, undefined, "a restored identity never points at missing source evidence");
+    assert.equal(store.getRun(restored.runId!)?.findings[0]?.screenshotPath, undefined);
+  });
+});
+
+test("Standard Restore strips non-immutable screenshot references even when an evidence directory copies", async () => {
+  await withRunServer(undefined, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Evidence ownership", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "src", "App.jsx"), "historical");
+    const historical = commitAll(dir, "historical");
+    writeFileSync(join(dir, "src", "App.jsx"), "current");
+    commitAll(dir, "current");
+    const conversation = store.createConversation(project.id, "Evidence");
+    const run = store.createRun(project.id, conversation.id);
+    store.updateRun(run.id, {
+      status: "succeeded",
+      commitHash: historical,
+      findings: [{
+        severity: "P2",
+        id: "visual-reviewed",
+        message: "Reviewed",
+        fix: "",
+        screenshotPath: ".visual-qa/screenshot.png",
+        screenshotUrl: `/projects/${project.id}/preview/.visual-qa/screenshot.png`,
+      }],
+      finishedAt: Date.now(),
+    });
+    const evidence = join(dataDir, "version-evidence", project.id, run.id, "visual");
+    mkdirSync(evidence, { recursive: true });
+    writeFileSync(join(evidence, "proof.png"), "immutable proof bytes");
+
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/restore`, { method: "POST" });
+    const body = (await response.json()) as { runId?: string; evidenceCopied?: boolean };
+    const restoredFinding = store.getRun(body.runId!)?.findings[0];
+
+    assert.equal(response.status, 200);
+    assert.equal(body.evidenceCopied, true);
+    assert.equal(restoredFinding?.screenshotUrl, undefined);
+    assert.equal(restoredFinding?.screenshotPath, undefined);
+  });
+});
+
+test("a Standard restore bypasses project commit hooks without leaving hook residue", async () => {
+  await withRunServer(undefined, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Hook-safe restore", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "src", "App.jsx"), "first version");
+    const firstCommit = commitAll(dir, "first");
+    writeFileSync(join(dir, "src", "App.jsx"), "second version");
+    commitAll(dir, "second");
+    const conversation = store.createConversation(project.id, "Restore");
+    const run = store.createRun(project.id, conversation.id);
+    store.updateRun(run.id, { status: "succeeded", commitHash: firstCommit, finishedAt: Date.now() });
+
+    const hook = join(dir, ".git", "hooks", "pre-commit");
+    writeFileSync(hook, "#!/bin/sh\ntouch hook-residue.txt\nexit 1\n");
+    chmodSync(hook, 0o755);
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/restore`, { method: "POST" });
+
+    assert.equal(response.status, 200);
+    assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "first version");
+    assert.equal(existsSync(join(dir, "hook-residue.txt")), false);
+    assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+  });
+});
+
+test("a Standard restore also isolates post-commit hooks from the restored worktree", async () => {
+  await withRunServer(undefined, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Post-hook-safe restore", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "src", "App.jsx"), "first version");
+    const firstCommit = commitAll(dir, "first");
+    writeFileSync(join(dir, "src", "App.jsx"), "second version");
+    commitAll(dir, "second");
+    const conversation = store.createConversation(project.id, "Restore");
+    const run = store.createRun(project.id, conversation.id);
+    store.updateRun(run.id, { status: "succeeded", commitHash: firstCommit, finishedAt: Date.now() });
+
+    const hook = join(dir, ".git", "hooks", "post-commit");
+    writeFileSync(hook, "#!/bin/sh\ntouch post-hook-residue.txt\n");
+    chmodSync(hook, 0o755);
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/restore`, { method: "POST" });
+
+    assert.equal(response.status, 200);
+    assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "first version");
+    assert.equal(existsSync(join(dir, "post-hook-residue.txt")), false);
+    assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+  });
+});
+
+test("a Standard restore does not run checkout hooks while applying the selected tree", async () => {
+  await withRunServer(undefined, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Checkout-hook-safe restore", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "src", "App.jsx"), "first version");
+    const firstCommit = commitAll(dir, "first");
+    writeFileSync(join(dir, "src", "App.jsx"), "second version");
+    commitAll(dir, "second");
+    const conversation = store.createConversation(project.id, "Restore");
+    const run = store.createRun(project.id, conversation.id);
+    store.updateRun(run.id, { status: "succeeded", commitHash: firstCommit, finishedAt: Date.now() });
+
+    const hook = join(dir, ".git", "hooks", "post-checkout");
+    writeFileSync(hook, "#!/bin/sh\ntouch checkout-hook-residue.txt\n");
+    chmodSync(hook, 0o755);
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/restore`, { method: "POST" });
+
+    assert.equal(response.status, 200);
+    assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "first version");
+    assert.equal(existsSync(join(dir, "checkout-hook-residue.txt")), false);
+    assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+  });
+});
+
+test("a Restore metadata failure atomically rolls the Standard tree back", async () => {
+  await withRunServer(undefined, async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Restore metadata", mode: "standard" });
+    const dir = join(dataDir, "projects", project.id);
+    mkdirSync(join(dir, "src"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    writeFileSync(join(dir, "src", "App.jsx"), "first version");
+    const firstCommit = commitAll(dir, "first");
+    writeFileSync(join(dir, "src", "App.jsx"), "second version");
+    const secondCommit = commitAll(dir, "second");
+    const conversation = store.createConversation(project.id, "Restore");
+    const sourceRun = store.createRun(project.id, conversation.id);
+    store.updateRun(sourceRun.id, { status: "succeeded", commitHash: firstCommit, findings: [], finishedAt: Date.now() });
+
+    const originalUpdateRun = store.updateRun.bind(store);
+    store.updateRun = ((id, patch) => {
+      if (id !== sourceRun.id) throw new Error("injected restored metadata failure");
+      return originalUpdateRun(id, patch);
+    }) as Store["updateRun"];
+
+    const response = await fetch(`${base}/api/projects/${project.id}/versions/${sourceRun.id}/restore`, { method: "POST" });
+    const result = (await response.json()) as { error?: string };
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+    const runs = store.listRuns(project.id);
+
+    assert.equal(response.status, 409, "filesystem and Current identity fail as one transaction");
+    assert.match(result.error ?? "", /metadata failure/);
+    assert.equal(head, secondCommit);
+    assert.equal(readFileSync(join(dir, "src", "App.jsx"), "utf8"), "second version");
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" }), "");
+    assert.equal(runs.filter((run) => run.status === "succeeded").length, 1, "partial metadata must not create a fake succeeded Current row");
+    assert.ok(runs.some((run) => run.id !== sourceRun.id && run.status === "failed"), "the partial audit row remains explicitly failed");
+  });
 });
 
 test("standard version preview URL endpoint resolves the dev server URL without iframe redirect", async () => {
@@ -2341,12 +3542,16 @@ test("standard run persists visual QA findings and score when enabled", async ()
       const run = store.getRun(done.runId as string)!;
       assert.equal(run.score, 92);
       assert.equal(run.findings[0]?.id, "visual-fixed-offscreen");
+      assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+      assert.equal(existsSync(join(dataDir, "version-evidence", project.id, run.id, "visual")), true);
     },
     {
       ensureDevServer: async () => ({ url: "http://127.0.0.1:6214/" }),
       captureCoverUrl: async () => true,
       visualQa: async (input) => {
         visualInput = input;
+        mkdirSync(join(input.projectRoot!, ".visual-qa"), { recursive: true });
+        writeFileSync(join(input.projectRoot!, ".visual-qa", "screenshot.png"), "fresh Standard review pixels");
         return [
           {
             severity: "P1",
@@ -2356,6 +3561,194 @@ test("standard run persists visual QA findings and score when enabled", async ()
           },
         ];
       },
+    },
+  );
+});
+
+test("a Standard Run can read uploaded .refs without committing daemon-owned attachments", async () => {
+  const runner: AgentRunner = {
+    id: "standard-ref-sidecar",
+    async runTurn(input) {
+      assert.equal(readFileSync(join(input.projectDir, ".refs", "reference.txt"), "utf8"), "reference evidence");
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "built from uploaded reference");
+      return { text: "used reference", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const { project, dir } = initStandardRunProject(dataDir, store);
+      const upload = await fetch(`${base}/api/projects/${project.id}/refs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "reference.txt", contentBase64: Buffer.from("reference evidence").toString("base64") }),
+      });
+      assert.equal(upload.status, 200);
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "Use ./.refs/reference.txt" }),
+      });
+      const responseText = await response.text();
+      assert.equal(response.status, 200, responseText);
+      const events = parseSse(responseText);
+
+      assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-done"]);
+      assert.equal(readFileSync(join(dir, ".refs", "reference.txt"), "utf8"), "reference evidence");
+      assert.equal(execFileSync("git", ["ls-files", "--", ".refs"], { cwd: dir, encoding: "utf8" }).trim(), "");
+      assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => false,
+    },
+  );
+});
+
+test("a generated Standard cover remains a clean sidecar for the next Run", async () => {
+  let turn = 0;
+  const runner: AgentRunner = {
+    id: "standard-cover-sidecar",
+    async runTurn(input) {
+      turn += 1;
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), `cover run ${turn}`);
+      return { text: `run ${turn}`, artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const { project, dir } = initStandardRunProject(dataDir, store);
+      const first = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "first cover run" }),
+      });
+      assert.deepEqual(terminalEvents(await closedSse(first, "first cover run")).map((event) => event.type), ["run-done"]);
+      for (let i = 0; i < 50 && !existsSync(join(dir, ".cover.png")); i += 1) await delay(10);
+      assert.equal(existsSync(join(dir, ".cover.png")), true);
+
+      const second = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "second cover run" }),
+      });
+      assert.deepEqual(terminalEvents(await closedSse(second, "second cover run")).map((event) => event.type), ["run-done"]);
+      assert.equal(turn, 2);
+      assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async (_url, outPath) => {
+        writeFileSync(outPath, `cover ${turn}`);
+        return true;
+      },
+    },
+  );
+});
+
+test("legacy tracked Standard runtime sidecars migrate out of Git without losing current references", async () => {
+  const runner: AgentRunner = {
+    id: "legacy-sidecar-migration",
+    async runTurn(input) {
+      assert.equal(readFileSync(join(input.projectDir, ".refs", "legacy.txt"), "utf8"), "current reference bytes");
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "built after sidecar migration");
+      return { text: "migrated", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false });
+      const { project, dir } = initStandardRunProject(dataDir, store);
+      mkdirSync(join(dir, ".refs"), { recursive: true });
+      mkdirSync(join(dir, ".visual-qa"), { recursive: true });
+      writeFileSync(join(dir, ".refs", "legacy.txt"), "old reference bytes");
+      writeFileSync(join(dir, ".visual-qa", "screenshot.png"), "old review pixels");
+      writeFileSync(join(dir, ".cover.png"), "old cover pixels");
+      commitAll(dir, "legacy tracked runtime files");
+      writeFileSync(join(dir, ".refs", "legacy.txt"), "current reference bytes");
+      writeFileSync(join(dir, ".visual-qa", "screenshot.png"), "current review pixels");
+      writeFileSync(join(dir, ".cover.png"), "current cover pixels");
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "migrate legacy sidecars" }),
+      });
+      const responseText = await response.text();
+      assert.equal(response.status, 200, responseText);
+      assert.deepEqual(terminalEvents(parseSse(responseText)).map((event) => event.type), ["run-done"], responseText);
+
+      assert.equal(execFileSync("git", ["ls-files", "--", ".cover.png", ".visual-qa", ".refs"], { cwd: dir, encoding: "utf8" }).trim(), "");
+      assert.equal(readFileSync(join(dir, ".refs", "legacy.txt"), "utf8"), "current reference bytes");
+      assert.equal(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => false,
+    },
+  );
+});
+
+test("a Standard preview failure cannot attach a pre-existing screenshot as current-run evidence", async () => {
+  const runner: AgentRunner = {
+    id: "standard-preview-failure",
+    async runTurn(input) {
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), "changed design");
+      return { text: "changed", artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: true, autoImproveEnabled: false });
+      const { project, dir } = initStandardRunProject(dataDir, store);
+      mkdirSync(join(dir, ".visual-qa"), { recursive: true });
+      writeFileSync(join(dir, ".visual-qa", "screenshot.png"), "pixels from an older visual review");
+      commitAll(dir, "seed old screenshot");
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "update the design" }),
+      });
+      const events = parseSse(await response.text());
+      const runId = events.find((event) => event.type === "run-start")!.runId as string;
+      const visualEvent = events.find((event) => event.type === "visual-qa")!;
+      const findings = visualEvent.findings as Array<{ id?: string; screenshotUrl?: string }>;
+
+      assert.ok(findings.some((finding) => finding.id === "visual-devserver-unavailable"));
+      assert.equal(findings.some((finding) => Boolean(finding.screenshotUrl)), false);
+      assert.equal(
+        existsSync(join(dataDir, "version-evidence", project.id, runId, "visual")),
+        false,
+        "a preview failure must not promote an older screenshot into this Run's immutable evidence",
+      );
+      const conversation = store.listConversations(project.id)[0]!;
+      const visualRecord = store
+        .listMessages(conversation.id)
+        .filter((message) => message.role === "system")
+        .map((message) => {
+          try {
+            return JSON.parse(message.content) as { visualReview?: { screenshotUrl?: string } };
+          } catch {
+            return {};
+          }
+        })
+        .find((message) => message.visualReview);
+      assert.ok(visualRecord?.visualReview, "the failed review attempt remains visible in the transcript");
+      assert.equal(visualRecord.visualReview.screenshotUrl, undefined);
+    },
+    {
+      visualQa: undefined,
+      ensureDevServer: async () => {
+        throw new Error("preview intentionally unavailable");
+      },
+      captureCoverUrl: async () => true,
     },
   );
 });
@@ -2446,6 +3839,7 @@ test("Sharingan standard run reviews an existing scaffold even when the first ag
       writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
       writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
       writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>SOURCE scaffold</main> }`);
+      writeValidSharinganEvidence(dir);
       execFileSync("git", ["add", "-A"], { cwd: dir });
       execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
 
@@ -2483,6 +3877,66 @@ test("Sharingan standard run reviews an existing scaffold even when the first ag
             ]
           : [];
       },
+    },
+  );
+});
+
+test("an unresolved Sharingan fidelity gate preserves a recovery commit without publishing it", async () => {
+  let turn = 0;
+  const runner: AgentRunner = {
+    id: "sharingan-quality-gate",
+    async runTurn(input) {
+      turn += 1;
+      writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>candidate ${turn}</main> }`);
+      return { text: `candidate ${turn}`, artifactHtml: "", artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(
+    runner,
+    async ({ base, dataDir, store }) => {
+      store.updateSettings({ visualQaEnabled: false, autoImproveEnabled: false, autoImproveMaxRounds: 0 });
+      const project = store.createProject({ name: "Strict clone", mode: "standard", sharingan: true });
+      const dir = join(dataDir, "projects", project.id);
+      mkdirSync(join(dir, "src"), { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: dir });
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+      writeFileSync(join(dir, "index.html"), `<div id="root"></div><script type="module" src="/src/App.jsx"></script>`);
+      writeFileSync(join(dir, "src", "App.jsx"), `export default function App(){ return <main>source baseline</main> }`);
+      const sourceHead = commitAll(dir, "base");
+
+      const response = await fetch(`${base}/api/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: project.id, brief: "reconstruct the source exactly" }),
+      });
+      const events = await closedSse(response, "Sharingan quality gate");
+      const runId = String(events.find((event) => event.type === "run-start")?.runId ?? "");
+      const run = store.getRun(runId);
+
+      assert.ok(events.some((event) => event.type === "run-error" && /fidelity gate/i.test(String(event.message))));
+      assert.equal(events.some((event) => event.type === "run-done"), false);
+      assert.equal(run?.status, "failed");
+      assert.equal(run?.lintPassed, false);
+      assert.match(run?.commitHash ?? "", /^[0-9a-f]{40}$/);
+      assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), sourceHead);
+      assert.match(readFileSync(join(dir, "src", "App.jsx"), "utf8"), /source baseline/);
+      assert.equal(
+        execFileSync("git", ["rev-parse", standardRunBranchName(runId)], { cwd: dir, encoding: "utf8" }).trim(),
+        run?.commitHash,
+      );
+    },
+    {
+      ensureDevServer: async () => ({ url: "http://127.0.0.1:5999/" }),
+      captureCoverUrl: async () => true,
+      visualQa: async () => [
+        {
+          severity: "P1",
+          id: "visual-source-screenshot-diff",
+          message: "The generated surface still differs materially from the source.",
+          fix: "Match the measured source layout and pixels.",
+        },
+      ],
     },
   );
 });
@@ -2546,6 +4000,7 @@ test("Sharingan standard run delegates source regions to isolated subagents befo
           ],
         }),
       );
+      writeValidSharinganEvidence(dir);
       execFileSync("git", ["add", "-A"], { cwd: dir });
       execFileSync("git", ["-c", "user.name=Dezin", "-c", "user.email=dezin@local", "commit", "-q", "-m", "base"], { cwd: dir });
 
@@ -2912,6 +4367,7 @@ test("Sharingan variant runs sync the root capture bundle before region subagent
         join(dir, ".sharingan", "region-plan.json"),
         JSON.stringify({ version: 1, sourceUrl: "https://example.com", regions: [{ id: "region-1", label: "Header", bbox: { x: 0, y: 0, w: 1200, h: 80 }, texts: ["Home"], assets: ["/_assets/hero.png"] }] }),
       );
+      writeValidSharinganEvidence(dir);
 
       store.ensureMainVariant(project.id);
       const variant = store.createVariant(project.id, "Variant");
@@ -2970,8 +4426,7 @@ test("a second targeted Sharingan Run keeps the variant capture when the root le
       writeFileSync(join(rootDir, "src", "App.jsx"), `export default function App(){ return <main>root</main> }`);
       commitAll(rootDir, "base without capture");
 
-      mkdirSync(join(rootDir, ".sharingan"), { recursive: true });
-      writeFileSync(join(rootDir, ".sharingan", "pages.json"), JSON.stringify({ sourceUrl: "https://root.example", pages: [] }));
+      writeValidSharinganEvidence(rootDir, "https://root.example");
       writeFileSync(join(rootDir, ".sharingan", "bundle-origin.txt"), "root-v1");
 
       store.ensureMainVariant(project.id);
@@ -3463,6 +4918,44 @@ console.log(JSON.stringify({type:"assistant", message:{content:[{type:"text", te
   }
 });
 
+test("daemon start removes Prototype snapshot crash residue without touching completed or legacy versions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-start-version-cleanup-"));
+  const dataDir = join(root, "data");
+  const portFile = join(root, "daemon.json");
+  const versionsDir = join(dataDir, "projects", "project-cleanup", ".versions");
+  mkdirSync(join(versionsDir, "orphan-run.files"), { recursive: true });
+  mkdirSync(join(versionsDir, "valid-run.files"), { recursive: true });
+  writeFileSync(join(versionsDir, "valid-run.html"), "<main>valid</main>");
+  writeFileSync(join(versionsDir, "legacy-run.html"), "<main>legacy</main>");
+  mkdirSync(join(versionsDir, "run-visual-round-0.files"), { recursive: true });
+  writeFileSync(join(versionsDir, "run-visual-round-0.html"), "<main>private</main>");
+  writeFileSync(join(versionsDir, ".run-crash.html.tmp"), "<main>staged</main>");
+
+  const child = spawn("node", ["--experimental-strip-types", "--experimental-sqlite", "--no-warnings", "src/start.ts"], {
+    cwd: process.cwd(),
+    env: { ...process.env, DEZIN_DATA_DIR: dataDir, DEZIN_PORTFILE: portFile },
+    stdio: "ignore",
+  });
+  try {
+    for (let i = 0; i < 80 && !existsSync(portFile); i++) await delay(50);
+    assert.equal(existsSync(portFile), true, "daemon wrote its port file");
+    assert.equal(existsSync(join(versionsDir, "orphan-run.files")), false);
+    assert.equal(existsSync(join(versionsDir, "run-visual-round-0.files")), false);
+    assert.equal(existsSync(join(versionsDir, "run-visual-round-0.html")), false);
+    assert.equal(existsSync(join(versionsDir, ".run-crash.html.tmp")), false);
+    assert.equal(existsSync(join(versionsDir, "valid-run.files")), true);
+    assert.equal(readFileSync(join(versionsDir, "valid-run.html"), "utf8"), "<main>valid</main>");
+    assert.equal(readFileSync(join(versionsDir, "legacy-run.html"), "utf8"), "<main>legacy</main>");
+  } finally {
+    await new Promise<void>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      child.once("exit", () => resolve());
+      child.kill("SIGTERM");
+    });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("daemon start rejects a second instance for the same data dir", async () => {
   const root = mkdtempSync(join(tmpdir(), "dezin-start-lock-"));
   const dataDir = join(root, "data");
@@ -3516,7 +5009,7 @@ test("research-enabled run writes research/ and grounds the build in the report"
   const researchPhase: NonNullable<AppDeps["researchPhase"]> = async (input) => {
     mkdirSync(join(input.dir, ".research"), { recursive: true });
     writeFileSync(join(input.dir, ".research", "research.md"), "# Research\n\nKey finding: real users skim.");
-    return { ran: true, produced: true, visualProduced: false };
+    return { ran: true, produced: true, visualProduced: false, complete: true, issues: [] };
   };
   await withRunServer(
     runner,
@@ -3552,7 +5045,7 @@ test("research phase uses the configured research Agent/model override", async (
     researchInput = { agentCommand: input.agentCommand, model: input.model };
     mkdirSync(join(input.dir, ".research"), { recursive: true });
     writeFileSync(join(input.dir, ".research", "research.md"), "# Research\n\nx");
-    return { ran: true, produced: true, visualProduced: false };
+    return { ran: true, produced: true, visualProduced: false, complete: true, issues: [] };
   };
   await withRunServer(
     runner,
@@ -3580,7 +5073,7 @@ test("a follow-up turn does not re-run Research on an already-researched project
   let researchCalls = 0;
   const researchPhase: NonNullable<AppDeps["researchPhase"]> = async () => {
     researchCalls++;
-    return { ran: false, produced: true, visualProduced: false };
+    return { ran: false, produced: true, visualProduced: false, complete: true, issues: [] };
   };
   await withRunServer(
     runner,
@@ -3592,12 +5085,8 @@ test("a follow-up turn does not re-run Research on an already-researched project
       // research — doing so flashes "Researching", re-surfaces the old direction gate, and cancels
       // the run.
       const dir = join(dataDir, "projects", project.id);
-      mkdirSync(join(dir, ".research", "directions", "a"), { recursive: true });
-      mkdirSync(join(dir, ".research", "directions", "b"), { recursive: true });
-      writeFileSync(join(dir, ".research", "research.md"), "# Research\n\nprior");
-      writeFileSync(join(dir, ".research", "directions", "a", "direction.md"), "# Direction A");
-      writeFileSync(join(dir, ".research", "directions", "b", "direction.md"), "# Direction B");
-      writeFileSync(join(dir, ".research", "chosen"), "a\n"); // the user picked direction "a" earlier
+      writeValidatedResearchBundle(dir);
+      writeFileSync(join(dir, ".research", "chosen"), "alpha\n"); // the user picked direction "alpha" earlier
 
       const res = await fetch(`${base}/api/runs`, {
         method: "POST",
@@ -3641,7 +5130,7 @@ test("dual-track research: SSE research-activity carries track, and visual asset
     // Emit one activity per track so the SSE assertion below can check both tags arrive.
     input.onActivity?.({ kind: "note", text: "product note", track: "product" });
     input.onActivity?.({ kind: "note", text: "visual note", track: "visual" });
-    return { ran: true, produced: true, visualProduced: true };
+    return { ran: true, produced: true, visualProduced: true, complete: true, issues: [] };
   };
   await withRunServer(
     runner,
@@ -3743,7 +5232,7 @@ test("runs without the research flag skip the research phase", async () => {
   let called = false;
   const researchPhase: NonNullable<AppDeps["researchPhase"]> = async () => {
     called = true;
-    return { ran: true, produced: false, visualProduced: false };
+    return { ran: true, produced: false, visualProduced: false, complete: false, issues: [] };
   };
   await withRunServer(
     runner,
@@ -3764,13 +5253,8 @@ test("runs without the research flag skip the research phase", async () => {
 });
 
 const researchWithDirections: NonNullable<AppDeps["researchPhase"]> = async (input) => {
-  const dirs = join(input.dir, ".research", "directions");
-  mkdirSync(join(dirs, "alpha"), { recursive: true });
-  mkdirSync(join(dirs, "beta"), { recursive: true });
-  writeFileSync(join(input.dir, ".research", "research.md"), "# Research\n\nFindings.");
-  writeFileSync(join(dirs, "alpha", "direction.md"), "# Alpha — bold\n\nBold concept for alpha.");
-  writeFileSync(join(dirs, "beta", "direction.md"), "# Beta — calm\n\nCalm concept for beta.");
-  return { ran: true, produced: true, visualProduced: false };
+  writeValidatedResearchBundle(input.dir);
+  return { ran: true, produced: true, visualProduced: false, complete: true, issues: [] };
 };
 
 test("Standard chosen direction is durably checkpointed before failure, abort, question, or no-op and retry reuses it", async () => {
@@ -3782,7 +5266,8 @@ test("Standard chosen direction is durably checkpointed before failure, abort, q
       async runTurn(input) {
         if (retrying) {
           assert.match(input.message, /Chosen direction/);
-          assert.match(input.message, /Bold concept for alpha/);
+          assert.match(input.message, /# Alpha — bold/);
+          assert.match(input.message, /Concept: Bold direction for alpha, grounded in the product and visual evidence\./);
           writeFileSync(join(input.projectDir, "src", "App.jsx"), `export default function App(){ return <main>retry ${exit} with alpha</main> }`);
           return { text: "retry built the chosen direction", artifactHtml: "", artifactPath: "index.html" };
         }
@@ -3804,12 +5289,7 @@ test("Standard chosen direction is durably checkpointed before failure, abort, q
       async ({ base, dataDir, store }) => {
         store.updateSettings({ researchEnabled: true, visualQaEnabled: false, autoImproveEnabled: false });
         const initialized = initStandardRunProject(dataDir, store);
-        const directionsDir = join(initialized.dir, ".research", "directions");
-        mkdirSync(join(directionsDir, "alpha"), { recursive: true });
-        mkdirSync(join(directionsDir, "beta"), { recursive: true });
-        writeFileSync(join(initialized.dir, ".research", "research.md"), "# Research\n\nFindings.");
-        writeFileSync(join(directionsDir, "alpha", "direction.md"), "# Alpha — bold\n\nBold concept for alpha.");
-        writeFileSync(join(directionsDir, "beta", "direction.md"), "# Beta — calm\n\nCalm concept for beta.");
+        writeValidatedResearchBundle(initialized.dir);
         const researchHead = commitAll(initialized.dir, "published research directions");
 
         const first = await fetch(`${base}/api/runs`, {
@@ -3881,7 +5361,7 @@ test("Standard direction gate publishes research from its transaction before dis
       const conversationId = firstEvents.find((event) => event.type === "run-start")!.conversationId as string;
 
       assert.ok(firstEvents.some((event) => event.type === "direction-gate"));
-      assert.equal(readFileSync(join(dir, ".research", "research.md"), "utf8"), "# Research\n\nFindings.");
+      assert.equal(readFileSync(join(dir, ".research", "research.md"), "utf8"), VALID_PRODUCT_RESEARCH_REPORT);
       assert.notEqual(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), head);
       assert.equal(existsSync(standardRunWorktreeDir(dataDir, project.id, firstRunId)), false);
       assert.equal(execFileSync("git", ["branch", "--list", standardRunBranchName(firstRunId)], { cwd: dir, encoding: "utf8" }).trim(), "");
@@ -3962,7 +5442,8 @@ test("a run with directionSlug skips the gate and builds the chosen direction", 
       assert.ok(events.some((e) => e.type === "run-done"));
       assert.ok(runner.calls.length >= 1);
       assert.match(runner.calls[0]!.message, /Chosen direction/);
-      assert.match(runner.calls[0]!.message, /Bold concept for alpha/);
+      assert.match(runner.calls[0]!.message, /# Alpha — bold/);
+      assert.match(runner.calls[0]!.message, /Concept: Bold direction for alpha, grounded in the product and visual evidence\./);
       assert.doesNotMatch(runner.calls[0]!.message, /Calm concept for beta/);
       // The pick is persisted so the Research views can show it (survives reload).
       const research = (await (await fetch(`${base}/api/projects/${project.id}/research`)).json()) as { chosenSlug?: string };
@@ -3970,6 +5451,32 @@ test("a run with directionSlug skips the gate and builds the chosen direction", 
     },
     { researchPhase: researchWithDirections },
   );
+});
+
+test("unsafe or missing directionSlug cannot bypass the gate or write the chosen checkpoint", async () => {
+  for (const directionSlug of ["../alpha", "missing-direction"]) {
+    const runner = new FakeRunner({ artifacts: [CLEAN], texts: ["must not build"] });
+    await withRunServer(
+      runner,
+      async ({ base, dataDir, store }) => {
+        const project = await createProject(base);
+        const response = await fetch(`${base}/api/runs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: project.id, brief: "make a hero", research: true, directionSlug }),
+        });
+        const events = await closedSse(response, `invalid direction ${directionSlug}`);
+        const runId = String(events.find((event) => event.type === "run-start")?.runId ?? "");
+        const chosen = join(dataDir, "projects", project.id, ".research", "chosen");
+
+        assert.equal(runner.calls.length, 0);
+        assert.deepEqual(terminalEvents(events).map((event) => event.type), ["run-error"]);
+        assert.equal(store.getRun(runId)?.status, "failed");
+        assert.equal(existsSync(chosen), false, "invalid direction must never be checkpointed");
+      },
+      { researchPhase: researchWithDirections },
+    );
+  }
 });
 
 test("picking a direction does not re-run research or duplicate the user/research message on reload", async () => {

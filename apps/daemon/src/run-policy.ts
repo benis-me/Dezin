@@ -6,6 +6,23 @@ const DEFAULT_AUTO_IMPROVE_MAX_ROUNDS = 8;
 // Normal Standard/Prototype runs only auto-repair real defects/slop. Sharingan overrides this:
 // every source-fidelity finding is required because reconstruction quality is the product.
 const AUTO_REPAIR_SEVERITIES = new Set<QualityFinding["severity"]>(["P0", "P1"]);
+const QUALITY_INFRASTRUCTURE_FINDING_IDS = new Set([
+  "visual-qa-failed",
+  "visual-devserver-unavailable",
+  "visual-chrome-unavailable",
+  "visual-render-failed",
+  "visual-screenshot-missing",
+  "visual-agent-review-failed",
+  "visual-artifact-missing",
+  "visual-review-unassessed",
+  "visual-source-evidence-missing",
+  "visual-source-evidence-invalid",
+  "visual-generated-evidence-invalid",
+]);
+
+export function isQualityInfrastructureFinding(finding: QualityFinding): boolean {
+  return QUALITY_INFRASTRUCTURE_FINDING_IDS.has(finding.id);
+}
 
 /** Max bounded design-improvement (ceiling) rounds once the floor (defects/slop) is clean. */
 export const CEILING_MAX_ROUNDS = 3;
@@ -52,14 +69,15 @@ function isSharinganBlockingFinding(finding: QualityFinding): boolean {
 
 export function standardRunPassed(findings: QualityFinding[], isSharingan: boolean | undefined): boolean {
   if (isSharingan) return !findings.some(isSharinganBlockingFinding);
-  if (findings.some((f) => f.severity === "P0")) return false;
+  if (findings.some(isQualityInfrastructureFinding)) return false;
+  if (findings.some((f) => AUTO_REPAIR_SEVERITIES.has(f.severity))) return false;
   return true;
 }
 
 export function standardRepairableDefects(findings: QualityFinding[], isSharingan: boolean | undefined): QualityFinding[] {
-  if (isSharingan) return findings.filter(isSharinganBlockingFinding);
+  if (isSharingan) return findings.filter((finding) => isSharinganBlockingFinding(finding) && !isQualityInfrastructureFinding(finding));
   return findings.filter((f) => {
-    if (!AUTO_REPAIR_SEVERITIES.has(f.severity) || f.id.startsWith("visual-improve") || f.id === "visual-reviewed") return false;
+    if (!AUTO_REPAIR_SEVERITIES.has(f.severity) || f.id.startsWith("visual-improve") || f.id === "visual-reviewed" || isQualityInfrastructureFinding(f)) return false;
     return true;
   });
 }
@@ -70,7 +88,7 @@ export function standardRepairableDefects(findings: QualityFinding[], isSharinga
 export function producedDesignReview(visualFindings: QualityFinding[]): boolean {
   return visualFindings.some((f) => {
     const id = String(f.id);
-    return id === "visual-reviewed" || id.startsWith("visual-ai-review") || id.startsWith("visual-improve");
+    return id === "visual-reviewed" || id.startsWith("visual-ai-review") || id.startsWith("visual-contract-drift") || id.startsWith("visual-improve");
   });
 }
 
@@ -104,7 +122,7 @@ export function researchModel(settings: Settings, fallback?: string): string | u
 
 export function shouldAutoRepair(settings: Settings, findings: QualityFinding[], repairRounds: number, maxRounds: number): boolean {
   if (!settings.autoImproveEnabled || repairRounds >= maxRounds) return false;
-  return findings.some((finding) => AUTO_REPAIR_SEVERITIES.has(finding.severity));
+  return findings.some((finding) => AUTO_REPAIR_SEVERITIES.has(finding.severity) && !isQualityInfrastructureFinding(finding));
 }
 
 export function withVisualScreenshotUrl(findings: QualityFinding[], screenshotUrl: string): QualityFinding[] {
