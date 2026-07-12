@@ -870,6 +870,13 @@ export function HomeScreen({
                   e.target.value = "";
                 }}
               />
+              <AgentComposerContextCards
+                items={homeDisplayItems}
+                onChange={() => {}}
+                onRemove={removeHomeDisplayItem}
+                sortable={false}
+                className="mx-1 mb-2"
+              />
               <div className={cn("relative overflow-hidden rounded-xl transition-colors duration-150", optimizingPrompt && "bg-surface-2/80")}>
                 {optimizingPrompt ? (
                   <div
@@ -952,14 +959,6 @@ export function HomeScreen({
                   </TooltipProvider>
                 ) : null}
               </div>
-              <AgentComposerContextCards
-                items={homeDisplayItems}
-                onChange={() => {}}
-                onRemove={removeHomeDisplayItem}
-                density="hero"
-                sortable={false}
-                className="mx-1"
-              />
               <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 px-1 pt-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <AttachMenu

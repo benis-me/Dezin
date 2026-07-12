@@ -149,9 +149,15 @@ test("HomeScreen allows a project reference to be the only design input", async 
   fireEvent.click(await screen.findByRole("menuitem", { name: "Reference source" }));
 
   const rail = await screen.findByRole("list", { name: "Attached context" });
-  expect(rail).toHaveAttribute("data-context-density", "hero");
+  const textarea = screen.getByRole("textbox", { name: "Describe your design" });
+  const attach = screen.getByRole("button", { name: "Add files and context" });
+
+  expect(rail).toHaveAttribute("data-context-layout", "top-rail");
+  expect(rail.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(rail.compareDocumentPosition(attach) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getByTestId("agent-context-card-project:p-source")).toHaveClass("h-9");
   expect(within(rail).getByText("Reference source")).toBeInTheDocument();
-  expect(within(rail).getByText("Project")).toBeInTheDocument();
+  expect(screen.getByTestId("agent-context-card-project:p-source")).toHaveAttribute("title", "Reference source: Project");
   await screen.findByLabelText("Remove Reference source");
   await waitFor(() => expect(design).toBeEnabled());
   fireEvent.click(design);
@@ -465,9 +471,10 @@ test("HomeScreen prompt presents dropped image references as rich context withou
   fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), { dataTransfer: { types: ["Files"], files: [file] } });
 
   const rail = await screen.findByRole("list", { name: "Attached context" });
-  expect(rail).toHaveAttribute("data-context-density", "hero");
+  expect(rail).toHaveAttribute("data-context-layout", "top-rail");
+  expect(rail.compareDocumentPosition(screen.getByLabelText("Describe your design")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(within(rail).getByRole("img", { name: "reference.png" })).toBeInTheDocument();
-  expect(within(rail).getByText("Image")).toBeInTheDocument();
+  expect(within(rail).queryByText("Image")).toBeNull();
   expect(screen.getByLabelText("Describe your design")).toHaveValue("");
 
   fireEvent.click(screen.getByLabelText("Design"));
@@ -521,9 +528,10 @@ test("HomeScreen keeps local paths and imported fig context structured until Des
   });
 
   const rail = await screen.findByRole("list", { name: "Attached context" });
-  expect(rail).toHaveAttribute("data-context-density", "hero");
+  expect(rail).toHaveAttribute("data-context-layout", "top-rail");
+  expect(rail.compareDocumentPosition(screen.getByLabelText("Describe your design")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(within(rail).getByText("source-app")).toBeInTheDocument();
-  expect(within(rail).getByText("Folder")).toBeInTheDocument();
+  expect(within(rail).queryByText("Folder")).toBeNull();
   expect(screen.getByLabelText("Describe your design")).toHaveValue("");
 
   const figInput = container.querySelector<HTMLInputElement>('input[accept=".fig"]');
@@ -532,7 +540,7 @@ test("HomeScreen keeps local paths and imported fig context structured until Des
   fireEvent.change(figInput!, { target: { files: [fig] } });
 
   await waitFor(() => expect(parseFig).toHaveBeenCalledWith(fig, "brand.fig"));
-  expect(await within(rail).findByText("Imported context")).toBeInTheDocument();
+  expect(await within(rail).findByTitle("Design context: Imported context · Imported .fig")).toBeInTheDocument();
   expect(screen.getByLabelText("Describe your design")).toHaveValue("");
   expect(screen.getByLabelText("Design")).toBeEnabled();
 
