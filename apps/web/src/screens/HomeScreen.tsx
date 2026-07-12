@@ -76,7 +76,7 @@ interface HomeComposerPrefs {
 
 type HomeContextItem = Extract<AgentComposerContextItem, { type: "local-path" | "text-context" }>;
 
-export function homeContextItemsForPaths(paths: string[]): HomeContextItem[] {
+function homeContextItemsForPaths(paths: string[]): HomeContextItem[] {
   return paths.map((path) => ({
     id: `home-local-path:${path}`,
     type: "local-path",
