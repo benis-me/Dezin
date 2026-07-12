@@ -188,7 +188,7 @@ export function AgentComposerContextCards<T extends AgentComposerContextItem>({
       data-context-density={density}
       className={cn("min-w-0 border-t border-border/70 pt-2.5", className)}
     >
-      <div aria-label="Agent context cards" className="flex min-w-0 gap-2 overflow-x-auto pb-0.5 pr-1 [scrollbar-width:thin]">
+      <div className="flex min-w-0 gap-2 overflow-x-auto pb-0.5 pr-1 [scrollbar-width:thin]">
         <DragDropProvider onDragEnd={handleDragEnd}>
           {items.map((item, index) => (
             <AgentComposerContextCard
@@ -228,7 +228,7 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
   onMoveAfter: () => void;
   onRemove: () => void;
 }) {
-  const { ref, isDragging, isDropTarget } = useSortable({
+  const { ref, handleRef, isDragging, isDropTarget } = useSortable({
     id: item.id,
     index,
     group: "agent-composer-context",
@@ -249,9 +249,8 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
       data-testid={`agent-context-card-${item.id}`}
       data-context-icon={iconKind}
       className={cn(
-        "group flex shrink-0 touch-none select-none items-center overflow-hidden rounded-lg border border-border bg-card text-xs text-foreground-2 transition-[opacity,border-color,box-shadow,transform,background-color] duration-150 ease-out motion-reduce:transition-none",
+        "group flex shrink-0 select-none items-center overflow-hidden rounded-lg border border-border bg-card text-xs text-foreground-2 transition-[opacity,border-color,box-shadow,transform,background-color] duration-150 ease-out motion-reduce:transition-none",
         density === "hero" ? "h-[4.75rem] w-60 basis-60 gap-2 p-1.5" : "h-10 w-52 basis-52 gap-1.5 px-1.5",
-        showGrip && "cursor-grab active:cursor-grabbing",
         isDragging && "opacity-55 ring-2 ring-ring/30",
         isDropTarget && "border-ring ring-2 ring-ring/30",
       )}
@@ -281,9 +280,10 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
       </span>
       {showGrip ? (
         <button
+          ref={handleRef}
           type="button"
           aria-label={`Drag ${item.title}`}
-          className="grid h-6 w-4 shrink-0 cursor-grab place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="grid h-6 w-4 shrink-0 touch-none cursor-grab place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <GripVertical size={12} strokeWidth={1.75} />
         </button>

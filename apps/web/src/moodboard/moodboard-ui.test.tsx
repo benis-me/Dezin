@@ -1947,11 +1947,11 @@ test("MoodboardAgentPanel renders canvas insertion as a removable sendable conte
   const message = screen.getByLabelText("Message") as HTMLTextAreaElement;
   await waitFor(() => expect(message).toHaveFocus());
   expect(message).toHaveValue("");
-  expect(screen.getByLabelText("Agent context cards")).toBeInTheDocument();
+  expect(screen.getByRole("list", { name: "Attached context" })).toBeInTheDocument();
   expect(screen.getByText("Material tone")).toBeInTheDocument();
   expect(screen.getByText("· note")).toBeInTheDocument();
 
-  fireEvent.dragOver(screen.getByLabelText("Agent context cards"), {
+  fireEvent.dragOver(screen.getByRole("list", { name: "Attached context" }), {
     dataTransfer: { types: ["application/x-dezin-agent-context"], files: [] },
   });
   expect(screen.queryByText("Drop files to attach")).toBeNull();
@@ -1960,7 +1960,7 @@ test("MoodboardAgentPanel renders canvas insertion as a removable sendable conte
   await waitFor(() =>
     expect(onSend).toHaveBeenCalledWith("Selected moodboard node:\n1. Material tone [note, id:note-1] at x:10, y:20, 180x80"),
   );
-  await waitFor(() => expect(screen.queryByLabelText("Agent context cards")).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("list", { name: "Attached context" })).toBeNull());
 });
 
 test("MoodboardAgentPanel exposes moodboard conversations in the project conversation control", () => {

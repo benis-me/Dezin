@@ -589,8 +589,8 @@ test("project agent composer cards serialize context at send time", async () => 
   fireEvent.click(screen.getByRole("button", { name: "Add" }));
 
   expect(await screen.findByText(".hero-title")).toBeInTheDocument();
-  expect(screen.getByLabelText("Agent context cards")).toBeInTheDocument();
-  fireEvent.dragOver(screen.getByLabelText("Agent context cards"), {
+  expect(screen.getByRole("list", { name: "Attached context" })).toBeInTheDocument();
+  fireEvent.dragOver(screen.getByRole("list", { name: "Attached context" }), {
     dataTransfer: { types: ["application/x-dezin-agent-context"], files: [] },
   });
   expect(screen.queryByText("Drop files to attach")).toBeNull();
@@ -604,7 +604,7 @@ test("project agent composer cards serialize context at send time", async () => 
   expect(input.brief).toContain("Scoped edit");
   expect(input.brief).toContain("selector: `.hero-title`");
   expect(input.brief).toContain("Make this sharper");
-  expect(screen.queryByLabelText("Agent context cards")).toBeNull();
+  expect(screen.queryByRole("list", { name: "Attached context" })).toBeNull();
 });
 
 test("completed runs collapse the interleaved process above the final summary", async () => {

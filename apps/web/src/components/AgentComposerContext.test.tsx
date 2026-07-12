@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import {
   AgentComposerContextCards,
@@ -35,7 +35,7 @@ test("context item helpers dedupe, remove, and reorder by id", () => {
   expect(moveContextItem(baseItems, "text-context:fig", "file:.refs/cloud.png")).toEqual([baseItems[2], baseItems[0], baseItems[1]]);
 });
 
-test("AgentComposerContextCards renders typed cards, removes, and reorders without native file drag", () => {
+test("AgentComposerContextCards renders typed cards, removes, and reorders without native file drag", async () => {
   const onChange = vi.fn();
   const onRemove = vi.fn();
   function Harness() {
@@ -60,7 +60,13 @@ test("AgentComposerContextCards renders typed cards, removes, and reorders witho
   expect(within(list).getByText("cloud.png")).toBeInTheDocument();
   expect(within(list).getByText("Warm references")).toBeInTheDocument();
   expect(within(list).getByText("Figma import")).toBeInTheDocument();
-  expect(screen.getByTestId("agent-context-card-file:.refs/cloud.png")).toHaveAttribute("data-context-icon", "image");
+  const cloudCard = screen.getByTestId("agent-context-card-file:.refs/cloud.png");
+  const cloudDragHandle = screen.getByLabelText("Drag cloud.png");
+  expect(cloudCard).toHaveAttribute("data-context-icon", "image");
+  expect(cloudCard).not.toHaveClass("touch-none");
+  expect(cloudDragHandle).toHaveClass("touch-none");
+  await waitFor(() => expect(cloudDragHandle).toHaveAttribute("aria-roledescription", "draggable"));
+  expect(cloudCard).not.toHaveAttribute("aria-roledescription", "draggable");
   expect(screen.getByRole("img", { name: "cloud.png" })).toHaveAttribute("src", "data:image/png;base64,Y2xvdWQ=");
   expect(screen.getByText("Image")).toBeInTheDocument();
   expect(screen.getByText("Moodboard")).toBeInTheDocument();
@@ -89,5 +95,6 @@ test("AgentComposerContextCards supports a preview-led hero rail without sorting
   );
 
   expect(screen.getByRole("list", { name: "Attached context" })).toHaveAttribute("data-context-density", "hero");
+  expect(screen.queryByLabelText("Agent context cards")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Drag cloud.png")).not.toBeInTheDocument();
 });
