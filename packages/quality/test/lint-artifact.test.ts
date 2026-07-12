@@ -291,6 +291,32 @@ test("lintArtifact in Sharingan mode allows SOURCE replay only inside the refere
   assert.ok(has(lintArtifact(copiedIntoSrc, { mode: "standard", isSharingan: true }), "sharingan-source-replay-final"));
 });
 
+test("Sharingan SOURCE replay detection catches class-only and map-only copies without blocking ordinary SOURCE data", () => {
+  const classOnlyReplay = `
+    const SOURCE = { boxes: [], images: [], vectors: [], texts: [] };
+    export default function App() {
+      return <main className="source-image">{SOURCE.images[0]?.src}</main>;
+    }
+  `;
+  const mapOnlyReplay = `
+    const SOURCE = { boxes: [], images: [], vectors: [], texts: [] };
+    export default function App() {
+      return <main>{SOURCE.images.map((image) => <img key={image.src} src={image.src} />)}</main>;
+    }
+  `;
+  const ordinarySourceData = `
+    const SOURCE = { images: [{ src: "/_assets/hero.webp" }] };
+    export default function App() {
+      return <main><img src={SOURCE.images[0].src} alt="Hero" /></main>;
+    }
+  `;
+
+  for (const replay of [classOnlyReplay, mapOnlyReplay]) {
+    assert.ok(has(lintArtifact(replay, { mode: "standard", isSharingan: true }), "sharingan-source-replay-final"));
+  }
+  assert.ok(!has(lintArtifact(ordinarySourceData, { mode: "standard", isSharingan: true }), "sharingan-source-replay-final"));
+});
+
 test("lintArtifact in Sharingan mode blocks external media fallbacks across markup and CSS", () => {
   const external = `
     /* file: src/App.jsx */
@@ -443,6 +469,90 @@ test("Sharingan external-media lint follows imported aliases into a render sink"
   `;
 
   assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows namespace imports through index modules", () => {
+  const surface = `
+    /* file: src/media/index.ts */
+    export const hero = "https://images.example.test/render?id=42";
+    /* file: src/App.tsx */
+    import * as media from "./media";
+    export default function App(){ return <img src={media.hero} alt="Hero" />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows parent-directory imports in concatenated source", () => {
+  const surface = `
+    /* file: src/media/data.ts */
+    export const hero = "https://images.example.test/render?id=42";
+    /* file: src/views/App.tsx */
+    import { hero } from "../media/data";
+    export default function App(){ return <img src={hero} alt="Hero" />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint preserves protocol-relative CSS URLs while stripping source comments", () => {
+  const surface = String.raw`
+    /* file: src/theme.css */
+    /* retired: background-image: url(https://old.example.test/hero.webp); */
+    .note::after { content: "escaped \" // still CSS text"; }
+    .hero { background-image: url(//cdn.example.test/hero.webp); }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint follows a multiline media initializer through nested calls", () => {
+  const surface = `
+    const hero = resolveMedia(
+      buildCandidate("https://images.example.test/render?id=42"),
+    );
+    export default function App(){ return <img src={hero} alt="Hero" />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint parses escaped quotes inside collection media values", () => {
+  const surface = String.raw`
+    const cards = [{ url: "https://images.example.test/render?caption=\"source\"" }];
+    export default function App(){ return <img src={cards[0].url} alt="Hero" />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint still catches remote data in an incomplete collection initializer", () => {
+  const surface = `
+    /* file: src/media.ts */
+    export const hero = {
+      url: "https://images.example.test/render?id=42"
+    /* file: src/App.tsx */
+    import { hero } from "./media";
+    export default function App(){ return <img src={hero.url} alt="Hero" />; }
+  `;
+
+  assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+});
+
+test("Sharingan external-media lint terminates cyclic aliases and leaves unresolved package namespaces alone", () => {
+  const cyclicAliases = `
+    const first = second;
+    const second = first;
+    export default function App(){ return <img src={first} alt="Hero" />; }
+  `;
+  const packageNamespace = `
+    import * as catalog from "@content/media";
+    export default function App(){ return <img src={catalog.hero} alt="Hero" />; }
+  `;
+
+  for (const surface of [cyclicAliases, packageNamespace]) {
+    assert.ok(!has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
+  }
 });
 
 test("Sharingan external-media lint follows external srcSet arrays joined at the render sink", () => {

@@ -8,15 +8,21 @@ import {
   ensureResearchScaffold,
   listAssets,
   listDirections,
+  listVisualAssets,
   readBrief,
   readChosenDirection,
+  readReport,
+  readSources,
+  resetResearchBundle,
   researchExists,
   validateResearchBundle,
+  visualResearchExists,
   writeBrief,
   writeChosenDirection,
   writeReport,
+  writeSources,
 } from "../src/io.ts";
-import type { ResearchBrief } from "../src/types.ts";
+import type { ResearchBrief, ResearchSource } from "../src/types.ts";
 
 async function project(): Promise<string> {
   return mkdtemp(join(tmpdir(), "dezin-research-"));
@@ -81,6 +87,45 @@ test("researchExists reflects whether a report was written", async () => {
   assert.equal(researchExists(dir), false);
   await writeReport(dir, "# Research\n\nFindings.");
   assert.equal(researchExists(dir), true);
+});
+
+test("resetResearchBundle removes generated outputs while preserving the distilled brief", async () => {
+  const dir = await project();
+  const sources: ResearchSource[] = [
+    {
+      id: "product-source",
+      kind: "competitor",
+      title: "Product source",
+      url: "https://example.com/product",
+      takeaways: ["A concrete product finding."],
+      assets: [],
+      authority: "primary",
+    },
+  ];
+  await writeBrief(dir, brief);
+  await writeReport(dir, "# Research\n\nGenerated product research.");
+  await writeSources(dir, sources);
+  await ensureResearchScaffold(dir);
+  await writeFile(join(dir, ".research", "assets", "product.png"), "generated");
+  await mkdir(join(dir, ".research", "visual", "assets"), { recursive: true });
+  await writeFile(join(dir, ".research", "visual", "visual.md"), "# Visual research\n\nGenerated visual research.");
+  await writeFile(join(dir, ".research", "visual", "assets", "visual.png"), "generated");
+  await mkdir(join(dir, ".research", "directions", "calm-editorial"), { recursive: true });
+  await writeFile(join(dir, ".research", "directions", "calm-editorial", "direction.md"), "# Calm editorial\n\nCandidate direction.");
+  await writeChosenDirection(dir, "calm-editorial");
+
+  assert.deepEqual(await readSources(dir), sources);
+  await resetResearchBundle(dir);
+
+  assert.deepEqual(await readBrief(dir), brief);
+  assert.equal(await readReport(dir), null);
+  assert.deepEqual(await readSources(dir), []);
+  assert.deepEqual(await listAssets(dir), []);
+  assert.deepEqual(await listVisualAssets(dir), []);
+  assert.deepEqual(await listDirections(dir), []);
+  assert.equal(await readChosenDirection(dir), null);
+  assert.equal(researchExists(dir), false);
+  assert.equal(visualResearchExists(dir), false);
 });
 
 test("listAssets and listDirections read the scaffold", async () => {
@@ -189,6 +234,45 @@ test("validateResearchBundle accepts two meaningful directions with source-linke
   const result = await validateResearchBundle(dir);
 
   assert.deepEqual(result, { complete: true, issues: [] });
+});
+
+test("validateResearchBundle accepts every supported image format when its file signature is valid", async () => {
+  const dir = await project();
+  await ensureResearchScaffold(dir);
+  await writeCompleteResearchTrack(dir, "product", "product.png");
+  await writeCompleteResearchTrack(dir, "visual", "visual.png");
+  await writeMeaningfulDirection(dir, "calm-editorial");
+  await writeMeaningfulDirection(dir, "focused-console");
+  const images: Array<[string, Buffer]> = [
+    ["product.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+    ["reference.svg", Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')],
+    ["reference.jpg", Buffer.from([0xff, 0xd8, 0xff])],
+    ["reference.jpeg", Buffer.from([0xff, 0xd8, 0xff])],
+    ["reference.gif", Buffer.from("GIF89a")],
+    ["reference.webp", Buffer.from("RIFF0000WEBP")],
+    ["reference.bmp", Buffer.from("BM")],
+    ["reference.ico", Buffer.from([0x00, 0x00, 0x01, 0x00])],
+    ["reference.avif", Buffer.concat([Buffer.alloc(4), Buffer.from("ftypavif")])],
+  ];
+  for (const [name, contents] of images) {
+    await writeFile(join(dir, ".research", "assets", name), contents);
+  }
+  await writeFile(
+    join(dir, ".research", "sources.json"),
+    `${JSON.stringify([
+      {
+        id: "product-source",
+        kind: "inspiration",
+        title: "Product source",
+        url: "https://example.com/product",
+        authority: "primary",
+        takeaways: ["A concrete, source-grounded design takeaway."],
+        assets: images.map(([name]) => `assets/${name}`),
+      },
+    ])}\n`,
+  );
+
+  assert.deepEqual(await validateResearchBundle(dir), { complete: true, issues: [] });
 });
 
 test("validateResearchBundle rejects unsupported evidence formats in both product and visual tracks", async () => {
