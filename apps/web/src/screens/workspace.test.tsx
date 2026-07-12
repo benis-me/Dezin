@@ -75,6 +75,33 @@ test("workspace loading state preserves the project split layout", () => {
   expect(screen.queryByLabelText("Message")).toBeNull();
 });
 
+test("workspace stacks its panels vertically at narrow viewports", async () => {
+  const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation(
+    (query) =>
+      ({
+        matches: query === "(max-width: 639px)",
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }) as MediaQueryList,
+  );
+  try {
+    render(
+      <ApiProvider client={makeFakeApi({ getProject: async () => new Promise(() => {}) })}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByRole("separator", { name: "Resize panels" })).toHaveAttribute("aria-orientation", "horizontal"));
+  } finally {
+    matchMedia.mockRestore();
+  }
+});
+
 test("the project composer does not submit Enter while an IME composition is active", async () => {
   const streamRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {});
   render(

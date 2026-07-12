@@ -365,8 +365,15 @@ export function MoodboardAgentPanel({
                   items={contextItems}
                   onChange={setContextItems}
                   onRemove={(id) => {
+                    const selectionStart = textareaRef.current?.selectionStart;
+                    const selectionEnd = textareaRef.current?.selectionEnd;
                     setContextItems((items) => removeContextItem(items, id));
-                    window.requestAnimationFrame(focusComposerEnd);
+                    window.requestAnimationFrame(() => {
+                      const textarea = textareaRef.current;
+                      if (!textarea) return;
+                      textarea.focus({ preventScroll: true });
+                      if (selectionStart != null && selectionEnd != null) textarea.setSelectionRange(selectionStart, selectionEnd);
+                    });
                   }}
                 />
                 <textarea

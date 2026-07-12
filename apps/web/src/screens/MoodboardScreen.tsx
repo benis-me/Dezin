@@ -11,6 +11,7 @@ import { MoodboardCanvas } from "../moodboard/MoodboardCanvas.tsx";
 import { MoodboardCanvasTopbar, type MoodboardCanvasTopbarControls } from "../moodboard/MoodboardCanvasTopbar.tsx";
 import { layerLabel } from "../moodboard/canvas-utils.ts";
 import { useMoodboardBoard } from "../moodboard/useMoodboardBoard.ts";
+import { useMediaQuery } from "../hooks/useMediaQuery.ts";
 
 const MOODBOARD_AGENT_PANEL = "agent";
 const MOODBOARD_CANVAS_PANEL = "canvas";
@@ -25,6 +26,7 @@ export function MoodboardScreen({
   onBack: () => void;
   onOpenSettings: (section?: string) => void;
 }) {
+  const narrowLayout = useMediaQuery("(max-width: 639px)");
   const agentPercent =
     readStoredPanelPercent(MOODBOARD_AGENT_WIDTH_KEY, 20, 44) ??
     panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 28, 20, 44);
@@ -59,10 +61,14 @@ export function MoodboardScreen({
     return (
       <div className="flex h-full w-full min-w-0 bg-background">
         <Group
+          key={narrowLayout ? "moodboard-loading-narrow" : "moodboard-loading-wide"}
           id="dezin-moodboard-layout-loading"
           className="min-h-0 flex-1"
-          defaultLayout={twoPanelLayout(MOODBOARD_AGENT_PANEL, agentPercent, MOODBOARD_CANVAS_PANEL)}
-          onLayoutChanged={(layout) => savePanelFraction(MOODBOARD_AGENT_WIDTH_KEY, layout, MOODBOARD_AGENT_PANEL)}
+          defaultLayout={twoPanelLayout(MOODBOARD_AGENT_PANEL, narrowLayout ? 55 : agentPercent, MOODBOARD_CANVAS_PANEL)}
+          onLayoutChanged={(layout) => {
+            if (!narrowLayout) savePanelFraction(MOODBOARD_AGENT_WIDTH_KEY, layout, MOODBOARD_AGENT_PANEL);
+          }}
+          orientation={narrowLayout ? "vertical" : "horizontal"}
           resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
         >
           <Panel id={MOODBOARD_AGENT_PANEL} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
@@ -82,7 +88,7 @@ export function MoodboardScreen({
             />
           </Panel>
           <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
-          <Panel id={MOODBOARD_CANVAS_PANEL} minSize="480px">
+          <Panel id={MOODBOARD_CANVAS_PANEL} minSize={narrowLayout ? "240px" : "480px"}>
             <section aria-label="Moodboard canvas" className="flex h-full min-w-0 flex-col">
               <MoodboardCanvasTopbar loading />
               <div className="relative min-h-0 flex-1 overflow-hidden bg-surface">
@@ -111,10 +117,14 @@ export function MoodboardScreen({
   return (
     <div className="flex h-full w-full flex-col bg-background">
       <Group
+        key={narrowLayout ? "moodboard-narrow" : "moodboard-wide"}
         id="dezin-moodboard-layout"
         className="min-h-0 flex-1"
-        defaultLayout={twoPanelLayout(MOODBOARD_AGENT_PANEL, agentPercent, MOODBOARD_CANVAS_PANEL)}
-        onLayoutChanged={(layout) => savePanelFraction(MOODBOARD_AGENT_WIDTH_KEY, layout, MOODBOARD_AGENT_PANEL)}
+        defaultLayout={twoPanelLayout(MOODBOARD_AGENT_PANEL, narrowLayout ? 55 : agentPercent, MOODBOARD_CANVAS_PANEL)}
+        onLayoutChanged={(layout) => {
+          if (!narrowLayout) savePanelFraction(MOODBOARD_AGENT_WIDTH_KEY, layout, MOODBOARD_AGENT_PANEL);
+        }}
+        orientation={narrowLayout ? "vertical" : "horizontal"}
         resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
       >
         <Panel id={MOODBOARD_AGENT_PANEL} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
@@ -144,7 +154,7 @@ export function MoodboardScreen({
           />
         </Panel>
         <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
-        <Panel id={MOODBOARD_CANVAS_PANEL} minSize="480px">
+        <Panel id={MOODBOARD_CANVAS_PANEL} minSize={narrowLayout ? "240px" : "480px"}>
           <section aria-label="Moodboard canvas" className="flex h-full min-w-0 flex-col">
             <MoodboardCanvasTopbar
               controls={canvasTopbarControls}

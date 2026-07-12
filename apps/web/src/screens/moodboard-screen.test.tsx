@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import { MoodboardCanvasTopbar } from "../moodboard/MoodboardCanvasTopbar.tsx";
 import { MoodboardScreen } from "./MoodboardScreen.tsx";
@@ -91,4 +91,29 @@ test("MoodboardScreen loading state keeps the project-style board shell", () => 
   ).toBe(true);
   expect(screen.getByLabelText("Moodboard canvas")).toBeInTheDocument();
   expect(screen.queryByText("Loading canvas")).toBeNull();
+});
+
+test("MoodboardScreen stacks its panels vertically at narrow viewports", async () => {
+  const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation(
+    (query) =>
+      ({
+        matches: query === "(max-width: 639px)",
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }) as MediaQueryList,
+  );
+  try {
+    render(<MoodboardScreen boardId="board-1" onBack={() => {}} onOpenSettings={() => {}} />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("separator", { name: "Resize moodboard agent panel" })).toHaveAttribute("aria-orientation", "horizontal"),
+    );
+  } finally {
+    matchMedia.mockRestore();
+  }
 });

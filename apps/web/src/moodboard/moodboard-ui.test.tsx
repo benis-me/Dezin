@@ -1991,14 +1991,17 @@ test("MoodboardAgentPanel renders canvas insertion as a removable sendable conte
 
   const draft = "Keep this direction";
   fireEvent.change(message, { target: { value: draft } });
+  const caret = 5;
+  message.focus();
+  message.setSelectionRange(caret, caret);
   const remove = within(rail).getByLabelText("Remove Material tone");
   remove.focus();
   expect(remove).toHaveFocus();
   fireEvent.click(remove);
   await waitFor(() => expect(message).toHaveFocus());
   expect(message).toHaveValue(draft);
-  expect(message.selectionStart).toBe(draft.length);
-  expect(message.selectionEnd).toBe(draft.length);
+  expect(message.selectionStart).toBe(caret);
+  expect(message.selectionEnd).toBe(caret);
   fireEvent.change(message, { target: { value: "" } });
 
   rerender(

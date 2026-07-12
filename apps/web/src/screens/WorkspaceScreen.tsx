@@ -95,6 +95,7 @@ import { PreviewRuntimeErrorOverlay } from "../components/PreviewRuntimeErrorOve
 import { cn } from "../lib/utils.ts";
 import { native } from "../lib/native.ts";
 import { isImeComposing } from "../lib/keyboard.ts";
+import { useMediaQuery } from "../hooks/useMediaQuery.ts";
 
 export { computeMarkupPosition } from "./workspace-markup.ts";
 
@@ -1932,12 +1933,17 @@ function AssistantMessage({ message }: { message: Msg }) {
 }
 
 function WorkspaceLoadingLayout({ conversationPercent }: { conversationPercent: number }) {
+  const narrowLayout = useMediaQuery("(max-width: 639px)");
   return (
     <Group
+      key={narrowLayout ? "workspace-loading-narrow" : "workspace-loading-wide"}
       id="dezin-workspace-layout-loading"
       className="flex-1"
       defaultLayout={twoPanelLayout(WORKSPACE_CONVERSATION_PANEL, conversationPercent, WORKSPACE_ARTIFACT_PANEL)}
-      onLayoutChanged={(layout) => savePanelFraction(SPLIT_KEY, layout, WORKSPACE_CONVERSATION_PANEL)}
+      onLayoutChanged={(layout) => {
+        if (!narrowLayout) savePanelFraction(SPLIT_KEY, layout, WORKSPACE_CONVERSATION_PANEL);
+      }}
+      orientation={narrowLayout ? "vertical" : "horizontal"}
       resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
     >
       <Panel id={WORKSPACE_CONVERSATION_PANEL} minSize="320px" maxSize="55%">
@@ -1972,7 +1978,7 @@ function WorkspaceLoadingLayout({ conversationPercent }: { conversationPercent: 
 
       <Separator aria-label="Resize panels" className={RESIZE_SEPARATOR_CLASS} />
 
-      <Panel id={WORKSPACE_ARTIFACT_PANEL} minSize="360px">
+      <Panel id={WORKSPACE_ARTIFACT_PANEL} minSize={narrowLayout ? "240px" : "360px"}>
         <section aria-label="Artifact loading" className="flex h-full min-w-0 flex-col">
           <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
             <div className="flex items-center gap-1.5 px-1.5">
@@ -2004,6 +2010,7 @@ function WorkspaceLoadingLayout({ conversationPercent }: { conversationPercent: 
 export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: string; onOpenSettings?: (section?: string) => void }) {
   const api = useApi();
   const { toast } = useToast();
+  const narrowLayout = useMediaQuery("(max-width: 639px)");
   const [tab, setTab] = useState<Tab>("Preview");
   const [research, setResearch] = useState<ResearchDetail | null>(null);
   const [researchRefreshKey, setResearchRefreshKey] = useState(0);
@@ -4283,10 +4290,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   return (
     <>
       <Group
+        key={narrowLayout ? "workspace-narrow" : "workspace-wide"}
         id="dezin-workspace-layout"
         className="flex-1"
         defaultLayout={twoPanelLayout(WORKSPACE_CONVERSATION_PANEL, workspaceConversationPercent, WORKSPACE_ARTIFACT_PANEL)}
-        onLayoutChanged={(layout) => savePanelFraction(SPLIT_KEY, layout, WORKSPACE_CONVERSATION_PANEL)}
+        onLayoutChanged={(layout) => {
+          if (!narrowLayout) savePanelFraction(SPLIT_KEY, layout, WORKSPACE_CONVERSATION_PANEL);
+        }}
+        orientation={narrowLayout ? "vertical" : "horizontal"}
         resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
       >
         <Panel id={WORKSPACE_CONVERSATION_PANEL} minSize="320px" maxSize="55%">
@@ -4716,7 +4727,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
       <Separator aria-label="Resize panels" className={RESIZE_SEPARATOR_CLASS} />
 
-      <Panel id={WORKSPACE_ARTIFACT_PANEL} minSize="360px">
+      <Panel id={WORKSPACE_ARTIFACT_PANEL} minSize={narrowLayout ? "240px" : "360px"}>
         <section aria-label="Artifact" className="flex h-full min-w-0 flex-col">
           <div className="app-drag flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-1">
           <div className="flex min-w-0 items-center gap-1">
