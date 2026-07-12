@@ -2103,7 +2103,8 @@ test("MoodboardAgentPanel shows progress immediately for an empty active convers
   expect(screen.getByTestId("moodboard-agent-messages")).toHaveClass("overflow-auto");
 });
 
-test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
+test("MoodboardAgentPanel drops files into the moodboard upload path without creating Agent context", async () => {
+  const user = userEvent.setup();
   const onUploadFiles = vi.fn();
   const files = [new File(["image"], "reference.png", { type: "image/png" })] as unknown as FileList;
 
@@ -2133,6 +2134,10 @@ test("MoodboardAgentPanel drops files into the moodboard upload path", () => {
   fireEvent.drop(composer, { dataTransfer: { types: ["Files"], files } });
 
   expect(onUploadFiles).toHaveBeenCalledWith(files);
+  expect(screen.queryByRole("list", { name: "Attached context" })).toBeNull();
+
+  await user.click(screen.getByLabelText("Add files and context"));
+  expect(await screen.findByRole("menuitem", { name: "Add images to board" })).toBeInTheDocument();
 });
 
 test("MoodboardAgentPanel empty state does not force a scroll container", () => {

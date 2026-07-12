@@ -378,6 +378,7 @@ export function MoodboardAgentPanel({
                 <div data-testid="moodboard-composer-actions" className="mt-1.5 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-0.5">
                     <AttachMenu
+                      fileActionLabel="Add images to board"
                       onAttachFile={onUploadFiles ? () => fileInputRef.current?.click() : undefined}
                       onPickPaths={(paths) =>
                         addContextItems(

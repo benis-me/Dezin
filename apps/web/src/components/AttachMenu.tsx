@@ -23,6 +23,7 @@ import type { EffectCard, Moodboard, Project } from "../lib/api.ts";
  * into a design brief that gets inserted as context.
  */
 export function AttachMenu({
+  fileActionLabel = "Attach file",
   onAttachFile,
   onPickPaths,
   onContext,
@@ -30,6 +31,7 @@ export function AttachMenu({
   onReferenceMoodboard,
   onReferenceEffect,
 }: {
+  fileActionLabel?: string;
   onAttachFile?: () => void;
   onPickPaths?: (paths: string[]) => void;
   onContext?: (text: string) => void;
@@ -71,9 +73,12 @@ export function AttachMenu({
       alive = false;
     };
   }, [api, onReferenceEffect]);
-  const soon = (what: string) => toast(`${what} isn't available yet.`);
   const pick = async (kind: "files" | "folder", label: string): Promise<void> => {
-    if (!native) return onAttachFile ? onAttachFile() : soon(label);
+    if (!native) {
+      if (kind === "files" && onAttachFile) onAttachFile();
+      else toast(`${label} is available in the desktop app.`);
+      return;
+    }
     const paths = kind === "files" ? await native.pickFiles() : await native.pickFolder();
     if (paths.length) onPickPaths?.(paths);
   };
@@ -107,9 +112,9 @@ export function AttachMenu({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-60">
         <DropdownMenuLabel>Files</DropdownMenuLabel>
-        <DropdownMenuItem onClick={() => void pick("files", "Attach file")}>
+        <DropdownMenuItem onClick={() => void pick("files", fileActionLabel)}>
           <Paperclip size={15} strokeWidth={1.75} />
-          Attach file
+          {fileActionLabel}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => void pick("folder", "Attach folder")}>
           <FolderPlus size={15} strokeWidth={1.75} />
