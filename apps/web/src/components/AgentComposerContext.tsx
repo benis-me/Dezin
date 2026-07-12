@@ -5,7 +5,17 @@ import { FileText, FolderOpen, GripVertical, Image as ImageIcon, Images, Layers,
 import { cn } from "../lib/utils.ts";
 
 export type AgentComposerContextItem<PreviewTarget = unknown> =
-  | { id: string; type: "file"; title: string; subtitle?: string; name: string; path: string }
+  | {
+      id: string;
+      type: "file";
+      title: string;
+      subtitle?: string;
+      name: string;
+      path: string;
+      previewUrl?: string;
+      mimeType?: string;
+      size?: number;
+    }
   | { id: string; type: "local-path"; title: string; subtitle?: string; path: string }
   | { id: string; type: "project"; title: string; subtitle?: string; projectId: string; name: string; referencePath?: string }
   | { id: string; type: "moodboard"; title: string; subtitle?: string; moodboardId: string; name?: string }
@@ -75,6 +85,41 @@ function contextIconKind(item: AgentComposerContextItem): ContextIconKind {
   }
 }
 
+function formatFileSize(size: number): string {
+  if (size < 1024) return `${Math.round(size)} ${Math.round(size) === 1 ? "byte" : "bytes"}`;
+  const kilobytes = size / 1024;
+  if (kilobytes < 1024) return `${Number(kilobytes.toFixed(1))} KB`;
+  return `${Number((kilobytes / 1024).toFixed(1))} MB`;
+}
+
+function contextTypeLabel(item: AgentComposerContextItem, iconKind: ContextIconKind): string {
+  if (iconKind === "image") return "Image";
+  switch (item.type) {
+    case "file":
+      return "File";
+    case "local-path":
+      return iconKind === "folder" ? "Folder" : "File";
+    case "project":
+      return "Project";
+    case "moodboard":
+      return "Moodboard";
+    case "effect":
+      return "Effect";
+    case "preview-target":
+      return "Selected element";
+    case "canvas-node":
+      return "Canvas selection";
+    case "text-context":
+      return "Imported context";
+  }
+}
+
+function contextMeta(item: AgentComposerContextItem): string | undefined {
+  if (item.type === "file" && typeof item.size === "number") return formatFileSize(item.size);
+  if (item.type === "canvas-node") return item.nodeType;
+  return item.subtitle;
+}
+
 function contextIcon(kind: ContextIconKind): ReactNode {
   switch (kind) {
     case "file":
@@ -103,11 +148,15 @@ export function AgentComposerContextCards<T extends AgentComposerContextItem>({
   onChange,
   onRemove,
   className,
+  density = "panel",
+  sortable = true,
 }: {
   items: T[];
   onChange: (items: T[]) => void;
   onRemove: (id: string) => void;
   className?: string;
+  density?: "hero" | "panel";
+  sortable?: boolean;
 }) {
   if (!items.length) return null;
 
@@ -131,20 +180,31 @@ export function AgentComposerContextCards<T extends AgentComposerContextItem>({
   };
 
   return (
-    <div aria-label="Agent context cards" className={cn("mb-2 flex flex-wrap gap-1.5", className)}>
-      <DragDropProvider onDragEnd={handleDragEnd}>
-        {items.map((item, index) => (
-          <AgentComposerContextCard
-            key={item.id}
-            item={item}
-            index={index}
-            count={items.length}
-            onMoveBefore={() => moveBefore(item.id)}
-            onMoveAfter={() => moveAfter(item.id)}
-            onRemove={() => onRemove(item.id)}
-          />
-        ))}
-      </DragDropProvider>
+    <div
+      role="list"
+      aria-label="Attached context"
+      data-testid="agent-context-rail"
+      data-context-layout="rail"
+      data-context-density={density}
+      className={cn("min-w-0 border-t border-border/70 pt-2.5", className)}
+    >
+      <div aria-label="Agent context cards" className="flex min-w-0 gap-2 overflow-x-auto pb-0.5 pr-1 [scrollbar-width:thin]">
+        <DragDropProvider onDragEnd={handleDragEnd}>
+          {items.map((item, index) => (
+            <AgentComposerContextCard
+              key={item.id}
+              item={item}
+              index={index}
+              count={items.length}
+              density={density}
+              sortable={sortable}
+              onMoveBefore={() => moveBefore(item.id)}
+              onMoveAfter={() => moveAfter(item.id)}
+              onRemove={() => onRemove(item.id)}
+            />
+          ))}
+        </DragDropProvider>
+      </div>
     </div>
   );
 }
@@ -153,6 +213,8 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
   item,
   index,
   count,
+  density,
+  sortable,
   onMoveBefore,
   onMoveAfter,
   onRemove,
@@ -160,6 +222,8 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
   item: T;
   index: number;
   count: number;
+  density: "hero" | "panel";
+  sortable: boolean;
   onMoveBefore: () => void;
   onMoveAfter: () => void;
   onRemove: () => void;
@@ -170,36 +234,61 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
     group: "agent-composer-context",
     type: "agent-composer-context",
     accept: "agent-composer-context",
-    disabled: count < 2,
+    disabled: !sortable || count < 2,
   });
   const iconKind = contextIconKind(item);
+  const typeLabel = contextTypeLabel(item, iconKind);
+  const meta = contextMeta(item);
+  const visibleMeta = meta === typeLabel ? undefined : meta;
+  const showGrip = sortable && count > 1;
 
   return (
     <div
       ref={ref}
+      role="listitem"
       data-testid={`agent-context-card-${item.id}`}
       data-context-icon={iconKind}
       className={cn(
-        "group flex max-w-full touch-none select-none items-center gap-1 rounded-md border border-border bg-surface-2 px-1 py-1 text-xs text-foreground-2 transition-[opacity,border-color,box-shadow,transform] duration-150 ease-out motion-reduce:transition-none",
-        count > 1 && "cursor-grab active:cursor-grabbing",
-        isDragging && "opacity-55 shadow-lg",
-        isDropTarget && "border-primary shadow-[0_0_0_2px_rgba(48,112,255,0.18)]",
+        "group flex shrink-0 touch-none select-none items-center overflow-hidden rounded-lg border border-border bg-card text-xs text-foreground-2 transition-[opacity,border-color,box-shadow,transform,background-color] duration-150 ease-out motion-reduce:transition-none",
+        density === "hero" ? "h-[4.75rem] w-60 basis-60 gap-2 p-1.5" : "h-10 w-52 basis-52 gap-1.5 px-1.5",
+        showGrip && "cursor-grab active:cursor-grabbing",
+        isDragging && "opacity-55 ring-2 ring-ring/30",
+        isDropTarget && "border-ring ring-2 ring-ring/30",
       )}
-      title={item.subtitle ? `${item.title}: ${item.subtitle}` : item.title}
+      title={meta ? `${item.title}: ${meta}` : item.title}
     >
-      <button
-        type="button"
-        aria-label={`Drag ${item.title}`}
-        className="grid h-5 w-4 shrink-0 cursor-grab place-items-center rounded text-muted-foreground transition-colors hover:bg-surface hover:text-foreground active:cursor-grabbing"
+      <span
+        className={cn(
+          "grid shrink-0 place-items-center overflow-hidden rounded-md border border-border/70 bg-surface-2 text-brand",
+          density === "hero" ? "h-full w-16" : "size-7",
+        )}
+        aria-hidden={item.type === "file" && item.previewUrl ? undefined : true}
       >
-        <GripVertical size={12} strokeWidth={1.75} />
-      </button>
-      <span className="shrink-0 text-brand" aria-hidden>
-        {contextIcon(iconKind)}
+        {item.type === "file" && item.previewUrl ? (
+          <img className="size-full object-cover" src={item.previewUrl} alt={item.title} />
+        ) : (
+          contextIcon(iconKind)
+        )}
       </span>
-      <span className="min-w-0 truncate font-medium">{item.title}</span>
-      {item.subtitle ? <span className="min-w-0 truncate text-muted-foreground">· {item.subtitle}</span> : null}
-      {count > 1 ? (
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-medium text-foreground">{item.title}</span>
+        <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[10px] leading-none text-muted-foreground">
+          <span className="shrink-0">{typeLabel}</span>
+          {visibleMeta ? (
+            <span className="min-w-0 truncate">· {visibleMeta}</span>
+          ) : null}
+        </span>
+      </span>
+      {showGrip ? (
+        <button
+          type="button"
+          aria-label={`Drag ${item.title}`}
+          className="grid h-6 w-4 shrink-0 cursor-grab place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          <GripVertical size={12} strokeWidth={1.75} />
+        </button>
+      ) : null}
+      {showGrip ? (
         <>
           <button type="button" disabled={index === 0} className="sr-only" onClick={onMoveBefore}>
             Move {item.title} before previous context card
@@ -217,7 +306,7 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
           event.stopPropagation();
           onRemove();
         }}
-        className="grid h-5 w-5 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+        className="grid size-6 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         <X size={11} strokeWidth={2} />
       </button>

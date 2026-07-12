@@ -10,7 +10,17 @@ import {
 } from "./AgentComposerContext.tsx";
 
 const baseItems: AgentComposerContextItem[] = [
-  { id: "local-path:/tmp/a.png", type: "local-path", title: "a.png", subtitle: "/tmp/a.png", path: "/tmp/a.png" },
+  {
+    id: "file:.refs/cloud.png",
+    type: "file",
+    title: "cloud.png",
+    subtitle: ".refs/cloud.png",
+    name: "cloud.png",
+    path: ".refs/cloud.png",
+    previewUrl: "data:image/png;base64,Y2xvdWQ=",
+    mimeType: "image/png",
+    size: 2048,
+  },
   { id: "moodboard:m1", type: "moodboard", title: "Warm references", subtitle: "Moodboard", moodboardId: "m1", name: "Warm references" },
   { id: "text-context:fig", type: "text-context", title: "Figma import", subtitle: ".fig", body: "Buttons and cards" },
 ];
@@ -22,7 +32,7 @@ test("context item helpers dedupe, remove, and reorder by id", () => {
     baseItems[2],
   ]);
   expect(removeContextItem(baseItems, "moodboard:m1")).toEqual([baseItems[0], baseItems[2]]);
-  expect(moveContextItem(baseItems, "text-context:fig", "local-path:/tmp/a.png")).toEqual([baseItems[2], baseItems[0], baseItems[1]]);
+  expect(moveContextItem(baseItems, "text-context:fig", "file:.refs/cloud.png")).toEqual([baseItems[2], baseItems[0], baseItems[1]]);
 });
 
 test("AgentComposerContextCards renders typed cards, removes, and reorders without native file drag", () => {
@@ -43,11 +53,19 @@ test("AgentComposerContextCards renders typed cards, removes, and reorders witho
   }
   render(<Harness />);
 
-  const list = screen.getByLabelText("Agent context cards");
-  expect(within(list).getByText("a.png")).toBeInTheDocument();
+  const list = screen.getByRole("list", { name: "Attached context" });
+  expect(list).toHaveAttribute("data-context-layout", "rail");
+  expect(list).toHaveAttribute("data-context-density", "panel");
+  expect(screen.getAllByRole("listitem")).toHaveLength(3);
+  expect(within(list).getByText("cloud.png")).toBeInTheDocument();
   expect(within(list).getByText("Warm references")).toBeInTheDocument();
   expect(within(list).getByText("Figma import")).toBeInTheDocument();
-  expect(screen.getByTestId("agent-context-card-local-path:/tmp/a.png")).toHaveAttribute("data-context-icon", "image");
+  expect(screen.getByTestId("agent-context-card-file:.refs/cloud.png")).toHaveAttribute("data-context-icon", "image");
+  expect(screen.getByRole("img", { name: "cloud.png" })).toHaveAttribute("src", "data:image/png;base64,Y2xvdWQ=");
+  expect(screen.getByText("Image")).toBeInTheDocument();
+  expect(screen.getByText("Moodboard")).toBeInTheDocument();
+  expect(screen.getByText("Imported context")).toBeInTheDocument();
+  expect(screen.getByLabelText("Remove cloud.png")).toHaveClass("focus-visible:ring-2");
   expect(screen.getByLabelText("Drag Figma import")).not.toHaveAttribute("draggable", "true");
 
   fireEvent.click(screen.getByLabelText("Remove Warm references"));
@@ -57,4 +75,19 @@ test("AgentComposerContextCards renders typed cards, removes, and reorders witho
   expect(onChange).toHaveBeenCalledWith([baseItems[0], baseItems[2], baseItems[1]]);
   fireEvent.click(screen.getByRole("button", { name: "Move Figma import before previous context card" }));
   expect(onChange).toHaveBeenCalledWith([baseItems[2], baseItems[0], baseItems[1]]);
+});
+
+test("AgentComposerContextCards supports a preview-led hero rail without sorting", () => {
+  render(
+    <AgentComposerContextCards
+      items={baseItems}
+      onChange={vi.fn()}
+      onRemove={vi.fn()}
+      density="hero"
+      sortable={false}
+    />,
+  );
+
+  expect(screen.getByRole("list", { name: "Attached context" })).toHaveAttribute("data-context-density", "hero");
+  expect(screen.queryByLabelText("Drag cloud.png")).not.toBeInTheDocument();
 });
