@@ -98,6 +98,8 @@ test("AgentComposerContextCards keeps a single panel card and its remove control
   await waitFor(() => expect(panelCard).not.toHaveAttribute("aria-disabled", "true"));
   expect(removeButton.closest('[aria-disabled="true"]')).toBeNull();
   expect(panelCard).toHaveClass("h-10", "w-52", "basis-52");
+  expect(removeButton).toHaveClass("size-7");
+  expect(removeButton).not.toHaveClass("size-8");
 });
 
 test("AgentComposerContextCards supports a preview-led hero rail without sorting", async () => {
@@ -122,4 +124,6 @@ test("AgentComposerContextCards supports a preview-led hero rail without sorting
   expect(removeButton.closest('[aria-disabled="true"]')).toBeNull();
   expect(heroCard).toHaveClass("flex-col", "h-28", "w-44", "basis-44", "items-stretch");
   expect(previewRegion).toHaveClass("h-16", "w-full");
+  expect(removeButton).toHaveClass("absolute", "right-1.5", "top-1.5", "size-8");
+  expect(removeButton).not.toHaveClass("size-7");
 });

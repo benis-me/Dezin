@@ -475,6 +475,31 @@ test("HomeScreen prompt presents dropped image references as rich context withou
   expect(takePendingImages()).toEqual([{ name: "reference.png", base64: expect.any(String) }]);
 });
 
+test("HomeScreen restores prompt focus and its end caret after removing context", async () => {
+  renderWithApi(<HomeScreen projects={[]} />, {
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+  });
+
+  const file = new File(["image"], "focus-reference.png", { type: "image/png" });
+  fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), { dataTransfer: { types: ["Files"], files: [file] } });
+
+  const rail = await screen.findByRole("list", { name: "Attached context" });
+  const textarea = screen.getByLabelText("Describe your design") as HTMLTextAreaElement;
+  const draft = "Keep this direction";
+  fireEvent.change(textarea, { target: { value: draft } });
+
+  const remove = within(rail).getByRole("button", { name: "Remove focus-reference.png" });
+  remove.focus();
+  expect(remove).toHaveFocus();
+  fireEvent.click(remove);
+
+  await waitFor(() => expect(textarea).toHaveFocus());
+  expect(textarea).toHaveValue(draft);
+  expect(textarea.selectionStart).toBe(draft.length);
+  expect(textarea.selectionEnd).toBe(draft.length);
+});
+
 test("HomeScreen keeps local paths and imported fig context structured until Design", async () => {
   const onNewProject = vi.fn();
   const parseFig = vi.fn(async (_file: Blob, name: string) => ({ name, summary: "Palette: #123456\nFonts: Geist" }));

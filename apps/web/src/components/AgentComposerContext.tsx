@@ -310,7 +310,7 @@ function AgentComposerContextCard<T extends AgentComposerContextItem>({
           }}
           className={cn(
             "grid shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-            density === "hero" ? "absolute right-1.5 top-1.5 size-7 border border-border bg-card text-foreground" : "size-6",
+            density === "hero" ? "absolute right-1.5 top-1.5 size-8 border border-border bg-card text-foreground" : "size-7",
           )}
         >
           <X size={11} strokeWidth={2} />

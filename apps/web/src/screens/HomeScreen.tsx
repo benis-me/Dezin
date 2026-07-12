@@ -275,6 +275,7 @@ export function HomeScreen({
   const [images, setImages] = useState<{ name: string; base64: string; preview: string }[]>([]);
   const [refs, setRefs] = useState<{ id: string; name: string; base64: string }[]>([]);
   const [homeContextItems, setHomeContextItems] = useState<HomeContextItem[]>([]);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
@@ -551,17 +552,24 @@ export function HomeScreen({
     ]);
   };
 
+  const focusPromptEnd = useCallback(() => {
+    const textarea = promptRef.current;
+    if (!textarea) return;
+    textarea.focus({ preventScroll: true });
+    const end = textarea.value.length;
+    textarea.setSelectionRange(end, end);
+  }, []);
+
   const removeHomeDisplayItem = (id: string): void => {
     if (id.startsWith("home-image:")) {
       setImages((current) => current.filter((image, index) => `home-image:${image.name}:${index}` !== id));
-      return;
-    }
-    if (id.startsWith("project:")) {
+    } else if (id.startsWith("project:")) {
       const projectId = id.slice("project:".length);
       setRefs((current) => current.filter((ref) => ref.id !== projectId));
-      return;
+    } else {
+      setHomeContextItems((current) => current.filter((item) => item.id !== id));
     }
-    setHomeContextItems((current) => current.filter((item) => item.id !== id));
+    window.requestAnimationFrame(focusPromptEnd);
   };
 
   const referenceProject = async (project: Project): Promise<void> => {
@@ -871,6 +879,7 @@ export function HomeScreen({
                   />
                 ) : null}
                 <textarea
+                  ref={promptRef}
                   aria-label="Describe your design"
                   value={brief}
                   disabled={optimizingPrompt}
