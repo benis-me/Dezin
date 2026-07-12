@@ -1,15 +1,116 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
+import { ToastProvider } from "../components/Toast.tsx";
+import { ApiProvider } from "../lib/api-context.tsx";
 import { MoodboardCanvasTopbar } from "../moodboard/MoodboardCanvasTopbar.tsx";
+import { makeFakeApi } from "../test/fake-api.ts";
 import { MoodboardScreen } from "./MoodboardScreen.tsx";
 
+const mockMoodboardState = vi.hoisted(() => ({
+  current: { loading: true, detail: null } as Record<string, unknown>,
+}));
+
 vi.mock("../moodboard/useMoodboardBoard.ts", () => ({
-  useMoodboardBoard: () => ({ loading: true, detail: null }),
+  useMoodboardBoard: () => mockMoodboardState.current,
 }));
 
 vi.mock("../moodboard/MoodboardCanvas.tsx", () => ({
-  MoodboardCanvas: () => <div data-testid="mock-moodboard-canvas" />,
+  MoodboardCanvas: ({ onSendToAgent }: { onSendToAgent?: (nodes: Array<Record<string, unknown>>) => void }) => (
+    <button
+      type="button"
+      onClick={() =>
+        onSendToAgent?.([
+          {
+            id: "note-1",
+            boardId: "board-1",
+            type: "note",
+            x: 10,
+            y: 20,
+            width: 180,
+            height: 80,
+            data: { text: "Material tone" },
+          },
+        ])
+      }
+    >
+      Send mock node to agent
+    </button>
+  ),
 }));
+
+function loadedMoodboardState(): Record<string, unknown> {
+  return {
+    detail: { id: "board-1", name: "Board", createdAt: 1, updatedAt: 1, archivedAt: null, coverAssetId: null },
+    nodes: [],
+    assets: [],
+    conversations: [],
+    conversationId: "",
+    messages: [],
+    selectedId: null,
+    selectedIds: [],
+    agents: [],
+    runAgent: "",
+    runModel: "",
+    imageModels: [],
+    imageModel: "",
+    imageProviderId: "",
+    imageActionModels: { removeBackgroundModel: "", editRegionModel: "", extractLayerModel: "" },
+    loading: false,
+    agentBusy: false,
+    imageBusy: false,
+    busy: false,
+    setSelectedId: vi.fn(),
+    setSelectedIds: vi.fn(),
+    setRunAgent: vi.fn(),
+    setRunModel: vi.fn(),
+    setImageModel: vi.fn(),
+    switchConversation: vi.fn(),
+    createConversation: vi.fn(),
+    renameConversation: vi.fn(),
+    deleteConversation: vi.fn(),
+    updateNodes: vi.fn(),
+    addNote: vi.fn(),
+    addSection: vi.fn(),
+    addImageGenerator: vi.fn(),
+    uploadFiles: vi.fn(),
+    uploadReferenceFiles: vi.fn(),
+    generateImage: vi.fn(),
+    setCoverImage: vi.fn(),
+    flushPendingNodes: vi.fn(),
+    sendMessage: vi.fn(),
+    rescanAgents: vi.fn(),
+  };
+}
+
+function installMutableMoodboardViewport(initialMatches = false) {
+  let matches = initialMatches;
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  const media = {
+    get matches() {
+      return matches;
+    },
+    media: "(max-width: 639px)",
+    onchange: null,
+    addListener: (listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
+    removeListener: (listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+    addEventListener: (_type: string, listener: EventListenerOrEventListenerObject) => {
+      if (typeof listener === "function") listeners.add(listener as (event: MediaQueryListEvent) => void);
+    },
+    removeEventListener: (_type: string, listener: EventListenerOrEventListenerObject) => {
+      if (typeof listener === "function") listeners.delete(listener as (event: MediaQueryListEvent) => void);
+    },
+    dispatchEvent: () => true,
+  } as MediaQueryList;
+  const spy = vi.spyOn(window, "matchMedia").mockReturnValue(media);
+  return {
+    setMatches(next: boolean) {
+      matches = next;
+      const event = { matches, media: media.media } as MediaQueryListEvent;
+      for (const listener of listeners) listener(event);
+    },
+    restore: () => spy.mockRestore(),
+  };
+}
 
 test("MoodboardCanvasTopbar mirrors the project artifact bar shape", () => {
   const onOpenModelSettings = vi.fn();
@@ -115,5 +216,50 @@ test("MoodboardScreen stacks its panels vertically at narrow viewports", async (
     );
   } finally {
     matchMedia.mockRestore();
+  }
+});
+
+test("MoodboardScreen preserves loaded composer identity and draft across the narrow breakpoint", async () => {
+  const viewport = installMutableMoodboardViewport();
+  mockMoodboardState.current = loadedMoodboardState();
+  localStorage.setItem("dezin.moodboard.agent.width", "0.37");
+  try {
+    render(
+      <ApiProvider client={makeFakeApi()}>
+        <ToastProvider>
+          <MoodboardScreen boardId="board-1" onBack={() => {}} onOpenSettings={() => {}} />
+        </ToastProvider>
+      </ApiProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Send mock node to agent" }));
+    await screen.findByRole("list", { name: "Attached context" });
+    const message = screen.getByLabelText("Message");
+    fireEvent.change(message, { target: { value: "Unsent moodboard draft" } });
+    message.focus();
+    message.setSelectionRange(6, 6);
+
+    act(() => viewport.setMatches(true));
+    await waitFor(() =>
+      expect(screen.getByRole("separator", { name: "Resize moodboard agent panel" })).toHaveAttribute("aria-orientation", "horizontal"),
+    );
+    expect(screen.getByLabelText("Message")).toBe(message);
+    expect(message).toHaveValue("Unsent moodboard draft");
+    expect(message).toHaveFocus();
+    expect(message.selectionStart).toBe(6);
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(localStorage.getItem("dezin.moodboard.agent.width")).toBe("0.37");
+
+    act(() => viewport.setMatches(false));
+    await waitFor(() =>
+      expect(screen.getByRole("separator", { name: "Resize moodboard agent panel" })).toHaveAttribute("aria-orientation", "vertical"),
+    );
+    expect(screen.getByLabelText("Message")).toBe(message);
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(localStorage.getItem("dezin.moodboard.agent.width")).toBe("0.37");
+  } finally {
+    mockMoodboardState.current = { loading: true, detail: null };
+    localStorage.removeItem("dezin.moodboard.agent.width");
+    viewport.restore();
   }
 });

@@ -77,6 +77,7 @@ The supplied image is a light-theme composer layout concept rather than a Dezin 
   - textarea width 344; add control x 23-55; model control x 202.125-329; send control x 335-367
   - document width remains 390px
   - newest user message bottom 134.75 is above composer top 343.203; overlap is false
+  - iteration 3 regression coverage confirms desktop -> narrow -> desktop preserves the loaded composer and preview iframe nodes, unsent draft/caret/focus, and stored desktop split preference
 
 ## Moodboard Agent
 
@@ -94,6 +95,7 @@ The supplied image is a light-theme composer layout concept rather than a Dezin 
   - textarea width 344; add control x 23-55; model control x 202.125-329; send control x 335-367
   - document width remains 390px
   - newest assistant message bottom 169.5 is above composer top 351.203; overlap is false
+  - iteration 3 regression coverage confirms desktop -> narrow -> desktop preserves the loaded composer node, unsent draft/caret/focus, replayed canvas context insertion, and stored desktop split preference
 
 ## Responsive and console
 
@@ -101,6 +103,7 @@ The supplied image is a light-theme composer layout concept rather than a Dezin 
 - clipping/overlap: none after the responsive fix
 - page-level horizontal overflow: none
 - Project and Moodboard panel orientation below 640px: vertical; composer and artifact/canvas each receive full viewport width
+- breakpoint orientation changes update the outer groups in place without remounting their loaded descendants after iteration 3
 - page identity: Home, Project, and Moodboard all reported title `Dezin` and their expected meaningful heading/textbox
 - blank-page check: passed on all three surfaces
 - framework overlay check: none on all three surfaces
@@ -148,6 +151,15 @@ The local QA projects intentionally have no generated preview run. For the final
 - GREEN: focused responsive files passed 118/118.
 - post-fix evidence: Project and Moodboard separators are horizontal; both composers are 344px wide inside a 390px document; all controls fit; forced context overflow remains one scrollable row; newest-message overlap is false.
 
+### Iteration 3 - Breakpoint lifecycle preservation
+
+- finding: Important lifecycle regression. Breakpoint-derived keys on the outer Project and Moodboard resizable groups remounted their loaded descendant trees whenever the viewport crossed 639px.
+- RED: the focused loaded-state transition tests failed `2 failed, 118 passed`; both found a replacement Message textarea after desktop -> narrow, and the Moodboard replacement had already lost its draft.
+- root cause: React treated the narrow and desktop groups as different keyed component instances even though `Group` supports changing `orientation` as a prop.
+- fix: remove only the four dynamic keys from the loading and loaded Project/Moodboard groups, retaining responsive orientation, minimum sizes, and desktop-only persistence guards.
+- GREEN: the two focused files passed `120/120`; desktop -> narrow -> desktop retained composer and preview identity, transient draft/context/caret/focus state, and both stored desktop split preferences.
+- verification boundary: focused suites and `git diff --check`; full CI was not rerun for this review follow-up by instruction.
+
 ## Findings
 
 - No remaining actionable P0, P1, or P2 findings.
@@ -160,5 +172,6 @@ The local QA projects intentionally have no generated preview run. For the final
 - `pnpm build:check`: `BUNDLE: PASS`, total JS gzip 771.0 KiB / 806.6 KiB
 - `git diff --check`: clean
 - `pnpm run ci`: exit 0; coverage suites passed; `PROCESS LEAKS: PASS`; bundle passed; production audit reported no known vulnerabilities
+- post-review lifecycle regression: focused Project/Moodboard screen files passed, 120 tests passed
 
 final result: passed

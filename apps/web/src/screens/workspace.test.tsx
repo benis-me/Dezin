@@ -34,6 +34,36 @@ const AGENTS = [
   { id: "codex", command: "codex", available: true, version: "codex 1.0.0", models: ["gpt-5"] },
 ];
 
+function installMutableNarrowViewport(initialMatches = false) {
+  let matches = initialMatches;
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  const media = {
+    get matches() {
+      return matches;
+    },
+    media: "(max-width: 639px)",
+    onchange: null,
+    addListener: (listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
+    removeListener: (listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+    addEventListener: (_type: string, listener: EventListenerOrEventListenerObject) => {
+      if (typeof listener === "function") listeners.add(listener as (event: MediaQueryListEvent) => void);
+    },
+    removeEventListener: (_type: string, listener: EventListenerOrEventListenerObject) => {
+      if (typeof listener === "function") listeners.delete(listener as (event: MediaQueryListEvent) => void);
+    },
+    dispatchEvent: () => true,
+  } as MediaQueryList;
+  const spy = vi.spyOn(window, "matchMedia").mockReturnValue(media);
+  return {
+    setMatches(next: boolean) {
+      matches = next;
+      const event = { matches, media: media.media } as MediaQueryListEvent;
+      for (const listener of listeners) listener(event);
+    },
+    restore: () => spy.mockRestore(),
+  };
+}
+
 test("workspace helper modules preserve transcript and version ordering semantics", () => {
   expect(runCardStackPosition(0, 1)).toBe("single");
   expect(
@@ -99,6 +129,50 @@ test("workspace stacks its panels vertically at narrow viewports", async () => {
     await waitFor(() => expect(screen.getByRole("separator", { name: "Resize panels" })).toHaveAttribute("aria-orientation", "horizontal"));
   } finally {
     matchMedia.mockRestore();
+  }
+});
+
+test("workspace preserves loaded preview and composer identity across the narrow breakpoint", async () => {
+  const viewport = installMutableNarrowViewport();
+  localStorage.setItem("dezin.workspace.split", "0.31");
+  try {
+    render(
+      <ApiProvider
+        client={makeFakeApi({
+          listFiles: async () => [{ path: "index.html", size: 12 }],
+        })}
+      >
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    const message = await screen.findByLabelText("Message");
+    const preview = await screen.findByTitle("Artifact preview");
+    fireEvent.change(message, { target: { value: "Unsent breakpoint draft" } });
+    message.focus();
+    message.setSelectionRange(7, 7);
+
+    act(() => viewport.setMatches(true));
+    await waitFor(() =>
+      expect(screen.getByRole("separator", { name: "Resize panels" })).toHaveAttribute("aria-orientation", "horizontal"),
+    );
+    expect(screen.getByLabelText("Message")).toBe(message);
+    expect(screen.getByTitle("Artifact preview")).toBe(preview);
+    expect(message).toHaveValue("Unsent breakpoint draft");
+    expect(message).toHaveFocus();
+    expect(message.selectionStart).toBe(7);
+    expect(localStorage.getItem("dezin.workspace.split")).toBe("0.31");
+
+    act(() => viewport.setMatches(false));
+    await waitFor(() =>
+      expect(screen.getByRole("separator", { name: "Resize panels" })).toHaveAttribute("aria-orientation", "vertical"),
+    );
+    expect(screen.getByLabelText("Message")).toBe(message);
+    expect(screen.getByTitle("Artifact preview")).toBe(preview);
+    expect(localStorage.getItem("dezin.workspace.split")).toBe("0.31");
+  } finally {
+    localStorage.removeItem("dezin.workspace.split");
+    viewport.restore();
   }
 });
 

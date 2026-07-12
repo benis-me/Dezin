@@ -1936,7 +1936,6 @@ function WorkspaceLoadingLayout({ conversationPercent }: { conversationPercent: 
   const narrowLayout = useMediaQuery("(max-width: 639px)");
   return (
     <Group
-      key={narrowLayout ? "workspace-loading-narrow" : "workspace-loading-wide"}
       id="dezin-workspace-layout-loading"
       className="flex-1"
       defaultLayout={twoPanelLayout(WORKSPACE_CONVERSATION_PANEL, conversationPercent, WORKSPACE_ARTIFACT_PANEL)}
@@ -4290,7 +4289,6 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   return (
     <>
       <Group
-        key={narrowLayout ? "workspace-narrow" : "workspace-wide"}
         id="dezin-workspace-layout"
         className="flex-1"
         defaultLayout={twoPanelLayout(WORKSPACE_CONVERSATION_PANEL, workspaceConversationPercent, WORKSPACE_ARTIFACT_PANEL)}

@@ -61,7 +61,6 @@ export function MoodboardScreen({
     return (
       <div className="flex h-full w-full min-w-0 bg-background">
         <Group
-          key={narrowLayout ? "moodboard-loading-narrow" : "moodboard-loading-wide"}
           id="dezin-moodboard-layout-loading"
           className="min-h-0 flex-1"
           defaultLayout={twoPanelLayout(MOODBOARD_AGENT_PANEL, narrowLayout ? 55 : agentPercent, MOODBOARD_CANVAS_PANEL)}
@@ -117,7 +116,6 @@ export function MoodboardScreen({
   return (
     <div className="flex h-full w-full flex-col bg-background">
       <Group
-        key={narrowLayout ? "moodboard-narrow" : "moodboard-wide"}
         id="dezin-moodboard-layout"
         className="min-h-0 flex-1"
         defaultLayout={twoPanelLayout(MOODBOARD_AGENT_PANEL, narrowLayout ? 55 : agentPercent, MOODBOARD_CANVAS_PANEL)}
