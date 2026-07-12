@@ -34,6 +34,7 @@ describe("HomeScreen Sharingan mode", () => {
     renderHome();
     expect(screen.queryByPlaceholderText("Paste a URL to clone…")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Design system" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sharingan clone from URL" })).toBeNull();
     fireEvent.doubleClick(screen.getByText("Start a design"));
     expect(screen.getByPlaceholderText("Paste a URL to clone…")).toBeInTheDocument();
     expect(screen.queryByText("Design Research")).not.toBeInTheDocument();

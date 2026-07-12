@@ -264,9 +264,14 @@ test("HomeScreen project cards are keyboard reachable and activate on Enter", ()
   expect(onOpenProject).toHaveBeenCalledWith("p-keyboard");
 });
 
-test("HomeScreen exposes a visible labeled Sharingan entry", () => {
+test("HomeScreen keeps Sharingan hidden behind the heading gesture", () => {
   renderWithApi(<HomeScreen projects={[]} />, { listSkills: async () => SKILLS });
-  expect(screen.getByRole("button", { name: "Sharingan clone from URL" })).toBeVisible();
+
+  expect(screen.queryByRole("button", { name: "Sharingan clone from URL" })).toBeNull();
+  expect(screen.getByRole("heading", { name: "Start a design" })).toHaveAttribute(
+    "title",
+    "Double-click for Sharingan — clone from a URL",
+  );
 });
 
 test("HomeScreen marks projects with an active generation", () => {

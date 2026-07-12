@@ -962,23 +962,6 @@ export function HomeScreen({
               />
               <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 px-1 pt-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    aria-label="Sharingan clone from URL"
-                    aria-pressed={sharingan}
-                    onClick={toggleSharingan}
-                    className={cn(
-                      "inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-                      sharingan ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    <span
-                      aria-hidden
-                      className="sharingan-eye size-3.5 shrink-0"
-                      style={{ WebkitMaskImage: `url(${sharinganEyeUrl})`, maskImage: `url(${sharinganEyeUrl})` }}
-                    />
-                    Sharingan
-                  </button>
                   <AttachMenu
                     onAttachFile={() => imgInputRef.current?.click()}
                     onPickPaths={addHomePaths}
