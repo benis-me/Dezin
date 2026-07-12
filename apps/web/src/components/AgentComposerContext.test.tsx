@@ -83,7 +83,24 @@ test("AgentComposerContextCards renders typed cards, removes, and reorders witho
   expect(onChange).toHaveBeenCalledWith([baseItems[2], baseItems[0], baseItems[1]]);
 });
 
-test("AgentComposerContextCards supports a preview-led hero rail without sorting", () => {
+test("AgentComposerContextCards keeps a single panel card and its remove control enabled", async () => {
+  render(
+    <AgentComposerContextCards
+      items={[baseItems[0]!]}
+      onChange={vi.fn()}
+      onRemove={vi.fn()}
+    />,
+  );
+
+  const panelCard = screen.getByRole("listitem");
+  const removeButton = screen.getByRole("button", { name: "Remove cloud.png" });
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  await waitFor(() => expect(panelCard).not.toHaveAttribute("aria-disabled", "true"));
+  expect(removeButton.closest('[aria-disabled="true"]')).toBeNull();
+  expect(panelCard).toHaveClass("h-10", "w-52", "basis-52");
+});
+
+test("AgentComposerContextCards supports a preview-led hero rail without sorting", async () => {
   render(
     <AgentComposerContextCards
       items={baseItems}
@@ -97,4 +114,12 @@ test("AgentComposerContextCards supports a preview-led hero rail without sorting
   expect(screen.getByRole("list", { name: "Attached context" })).toHaveAttribute("data-context-density", "hero");
   expect(screen.queryByLabelText("Agent context cards")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Drag cloud.png")).not.toBeInTheDocument();
+  const heroCard = screen.getByTestId("agent-context-card-file:.refs/cloud.png");
+  const removeButton = screen.getByRole("button", { name: "Remove cloud.png" });
+  const previewRegion = screen.getByRole("img", { name: "cloud.png" }).parentElement;
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  await waitFor(() => expect(heroCard).not.toHaveAttribute("aria-disabled", "true"));
+  expect(removeButton.closest('[aria-disabled="true"]')).toBeNull();
+  expect(heroCard).toHaveClass("flex-col", "h-28", "w-44", "basis-44", "items-stretch");
+  expect(previewRegion).toHaveClass("h-16", "w-full");
 });
