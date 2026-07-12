@@ -1,4 +1,4 @@
-import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { test, expect, afterEach, vi } from "vitest";
 import { HomeScreen } from "./HomeScreen.tsx";
@@ -15,11 +15,14 @@ import { AgentsProvider } from "../lib/agents-context.tsx";
 import { makeFakeApi } from "../test/fake-api.ts";
 import type { Settings } from "../lib/api.ts";
 import { SETTINGS_UPDATED_EVENT } from "../lib/settings-events.ts";
+import { takePendingImages, takePendingRefs } from "../lib/pending-brief.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 
 afterEach(() => {
   localStorage.removeItem("dezin.shell.sidebar.width");
   localStorage.removeItem("dezin.home.composer");
+  takePendingImages();
+  takePendingRefs();
   cleanup();
 });
 
@@ -145,10 +148,15 @@ test("HomeScreen allows a project reference to be the only design input", async 
   await user.hover(await screen.findByText("Reference a project"));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Reference source" }));
 
-  await screen.findByLabelText("Remove reference Reference source");
+  const rail = await screen.findByRole("list", { name: "Attached context" });
+  expect(rail).toHaveAttribute("data-context-density", "hero");
+  expect(within(rail).getByText("Reference source")).toBeInTheDocument();
+  expect(within(rail).getByText("Project")).toBeInTheDocument();
+  await screen.findByLabelText("Remove Reference source");
   await waitFor(() => expect(design).toBeEnabled());
   fireEvent.click(design);
   expect(onNewProject).toHaveBeenCalledWith("Build on the referenced design.", "frontend-design", "modern-minimal", "prototype");
+  expect(takePendingRefs()).toEqual([{ name: "Reference source", base64: expect.any(String) }]);
 });
 
 test("HomeScreen persists the selected agent model as the next default", async () => {
@@ -441,16 +449,72 @@ test("HomeScreen optimizes the prompt with the selected agent and lets the user 
   expect(screen.getByRole("button", { name: "Optimize prompt" })).toBeInTheDocument();
 });
 
-test("HomeScreen prompt accepts dropped image references", async () => {
-  renderWithApi(<HomeScreen projects={[]} />, {
+test("HomeScreen prompt presents dropped image references as rich context without mutating the brief", async () => {
+  const onNewProject = vi.fn();
+  renderWithApi(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
     listSkills: async () => SKILLS,
     listDesignSystems: async () => DSYS,
   });
 
   const file = new File(["image"], "reference.png", { type: "image/png" });
-  fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), { dataTransfer: { files: [file] } });
+  fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), { dataTransfer: { types: ["Files"], files: [file] } });
 
-  expect(await screen.findByAltText("reference.png")).toBeInTheDocument();
+  const rail = await screen.findByRole("list", { name: "Attached context" });
+  expect(rail).toHaveAttribute("data-context-density", "hero");
+  expect(within(rail).getByRole("img", { name: "reference.png" })).toBeInTheDocument();
+  expect(within(rail).getByText("Image")).toBeInTheDocument();
+  expect(screen.getByLabelText("Describe your design")).toHaveValue("");
+
+  fireEvent.click(screen.getByLabelText("Design"));
+  expect(onNewProject).toHaveBeenCalledWith(
+    "Recreate the reference screenshot faithfully.",
+    "frontend-design",
+    "modern-minimal",
+    "prototype",
+  );
+  expect(takePendingImages()).toEqual([{ name: "reference.png", base64: expect.any(String) }]);
+});
+
+test("HomeScreen keeps local paths and imported fig context structured until Design", async () => {
+  const onNewProject = vi.fn();
+  const parseFig = vi.fn(async (_file: Blob, name: string) => ({ name, summary: "Palette: #123456\nFonts: Geist" }));
+  const { container } = renderWithApi(<HomeScreen projects={[]} onNewProject={onNewProject} />, {
+    listSkills: async () => SKILLS,
+    listDesignSystems: async () => DSYS,
+    parseFig,
+  });
+
+  const folder = new File([], "source-app", { type: "" });
+  Object.defineProperty(folder, "path", { value: "/Users/ben/Projects/source-app" });
+  fireEvent.drop(screen.getByLabelText("Design prompt dropzone"), {
+    dataTransfer: { types: ["Files"], files: [folder] },
+  });
+
+  const rail = await screen.findByRole("list", { name: "Attached context" });
+  expect(rail).toHaveAttribute("data-context-density", "hero");
+  expect(within(rail).getByText("source-app")).toBeInTheDocument();
+  expect(within(rail).getByText("Folder")).toBeInTheDocument();
+  expect(screen.getByLabelText("Describe your design")).toHaveValue("");
+
+  const figInput = container.querySelector<HTMLInputElement>('input[accept=".fig"]');
+  expect(figInput).not.toBeNull();
+  const fig = new File(["fig"], "brand.fig", { type: "application/octet-stream" });
+  fireEvent.change(figInput!, { target: { files: [fig] } });
+
+  await waitFor(() => expect(parseFig).toHaveBeenCalledWith(fig, "brand.fig"));
+  expect(await within(rail).findByText("Imported context")).toBeInTheDocument();
+  expect(screen.getByLabelText("Describe your design")).not.toHaveValue(expect.stringContaining("Use these local paths"));
+  expect(screen.getByLabelText("Design")).toBeEnabled();
+
+  fireEvent.click(screen.getByLabelText("Design"));
+  expect(onNewProject).toHaveBeenCalledWith(
+    expect.stringContaining("Reference local paths: /Users/ben/Projects/source-app"),
+    "frontend-design",
+    "modern-minimal",
+    "prototype",
+  );
+  expect(onNewProject.mock.calls[0]?.[0]).toContain("Use the attached context to design the artifact.");
+  expect(onNewProject.mock.calls[0]?.[0]).toContain("Palette: #123456\nFonts: Geist");
 });
 
 test("MoodboardsScreen uses a Home-like prompt to start a board with initial direction", async () => {

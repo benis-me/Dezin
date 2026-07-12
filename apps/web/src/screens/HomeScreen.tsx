@@ -7,7 +7,6 @@ import {
   Check,
   FileText,
   FolderInput,
-  Layers,
   Image as ImageIcon,
   Palette,
   LayoutGrid,
@@ -40,6 +39,11 @@ import {
   type PickerOption,
 } from "../components/ui/index.ts";
 import { AttachMenu } from "../components/AttachMenu.tsx";
+import {
+  AgentComposerContextCards,
+  upsertContextItems,
+  type AgentComposerContextItem,
+} from "../components/AgentComposerContext.tsx";
 import { DesignSystemSelect } from "../components/DesignSystemSelect.tsx";
 import { FieldSelect } from "../components/FieldSelect.tsx";
 import { useApi } from "../lib/api-context.tsx";
@@ -68,6 +72,18 @@ interface HomeComposerPrefs {
   skillId?: string;
   designSystemId?: string;
   mode?: ProjectMode;
+}
+
+type HomeContextItem = Extract<AgentComposerContextItem, { type: "local-path" | "text-context" }>;
+
+export function homeContextItemsForPaths(paths: string[]): HomeContextItem[] {
+  return paths.map((path) => ({
+    id: `home-local-path:${path}`,
+    type: "local-path",
+    title: path.split(/[\\/]/).filter(Boolean).at(-1) ?? path,
+    subtitle: path,
+    path,
+  }));
 }
 
 function isProjectMode(value: unknown): value is ProjectMode {
@@ -258,9 +274,34 @@ export function HomeScreen({
   const [layout, setLayout] = useState<"grid" | "list">("grid");
   const [images, setImages] = useState<{ name: string; base64: string; preview: string }[]>([]);
   const [refs, setRefs] = useState<{ id: string; name: string; base64: string }[]>([]);
+  const [homeContextItems, setHomeContextItems] = useState<HomeContextItem[]>([]);
   const imgInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
+
+  const homeDisplayItems = useMemo<AgentComposerContextItem[]>(
+    () => [
+      ...images.map((image, index) => ({
+        id: `home-image:${image.name}:${index}`,
+        type: "file" as const,
+        title: image.name,
+        name: image.name,
+        path: image.name,
+        previewUrl: image.preview,
+        mimeType: "image/*",
+      })),
+      ...refs.map((ref) => ({
+        id: `project:${ref.id}`,
+        type: "project" as const,
+        title: ref.name,
+        subtitle: "Project",
+        projectId: ref.id,
+        name: ref.name,
+      })),
+      ...homeContextItems,
+    ],
+    [homeContextItems, images, refs],
+  );
 
   const setSkillId = useCallback((value: string) => {
     setSkillIdState(value);
@@ -488,9 +529,39 @@ export function HomeScreen({
     const dataTransfer = event.dataTransfer;
     const paths = localPathsFromDataTransfer(dataTransfer);
     if (paths.length) {
-      setBrief((current) => `${current}${current.trim() ? "\n\n" : ""}Use these local paths as reference: ${paths.join(", ")}`);
+      setHomeContextItems((current) => upsertContextItems(current, homeContextItemsForPaths(paths)));
     }
     void filesFromDataTransfer(dataTransfer).then(addImages);
+  };
+
+  const addHomePaths = (paths: string[]): void => {
+    setHomeContextItems((current) => upsertContextItems(current, homeContextItemsForPaths(paths)));
+  };
+
+  const addHomeTextContext = (body: string): void => {
+    setHomeContextItems((current) => [
+      ...current,
+      {
+        id: `home-text-context:${Date.now()}:${current.length}`,
+        type: "text-context",
+        title: "Design context",
+        subtitle: "Imported .fig",
+        body,
+      },
+    ]);
+  };
+
+  const removeHomeDisplayItem = (id: string): void => {
+    if (id.startsWith("home-image:")) {
+      setImages((current) => current.filter((image, index) => `home-image:${image.name}:${index}` !== id));
+      return;
+    }
+    if (id.startsWith("project:")) {
+      const projectId = id.slice("project:".length);
+      setRefs((current) => current.filter((ref) => ref.id !== projectId));
+      return;
+    }
+    setHomeContextItems((current) => current.filter((item) => item.id !== id));
   };
 
   const referenceProject = async (project: Project): Promise<void> => {
@@ -527,9 +598,22 @@ export function HomeScreen({
   };
 
   const submit = () => {
-    const text =
+    const pathItems = homeContextItems.filter((item): item is Extract<HomeContextItem, { type: "local-path" }> => item.type === "local-path");
+    const textItems = homeContextItems.filter((item): item is Extract<HomeContextItem, { type: "text-context" }> => item.type === "text-context");
+    const contextSuffix = [
+      pathItems.length ? `Reference local paths: ${pathItems.map((item) => item.path).join(", ")}` : "",
+      ...textItems.map((item) => `${item.title}:\n${item.body}`),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const base =
       brief.trim() ||
-      (images.length ? "Recreate the reference screenshot faithfully." : refs.length ? "Build on the referenced design." : "");
+      (images.length
+        ? "Recreate the reference screenshot faithfully."
+        : refs.length
+          ? "Build on the referenced design."
+          : "Use the attached context to design the artifact.");
+    const text = sharingan ? brief.trim() : [base, contextSuffix].filter(Boolean).join("\n\n");
     if (sharingan) {
       if (!isCloneUrl(text)) {
         toast("Enter a valid http(s) URL to clone.", { variant: "error" });
@@ -778,44 +862,6 @@ export function HomeScreen({
                   e.target.value = "";
                 }}
               />
-              {images.length ? (
-                <div className="flex flex-wrap gap-2 px-2 pb-1 pt-1.5">
-                  {images.map((img, i) => (
-                    <span key={`${img.name}-${i}`} className="group relative overflow-hidden rounded-lg border border-border">
-                      <img src={img.preview} alt={img.name} className="h-16 w-16 object-cover" />
-                      <button
-                        type="button"
-                        aria-label={`Remove ${img.name}`}
-                        onClick={() => setImages((cur) => cur.filter((_, j) => j !== i))}
-                        className="absolute right-0.5 top-0.5 grid size-5 place-items-center rounded-md bg-background/80 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
-                      >
-                        <X size={12} strokeWidth={2} />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-              {refs.length ? (
-                <div className="flex flex-wrap gap-1.5 px-2 pb-1 pt-1.5">
-                  {refs.map((r) => (
-                    <span
-                      key={r.id}
-                      className="flex items-center gap-1.5 rounded-md border border-border bg-surface-2/60 py-1 pl-2 pr-1 text-xs"
-                    >
-                      <Layers size={12} strokeWidth={1.75} className="text-muted-foreground" />
-                      <span className="max-w-[12rem] truncate font-medium">{r.name}</span>
-                      <button
-                        type="button"
-                        aria-label={`Remove reference ${r.name}`}
-                        onClick={() => setRefs((cur) => cur.filter((x) => x.id !== r.id))}
-                        className="grid size-4 place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
-                      >
-                        <X size={11} strokeWidth={2} />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              ) : null}
               <div className={cn("relative overflow-hidden rounded-xl transition-colors duration-150", optimizingPrompt && "bg-surface-2/80")}>
                 {optimizingPrompt ? (
                   <div
@@ -834,7 +880,9 @@ export function HomeScreen({
                       ? "Paste a URL to clone…"
                       : images.length
                         ? "Add notes, or just build to recreate the screenshot…"
-                        : "A pricing page with three plans, the middle one recommended…"
+                        : refs.length || homeContextItems.length
+                          ? "Add notes, or just build from the attached context…"
+                          : "A pricing page with three plans, the middle one recommended…"
                   }
                   rows={3}
                   className="relative z-10 field-sizing-content max-h-64 min-h-[92px] w-full resize-none bg-transparent px-3 py-2.5 pr-12 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:cursor-wait disabled:opacity-75"
@@ -895,6 +943,14 @@ export function HomeScreen({
                   </TooltipProvider>
                 ) : null}
               </div>
+              <AgentComposerContextCards
+                items={homeDisplayItems}
+                onChange={() => {}}
+                onRemove={removeHomeDisplayItem}
+                density="hero"
+                sortable={false}
+                className="mx-1"
+              />
               <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 px-1 pt-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <button
@@ -916,8 +972,8 @@ export function HomeScreen({
                   </button>
                   <AttachMenu
                     onAttachFile={() => imgInputRef.current?.click()}
-                    onPickPaths={(paths) => setBrief((b) => `${b}${b.trim() ? "\n\n" : ""}Use these local paths as reference: ${paths.join(", ")}`)}
-                    onContext={(text) => setBrief((b) => `${b}${b.trim() ? "\n\n" : ""}${text}`)}
+                    onPickPaths={addHomePaths}
+                    onContext={addHomeTextContext}
                     onReference={(p) => void referenceProject(p)}
                   />
                   <FieldSelect label="Template" value={skillId} options={skillOptions} onChange={setSkillId} />
@@ -956,7 +1012,7 @@ export function HomeScreen({
                   <Button
                     size="lg"
                     onClick={submit}
-                    disabled={creating || optimizingPrompt || (brief.trim().length === 0 && images.length === 0 && refs.length === 0)}
+                    disabled={creating || optimizingPrompt || (brief.trim().length === 0 && images.length === 0 && refs.length === 0 && homeContextItems.length === 0)}
                     aria-label="Design"
                     className="px-6 shadow-[0_8px_24px_-8px_color-mix(in_oklch,var(--primary)_60%,transparent)]"
                   >
