@@ -589,11 +589,11 @@ test("project agent composer cards serialize context at send time", async () => 
   fireEvent.click(screen.getByRole("button", { name: "Add" }));
 
   expect(await screen.findByText(".hero-title")).toBeInTheDocument();
-  expect(screen.getByRole("list", { name: "Attached context" })).toBeInTheDocument();
-  fireEvent.dragOver(screen.getByRole("list", { name: "Attached context" }), {
+  const rail = screen.getByRole("list", { name: "Attached context" });
+  fireEvent.dragOver(rail, {
     dataTransfer: { types: ["application/x-dezin-agent-context"], files: [] },
   });
-  expect(screen.queryByText("Drop files to attach")).toBeNull();
+  expect(screen.queryByText("Add files to this request")).toBeNull();
 
   fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Use the selected references" } });
   fireEvent.click(screen.getByLabelText("Send"));
@@ -605,6 +605,39 @@ test("project agent composer cards serialize context at send time", async () => 
   expect(input.brief).toContain("selector: `.hero-title`");
   expect(input.brief).toContain("Make this sharper");
   expect(screen.queryByRole("list", { name: "Attached context" })).toBeNull();
+});
+
+test("project composer shows an uploaded image in the attachment rail below its actions", async () => {
+  const refUrl = vi.fn(() => "data:image/png;base64,Y2xvdWQ=");
+  const fake = makeFakeApi({
+    uploadRef: async () => ({ name: "cloud.png", path: ".refs/cloud.png" }),
+    refUrl,
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const message = await screen.findByLabelText("Message");
+  const upload = screen.getByLabelText("Attach files");
+  fireEvent.change(upload, {
+    target: { files: [new File(["cloud"], "cloud.png", { type: "image/png" })] },
+  });
+
+  const rail = await screen.findByRole("list", { name: "Attached context" });
+  expect(within(rail).getByRole("img", { name: "cloud.png" })).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^data:image\/png;base64,/),
+  );
+  expect(refUrl).toHaveBeenCalledWith("p1", ".refs/cloud.png");
+  const actions = screen.getByTestId("project-composer-actions");
+  expect(actions.compareDocumentPosition(rail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  const remove = within(rail).getByLabelText("Remove cloud.png");
+  remove.focus();
+  fireEvent.click(remove);
+  await waitFor(() => expect(message).toHaveFocus());
 });
 
 test("completed runs collapse the interleaved process above the final summary", async () => {

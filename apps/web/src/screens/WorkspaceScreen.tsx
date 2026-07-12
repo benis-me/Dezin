@@ -2042,6 +2042,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [liveItems, setLiveItems] = useState<LiveItem[]>([]);
   const [input, setInput] = useState("");
   const [contextItems, setContextItems] = useState<WorkspaceContextItem[]>([]);
+  const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
@@ -4053,6 +4054,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             subtitle: ref.path,
             name: ref.name,
             path: ref.path,
+            previewUrl: file.type.startsWith("image/") ? api.refUrl(projectId, ref.path) : undefined,
+            mimeType: file.type || undefined,
+            size: file.size,
           },
         ]);
       } catch {
@@ -4504,18 +4508,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             }`}
           >
             {dragging ? (
-              <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl bg-card/90 text-sm font-medium text-foreground">
+              <div className="pointer-events-none absolute inset-1 z-10 grid place-items-center rounded-xl border border-dashed border-ring bg-card/90 text-sm font-medium text-foreground">
                 <span className="flex items-center gap-2">
                   <Paperclip size={15} strokeWidth={1.75} />
-                  Drop files to attach
+                  Add files to this request
                 </span>
               </div>
             ) : null}
-            <AgentComposerContextCards
-              items={contextItems}
-              onChange={setContextItems}
-              onRemove={(id) => setContextItems((items) => removeContextItem(items, id))}
-            />
             {queue.length ? (
               <TooltipProvider delayDuration={120}>
                 <div className="mb-2 rounded-lg border border-border bg-surface-2/60 p-1.5">
@@ -4605,6 +4604,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
               />
             ) : null}
             <textarea
+              ref={messageInputRef}
               aria-label="Message"
               rows={1}
               value={input}
@@ -4622,9 +4622,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     ? "Iterate on this design…"
                     : "Describe the design you want…"
               }
-              className="field-sizing-content max-h-40 min-h-[36px] w-full resize-none bg-transparent px-1 py-0.5 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
+              className="field-sizing-content max-h-40 min-h-[44px] w-full resize-none bg-transparent px-1 py-0.5 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
             />
-            <div className="mt-1 flex items-center justify-between gap-2">
+            <div data-testid="project-composer-actions" className="mt-1.5 flex items-center justify-between gap-2">
               <div className="flex items-center gap-0.5">
                 <AttachMenu
                   onAttachFile={isExisting ? () => fileInputRef.current?.click() : undefined}
@@ -4699,6 +4699,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                 </div>
               </TooltipProvider>
             </div>
+            <AgentComposerContextCards
+              className="mt-2.5"
+              items={contextItems}
+              onChange={setContextItems}
+              onRemove={(id) => {
+                setContextItems((items) => removeContextItem(items, id));
+                window.requestAnimationFrame(() => messageInputRef.current?.focus({ preventScroll: true }));
+              }}
+            />
           </div>
           </div>
         </div>
