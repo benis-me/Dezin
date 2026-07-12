@@ -78,6 +78,7 @@ The supplied image is a light-theme composer layout concept rather than a Dezin 
   - document width remains 390px
   - newest user message bottom 134.75 is above composer top 343.203; overlap is false
   - iteration 3 regression coverage confirms desktop -> narrow -> desktop preserves the loaded composer and preview iframe nodes, unsent draft/caret/focus, and stored desktop split preference
+  - iteration 4 regression coverage resizes the real narrow separator and confirms desktop restores its original panel size instead of reusing the vertical height ratio
 
 ## Moodboard Agent
 
@@ -96,6 +97,7 @@ The supplied image is a light-theme composer layout concept rather than a Dezin 
   - document width remains 390px
   - newest assistant message bottom 169.5 is above composer top 351.203; overlap is false
   - iteration 3 regression coverage confirms desktop -> narrow -> desktop preserves the loaded composer node, unsent draft/caret/focus, replayed canvas context insertion, and stored desktop split preference
+  - iteration 4 regression coverage resizes the real narrow separator and confirms desktop restores its original panel size instead of reusing the vertical height ratio
 
 ## Responsive and console
 
@@ -104,6 +106,7 @@ The supplied image is a light-theme composer layout concept rather than a Dezin 
 - page-level horizontal overflow: none
 - Project and Moodboard panel orientation below 640px: vertical; composer and artifact/canvas each receive full viewport width
 - breakpoint orientation changes update the outer groups in place without remounting their loaded descendants after iteration 3
+- horizontal and vertical layouts use separate stable panel-ID sequences after iteration 4, isolating the resizable-panel cache without React remount keys
 - page identity: Home, Project, and Moodboard all reported title `Dezin` and their expected meaningful heading/textbox
 - blank-page check: passed on all three surfaces
 - framework overlay check: none on all three surfaces
@@ -160,6 +163,16 @@ The local QA projects intentionally have no generated preview run. For the final
 - GREEN: the two focused files passed `120/120`; desktop -> narrow -> desktop retained composer and preview identity, transient draft/context/caret/focus state, and both stored desktop split preferences.
 - verification boundary: focused suites and `git diff --check`; full CI was not rerun for this review follow-up by instruction.
 
+### Iteration 4 - Orientation-specific layout cache
+
+- finding: Important responsive-state regression. `react-resizable-panels` caches layouts by the ordered panel-ID sequence, not by orientation, so the preserved Group instance could reuse a user-resized narrow height ratio as the next desktop width ratio.
+- test harness: both loaded-state tests provide nonzero panel dimensions, focus the rendered separator, and dispatch its supported vertical `ArrowDown` resize path; no imperative test-only production API is used.
+- RED: the focused files failed `2 failed, 118 passed`; Moodboard restored `42` instead of desktop `37`, and Workspace restored `45` instead of desktop `31` after a narrow resize.
+- root cause: desktop and narrow groups retained the same `agent,canvas` / `conversation,artifact` panel-ID sequences, which are the library's in-memory layout cache keys.
+- fix: retain unkeyed Groups and stable React positions, but give the narrow panels separate stable IDs and build each orientation's default/persistence layout against its matching IDs. Narrow callbacks remain excluded from desktop local-storage persistence.
+- GREEN: the two focused files passed `120/120`; the original desktop sizes return after a real narrow resize while composer, preview, draft, caret, Moodboard context insertion, and stored desktop split preferences remain intact.
+- verification boundary: focused suites and `git diff --check`; full CI was not rerun for this review follow-up by instruction.
+
 ## Findings
 
 - No remaining actionable P0, P1, or P2 findings.
@@ -173,5 +186,6 @@ The local QA projects intentionally have no generated preview run. For the final
 - `git diff --check`: clean
 - `pnpm run ci`: exit 0; coverage suites passed; `PROCESS LEAKS: PASS`; bundle passed; production audit reported no known vulnerabilities
 - post-review lifecycle regression: focused Project/Moodboard screen files passed, 120 tests passed
+- post-review orientation-cache regression: focused Project/Moodboard screen files passed, 120 tests passed
 
 final result: passed

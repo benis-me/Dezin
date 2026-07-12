@@ -112,6 +112,15 @@ function installMutableMoodboardViewport(initialMatches = false) {
   };
 }
 
+function installMoodboardPanelDimensions() {
+  const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
+  const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(400);
+  return () => {
+    width.mockRestore();
+    height.mockRestore();
+  };
+}
+
 test("MoodboardCanvasTopbar mirrors the project artifact bar shape", () => {
   const onOpenModelSettings = vi.fn();
   const controls = {
@@ -219,8 +228,9 @@ test("MoodboardScreen stacks its panels vertically at narrow viewports", async (
   }
 });
 
-test("MoodboardScreen preserves loaded composer identity and draft across the narrow breakpoint", async () => {
+test("MoodboardScreen preserves its loaded composer and desktop layout across a narrow resize", async () => {
   const viewport = installMutableMoodboardViewport();
+  const restorePanelDimensions = installMoodboardPanelDimensions();
   mockMoodboardState.current = loadedMoodboardState();
   localStorage.setItem("dezin.moodboard.agent.width", "0.37");
   try {
@@ -235,6 +245,10 @@ test("MoodboardScreen preserves loaded composer identity and draft across the na
     fireEvent.click(screen.getByRole("button", { name: "Send mock node to agent" }));
     await screen.findByRole("list", { name: "Attached context" });
     const message = screen.getByLabelText("Message");
+    const separator = screen.getByRole("separator", { name: "Resize moodboard agent panel" });
+    expect(separator).toHaveAttribute("aria-orientation", "vertical");
+    const desktopAgentSize = Number(separator.getAttribute("aria-valuenow"));
+    expect(desktopAgentSize).toBeGreaterThan(0);
     fireEvent.change(message, { target: { value: "Unsent moodboard draft" } });
     message.focus();
     message.setSelectionRange(6, 6);
@@ -243,6 +257,7 @@ test("MoodboardScreen preserves loaded composer identity and draft across the na
     await waitFor(() =>
       expect(screen.getByRole("separator", { name: "Resize moodboard agent panel" })).toHaveAttribute("aria-orientation", "horizontal"),
     );
+    expect(screen.getByRole("separator", { name: "Resize moodboard agent panel" })).toBe(separator);
     expect(screen.getByLabelText("Message")).toBe(message);
     expect(message).toHaveValue("Unsent moodboard draft");
     expect(message).toHaveFocus();
@@ -250,16 +265,30 @@ test("MoodboardScreen preserves loaded composer identity and draft across the na
     expect(screen.getAllByRole("listitem")).toHaveLength(1);
     expect(localStorage.getItem("dezin.moodboard.agent.width")).toBe("0.37");
 
+    const narrowAgentSize = Number(separator.getAttribute("aria-valuenow"));
+    act(() => {
+      separator.focus();
+      fireEvent.keyDown(separator, { key: "ArrowDown" });
+    });
+    await waitFor(() => expect(Number(separator.getAttribute("aria-valuenow"))).toBeGreaterThan(narrowAgentSize));
+    const resizedNarrowAgentSize = Number(separator.getAttribute("aria-valuenow"));
+
     act(() => viewport.setMatches(false));
     await waitFor(() =>
       expect(screen.getByRole("separator", { name: "Resize moodboard agent panel" })).toHaveAttribute("aria-orientation", "vertical"),
     );
+    expect(screen.getByRole("separator", { name: "Resize moodboard agent panel" })).toBe(separator);
+    expect(Number(separator.getAttribute("aria-valuenow"))).toBe(desktopAgentSize);
+    expect(Number(separator.getAttribute("aria-valuenow"))).not.toBe(resizedNarrowAgentSize);
     expect(screen.getByLabelText("Message")).toBe(message);
+    expect(message).toHaveValue("Unsent moodboard draft");
+    expect(message.selectionStart).toBe(6);
     expect(screen.getAllByRole("listitem")).toHaveLength(1);
     expect(localStorage.getItem("dezin.moodboard.agent.width")).toBe("0.37");
   } finally {
     mockMoodboardState.current = { loading: true, detail: null };
     localStorage.removeItem("dezin.moodboard.agent.width");
     viewport.restore();
+    restorePanelDimensions();
   }
 });

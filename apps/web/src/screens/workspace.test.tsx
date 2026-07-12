@@ -64,6 +64,15 @@ function installMutableNarrowViewport(initialMatches = false) {
   };
 }
 
+function installWorkspacePanelDimensions() {
+  const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(600);
+  const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(400);
+  return () => {
+    width.mockRestore();
+    height.mockRestore();
+  };
+}
+
 test("workspace helper modules preserve transcript and version ordering semantics", () => {
   expect(runCardStackPosition(0, 1)).toBe("single");
   expect(
@@ -132,8 +141,9 @@ test("workspace stacks its panels vertically at narrow viewports", async () => {
   }
 });
 
-test("workspace preserves loaded preview and composer identity across the narrow breakpoint", async () => {
+test("workspace preserves its loaded preview and desktop layout across a narrow resize", async () => {
   const viewport = installMutableNarrowViewport();
+  const restorePanelDimensions = installWorkspacePanelDimensions();
   localStorage.setItem("dezin.workspace.split", "0.31");
   try {
     render(
@@ -148,6 +158,10 @@ test("workspace preserves loaded preview and composer identity across the narrow
 
     const message = await screen.findByLabelText("Message");
     const preview = await screen.findByTitle("Artifact preview");
+    const separator = screen.getByRole("separator", { name: "Resize panels" });
+    expect(separator).toHaveAttribute("aria-orientation", "vertical");
+    const desktopConversationSize = Number(separator.getAttribute("aria-valuenow"));
+    expect(desktopConversationSize).toBeGreaterThan(0);
     fireEvent.change(message, { target: { value: "Unsent breakpoint draft" } });
     message.focus();
     message.setSelectionRange(7, 7);
@@ -156,6 +170,7 @@ test("workspace preserves loaded preview and composer identity across the narrow
     await waitFor(() =>
       expect(screen.getByRole("separator", { name: "Resize panels" })).toHaveAttribute("aria-orientation", "horizontal"),
     );
+    expect(screen.getByRole("separator", { name: "Resize panels" })).toBe(separator);
     expect(screen.getByLabelText("Message")).toBe(message);
     expect(screen.getByTitle("Artifact preview")).toBe(preview);
     expect(message).toHaveValue("Unsent breakpoint draft");
@@ -163,16 +178,30 @@ test("workspace preserves loaded preview and composer identity across the narrow
     expect(message.selectionStart).toBe(7);
     expect(localStorage.getItem("dezin.workspace.split")).toBe("0.31");
 
+    const narrowConversationSize = Number(separator.getAttribute("aria-valuenow"));
+    act(() => {
+      separator.focus();
+      fireEvent.keyDown(separator, { key: "ArrowDown" });
+    });
+    await waitFor(() => expect(Number(separator.getAttribute("aria-valuenow"))).toBeGreaterThan(narrowConversationSize));
+    const resizedNarrowConversationSize = Number(separator.getAttribute("aria-valuenow"));
+
     act(() => viewport.setMatches(false));
     await waitFor(() =>
       expect(screen.getByRole("separator", { name: "Resize panels" })).toHaveAttribute("aria-orientation", "vertical"),
     );
+    expect(screen.getByRole("separator", { name: "Resize panels" })).toBe(separator);
+    expect(Number(separator.getAttribute("aria-valuenow"))).toBe(desktopConversationSize);
+    expect(Number(separator.getAttribute("aria-valuenow"))).not.toBe(resizedNarrowConversationSize);
     expect(screen.getByLabelText("Message")).toBe(message);
     expect(screen.getByTitle("Artifact preview")).toBe(preview);
+    expect(message).toHaveValue("Unsent breakpoint draft");
+    expect(message.selectionStart).toBe(7);
     expect(localStorage.getItem("dezin.workspace.split")).toBe("0.31");
   } finally {
     localStorage.removeItem("dezin.workspace.split");
     viewport.restore();
+    restorePanelDimensions();
   }
 });
 

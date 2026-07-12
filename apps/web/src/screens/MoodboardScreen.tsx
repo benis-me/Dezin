@@ -15,6 +15,8 @@ import { useMediaQuery } from "../hooks/useMediaQuery.ts";
 
 const MOODBOARD_AGENT_PANEL = "agent";
 const MOODBOARD_CANVAS_PANEL = "canvas";
+const MOODBOARD_NARROW_AGENT_PANEL = "agent-narrow";
+const MOODBOARD_NARROW_CANVAS_PANEL = "canvas-narrow";
 const MOODBOARD_AGENT_WIDTH_KEY = "dezin.moodboard.agent.width";
 
 export function MoodboardScreen({
@@ -27,6 +29,8 @@ export function MoodboardScreen({
   onOpenSettings: (section?: string) => void;
 }) {
   const narrowLayout = useMediaQuery("(max-width: 639px)");
+  const agentPanelId = narrowLayout ? MOODBOARD_NARROW_AGENT_PANEL : MOODBOARD_AGENT_PANEL;
+  const canvasPanelId = narrowLayout ? MOODBOARD_NARROW_CANVAS_PANEL : MOODBOARD_CANVAS_PANEL;
   const agentPercent =
     readStoredPanelPercent(MOODBOARD_AGENT_WIDTH_KEY, 20, 44) ??
     panelPercentFromPixels(400, typeof window === "undefined" ? 0 : window.innerWidth, 28, 20, 44);
@@ -63,14 +67,14 @@ export function MoodboardScreen({
         <Group
           id="dezin-moodboard-layout-loading"
           className="min-h-0 flex-1"
-          defaultLayout={twoPanelLayout(MOODBOARD_AGENT_PANEL, narrowLayout ? 55 : agentPercent, MOODBOARD_CANVAS_PANEL)}
+          defaultLayout={twoPanelLayout(agentPanelId, narrowLayout ? 55 : agentPercent, canvasPanelId)}
           onLayoutChanged={(layout) => {
-            if (!narrowLayout) savePanelFraction(MOODBOARD_AGENT_WIDTH_KEY, layout, MOODBOARD_AGENT_PANEL);
+            if (!narrowLayout) savePanelFraction(MOODBOARD_AGENT_WIDTH_KEY, layout, agentPanelId);
           }}
           orientation={narrowLayout ? "vertical" : "horizontal"}
           resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
         >
-          <Panel id={MOODBOARD_AGENT_PANEL} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
+          <Panel id={agentPanelId} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
             <MoodboardAgentPanel
               loading
               boardName="Moodboard"
@@ -87,7 +91,7 @@ export function MoodboardScreen({
             />
           </Panel>
           <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
-          <Panel id={MOODBOARD_CANVAS_PANEL} minSize={narrowLayout ? "240px" : "480px"}>
+          <Panel id={canvasPanelId} minSize={narrowLayout ? "240px" : "480px"}>
             <section aria-label="Moodboard canvas" className="flex h-full min-w-0 flex-col">
               <MoodboardCanvasTopbar loading />
               <div className="relative min-h-0 flex-1 overflow-hidden bg-surface">
@@ -118,14 +122,14 @@ export function MoodboardScreen({
       <Group
         id="dezin-moodboard-layout"
         className="min-h-0 flex-1"
-        defaultLayout={twoPanelLayout(MOODBOARD_AGENT_PANEL, narrowLayout ? 55 : agentPercent, MOODBOARD_CANVAS_PANEL)}
+        defaultLayout={twoPanelLayout(agentPanelId, narrowLayout ? 55 : agentPercent, canvasPanelId)}
         onLayoutChanged={(layout) => {
-          if (!narrowLayout) savePanelFraction(MOODBOARD_AGENT_WIDTH_KEY, layout, MOODBOARD_AGENT_PANEL);
+          if (!narrowLayout) savePanelFraction(MOODBOARD_AGENT_WIDTH_KEY, layout, agentPanelId);
         }}
         orientation={narrowLayout ? "vertical" : "horizontal"}
         resizeTargetMinimumSize={{ coarse: 20, fine: 8 }}
       >
-        <Panel id={MOODBOARD_AGENT_PANEL} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
+        <Panel id={agentPanelId} minSize="280px" maxSize="520px" defaultSize={agentPercent} groupResizeBehavior="preserve-pixel-size">
           <MoodboardAgentPanel
             boardName={board.detail.name}
             messages={board.messages}
@@ -152,7 +156,7 @@ export function MoodboardScreen({
           />
         </Panel>
         <Separator aria-label="Resize moodboard agent panel" className={RESIZE_SEPARATOR_CLASS} />
-        <Panel id={MOODBOARD_CANVAS_PANEL} minSize={narrowLayout ? "240px" : "480px"}>
+        <Panel id={canvasPanelId} minSize={narrowLayout ? "240px" : "480px"}>
           <section aria-label="Moodboard canvas" className="flex h-full min-w-0 flex-col">
             <MoodboardCanvasTopbar
               controls={canvasTopbarControls}
