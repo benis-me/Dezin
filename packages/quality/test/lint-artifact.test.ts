@@ -499,8 +499,7 @@ test("Sharingan external-media lint preserves protocol-relative CSS URLs while s
   const surface = String.raw`
     /* file: src/theme.css */
     /* retired: background-image: url(https://old.example.test/hero.webp); */
-    .note::after { content: "escaped \" // still CSS text"; }
-    .hero { background-image: url(//cdn.example.test/hero.webp); }
+    .note::after { content: "escaped \" // still CSS text"; } .hero { background-image: url(//cdn.example.test/hero.webp); }
   `;
 
   assert.ok(has(lintArtifact(surface, { mode: "standard", isSharingan: true }), "sharingan-external-media"));
@@ -519,7 +518,7 @@ test("Sharingan external-media lint follows a multiline media initializer throug
 
 test("Sharingan external-media lint parses escaped quotes inside collection media values", () => {
   const surface = String.raw`
-    const cards = [{ url: "https://images.example.test/render?caption=\"source\"" }];
+    const cards = [{ caption: "quoted \"source\"", url: "https://images.example.test/render?id=42" }];
     export default function App(){ return <img src={cards[0].url} alt="Hero" />; }
   `;
 

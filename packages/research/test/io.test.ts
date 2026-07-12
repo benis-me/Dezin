@@ -13,6 +13,8 @@ import {
   readChosenDirection,
   readReport,
   readSources,
+  readVisualMoodboardId,
+  readVisualSources,
   resetResearchBundle,
   researchExists,
   validateResearchBundle,
@@ -21,6 +23,7 @@ import {
   writeChosenDirection,
   writeReport,
   writeSources,
+  writeVisualMoodboardId,
 } from "../src/io.ts";
 import type { ResearchBrief, ResearchSource } from "../src/types.ts";
 
@@ -110,11 +113,18 @@ test("resetResearchBundle removes generated outputs while preserving the distill
   await mkdir(join(dir, ".research", "visual", "assets"), { recursive: true });
   await writeFile(join(dir, ".research", "visual", "visual.md"), "# Visual research\n\nGenerated visual research.");
   await writeFile(join(dir, ".research", "visual", "assets", "visual.png"), "generated");
+  await writeFile(
+    join(dir, ".research", "visual", "sources.json"),
+    `${JSON.stringify([{ ...sources[0], id: "visual-source", kind: "inspiration", reached: true }])}\n`,
+  );
+  await writeVisualMoodboardId(dir, "moodboard-1");
   await mkdir(join(dir, ".research", "directions", "calm-editorial"), { recursive: true });
   await writeFile(join(dir, ".research", "directions", "calm-editorial", "direction.md"), "# Calm editorial\n\nCandidate direction.");
   await writeChosenDirection(dir, "calm-editorial");
 
   assert.deepEqual(await readSources(dir), sources);
+  assert.equal((await readVisualSources(dir))[0]?.id, "visual-source");
+  assert.equal(await readVisualMoodboardId(dir), "moodboard-1");
   await resetResearchBundle(dir);
 
   assert.deepEqual(await readBrief(dir), brief);
@@ -122,6 +132,8 @@ test("resetResearchBundle removes generated outputs while preserving the distill
   assert.deepEqual(await readSources(dir), []);
   assert.deepEqual(await listAssets(dir), []);
   assert.deepEqual(await listVisualAssets(dir), []);
+  assert.deepEqual(await readVisualSources(dir), []);
+  assert.equal(await readVisualMoodboardId(dir), null);
   assert.deepEqual(await listDirections(dir), []);
   assert.equal(await readChosenDirection(dir), null);
   assert.equal(researchExists(dir), false);
@@ -273,6 +285,51 @@ test("validateResearchBundle accepts every supported image format when its file 
   );
 
   assert.deepEqual(await validateResearchBundle(dir), { complete: true, issues: [] });
+});
+
+test("validateResearchBundle rejects every supported image extension when its file signature is invalid", async () => {
+  const dir = await project();
+  await ensureResearchScaffold(dir);
+  await writeCompleteResearchTrack(dir, "product", "product.png");
+  await writeCompleteResearchTrack(dir, "visual", "visual.png");
+  await writeMeaningfulDirection(dir, "calm-editorial");
+  await writeMeaningfulDirection(dir, "focused-console");
+  const invalidImages: Array<[string, Buffer]> = [
+    ["invalid.svg", Buffer.from("<svx></svx>")],
+    ["invalid.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x00])],
+    ["invalid.jpg", Buffer.from([0xff, 0xd8, 0x00])],
+    ["invalid.jpeg", Buffer.from([0xff, 0xd8, 0x00])],
+    ["invalid.gif", Buffer.from("GIFF")],
+    ["invalid.webp", Buffer.from("RIFF0000NOPE")],
+    ["invalid.bmp", Buffer.from("BZ")],
+    ["invalid.ico", Buffer.from([0x00, 0x00, 0x02, 0x00])],
+    ["invalid.avif", Buffer.concat([Buffer.alloc(4), Buffer.from("ftypmp42")])],
+  ];
+  for (const [name, contents] of invalidImages) {
+    await writeFile(join(dir, ".research", "assets", name), contents);
+  }
+  await writeFile(
+    join(dir, ".research", "sources.json"),
+    `${JSON.stringify([
+      {
+        id: "product-source",
+        kind: "inspiration",
+        title: "Product source",
+        url: "https://example.com/product",
+        authority: "primary",
+        takeaways: ["A concrete, source-grounded design takeaway."],
+        assets: ["assets/product.png", ...invalidImages.map(([name]) => `assets/${name}`)],
+      },
+    ])}\n`,
+  );
+
+  const result = await validateResearchBundle(dir);
+  const invalidPaths = new Set(
+    result.issues.filter((issue) => issue.code === "product-asset-invalid").map((issue) => issue.path),
+  );
+
+  assert.equal(result.complete, false);
+  assert.deepEqual(invalidPaths, new Set(invalidImages.map(([name]) => `assets/${name}`)));
 });
 
 test("validateResearchBundle rejects unsupported evidence formats in both product and visual tracks", async () => {

@@ -503,7 +503,16 @@ function initTransactionRepository(): { dataDir: string; sourceDir: string; sour
 
 function commitFixture(dir: string, message: string): string {
   execFileSync("git", ["add", "-A"], { cwd: dir });
-  execFileSync("git", ["commit", "-qm", message], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", message], {
+    cwd: dir,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Dezin Tests",
+      GIT_AUTHOR_EMAIL: "dezin-tests@local",
+      GIT_COMMITTER_NAME: "Dezin Tests",
+      GIT_COMMITTER_EMAIL: "dezin-tests@local",
+    },
+  });
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
 }
 
