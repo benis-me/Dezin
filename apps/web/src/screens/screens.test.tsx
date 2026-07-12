@@ -503,7 +503,7 @@ test("HomeScreen keeps local paths and imported fig context structured until Des
 
   await waitFor(() => expect(parseFig).toHaveBeenCalledWith(fig, "brand.fig"));
   expect(await within(rail).findByText("Imported context")).toBeInTheDocument();
-  expect(screen.getByLabelText("Describe your design")).not.toHaveValue(expect.stringContaining("Use these local paths"));
+  expect(screen.getByLabelText("Describe your design")).toHaveValue("");
   expect(screen.getByLabelText("Design")).toBeEnabled();
 
   fireEvent.click(screen.getByLabelText("Design"));

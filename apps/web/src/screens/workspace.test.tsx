@@ -607,11 +607,19 @@ test("project agent composer cards serialize context at send time", async () => 
   expect(screen.queryByRole("list", { name: "Attached context" })).toBeNull();
 });
 
-test("project composer shows an uploaded image in the attachment rail below its actions", async () => {
-  const refUrl = vi.fn(() => "data:image/png;base64,Y2xvdWQ=");
+test("project composer presents uploaded image metadata and serializes only its stored reference", async () => {
+  const displayPreviewUrl = "data:image/png;base64,Y2xvdWQ=";
+  const refUrl = vi.fn(() => displayPreviewUrl);
+  const streamRun = vi.fn((_input: { brief: string }) =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-upload", conversationId: "c1" };
+      yield { type: "run-done", runId: "r-upload", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+    })(),
+  );
   const fake = makeFakeApi({
     uploadRef: async () => ({ name: "cloud.png", path: ".refs/cloud.png" }),
     refUrl,
+    streamRun: streamRun as never,
   });
   render(
     <ApiProvider client={fake}>
@@ -619,7 +627,7 @@ test("project composer shows an uploaded image in the attachment rail below its 
     </ApiProvider>,
   );
 
-  const message = await screen.findByLabelText("Message");
+  await screen.findByLabelText("Message");
   const upload = screen.getByLabelText("Attach files");
   fireEvent.change(upload, {
     target: { files: [new File(["cloud"], "cloud.png", { type: "image/png" })] },
@@ -630,10 +638,36 @@ test("project composer shows an uploaded image in the attachment rail below its 
     "src",
     expect.stringMatching(/^data:image\/png;base64,/),
   );
+  expect(within(rail).getByText("Image")).toBeInTheDocument();
+  expect(within(rail).getByText("· 5 bytes")).toBeInTheDocument();
   expect(refUrl).toHaveBeenCalledWith("p1", ".refs/cloud.png");
   const actions = screen.getByTestId("project-composer-actions");
   expect(actions.compareDocumentPosition(rail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
+  fireEvent.click(screen.getByLabelText("Send"));
+  await waitFor(() => expect(streamRun).toHaveBeenCalled());
+  const input = streamRun.mock.calls[0]![0] as { brief: string };
+  expect(input.brief).toContain("Reference files (read them from disk): .refs/cloud.png");
+  expect(input.brief).not.toContain(displayPreviewUrl);
+});
+
+test("project composer returns focus to the message after removing an uploaded image", async () => {
+  const fake = makeFakeApi({
+    uploadRef: async () => ({ name: "cloud.png", path: ".refs/cloud.png" }),
+    refUrl: () => "data:image/png;base64,Y2xvdWQ=",
+  });
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const message = await screen.findByLabelText("Message");
+  fireEvent.change(screen.getByLabelText("Attach files"), {
+    target: { files: [new File(["cloud"], "cloud.png", { type: "image/png" })] },
+  });
+
+  const rail = await screen.findByRole("list", { name: "Attached context" });
   const remove = within(rail).getByLabelText("Remove cloud.png");
   remove.focus();
   fireEvent.click(remove);

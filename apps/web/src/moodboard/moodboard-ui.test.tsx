@@ -1959,8 +1959,14 @@ test("MoodboardAgentPanel renders canvas insertion as a removable sendable conte
   });
   expect(screen.queryByText("Add images to this moodboard")).toBeNull();
 
+  const draft = "Keep this direction";
+  fireEvent.change(message, { target: { value: draft } });
   fireEvent.click(within(rail).getByLabelText("Remove Material tone"));
   await waitFor(() => expect(message).toHaveFocus());
+  expect(message).toHaveValue(draft);
+  expect(message.selectionStart).toBe(draft.length);
+  expect(message.selectionEnd).toBe(draft.length);
+  fireEvent.change(message, { target: { value: "" } });
 
   rerender(
     <ApiProvider client={makeFakeApi()}>
