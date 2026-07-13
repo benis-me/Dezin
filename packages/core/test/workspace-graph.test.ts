@@ -34,6 +34,37 @@ function graphWith(...nodes: WorkspaceNode[]): WorkspaceGraph {
   return { workspaceId: WORKSPACE_ID, revision: 0, nodes, edges: [] };
 }
 
+function graphWithQuality(quality: unknown): WorkspaceGraph {
+  return graphWith({ ...pageNode("page-1"), quality } as unknown as WorkspaceNode);
+}
+
+function largeComponentGraph(size: number, cycleTarget?: number): WorkspaceGraph {
+  const nodes = new Array<WorkspaceNode>(size);
+  const edges: WorkspaceGraph["edges"] = new Array(size - 1 + (cycleTarget === undefined ? 0 : 1));
+  for (let index = 0; index < size; index += 1) {
+    nodes[index] = componentNode(`component-${index}`);
+    if (index > 0) {
+      edges[index - 1] = {
+        id: `uses-${index - 1}-${index}`,
+        workspaceId: WORKSPACE_ID,
+        kind: "uses",
+        sourceNodeId: `component-${index - 1}`,
+        targetNodeId: `component-${index}`,
+      };
+    }
+  }
+  if (cycleTarget !== undefined) {
+    edges[edges.length - 1] = {
+      id: `uses-${size - 1}-${cycleTarget}`,
+      workspaceId: WORKSPACE_ID,
+      kind: "uses",
+      sourceNodeId: `component-${size - 1}`,
+      targetNodeId: `component-${cycleTarget}`,
+    };
+  }
+  return { workspaceId: WORKSPACE_ID, revision: 0, nodes, edges };
+}
+
 function addEdgeCommand(id: string, edge: NewWorkspaceEdge): WorkspaceGraphCommand {
   return { id, type: "add-edge", edge };
 }
@@ -821,34 +852,125 @@ test("graph root, nodes, and edges reject unknown fields", () => {
   assert.throws(() => validateWorkspaceGraph(graphWithExtraEdge), WorkspaceGraphValidationError);
 });
 
-test("artifact quality accepts finite acyclic JSON data and rejects unsafe payloads", () => {
-  const valid = graphWith({
-    id: "page-1",
-    workspaceId: WORKSPACE_ID,
-    kind: "page",
-    name: "page-1",
-    artifactId: "artifact-page-1",
-    quality: { state: "unassessed" as const, score: null, findings: [] },
+test("artifact quality codec reconstructs valid summaries without trimming content", () => {
+  const quality = Object.freeze({
+    state: "needs-attention" as const,
+    score: 82.5,
+    findings: Object.freeze([Object.freeze({
+      severity: "P1" as const,
+      id: "finding-1",
+      message: "  preserve message whitespace  ",
+      fix: "  preserve fix whitespace  ",
+      snippet: "  <button>Buy</button>  ",
+      selector: "  [data-buy]  ",
+      screenshotPath: "  screenshots/buy.png  ",
+      screenshotUrl: "  https://example.test/buy.png  ",
+      reviewSummary: "  needs another pass  ",
+      reviewStatus: "active" as const,
+      reviewRound: 2,
+      corroborated: false,
+    })]),
   });
-  assert.doesNotThrow(() => validateWorkspaceGraph(valid));
+  const graph = graphWithQuality(quality);
+  const before = structuredClone(graph);
 
-  const unsafeValues: unknown[] = [
-    { state: "unassessed", score: Number.POSITIVE_INFINITY, findings: [] },
-    { state: "unassessed", score: null, findings: [], callback: () => {} },
+  const next = applyWorkspaceGraphCommands(graph, [
+    { id: "command-rename", type: "rename-node", nodeId: "page-1", name: "Renamed" },
+  ]);
+
+  assert.deepEqual(graph, before);
+  const qualityNode = next.nodes[0];
+  assert.ok(qualityNode?.kind === "page");
+  assert.deepEqual(qualityNode.quality, quality);
+  assert.doesNotThrow(() => validateWorkspaceGraph(graphWithQuality({
+    state: "unassessed",
+    score: null,
+    findings: [],
+  })));
+});
+
+test("artifact quality summary rejects missing, unknown, and invalid fields", () => {
+  const sparseFindings = new Array(1);
+  const invalidSummaries: unknown[] = [
+    null,
+    [],
+    { state: "unassessed", score: null, findings: [], extra: true },
+    { score: null, findings: [] },
+    { state: undefined, score: null, findings: [] },
+    { state: " passed ", score: null, findings: [] },
+    { state: "unknown", score: null, findings: [] },
+    { state: "passed", findings: [] },
+    { state: "passed", score: undefined, findings: [] },
+    { state: "passed", score: Number.NaN, findings: [] },
+    { state: "passed", score: Number.POSITIVE_INFINITY, findings: [] },
+    { state: "passed", score: "100", findings: [] },
+    { state: "passed", score: null },
+    { state: "passed", score: null, findings: undefined },
+    { state: "passed", score: null, findings: {} },
+    { state: "passed", score: null, findings: sparseFindings },
   ];
-  const cyclic: Record<string, unknown> = { state: "unassessed", score: null, findings: [] };
-  cyclic.self = cyclic;
-  unsafeValues.push(cyclic);
-  for (const quality of unsafeValues) {
-    const graph = graphWith({ ...pageNode("page-1"), quality } as unknown as WorkspaceNode);
-    assert.throws(() => validateWorkspaceGraph(graph), WorkspaceGraphValidationError);
-    assert.throws(
-      () => applyWorkspaceGraphCommands(graph, [
-        { id: "command-rename", type: "rename-node", nodeId: "page-1", name: "Renamed" },
-      ]),
-      WorkspaceGraphValidationError,
-    );
+
+  for (const quality of invalidSummaries) {
+    assert.throws(() => validateWorkspaceGraph(graphWithQuality(quality)), WorkspaceGraphValidationError);
   }
+});
+
+test("artifact quality findings enforce the complete core contract", () => {
+  const validFinding = {
+    severity: "P2",
+    id: "finding-1",
+    message: "message",
+    fix: "fix",
+  };
+  const invalidFindings: unknown[] = [
+    null,
+    [],
+    { ...validFinding, extra: true },
+    { id: "finding-1", message: "message", fix: "fix" },
+    { severity: "P2", message: "message", fix: "fix" },
+    { severity: "P2", id: "finding-1", fix: "fix" },
+    { severity: "P2", id: "finding-1", message: "message" },
+    { ...validFinding, severity: undefined },
+    { ...validFinding, severity: " P2 " },
+    { ...validFinding, severity: "P3" },
+    { ...validFinding, id: undefined },
+    { ...validFinding, id: " finding-1 " },
+    { ...validFinding, id: "" },
+    { ...validFinding, message: undefined },
+    { ...validFinding, message: 1 },
+    { ...validFinding, fix: undefined },
+    { ...validFinding, fix: false },
+    { ...validFinding, snippet: undefined },
+    { ...validFinding, selector: 1 },
+    { ...validFinding, screenshotPath: null },
+    { ...validFinding, screenshotUrl: false },
+    { ...validFinding, reviewSummary: 1 },
+    { ...validFinding, reviewStatus: undefined },
+    { ...validFinding, reviewStatus: " active " },
+    { ...validFinding, reviewStatus: "pending" },
+    { ...validFinding, reviewRound: undefined },
+    { ...validFinding, reviewRound: -1 },
+    { ...validFinding, reviewRound: 1.5 },
+    { ...validFinding, reviewRound: Number.MAX_SAFE_INTEGER + 1 },
+    { ...validFinding, corroborated: undefined },
+    { ...validFinding, corroborated: "true" },
+  ];
+
+  for (const finding of invalidFindings) {
+    const quality = { state: "failed", score: 0, findings: [finding] };
+    assert.throws(() => validateWorkspaceGraph(graphWithQuality(quality)), WorkspaceGraphValidationError);
+  }
+});
+
+test("component dependency validation accepts a 5,000-node acyclic chain", () => {
+  assert.doesNotThrow(() => validateWorkspaceGraph(largeComponentGraph(5_000)));
+});
+
+test("component dependency validation reports a deep cycle as a graph validation error", () => {
+  assert.throws(
+    () => validateWorkspaceGraph(largeComponentGraph(5_000, 2_500)),
+    WorkspaceGraphValidationError,
+  );
 });
 
 test("frozen and null-prototype JSON-shaped commands remain accepted", () => {

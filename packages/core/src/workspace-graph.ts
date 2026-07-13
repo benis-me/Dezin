@@ -40,6 +40,9 @@ const RESOURCE_PIN_POLICIES: readonly ResourcePinPolicy[] = ["follow-head", "pin
 const PROTOTYPE_TRIGGERS = ["click", "submit"] as const;
 const PROTOTYPE_TRANSITIONS = ["none", "fade", "slide"] as const;
 const PROTOTYPE_STATUSES = ["planned", "interactive", "broken"] as const;
+const ARTIFACT_QUALITY_STATES = ["passed", "needs-attention", "failed", "unassessed"] as const;
+const QUALITY_FINDING_SEVERITIES = ["P0", "P1", "P2"] as const;
+const QUALITY_REVIEW_STATUSES = ["active", "resolved"] as const;
 const OBJECT_PROTOTYPE_KEYS = new Set(Reflect.ownKeys(Object.prototype));
 const ARRAY_PROTOTYPE_KEYS = new Set(Reflect.ownKeys(Array.prototype));
 
@@ -167,6 +170,11 @@ function exactString(value: unknown, label: string): string {
   const canonical = canonicalString(value, label);
   if (canonical !== value) invalid(`${label} must not have surrounding whitespace`);
   return canonical;
+}
+
+function contentString(value: unknown, label: string): string {
+  if (typeof value !== "string") invalid(`${label} must be a string`);
+  return value;
 }
 
 function optionalCanonicalString(value: unknown, label: string): string | undefined {
@@ -308,44 +316,95 @@ function validateCanonicalPrototypeBinding(value: unknown): PrototypeBinding {
   };
 }
 
-function snapshotJsonValue(
-  value: unknown,
+function optionalFindingString(
+  finding: UnknownRecord,
+  field: "snippet" | "selector" | "screenshotPath" | "screenshotUrl" | "reviewSummary",
   label: string,
-  ancestors = new Set<object>(),
-  depth = 0,
-): unknown {
-  if (depth > 100) invalid(`${label} exceeds the maximum JSON depth`);
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) invalid(`${label} numbers must be finite`);
-    return value;
-  }
-  if (typeof value !== "object") invalid(`${label} must contain only JSON-shaped data`);
-  if (ancestors.has(value)) invalid(`${label} must be acyclic`);
-  ancestors.add(value);
-  try {
-    if (isArrayBoundary(value, label)) {
-      const items = requireDenseArray(value, label);
-      const snapshot = new Array<unknown>(items.length);
-      for (let index = 0; index < items.length; index += 1) {
-        snapshot[index] = snapshotJsonValue(items[index], `${label}[${index}]`, ancestors, depth + 1);
-      }
-      return snapshot;
+): string | undefined {
+  if (!Object.hasOwn(finding, field)) return undefined;
+  return contentString(finding[field], `${label} ${field}`);
+}
+
+function validateQualityFinding(
+  value: unknown,
+  index: number,
+): ArtifactQualitySummary["findings"][number] {
+  const label = `artifact quality finding at index ${index}`;
+  const finding = requireRecord(value, label);
+  rejectUnexpectedFields(
+    finding,
+    [
+      "severity",
+      "id",
+      "message",
+      "fix",
+      "snippet",
+      "selector",
+      "screenshotPath",
+      "screenshotUrl",
+      "reviewSummary",
+      "reviewStatus",
+      "reviewRound",
+      "corroborated",
+    ],
+    label,
+  );
+
+  const snippet = optionalFindingString(finding, "snippet", label);
+  const selector = optionalFindingString(finding, "selector", label);
+  const screenshotPath = optionalFindingString(finding, "screenshotPath", label);
+  const screenshotUrl = optionalFindingString(finding, "screenshotUrl", label);
+  const reviewSummary = optionalFindingString(finding, "reviewSummary", label);
+  const reviewStatus = Object.hasOwn(finding, "reviewStatus")
+    ? exactEnum(finding.reviewStatus, `${label} reviewStatus`, QUALITY_REVIEW_STATUSES)
+    : undefined;
+
+  let reviewRound: number | undefined;
+  if (Object.hasOwn(finding, "reviewRound")) {
+    if (typeof finding.reviewRound !== "number"
+      || !Number.isSafeInteger(finding.reviewRound)
+      || finding.reviewRound < 0) {
+      invalid(`${label} reviewRound must be a non-negative safe integer`);
     }
-    const record = requireRecord(value, label);
-    const snapshot = Object.create(null) as UnknownRecord;
-    for (const [key, item] of Object.entries(record)) {
-      Object.defineProperty(snapshot, key, {
-        value: snapshotJsonValue(item, `${label}.${key}`, ancestors, depth + 1),
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
-    }
-    return snapshot;
-  } finally {
-    ancestors.delete(value);
+    reviewRound = finding.reviewRound;
   }
+
+  let corroborated: boolean | undefined;
+  if (Object.hasOwn(finding, "corroborated")) {
+    if (typeof finding.corroborated !== "boolean") invalid(`${label} corroborated must be a boolean`);
+    corroborated = finding.corroborated;
+  }
+
+  return {
+    severity: exactEnum(finding.severity, `${label} severity`, QUALITY_FINDING_SEVERITIES),
+    id: exactString(finding.id, `${label} id`),
+    message: contentString(finding.message, `${label} message`),
+    fix: contentString(finding.fix, `${label} fix`),
+    ...(snippet === undefined ? {} : { snippet }),
+    ...(selector === undefined ? {} : { selector }),
+    ...(screenshotPath === undefined ? {} : { screenshotPath }),
+    ...(screenshotUrl === undefined ? {} : { screenshotUrl }),
+    ...(reviewSummary === undefined ? {} : { reviewSummary }),
+    ...(reviewStatus === undefined ? {} : { reviewStatus }),
+    ...(reviewRound === undefined ? {} : { reviewRound }),
+    ...(corroborated === undefined ? {} : { corroborated }),
+  };
+}
+
+function validateArtifactQualitySummary(value: unknown, label: string): ArtifactQualitySummary {
+  const quality = requireRecord(value, label);
+  rejectUnexpectedFields(quality, ["state", "score", "findings"], label);
+  const state = exactEnum(quality.state, `${label} state`, ARTIFACT_QUALITY_STATES);
+  const score = quality.score;
+  if (score !== null && (typeof score !== "number" || !Number.isFinite(score))) {
+    invalid(`${label} score must be a finite number or null`);
+  }
+  const findingInputs = requireDenseArray(quality.findings, `${label} findings`);
+  const findings = new Array<ArtifactQualitySummary["findings"][number]>(findingInputs.length);
+  for (let index = 0; index < findingInputs.length; index += 1) {
+    findings[index] = validateQualityFinding(findingInputs[index], index);
+  }
+  return { state, score, findings };
 }
 
 function safeStructuredClone<T>(value: T, label: string): T {
@@ -509,7 +568,7 @@ function validateNode(value: unknown, workspaceId: string): WorkspaceNode {
       `${kind} node ${id}`,
     );
     const quality = Object.hasOwn(node, "quality")
-      ? snapshotJsonValue(node.quality, `${kind} node ${id} quality`) as ArtifactQualitySummary
+      ? validateArtifactQualitySummary(node.quality, `${kind} node ${id} quality`)
       : undefined;
     return {
       id,
@@ -625,30 +684,49 @@ function validateComponentDependencies(
   edges: readonly WorkspaceEdge[],
   nodesById: ReadonlyMap<string, WorkspaceNode>,
 ): void {
-  const dependencies = new Map<string, string[]>();
+  const dependents = new Map<string, string[]>();
+  const dependencyCounts = new Map<string, number>();
   for (const node of nodes) {
-    if (node.kind === "component") dependencies.set(node.id, []);
+    if (node.kind === "component") {
+      dependents.set(node.id, []);
+      dependencyCounts.set(node.id, 0);
+    }
   }
   for (const edge of edges) {
     if (edge.kind !== "uses") continue;
     const source = nodesById.get(edge.sourceNodeId);
     const target = nodesById.get(edge.targetNodeId);
     if (source?.kind === "component" && target?.kind === "component") {
-      dependencies.get(source.id)?.push(target.id);
+      dependents.get(source.id)?.push(target.id);
+      dependencyCounts.set(target.id, (dependencyCounts.get(target.id) ?? 0) + 1);
     }
   }
 
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (nodeId: string): void => {
-    if (visiting.has(nodeId)) invalid(`component dependency cycle includes ${nodeId}`);
-    if (visited.has(nodeId)) return;
-    visiting.add(nodeId);
-    for (const dependencyId of dependencies.get(nodeId) ?? []) visit(dependencyId);
-    visiting.delete(nodeId);
-    visited.add(nodeId);
-  };
-  for (const nodeId of dependencies.keys()) visit(nodeId);
+  const ready = new Array<string>(dependencyCounts.size);
+  let readyLength = 0;
+  for (const [nodeId, dependencyCount] of dependencyCounts) {
+    if (dependencyCount === 0) {
+      ready[readyLength] = nodeId;
+      readyLength += 1;
+    }
+  }
+
+  let processed = 0;
+  for (let index = 0; index < readyLength; index += 1) {
+    const nodeId = ready[index];
+    if (nodeId === undefined) continue;
+    processed += 1;
+    for (const dependentId of dependents.get(nodeId) ?? []) {
+      const nextCount = (dependencyCounts.get(dependentId) ?? 0) - 1;
+      dependencyCounts.set(dependentId, nextCount);
+      if (nextCount === 0) {
+        ready[readyLength] = dependentId;
+        readyLength += 1;
+      }
+    }
+  }
+
+  if (processed !== dependencyCounts.size) invalid("component dependency cycle detected");
 }
 
 function snapshotWorkspaceGraph(value: unknown): WorkspaceGraph {
