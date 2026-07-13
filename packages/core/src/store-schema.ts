@@ -491,6 +491,8 @@ CREATE INDEX IF NOT EXISTS idx_component_instances_owner
   ON component_instances(owner_artifact_id, workspace_id);
 CREATE INDEX IF NOT EXISTS idx_component_instances_component
   ON component_instances(component_artifact_id, workspace_id);
+CREATE INDEX IF NOT EXISTS idx_component_instances_workspace
+  ON component_instances(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_revision_dependencies_instance
   ON artifact_revision_dependencies(instance_id, owner_artifact_id, component_artifact_id, workspace_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_revision_dependencies_component
@@ -526,6 +528,10 @@ WHEN NEW.active_snapshot_id IS NOT NULL AND NOT EXISTS (
   WHERE id = NEW.active_snapshot_id AND workspace_id = NEW.id
 )
 BEGIN SELECT RAISE(ABORT, 'workspace active snapshot ownership violation'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_active_snapshot_update_required
+BEFORE UPDATE OF active_snapshot_id ON project_workspaces
+WHEN NEW.active_snapshot_id IS NULL
+BEGIN SELECT RAISE(ABORT, 'workspace active snapshot cannot be null'); END;
 CREATE TRIGGER IF NOT EXISTS workspace_active_kernel_insert_ownership
 BEFORE INSERT ON project_workspaces
 WHEN NEW.active_kernel_revision_id IS NOT NULL AND NOT EXISTS (
@@ -540,6 +546,10 @@ WHEN NEW.active_kernel_revision_id IS NOT NULL AND NOT EXISTS (
   WHERE id = NEW.active_kernel_revision_id AND workspace_id = NEW.id
 )
 BEGIN SELECT RAISE(ABORT, 'workspace active kernel ownership violation'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_active_kernel_update_required
+BEFORE UPDATE OF active_kernel_revision_id ON project_workspaces
+WHEN NEW.active_kernel_revision_id IS NULL
+BEGIN SELECT RAISE(ABORT, 'workspace active kernel cannot be null'); END;
 
 CREATE TRIGGER IF NOT EXISTS artifact_active_track_insert_ownership
 BEFORE INSERT ON workspace_artifacts
@@ -653,6 +663,30 @@ WHEN NEW.kind IN ('page', 'component') AND NOT EXISTS (
     AND kind = NEW.kind
 )
 BEGIN SELECT RAISE(ABORT, 'workspace node Artifact kind ownership violation'); END;
+
+CREATE TRIGGER IF NOT EXISTS workspace_artifact_kind_update_immutable
+BEFORE UPDATE OF kind ON workspace_artifacts
+WHEN NEW.kind IS NOT OLD.kind
+BEGIN SELECT RAISE(ABORT, 'workspace Artifact kind is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS component_instance_component_kind_insert_ownership
+BEFORE INSERT ON component_instances
+WHEN NOT EXISTS (
+  SELECT 1 FROM workspace_artifacts
+  WHERE id = NEW.component_artifact_id
+    AND workspace_id = NEW.workspace_id
+    AND kind = 'component'
+)
+BEGIN SELECT RAISE(ABORT, 'component instance component kind ownership violation'); END;
+CREATE TRIGGER IF NOT EXISTS component_instance_component_kind_update_ownership
+BEFORE UPDATE OF component_artifact_id, workspace_id ON component_instances
+WHEN NOT EXISTS (
+  SELECT 1 FROM workspace_artifacts
+  WHERE id = NEW.component_artifact_id
+    AND workspace_id = NEW.workspace_id
+    AND kind = 'component'
+)
+BEGIN SELECT RAISE(ABORT, 'component instance component kind ownership violation'); END;
 
 CREATE TRIGGER IF NOT EXISTS project_workspace_delete_guard
 BEFORE DELETE ON project_workspaces

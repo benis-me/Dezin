@@ -73,4 +73,13 @@ export {
   normalizeWorkspaceGraphCommands,
   validateWorkspaceGraph,
 } from "./workspace-graph.ts";
+export { WorkspaceStore } from "./workspace-store.ts";
+export {
+  WorkspaceStoreCodecError,
+  type ArtifactRevisionRecord,
+  type ArtifactTrackRecord,
+  type WorkspaceArtifactRecord,
+  type WorkspaceSnapshotBaseRecord,
+  type WorkspaceSnapshotRecord,
+} from "./workspace-codecs.ts";
 export { Store, type StoreClock } from "./store.ts";

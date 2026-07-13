@@ -4,7 +4,17 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store, type StoreClock } from "../src/store.ts";
+import {
+  Store,
+  WorkspaceStore,
+  WorkspaceStoreCodecError,
+  type ArtifactRevisionRecord,
+  type ArtifactTrackRecord,
+  type StoreClock,
+  type WorkspaceArtifactRecord,
+  type WorkspaceSnapshotRecord,
+} from "../src/index.ts";
+import { asProjectWorkspace } from "../src/workspace-codecs.ts";
 import { WorkspaceGraphValidationError } from "../src/workspace-graph.ts";
 
 const REQUIRED_WORKSPACE_TABLES = [
@@ -192,6 +202,60 @@ function assertRejectedWithoutChanging(db: DatabaseSync, table: string, action: 
 test("fresh stores create every normalized workspace table", () => {
   const store = new Store(":memory:", fakeClock());
   assert.deepEqual(requiredWorkspaceTables(store.db), REQUIRED_WORKSPACE_TABLES);
+  assert.ok(store.workspace instanceof WorkspaceStore);
+
+  const artifacts: WorkspaceArtifactRecord[] = store.workspace.listArtifacts("missing-project");
+  const tracks: ArtifactTrackRecord[] = store.workspace.listTracks("missing-project", "missing-artifact");
+  const revisions: ArtifactRevisionRecord[] = store.workspace.listRevisions("missing-project", "missing-artifact");
+  const snapshots: WorkspaceSnapshotRecord[] = store.workspace.listSnapshots("missing-project");
+  assert.deepEqual({ artifacts, tracks, revisions, snapshots }, {
+    artifacts: [],
+    tracks: [],
+    revisions: [],
+    snapshots: [],
+  });
+
+  const workspaceIndexes = store.db.prepare("PRAGMA index_list(component_instances)").all() as Array<{ name: string }>;
+  assert.ok(
+    workspaceIndexes.some(({ name }) => name === "idx_component_instances_workspace"),
+    "component_instances needs a workspace-leading cascade index",
+  );
+  store.close();
+});
+
+test("workspace scalar codecs reject corrupt values instead of coercing them", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Codec boundary", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+
+  store.db.prepare("UPDATE projects SET mode = 'corrupt-mode' WHERE id = ?").run(project.id);
+  assert.throws(() => store.workspace.getWorkspace(project.id), WorkspaceStoreCodecError);
+  store.db.prepare("UPDATE projects SET mode = 'standard' WHERE id = ?").run(project.id);
+
+  const validRow = {
+    id: workspace.id,
+    project_id: project.id,
+    mode: "standard",
+    graph_revision: 0,
+    active_snapshot_id: workspace.activeSnapshotId,
+    active_kernel_revision_id: workspace.activeKernelRevisionId,
+    created_at: 1,
+    updated_at: 1,
+  };
+  for (const corrupt of ["", null, false, -1, 1.5, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => asProjectWorkspace({ ...validRow, updated_at: corrupt }),
+      WorkspaceStoreCodecError,
+      `updated_at ${String(corrupt)} must fail closed`,
+    );
+  }
+  for (const corrupt of ["", null, false, -1, 1.5, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => asProjectWorkspace({ ...validRow, graph_revision: corrupt }),
+      WorkspaceStoreCodecError,
+      `graph_revision ${String(corrupt)} must fail closed`,
+    );
+  }
   store.close();
 });
 
@@ -465,6 +529,48 @@ test("WorkspaceStore reads normalized records defensively and snapshots resolve 
      VALUES (?, 2, '{}', '[]', 'bad-graph', 26)`,
   ).run(workspace.id);
   assert.throws(() => store.workspace.getGraphRevision(project.id, 2), WorkspaceGraphValidationError);
+  store.close();
+});
+
+test("WorkspaceStore list ordering is stable across tied timestamps and multiple Tracks", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Stable ordering", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+
+  insertArtifact(store.db, workspace.id, "artifact-z");
+  insertArtifact(store.db, workspace.id, "artifact-a");
+  assert.deepEqual(
+    store.workspace.listArtifacts(project.id).map(({ id }) => id),
+    ["artifact-a", "artifact-z"],
+  );
+
+  insertTrack(store.db, "artifact-a", "track-z");
+  insertTrack(store.db, "artifact-a", "track-a");
+  assert.deepEqual(
+    store.workspace.listTracks(project.id, "artifact-a").map(({ id }) => id),
+    ["track-a", "track-z"],
+  );
+
+  insertRevision(store.db, {
+    id: "revision-z",
+    workspaceId: workspace.id,
+    artifactId: "artifact-a",
+    trackId: "track-z",
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    sequence: 1,
+  });
+  insertRevision(store.db, {
+    id: "revision-a",
+    workspaceId: workspace.id,
+    artifactId: "artifact-a",
+    trackId: "track-a",
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    sequence: 7,
+  });
+  assert.deepEqual(
+    store.workspace.listRevisions(project.id, "artifact-a").map(({ id }) => id),
+    ["revision-a", "revision-z"],
+  );
   store.close();
 });
 
@@ -860,6 +966,30 @@ test("workspace node kind must match its owned Artifact kind on insert and updat
     (store.db.prepare("SELECT artifact_id FROM workspace_nodes WHERE id = 'page-node'").get() as { artifact_id: string }).artifact_id,
     "page-1",
   );
+  assert.throws(
+    () => store.db.prepare("UPDATE workspace_artifacts SET kind = 'component' WHERE id = 'page-1'").run(),
+    /kind/i,
+  );
+
+  assert.throws(
+    () => store.db.prepare(
+      `INSERT INTO component_instances
+         (id, workspace_id, owner_artifact_id, component_artifact_id, created_at)
+       VALUES ('bad-page-instance', ?, 'page-1', 'page-1', 1)`,
+    ).run(workspace.id),
+    /component kind/i,
+  );
+  store.db.prepare(
+    `INSERT INTO component_instances
+       (id, workspace_id, owner_artifact_id, component_artifact_id, created_at)
+     VALUES ('valid-component-instance', ?, 'page-1', 'component-1', 1)`,
+  ).run(workspace.id);
+  assert.throws(
+    () => store.db.prepare(
+      "UPDATE component_instances SET component_artifact_id = 'page-1' WHERE id = 'valid-component-instance'",
+    ).run(),
+    /component kind/i,
+  );
   store.close();
 });
 
@@ -876,6 +1006,15 @@ test("active, Head, and parent pointers cannot dangle when their owned target is
     () => store.db.prepare("DELETE FROM shared_design_kernel_revisions WHERE id = ?").run(workspace.activeKernelRevisionId),
     /constraint/i,
   );
+  assert.throws(
+    () => store.db.prepare("UPDATE project_workspaces SET active_snapshot_id = NULL WHERE id = ?").run(workspace.id),
+    /active snapshot/i,
+  );
+  assert.throws(
+    () => store.db.prepare("UPDATE project_workspaces SET active_kernel_revision_id = NULL WHERE id = ?").run(workspace.id),
+    /active kernel/i,
+  );
+  assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
 
   insertArtifact(store.db, workspace.id, "artifact-parent");
   insertTrack(store.db, "artifact-parent", "track-parent");
@@ -930,5 +1069,23 @@ test("workspace codecs reject corrupt immutable JSON instead of silently replaci
   store.db.prepare("UPDATE artifact_revisions SET render_spec_json = '{}' WHERE id = 'revision-json'").run();
   store.db.prepare("UPDATE workspace_snapshots SET provenance_json = '[]' WHERE id = ?").run(workspace.activeSnapshotId);
   assert.throws(() => store.workspace.listSnapshots(project.id), /JSON object/i);
+
+  insertResource(store.db, workspace.id, "resource-json");
+  store.db.prepare(
+    `INSERT INTO workspace_nodes
+       (id, workspace_id, kind, artifact_id, resource_id, archived_at, created_at, updated_at)
+     VALUES ('artifact-json-node', ?, 'page', 'artifact-json', NULL, NULL, 20, 20),
+            ('resource-json-node', ?, 'resource', NULL, 'resource-json', NULL, 20, 20)`,
+  ).run(workspace.id, workspace.id);
+  store.db.prepare(
+    `INSERT INTO workspace_edges
+       (id, workspace_id, kind, source_node_id, target_node_id, payload_json, created_at, updated_at)
+     VALUES ('edge-json', ?, 'informs', 'resource-json-node', 'artifact-json-node', '{', 21, 21)`,
+  ).run(workspace.id);
+  assert.throws(() => store.workspace.getGraph(project.id), /valid JSON|canonical empty object/i);
+  store.db.prepare("UPDATE workspace_edges SET payload_json = '{\"unexpected\":true}' WHERE id = 'edge-json'").run();
+  assert.throws(() => store.workspace.getGraph(project.id), /canonical empty object/i);
+  store.db.prepare("UPDATE workspace_edges SET payload_json = '{}' WHERE id = 'edge-json'").run();
+  assert.equal(store.workspace.getGraph(project.id).edges.length, 1);
   store.close();
 });

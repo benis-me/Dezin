@@ -88,17 +88,17 @@ function nullableString(value: unknown, label: string): string | null {
 }
 
 function nonNegativeInteger(value: unknown, label: string): number {
-  const number = Number(value);
-  if (!Number.isSafeInteger(number) || number < 0) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new WorkspaceStoreCodecError(`${label} must be a non-negative safe integer`);
   }
-  return number;
+  return value;
 }
 
 function timestamp(value: unknown, label: string): number {
-  const number = Number(value);
-  if (!Number.isFinite(number)) throw new WorkspaceStoreCodecError(`${label} must be finite`);
-  return number;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new WorkspaceStoreCodecError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
 }
 
 function parseJson(value: unknown, label: string): unknown {
@@ -118,12 +118,21 @@ function jsonObject(value: unknown, label: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+function canonicalEmptyJsonObject(value: unknown, label: string): void {
+  const parsed = jsonObject(value, label);
+  if (Object.keys(parsed).length !== 0 || value !== "{}") {
+    throw new WorkspaceStoreCodecError(`${label} must contain the canonical empty object {}`);
+  }
+}
+
 export function asProjectWorkspace(row: Row): ProjectWorkspace {
-  const mode = row.mode === "standard" ? "standard" : "prototype";
+  if (row.mode !== "standard" && row.mode !== "prototype") {
+    throw new WorkspaceStoreCodecError(`workspace project mode must be standard or prototype`);
+  }
   return {
     id: requiredString(row.id, "workspace id"),
     projectId: requiredString(row.project_id, "workspace project id"),
-    mode,
+    mode: row.mode,
     graphRevision: nonNegativeInteger(row.graph_revision, "workspace graph revision"),
     activeSnapshotId: requiredString(row.active_snapshot_id, "workspace active snapshot id"),
     activeKernelRevisionId: requiredString(row.active_kernel_revision_id, "workspace active Kernel revision id"),
@@ -215,6 +224,7 @@ export function asWorkspaceEdge(row: Row): WorkspaceEdge {
     return { ...base, kind: "prototype", prototype: parseJson(row.payload_json, "prototype edge payload") as never };
   }
   if (row.kind === "uses" || row.kind === "informs" || row.kind === "derives-from") {
+    canonicalEmptyJsonObject(row.payload_json, `${row.kind} edge payload`);
     return { ...base, kind: row.kind };
   }
   throw new WorkspaceStoreCodecError(`unsupported workspace edge kind ${String(row.kind)}`);

@@ -153,7 +153,7 @@ export class WorkspaceStore {
     const rows = this.db.prepare(
       `SELECT * FROM workspace_artifacts
        WHERE workspace_id = ?
-       ORDER BY created_at ASC, rowid ASC`,
+       ORDER BY created_at ASC, id ASC`,
     ).all(workspace.id) as Row[];
     return rows.map(asWorkspaceArtifact);
   }
@@ -166,7 +166,7 @@ export class WorkspaceStore {
        FROM artifact_tracks t
        JOIN workspace_artifacts a ON a.id = t.artifact_id
        WHERE a.workspace_id = ? AND a.id = ?
-       ORDER BY t.created_at ASC, t.rowid ASC`,
+       ORDER BY t.created_at ASC, t.id ASC`,
     ).all(workspace.id, artifactId) as Row[];
     return rows.map(asArtifactTrack);
   }
@@ -177,7 +177,7 @@ export class WorkspaceStore {
     const rows = this.db.prepare(
       `SELECT * FROM artifact_revisions
        WHERE workspace_id = ? AND artifact_id = ?
-       ORDER BY sequence ASC, rowid ASC`,
+       ORDER BY created_at ASC, id ASC`,
     ).all(workspace.id, artifactId) as Row[];
     return rows.map(asArtifactRevision);
   }
@@ -188,7 +188,7 @@ export class WorkspaceStore {
     const rows = this.db.prepare(
       `SELECT * FROM workspace_snapshots
        WHERE workspace_id = ?
-       ORDER BY sequence ASC, rowid ASC`,
+       ORDER BY sequence ASC, id ASC`,
     ).all(workspace.id) as Row[];
     return rows.map((row) => {
       const snapshot = asWorkspaceSnapshotBase(row);
@@ -241,7 +241,7 @@ export class WorkspaceStore {
        LEFT JOIN resources r
          ON r.id = n.resource_id AND r.workspace_id = n.workspace_id
        WHERE n.workspace_id = ? AND n.archived_at IS NULL
-       ORDER BY n.created_at ASC, n.rowid ASC`,
+       ORDER BY n.created_at ASC, n.id ASC`,
     ).all(workspaceId) as Row[];
     return rows.map(asWorkspaceNode);
   }
@@ -257,7 +257,7 @@ export class WorkspaceStore {
        WHERE e.workspace_id = ?
          AND source.archived_at IS NULL
          AND target.archived_at IS NULL
-       ORDER BY e.created_at ASC, e.rowid ASC`,
+       ORDER BY e.created_at ASC, e.id ASC`,
     ).all(workspaceId) as Row[];
     return rows.map(asWorkspaceEdge);
   }
