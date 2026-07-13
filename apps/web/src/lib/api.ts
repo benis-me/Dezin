@@ -38,6 +38,343 @@ export interface Project {
   sourceUrl?: string;
 }
 
+export type WorkspaceNodeKind = "page" | "component" | "resource";
+export type WorkspaceEdgeKind = "prototype" | "uses" | "informs" | "derives-from";
+export type WorkspaceArtifactKind = "page" | "component";
+export type WorkspacePrototypeEdgeStatus = "planned" | "interactive" | "broken";
+
+export interface WorkspaceQualityFinding {
+  severity: "P0" | "P1" | "P2";
+  id: string;
+  message: string;
+  fix: string;
+  snippet?: string;
+  selector?: string;
+  screenshotPath?: string;
+  screenshotUrl?: string;
+  reviewSummary?: string;
+  reviewStatus?: "active" | "resolved";
+  reviewRound?: number;
+  corroborated?: boolean;
+}
+
+export interface WorkspaceArtifactQualitySummary {
+  state: "passed" | "needs-attention" | "failed" | "unassessed";
+  score: number | null;
+  findings: WorkspaceQualityFinding[];
+}
+
+interface WorkspaceNodeBase {
+  id: string;
+  workspaceId: string;
+  name: string;
+}
+
+export interface WorkspaceArtifactNode extends WorkspaceNodeBase {
+  kind: WorkspaceArtifactKind;
+  artifactId: string;
+  resourceId?: never;
+  quality?: WorkspaceArtifactQualitySummary;
+}
+
+export interface WorkspaceResourceNode extends WorkspaceNodeBase {
+  kind: "resource";
+  resourceId: string;
+  artifactId?: never;
+}
+
+export type WorkspaceNode = WorkspaceArtifactNode | WorkspaceResourceNode;
+
+export interface WorkspaceDesignNodeLocator {
+  designNodeId: string;
+  sourcePath?: string;
+  selector?: string;
+}
+
+export interface WorkspacePrototypeBinding {
+  sourceArtifactId: string;
+  sourceRevisionId: string;
+  sourceLocator: WorkspaceDesignNodeLocator;
+  trigger: "click" | "submit";
+  targetArtifactId: string;
+  targetState?: string;
+  transition?: {
+    type: "none" | "fade" | "slide";
+    durationMs?: number;
+    easing?: string;
+  };
+}
+
+interface WorkspaceEdgeBase {
+  id: string;
+  workspaceId: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+}
+
+export type WorkspaceEdge =
+  | (WorkspaceEdgeBase & {
+      kind: "prototype";
+      prototype:
+        | { status: "planned"; binding?: never; brokenReason?: never }
+        | { status: "interactive"; binding: WorkspacePrototypeBinding; brokenReason?: never }
+        | { status: "broken"; binding?: WorkspacePrototypeBinding; brokenReason: string };
+    })
+  | (WorkspaceEdgeBase & { kind: Exclude<WorkspaceEdgeKind, "prototype">; prototype?: never });
+
+export interface WorkspaceGraph {
+  workspaceId: string;
+  revision: number;
+  nodes: WorkspaceNode[];
+  edges: WorkspaceEdge[];
+}
+
+export interface ProjectWorkspace {
+  id: string;
+  projectId: string;
+  mode: ProjectMode;
+  graphRevision: number;
+  activeSnapshotId: string;
+  activeKernelRevisionId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkspaceArtifact {
+  id: string;
+  workspaceId: string;
+  kind: WorkspaceArtifactKind;
+  name: string;
+  sourceRoot: string;
+  legacyWrapped: boolean;
+  activeTrackId: string | null;
+  archivedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type WorkspaceArtifactPayload = WorkspaceArtifact;
+
+export interface ArtifactTrack {
+  id: string;
+  artifactId: string;
+  name: string;
+  headRevisionId: string | null;
+  legacyVariantId: string | null;
+  createdAt: number;
+}
+
+export interface ArtifactRevision {
+  id: string;
+  workspaceId: string;
+  artifactId: string;
+  trackId: string;
+  sequence: number;
+  parentRevisionId: string | null;
+  sourceCommitHash: string;
+  sourceTreeHash: string;
+  artifactRoot: string;
+  kernelRevisionId: string;
+  renderSpec: Record<string, unknown>;
+  quality: Record<string, unknown>;
+  contextPackHash: string | null;
+  producedByRunId: string | null;
+  legacyRunId: string | null;
+  createdAt: number;
+}
+
+export interface WorkspaceRenderFrameSpec {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  initialState?: string;
+  fixture?: Record<string, unknown>;
+  background?: string;
+}
+
+export interface WorkspaceArtifactQualityProfile {
+  requiredFrameIds: string[];
+  blockingSeverities: WorkspaceQualityFinding["severity"][];
+  requireRuntimeChecks: boolean;
+  requireVisualReview: boolean;
+}
+
+export interface SharedDesignKernelRevision {
+  id: string;
+  workspaceId: string;
+  sequence: number;
+  parentRevisionId: string | null;
+  tokens: Record<string, string | number>;
+  typography: Record<string, unknown>;
+  sharedAssetRevisionIds: string[];
+  brief: string;
+  terminology: Record<string, string>;
+  exclusions: string[];
+  responsiveFrames: WorkspaceRenderFrameSpec[];
+  qualityProfile: WorkspaceArtifactQualityProfile;
+  checksum: string;
+  createdAt: number;
+}
+
+export interface KernelImpactArtifactRevision {
+  artifactId: string;
+  revisionId: string;
+  pinnedKernelRevisionId: string;
+}
+
+export interface KernelImpactAnalysis {
+  workspaceId: string;
+  baseSnapshotId: string;
+  fromKernelRevisionId: string;
+  toKernelRevisionId: string;
+  affectedArtifactRevisions: KernelImpactArtifactRevision[];
+}
+
+export type WorkspaceSnapshotProvenance =
+  | { kind: "workspace-created" }
+  | { kind: "graph-command"; commandIds: string[] }
+  | { kind: "proposal-approval"; proposalId: string; proposalRevision: number; planId?: string }
+  | { kind: "artifact-publication"; revisionId: string; runId?: string; planId?: string; taskId?: string }
+  | { kind: "resource-publication"; resourceRevisionId: string; runId?: string; planId?: string; taskId?: string }
+  | { kind: "kernel-publication"; kernelRevisionId: string; proposalId?: string; impact?: KernelImpactAnalysis }
+  | { kind: "propagation"; proposalId: string; batchId: string }
+  | { kind: "plan-checkpoint"; proposalId: string; planId: string; checkpointId: string }
+  | { kind: "restore"; restoredSnapshotId?: string; restoredRevisionId?: string }
+  | { kind: "legacy-migration"; migration: string };
+
+export interface WorkspaceSnapshot {
+  id: string;
+  workspaceId: string;
+  sequence: number;
+  parentSnapshotId: string | null;
+  graphRevision: number;
+  kernelRevisionId: string;
+  reason: string;
+  provenance: WorkspaceSnapshotProvenance;
+  createdByRunId: string | null;
+  createdAt: number;
+  graph: WorkspaceGraph;
+  artifactTracks: Record<string, string>;
+  artifactRevisions: Record<string, string | null>;
+  resourceRevisions: Record<string, string>;
+}
+
+export interface WorkspaceViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+export type WorkspaceLayoutCommand =
+  | { type: "add-group"; groupId: string; label: string; bounds: { x: number; y: number; width: number; height: number } }
+  | { type: "rename-group"; groupId: string; label: string }
+  | { type: "delete-group"; groupId: string; ungroupChildren: true }
+  | { type: "set-parent"; objectId: string; parentGroupId: string | null }
+  | { type: "move"; objectId: string; x: number; y: number }
+  | { type: "resize-group"; groupId: string; width: number; height: number }
+  | { type: "set-collapsed"; groupId: string; collapsed: boolean }
+  | { type: "set-viewport"; viewport: WorkspaceViewport };
+
+export interface WorkspaceLayoutPatch {
+  layoutId?: string;
+  graphRevision: number;
+  commands: readonly WorkspaceLayoutCommand[];
+}
+
+export type WorkspaceLayoutObject =
+  | { id: string; kind: "node"; x: number; y: number; parentGroupId: string | null }
+  | {
+      id: string;
+      kind: "group";
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      parentGroupId: string | null;
+      label: string;
+      collapsed: boolean;
+    };
+
+export interface WorkspaceLayout {
+  workspaceId: string;
+  layoutId: string;
+  objects: WorkspaceLayoutObject[];
+  viewport: WorkspaceViewport;
+}
+
+interface NewWorkspaceEdgeBase {
+  id: string;
+  workspaceId: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  prototype?: never;
+}
+
+export type NewWorkspaceEdge =
+  | (NewWorkspaceEdgeBase & { kind: "prototype" })
+  | (NewWorkspaceEdgeBase & { kind: Exclude<WorkspaceEdgeKind, "prototype"> });
+
+export type WorkspaceGraphCommand =
+  | {
+      id: string;
+      type: "add-node";
+      node:
+        | { id: string; kind: WorkspaceArtifactKind; name: string; artifactId: string; createIdentity?: { initialTrackId: string } }
+        | {
+            id: string;
+            kind: "resource";
+            name: string;
+            resourceId: string;
+            createIdentity?: {
+              resourceKind: "research" | "moodboard" | "sharingan-capture" | "file" | "asset" | "effect" | "external-reference";
+              defaultPinPolicy: "follow-head" | "pin-current" | "manual";
+            };
+          };
+    }
+  | { id: string; type: "rename-node"; nodeId: string; name: string }
+  | { id: string; type: "archive-node"; nodeId: string }
+  | {
+      id: string;
+      type: "add-edge";
+      edge: NewWorkspaceEdge;
+    }
+  | { id: string; type: "remove-edge"; edgeId: string }
+  | { id: string; type: "bind-prototype"; edgeId: string; binding: WorkspacePrototypeBinding };
+
+export interface GraphCommandRequest {
+  baseGraphRevision: number;
+  expectedSnapshotId: string;
+  commands: readonly WorkspaceGraphCommand[];
+}
+
+export interface WorkspaceGraphMutationResult {
+  graph: WorkspaceGraph;
+  snapshot: WorkspaceSnapshot;
+}
+
+export interface ReadyProjectWorkspacePayload {
+  status: "ready";
+  workspace: ProjectWorkspace;
+  graph: WorkspaceGraph;
+  activeSnapshot: WorkspaceSnapshot;
+  activeKernelRevision: SharedDesignKernelRevision;
+  artifacts: WorkspaceArtifact[];
+  tracks: ArtifactTrack[];
+  revisions: ArtifactRevision[];
+  snapshots: WorkspaceSnapshot[];
+  layout: WorkspaceLayout;
+}
+
+export interface UnsupportedProjectWorkspacePayload {
+  status: "unsupported";
+  code: "workspace_requires_standard_project";
+  projectId: string;
+  projectMode: "prototype";
+}
+
+export type ProjectWorkspacePayload = ReadyProjectWorkspacePayload | UnsupportedProjectWorkspacePayload;
+
 export type SetupPhase = "scaffolding" | "installing" | "ready" | "error";
 export interface SetupStatus {
   phase: SetupPhase;
@@ -440,12 +777,16 @@ export interface ApiClientOptions {
   daemonToken?: string;
 }
 
+export type ApiErrorDetails = Record<string, unknown>;
+
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  details: ApiErrorDetails | null;
+  constructor(status: number, message: string, details: ApiErrorDetails | null = null) {
     super(message || `HTTP ${status}`);
     this.name = "ApiError";
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -462,18 +803,24 @@ async function safeText(res: Response): Promise<string> {
   }
 }
 
-async function safeErrorText(res: Response): Promise<string> {
+async function readApiError(res: Response): Promise<{ message: string; details: ApiErrorDetails | null }> {
   const text = await safeText(res);
   if ((res.headers.get("content-type") ?? "").includes("application/json")) {
     try {
-      const body = JSON.parse(text) as { error?: unknown; message?: unknown };
-      if (typeof body.error === "string" && body.error.trim()) return body.error.trim();
-      if (typeof body.message === "string" && body.message.trim()) return body.message.trim();
+      const parsed = JSON.parse(text) as unknown;
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        const details = parsed as ApiErrorDetails;
+        const error = details.error;
+        const message = details.message;
+        if (typeof error === "string" && error.trim()) return { message: error.trim(), details };
+        if (typeof message === "string" && message.trim()) return { message: message.trim(), details };
+        return { message: text, details };
+      }
     } catch {
       // Keep the raw response text if the JSON body is malformed.
     }
   }
-  return text;
+  return { message: text, details: null };
 }
 
 function jsonInit(method: string, body?: unknown): RequestInit {
@@ -624,6 +971,15 @@ export interface ApiClient {
   releasePreviewLease(leaseId: string): Promise<void>;
   captureProjectCover(id: string, options?: { release?: boolean }): Promise<{ captured: boolean; reason?: string }>;
   getProject(id: string): Promise<Project>;
+  getWorkspace(projectId: string): Promise<ProjectWorkspacePayload>;
+  applyWorkspaceGraphCommands(projectId: string, input: GraphCommandRequest): Promise<WorkspaceGraphMutationResult>;
+  saveWorkspaceLayout(projectId: string, input: WorkspaceLayoutPatch): Promise<WorkspaceLayout>;
+  getArtifact(projectId: string, artifactId: string): Promise<WorkspaceArtifactPayload>;
+  listArtifactTracks(projectId: string, artifactId: string): Promise<ArtifactTrack[]>;
+  listArtifactRevisions(projectId: string, artifactId: string): Promise<ArtifactRevision[]>;
+  getArtifactRevision(projectId: string, artifactId: string, revisionId: string): Promise<ArtifactRevision>;
+  listWorkspaceSnapshots(projectId: string): Promise<WorkspaceSnapshot[]>;
+  getWorkspaceSnapshot(projectId: string, snapshotId: string): Promise<WorkspaceSnapshot>;
   patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean }): Promise<Project>;
   saveCover(id: string, dataUrl: string): Promise<void>;
   deleteProject(id: string): Promise<void>;
@@ -762,7 +1118,10 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
 
   async function json<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await f(baseUrl + path, initWithDaemonToken(init));
-    if (!res.ok) throw new ApiError(res.status, await safeErrorText(res));
+    if (!res.ok) {
+      const error = await readApiError(res);
+      throw new ApiError(res.status, error.message, error.details);
+    }
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   }
@@ -866,6 +1225,23 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     captureProjectCover: (id, options) =>
       json<{ captured: boolean; reason?: string }>(`/api/projects/${enc(id)}/cover/capture${options?.release ? "?release=1" : ""}`, { method: "POST" }),
     getProject: (id) => json<Project>(`/api/projects/${enc(id)}`),
+    getWorkspace: (projectId) => json<ProjectWorkspacePayload>(`/api/projects/${enc(projectId)}/workspace`),
+    applyWorkspaceGraphCommands: (projectId, input) =>
+      json<WorkspaceGraphMutationResult>(`/api/projects/${enc(projectId)}/workspace/graph/commands`, jsonInit("POST", input)),
+    saveWorkspaceLayout: (projectId, input) =>
+      json<WorkspaceLayout>(`/api/projects/${enc(projectId)}/workspace/layout`, jsonInit("PUT", input)),
+    getArtifact: (projectId, artifactId) =>
+      json<WorkspaceArtifactPayload>(`/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}`),
+    listArtifactTracks: (projectId, artifactId) =>
+      json<ArtifactTrack[]>(`/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/tracks`),
+    listArtifactRevisions: (projectId, artifactId) =>
+      json<ArtifactRevision[]>(`/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions`),
+    getArtifactRevision: (projectId, artifactId, revisionId) =>
+      json<ArtifactRevision>(`/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions/${enc(revisionId)}`),
+    listWorkspaceSnapshots: (projectId) =>
+      json<WorkspaceSnapshot[]>(`/api/projects/${enc(projectId)}/workspace/snapshots`),
+    getWorkspaceSnapshot: (projectId, snapshotId) =>
+      json<WorkspaceSnapshot>(`/api/projects/${enc(projectId)}/workspace/snapshots/${enc(snapshotId)}`),
     patchProject: (id, patch) => json<Project>(`/api/projects/${enc(id)}`, jsonInit("PATCH", patch)),
     saveCover: (id, dataUrl) => json<{ ok: boolean }>(`/api/projects/${enc(id)}/cover`, jsonInit("POST", { dataUrl })).then(() => {}),
     deleteProject: (id) => json<void>(`/api/projects/${enc(id)}`, { method: "DELETE" }),

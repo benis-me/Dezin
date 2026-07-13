@@ -9,6 +9,9 @@ import { setPendingBrief } from "./lib/pending-brief.ts";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
 
 const WorkspaceScreen = lazy(() => import("./screens/WorkspaceScreen.tsx").then((module) => ({ default: module.WorkspaceScreen })));
+const ProjectStudioScreen = lazy(() =>
+  import("./project-studio/ProjectStudioScreen.tsx").then((module) => ({ default: module.ProjectStudioScreen })),
+);
 const DesignSystemsScreen = lazy(() => import("./screens/DesignSystemsScreen.tsx").then((module) => ({ default: module.DesignSystemsScreen })));
 const DesignSystemDetailScreen = lazy(() =>
   import("./screens/DesignSystemDetailScreen.tsx").then((module) => ({ default: module.DesignSystemDetailScreen })),
@@ -34,9 +37,31 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
   const { toast } = useToast();
   switch (route.name) {
     case "project":
+      if (route.id === "new") {
+        return <WorkspaceScreen key={route.id} projectId={route.id} onOpenSettings={onOpenSettings} />;
+      }
+      return (
+        <ProjectStudioScreen
+          key={route.id}
+          projectId={route.id}
+          artifactId={null}
+          legacyFallback={WorkspaceScreen}
+          onOpenSettings={onOpenSettings}
+        />
+      );
+    case "project-canvas":
+    case "project-artifact":
       // key by projectId: switching projects must give a FRESH instance (full state reset), not reuse
       // one component whose refs (activeConv, abortRef, running/queue) leak from the previous project.
-      return <WorkspaceScreen key={route.id} projectId={route.id} onOpenSettings={onOpenSettings} />;
+      return (
+        <ProjectStudioScreen
+          key={route.id}
+          projectId={route.id}
+          artifactId={route.name === "project-artifact" ? route.artifactId : null}
+          legacyFallback={WorkspaceScreen}
+          onOpenSettings={onOpenSettings}
+        />
+      );
     case "moodboards":
       return <MoodboardsScreen onOpenBoard={(id) => navigate(`/moodboards/${id}`)} />;
     case "moodboard":
@@ -83,6 +108,13 @@ function Screen({ route, onOpenSettings }: { route: Route; onOpenSettings: (sect
         />
       );
   }
+}
+
+function routeLifetimeKey(route: Route): string {
+  if (route.name === "project" || route.name === "project-canvas" || route.name === "project-artifact") {
+    return `project:${route.id}`;
+  }
+  return routeToPath(route);
 }
 
 class RouteErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -206,7 +238,7 @@ export default function App() {
 
   return (
     <Shell dark={dark} onToggleDark={onToggleDark} onOpenSettings={openSettings} routeOverride={backgroundRoute ?? undefined}>
-      <RouteErrorBoundary key={backgroundRoute ? routeToPath(backgroundRoute) : "direct-settings"}>
+      <RouteErrorBoundary key={backgroundRoute ? routeLifetimeKey(backgroundRoute) : "direct-settings"}>
         <Suspense fallback={<RouteLoading label="Loading screen..." />}>
           {backgroundRoute ? <Screen route={backgroundRoute} onOpenSettings={openSettings} /> : null}
         </Suspense>

@@ -10,6 +10,8 @@ import type { AnchorHTMLAttributes, ReactNode, MouseEvent } from "react";
 export type Route =
   | { name: "home" }
   | { name: "project"; id: string }
+  | { name: "project-canvas"; id: string }
+  | { name: "project-artifact"; id: string; artifactId: string }
   | { name: "effects" }
   | { name: "effect-new" }
   | { name: "effect"; id: string }
@@ -22,10 +24,31 @@ export type Route =
 
 const NAV_EVENT = "dezin:navigate";
 
+function decodeSegment(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
 export function parsePath(pathname: string): Route {
   const segs = pathname.split("/").filter(Boolean);
   if (segs.length === 0) return { name: "home" };
-  if (segs[0] === "projects" && segs[1]) return { name: "project", id: decodeURIComponent(segs[1]) };
+  if (segs[0] === "projects" && segs.length === 4 && segs[1] && segs[2] === "artifacts" && segs[3]) {
+    const id = decodeSegment(segs[1]);
+    const artifactId = decodeSegment(segs[3]);
+    if (id !== null && artifactId !== null) return { name: "project-artifact", id, artifactId };
+    return { name: "home" };
+  }
+  if (segs[0] === "projects" && segs.length === 3 && segs[1] && segs[2] === "canvas") {
+    const id = decodeSegment(segs[1]);
+    return id === null ? { name: "home" } : { name: "project-canvas", id };
+  }
+  if (segs[0] === "projects" && segs.length === 2 && segs[1]) {
+    const id = decodeSegment(segs[1]);
+    return id === null ? { name: "home" } : { name: "project", id };
+  }
   if (segs[0] === "effects" && segs[1] === "new") return { name: "effect-new" };
   if (segs[0] === "effects" && segs[1]) return { name: "effect", id: decodeURIComponent(segs[1]) };
   if (segs[0] === "effects") return { name: "effects" };
@@ -42,6 +65,10 @@ export function routeToPath(route: Route): string {
   switch (route.name) {
     case "project":
       return `/projects/${encodeURIComponent(route.id)}`;
+    case "project-canvas":
+      return `/projects/${encodeURIComponent(route.id)}/canvas`;
+    case "project-artifact":
+      return `/projects/${encodeURIComponent(route.id)}/artifacts/${encodeURIComponent(route.artifactId)}`;
     case "effects":
       return "/effects";
     case "effect-new":

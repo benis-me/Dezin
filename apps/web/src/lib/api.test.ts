@@ -225,6 +225,60 @@ test("getVersionDiff GETs the version diff endpoint", async () => {
   expect(fetchImpl).toHaveBeenCalledWith("http://d/api/projects/p1/versions/r1/diff", undefined);
 });
 
+test("workspace APIs encode project and artifact IDs and send typed mutation bodies", async () => {
+  const responses = [
+    { status: "unsupported", code: "workspace_requires_standard_project", projectId: "p /1", projectMode: "prototype" },
+    { graph: { workspaceId: "w1", revision: 2, nodes: [], edges: [] }, snapshot: { id: "s2" } },
+    { workspaceId: "w1", layoutId: "default", objects: [], viewport: { x: 2, y: 3, zoom: 1 } },
+    { id: "a /1", workspaceId: "w1", kind: "page", name: "Page" },
+    [],
+    [],
+    { id: "r /1", artifactId: "a /1" },
+    [],
+    { id: "s /1", workspaceId: "w1" },
+  ];
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(responses.shift()));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  const graphInput = {
+    baseGraphRevision: 1,
+    expectedSnapshotId: "s1",
+    commands: [{ id: "c1", type: "rename-node" as const, nodeId: "n1", name: "Checkout" }],
+  };
+  const layoutInput = {
+    layoutId: "default",
+    graphRevision: 2,
+    commands: [{ type: "set-viewport" as const, viewport: { x: 2, y: 3, zoom: 1 } }],
+  };
+
+  await api.getWorkspace("p /1");
+  await api.applyWorkspaceGraphCommands("p /1", graphInput);
+  await api.saveWorkspaceLayout("p /1", layoutInput);
+  await api.getArtifact("p /1", "a /1");
+  await api.listArtifactTracks("p /1", "a /1");
+  await api.listArtifactRevisions("p /1", "a /1");
+  await api.getArtifactRevision("p /1", "a /1", "r /1");
+  await api.listWorkspaceSnapshots("p /1");
+  await api.getWorkspaceSnapshot("p /1", "s /1");
+
+  expect(fetchImpl).toHaveBeenNthCalledWith(1, "http://d/api/projects/p%20%2F1/workspace", undefined);
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    2,
+    "http://d/api/projects/p%20%2F1/workspace/graph/commands",
+    expect.objectContaining({ method: "POST", body: JSON.stringify(graphInput) }),
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    3,
+    "http://d/api/projects/p%20%2F1/workspace/layout",
+    expect.objectContaining({ method: "PUT", body: JSON.stringify(layoutInput) }),
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(4, "http://d/api/projects/p%20%2F1/artifacts/a%20%2F1", undefined);
+  expect(fetchImpl).toHaveBeenNthCalledWith(5, "http://d/api/projects/p%20%2F1/artifacts/a%20%2F1/tracks", undefined);
+  expect(fetchImpl).toHaveBeenNthCalledWith(6, "http://d/api/projects/p%20%2F1/artifacts/a%20%2F1/revisions", undefined);
+  expect(fetchImpl).toHaveBeenNthCalledWith(7, "http://d/api/projects/p%20%2F1/artifacts/a%20%2F1/revisions/r%20%2F1", undefined);
+  expect(fetchImpl).toHaveBeenNthCalledWith(8, "http://d/api/projects/p%20%2F1/workspace/snapshots", undefined);
+  expect(fetchImpl).toHaveBeenNthCalledWith(9, "http://d/api/projects/p%20%2F1/workspace/snapshots/s%20%2F1", undefined);
+});
+
 test("forkMessage POSTs the message fork endpoint", async () => {
   const payload = { conversationId: "c2", variantId: "v2", variants: [] };
   const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(payload));
@@ -244,12 +298,21 @@ test("non-ok responses throw ApiError with the status", async () => {
 });
 
 test("non-ok JSON responses throw ApiError with the daemon error message", async () => {
-  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({ error: "OpenAI rejected credentials." }, 401));
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse({
+    error: "OpenAI rejected credentials.",
+    code: "provider_auth_failed",
+    providerId: "openai",
+  }, 401));
   const api = createApiClient({ fetchImpl });
   await expect(api.testModelProvider("openai")).rejects.toMatchObject({
     name: "ApiError",
     status: 401,
     message: "OpenAI rejected credentials.",
+    details: {
+      error: "OpenAI rejected credentials.",
+      code: "provider_auth_failed",
+      providerId: "openai",
+    },
   });
 });
 

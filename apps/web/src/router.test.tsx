@@ -8,6 +8,20 @@ test("parsePath maps URLs to typed routes", () => {
   expect(parsePath("/")).toEqual({ name: "home" });
   expect(parsePath("/projects/abc")).toEqual({ name: "project", id: "abc" });
   expect(parsePath("/projects/a%20b")).toEqual({ name: "project", id: "a b" });
+  expect(parsePath("/projects/p-1/canvas")).toEqual({ name: "project-canvas", id: "p-1" });
+  expect(parsePath("/projects/p-1/artifacts/a-1")).toEqual({
+    name: "project-artifact",
+    id: "p-1",
+    artifactId: "a-1",
+  });
+  expect(parsePath("/projects/p%201/artifacts/a%2F1")).toEqual({
+    name: "project-artifact",
+    id: "p 1",
+    artifactId: "a/1",
+  });
+  expect(parsePath("/projects/%ZZ/canvas")).toEqual({ name: "home" });
+  expect(parsePath("/projects/p-1/canvas/extra")).toEqual({ name: "home" });
+  expect(parsePath("/projects/p-1/artifacts/a-1/extra")).toEqual({ name: "home" });
   expect(parsePath("/effects")).toEqual({ name: "effects" });
   expect(parsePath("/effects/new")).toEqual({ name: "effect-new" });
   expect(parsePath("/effects/paper-texture")).toEqual({ name: "effect", id: "paper-texture" });
@@ -20,6 +34,8 @@ test("routeToPath round-trips through parsePath", () => {
   const routes: Route[] = [
     { name: "home" },
     { name: "project", id: "p1" },
+    { name: "project-canvas", id: "p 1" },
+    { name: "project-artifact", id: "p 1", artifactId: "a/1" },
     { name: "effects" },
     { name: "effect-new" },
     { name: "effect", id: "paper-texture" },
