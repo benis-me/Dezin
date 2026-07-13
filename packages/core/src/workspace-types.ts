@@ -14,6 +14,7 @@ export type ResourceKind =
 export type ResourcePinPolicy = "follow-head" | "pin-current" | "manual";
 export type PrototypeEdgeStatus = "planned" | "interactive" | "broken";
 export type ArtifactQualityState = "passed" | "needs-attention" | "failed" | "unassessed";
+export type ComponentInstanceDependencyStatus = "linked" | "detached";
 
 export interface RenderFrameSpec {
   id: string;
@@ -64,6 +65,104 @@ export interface SharedDesignKernelRevision {
   qualityProfile: ArtifactQualityProfile;
   checksum: string;
   createdAt: number;
+}
+
+export interface CreateKernelRevisionInput {
+  workspaceId: string;
+  parentRevisionId: string;
+  tokens: Record<string, string | number>;
+  typography: Record<string, unknown>;
+  sharedAssetRevisionIds: string[];
+  brief: string;
+  terminology: Record<string, string>;
+  exclusions: string[];
+  responsiveFrames: RenderFrameSpec[];
+  qualityProfile: ArtifactQualityProfile;
+}
+
+export interface ArtifactRevisionDependencyInput {
+  instanceId: string;
+  componentArtifactId: string;
+  componentRevisionId: string;
+  createInstanceIdentity?: true;
+  variantKey?: string;
+  stateKey?: string;
+  sourceLocator: DesignNodeLocator;
+  overrides: Record<string, unknown>;
+  status: ComponentInstanceDependencyStatus;
+}
+
+export interface ArtifactRevisionDependency {
+  workspaceId: string;
+  ownerArtifactId: string;
+  revisionId: string;
+  instanceId: string;
+  componentArtifactId: string;
+  componentRevisionId: string;
+  variantKey: string | null;
+  stateKey: string | null;
+  sourceLocator: DesignNodeLocator;
+  overrides: Record<string, unknown>;
+  status: ComponentInstanceDependencyStatus;
+}
+
+export interface ArtifactRevisionResourcePinInput {
+  resourceId: string;
+  resourceRevisionId: string;
+}
+
+export interface ArtifactRevisionResourcePin {
+  workspaceId: string;
+  ownerArtifactId: string;
+  revisionId: string;
+  resourceId: string;
+  resourceRevisionId: string;
+}
+
+export interface CreateArtifactRevisionInput {
+  artifactId: string;
+  trackId: string;
+  parentRevisionId: string | null;
+  sourceCommitHash: string;
+  sourceTreeHash: string;
+  kernelRevisionId: string;
+  renderSpec: Record<string, unknown>;
+  quality: Record<string, unknown>;
+  contextPackHash?: string | null;
+  producedByRunId?: string | null;
+  dependencies: ArtifactRevisionDependencyInput[];
+  resourcePins: ArtifactRevisionResourcePinInput[];
+}
+
+export interface WorkspaceSnapshotPublicationInput {
+  expectedSnapshotId: string;
+  reason: string;
+  provenance: WorkspaceSnapshotProvenance;
+  createdByRunId?: string | null;
+}
+
+export interface ArtifactPublicationExpectation {
+  expectedHeadRevisionId: string | null;
+  expectedSnapshotId: string;
+}
+
+export interface KernelPublicationExpectation {
+  expectedKernelRevisionId: string;
+  expectedSnapshotId: string;
+}
+
+export interface KernelImpactArtifactRevision {
+  artifactId: string;
+  revisionId: string;
+  pinnedKernelRevisionId: string;
+}
+
+export interface KernelImpactAnalysis {
+  workspaceId: string;
+  baseSnapshotId: string;
+  fromKernelRevisionId: string;
+  toKernelRevisionId: string;
+  affectedArtifactRevisions: KernelImpactArtifactRevision[];
 }
 
 interface WorkspaceNodeBase {
@@ -155,7 +254,12 @@ export type WorkspaceSnapshotProvenance =
   | { kind: "proposal-approval"; proposalId: string; proposalRevision: number; planId?: string }
   | { kind: "artifact-publication"; revisionId: string; runId?: string; planId?: string; taskId?: string }
   | { kind: "resource-publication"; resourceRevisionId: string; runId?: string; planId?: string; taskId?: string }
-  | { kind: "kernel-publication"; kernelRevisionId: string; proposalId?: string }
+  | {
+      kind: "kernel-publication";
+      kernelRevisionId: string;
+      proposalId?: string;
+      impact?: KernelImpactAnalysis;
+    }
   | { kind: "propagation"; proposalId: string; batchId: string }
   | { kind: "plan-checkpoint"; proposalId: string; planId: string; checkpointId: string }
   | { kind: "restore"; restoredSnapshotId?: string; restoredRevisionId?: string }

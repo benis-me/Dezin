@@ -1,11 +1,24 @@
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   normalizeWorkspaceGraphCommands,
   validateWorkspaceGraph,
   WorkspaceGraphValidationError,
 } from "./workspace-graph.ts";
 import type {
+  ArtifactRevisionDependency,
+  ArtifactRevisionDependencyInput,
+  ArtifactRevisionResourcePin,
+  ArtifactRevisionResourcePinInput,
   ArtifactKind,
+  ArtifactPublicationExpectation,
+  CreateArtifactRevisionInput,
+  CreateKernelRevisionInput,
+  DesignNodeLocator,
+  KernelImpactAnalysis,
+  KernelPublicationExpectation,
   ProjectWorkspace,
+  SharedDesignKernelRevision,
   WorkspaceEdge,
   WorkspaceGraph,
   WorkspaceGraphMutationInput,
@@ -13,12 +26,45 @@ import type {
   WorkspaceLayoutPatch,
   WorkspaceNode,
   WorkspaceSnapshot,
+  WorkspaceSnapshotPublicationInput,
   WorkspaceSnapshotProvenance,
 } from "./workspace-types.ts";
 import type { Row } from "./store-codecs.ts";
 
 const OBJECT_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Object.prototype));
 const ARRAY_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Array.prototype));
+
+export function compareBinary(left: string, right: string): number {
+  if (!isWellFormedUtf16(left) || !isWellFormedUtf16(right)) {
+    throw new WorkspaceStoreCodecError("durable identifiers must contain well-formed Unicode");
+  }
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+export function isWellFormedUtf16(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      if (index + 1 >= value.length) return false;
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sortedUtf8ObjectKeys(value: Record<string, unknown>, label: string): string[] {
+  const keys = Object.keys(value);
+  for (const key of keys) {
+    if (!isWellFormedUtf16(key)) {
+      throw new WorkspaceStoreCodecError(`${label} keys must contain well-formed Unicode`);
+    }
+  }
+  return keys.sort(compareBinary);
+}
 
 export interface WorkspaceArtifactRecord {
   id: string;
@@ -60,6 +106,9 @@ export interface ArtifactRevisionRecord {
   createdAt: number;
 }
 
+export type ArtifactRevisionDependencyRecord = ArtifactRevisionDependency;
+export type ArtifactRevisionResourcePinRecord = ArtifactRevisionResourcePin;
+
 export interface WorkspaceSnapshotBaseRecord extends Omit<WorkspaceSnapshot, "graph" | "artifactTracks" | "artifactRevisions" | "resourceRevisions"> {
   id: string;
   workspaceId: string;
@@ -86,6 +135,9 @@ function requiredString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new WorkspaceStoreCodecError(`${label} must be a non-empty string`);
   }
+  if (!isWellFormedUtf16(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must contain well-formed Unicode`);
+  }
   return value;
 }
 
@@ -99,6 +151,17 @@ function nonNegativeInteger(value: unknown, label: string): number {
     throw new WorkspaceStoreCodecError(`${label} must be a non-negative safe integer`);
   }
   return value;
+}
+
+function positiveInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new WorkspaceStoreCodecError(`${label} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function sealedAggregate(value: unknown, label: string): void {
+  if (value !== 1) throw new WorkspaceStoreCodecError(`${label} must be sealed before it can be read`);
 }
 
 function timestamp(value: unknown, label: string): number {
@@ -234,6 +297,403 @@ function boundaryArray(value: unknown, label: string): unknown[] {
   return result;
 }
 
+interface JsonBoundaryState {
+  readonly ancestors: WeakSet<object>;
+  count: number;
+}
+
+function canonicalJsonValue(
+  value: unknown,
+  label: string,
+  state: JsonBoundaryState = { ancestors: new WeakSet<object>(), count: 0 },
+  depth = 0,
+): unknown {
+  state.count += 1;
+  if (state.count > 100_000 || depth > 64) {
+    throw new WorkspaceStoreCodecError(`${label} exceeds the JSON boundary budget`);
+  }
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (!isWellFormedUtf16(value)) {
+      throw new WorkspaceStoreCodecError(`${label} strings must contain well-formed Unicode`);
+    }
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new WorkspaceStoreCodecError(`${label} numbers must be finite`);
+    return value;
+  }
+  if (typeof value !== "object") {
+    throw new WorkspaceStoreCodecError(`${label} must contain only JSON values`);
+  }
+  if (state.ancestors.has(value)) throw new WorkspaceStoreCodecError(`${label} cannot contain cycles`);
+  state.ancestors.add(value);
+  try {
+    let isArray = false;
+    try {
+      isArray = Array.isArray(value);
+    } catch {
+      throw new WorkspaceStoreCodecError(`${label} could not be inspected safely`);
+    }
+    if (isArray) {
+      const values = boundaryArray(value, label);
+      return values.map((entry, index) => canonicalJsonValue(entry, `${label}[${index}]`, state, depth + 1));
+    }
+    const record = boundaryRecord(value, label);
+    const result: Record<string, unknown> = {};
+    for (const key of sortedUtf8ObjectKeys(record, label)) {
+      if (key === "__proto__" || key === "prototype" || key === "constructor") {
+        throw new WorkspaceStoreCodecError(`${label} contains unsafe field ${key}`);
+      }
+      result[key] = canonicalJsonValue(record[key], `${label}.${key}`, state, depth + 1);
+    }
+    return result;
+  } finally {
+    state.ancestors.delete(value);
+  }
+}
+
+function canonicalJsonObject(value: unknown, label: string): Record<string, unknown> {
+  const result = canonicalJsonValue(value, label);
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    throw new WorkspaceStoreCodecError(`${label} must be a JSON object`);
+  }
+  return result as Record<string, unknown>;
+}
+
+function canonicalStringArray(value: unknown, label: string): string[] {
+  return boundaryArray(value, label).map((entry, index) => canonicalString(entry, `${label}[${index}]`));
+}
+
+function nullableCanonicalString(value: unknown, label: string): string | null {
+  return value === null ? null : canonicalString(value, label);
+}
+
+function optionalNullableCanonicalString(
+  input: Record<string, unknown>,
+  field: string,
+  label: string,
+): string | null | undefined {
+  if (!Object.hasOwn(input, field)) return undefined;
+  return nullableCanonicalString(input[field], label);
+}
+
+function normalizeDesignNodeLocatorInput(value: unknown, label: string): DesignNodeLocator {
+  const locator = boundaryRecord(value, label);
+  allowFields(locator, ["designNodeId", "sourcePath", "selector"], label);
+  const sourcePath = Object.hasOwn(locator, "sourcePath")
+    ? canonicalString(locator.sourcePath, `${label} sourcePath`)
+    : undefined;
+  const selector = Object.hasOwn(locator, "selector")
+    ? canonicalString(locator.selector, `${label} selector`)
+    : undefined;
+  return {
+    designNodeId: canonicalString(locator.designNodeId, `${label} designNodeId`),
+    ...(sourcePath === undefined ? {} : { sourcePath }),
+    ...(selector === undefined ? {} : { selector }),
+  };
+}
+
+function normalizeArtifactDependencyInput(value: unknown, index: number): ArtifactRevisionDependencyInput {
+  const label = `Artifact Revision dependency at index ${index}`;
+  const dependency = boundaryRecord(value, label);
+  allowFields(dependency, [
+    "instanceId",
+    "componentArtifactId",
+    "componentRevisionId",
+    "createInstanceIdentity",
+    "variantKey",
+    "stateKey",
+    "sourceLocator",
+    "overrides",
+    "status",
+  ], label);
+  if (Object.hasOwn(dependency, "createInstanceIdentity") && dependency.createInstanceIdentity !== true) {
+    throw new WorkspaceStoreCodecError(`${label} createInstanceIdentity must be true when present`);
+  }
+  if (dependency.status !== "linked" && dependency.status !== "detached") {
+    throw new WorkspaceStoreCodecError(`${label} status must be linked or detached`);
+  }
+  const variantKey = optionalNullableCanonicalString(dependency, "variantKey", `${label} variantKey`);
+  const stateKey = optionalNullableCanonicalString(dependency, "stateKey", `${label} stateKey`);
+  return {
+    instanceId: canonicalString(dependency.instanceId, `${label} instanceId`),
+    componentArtifactId: canonicalString(dependency.componentArtifactId, `${label} componentArtifactId`),
+    componentRevisionId: canonicalString(dependency.componentRevisionId, `${label} componentRevisionId`),
+    ...(dependency.createInstanceIdentity === true ? { createInstanceIdentity: true } : {}),
+    ...(variantKey == null ? {} : { variantKey }),
+    ...(stateKey == null ? {} : { stateKey }),
+    sourceLocator: normalizeDesignNodeLocatorInput(dependency.sourceLocator, `${label} sourceLocator`),
+    overrides: canonicalJsonObject(dependency.overrides, `${label} overrides`),
+    status: dependency.status,
+  };
+}
+
+function normalizeArtifactResourcePinInput(value: unknown, index: number): ArtifactRevisionResourcePinInput {
+  const label = `Artifact Revision Resource pin at index ${index}`;
+  const pin = boundaryRecord(value, label);
+  allowFields(pin, ["resourceId", "resourceRevisionId"], label);
+  return {
+    resourceId: canonicalString(pin.resourceId, `${label} resourceId`),
+    resourceRevisionId: canonicalString(pin.resourceRevisionId, `${label} Resource Revision id`),
+  };
+}
+
+export function normalizeCreateArtifactRevisionInput(value: unknown): CreateArtifactRevisionInput {
+  const input = boundaryRecord(value, "create Artifact Revision input");
+  allowFields(input, [
+    "artifactId",
+    "trackId",
+    "parentRevisionId",
+    "sourceCommitHash",
+    "sourceTreeHash",
+    "kernelRevisionId",
+    "renderSpec",
+    "quality",
+    "contextPackHash",
+    "producedByRunId",
+    "dependencies",
+    "resourcePins",
+  ], "create Artifact Revision input");
+  if (!Object.hasOwn(input, "parentRevisionId")) {
+    throw new WorkspaceStoreCodecError("create Artifact Revision input requires parentRevisionId");
+  }
+  if (!Object.hasOwn(input, "dependencies") || !Object.hasOwn(input, "resourcePins")) {
+    throw new WorkspaceStoreCodecError("create Artifact Revision input requires complete dependencies and resourcePins");
+  }
+  const dependencies = boundaryArray(input.dependencies, "Artifact Revision dependencies")
+    .map(normalizeArtifactDependencyInput);
+  const instanceIds = new Set<string>();
+  for (const dependency of dependencies) {
+    if (instanceIds.has(dependency.instanceId)) {
+      throw new WorkspaceStoreCodecError(`duplicate Artifact Revision instance id ${dependency.instanceId}`);
+    }
+    instanceIds.add(dependency.instanceId);
+  }
+  dependencies.sort((left, right) => compareBinary(left.instanceId, right.instanceId));
+  const resourcePins = boundaryArray(input.resourcePins, "Artifact Revision Resource pins")
+    .map(normalizeArtifactResourcePinInput);
+  const resourceIds = new Set<string>();
+  for (const pin of resourcePins) {
+    if (resourceIds.has(pin.resourceId)) {
+      throw new WorkspaceStoreCodecError(`duplicate Artifact Revision Resource pin ${pin.resourceId}`);
+    }
+    resourceIds.add(pin.resourceId);
+  }
+  resourcePins.sort((left, right) => compareBinary(left.resourceId, right.resourceId));
+  const contextPackHash = optionalNullableCanonicalString(input, "contextPackHash", "Context Pack hash");
+  const producedByRunId = optionalNullableCanonicalString(input, "producedByRunId", "producing Run id");
+  return {
+    artifactId: canonicalString(input.artifactId, "Artifact id"),
+    trackId: canonicalString(input.trackId, "Artifact Track id"),
+    parentRevisionId: nullableCanonicalString(input.parentRevisionId, "parent Artifact Revision id"),
+    sourceCommitHash: canonicalString(input.sourceCommitHash, "source commit hash"),
+    sourceTreeHash: canonicalString(input.sourceTreeHash, "source tree hash"),
+    kernelRevisionId: canonicalString(input.kernelRevisionId, "Kernel Revision id"),
+    renderSpec: canonicalJsonObject(input.renderSpec, "Artifact Revision render spec"),
+    quality: canonicalJsonObject(input.quality, "Artifact Revision quality"),
+    ...(contextPackHash === undefined ? {} : { contextPackHash }),
+    ...(producedByRunId === undefined ? {} : { producedByRunId }),
+    dependencies,
+    resourcePins,
+  };
+}
+
+interface KernelPayload {
+  tokens: Record<string, string | number>;
+  typography: Record<string, unknown>;
+  sharedAssetRevisionIds: string[];
+  brief: string;
+  terminology: Record<string, string>;
+  exclusions: string[];
+  responsiveFrames: SharedDesignKernelRevision["responsiveFrames"];
+  qualityProfile: SharedDesignKernelRevision["qualityProfile"];
+}
+
+function normalizeKernelPayload(value: unknown, label: string): KernelPayload {
+  const payload = boundaryRecord(value, label);
+  allowFields(payload, [
+    "tokens",
+    "typography",
+    "sharedAssetRevisionIds",
+    "brief",
+    "terminology",
+    "exclusions",
+    "responsiveFrames",
+    "qualityProfile",
+  ], label);
+  const tokenInput = boundaryRecord(payload.tokens, `${label} tokens`);
+  const tokens: Record<string, string | number> = {};
+  for (const key of sortedUtf8ObjectKeys(tokenInput, `${label} tokens`)) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+      throw new WorkspaceStoreCodecError(`${label} tokens contain unsafe field ${key}`);
+    }
+    const token = tokenInput[key];
+    if (typeof token !== "string" && (typeof token !== "number" || !Number.isFinite(token))) {
+      throw new WorkspaceStoreCodecError(`${label} token ${key} must be a string or finite number`);
+    }
+    if (typeof token === "string" && !isWellFormedUtf16(token)) {
+      throw new WorkspaceStoreCodecError(`${label} token ${key} must contain well-formed Unicode`);
+    }
+    tokens[key] = token;
+  }
+  const terminologyInput = boundaryRecord(payload.terminology, `${label} terminology`);
+  const terminology: Record<string, string> = {};
+  for (const key of sortedUtf8ObjectKeys(terminologyInput, `${label} terminology`)) {
+    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+      throw new WorkspaceStoreCodecError(`${label} terminology contains unsafe field ${key}`);
+    }
+    terminology[key] = canonicalString(terminologyInput[key], `${label} terminology ${key}`);
+  }
+  const responsiveFrames = boundaryArray(payload.responsiveFrames, `${label} responsiveFrames`).map((entry, index) => {
+    const frameLabel = `${label} responsive frame at index ${index}`;
+    const frame = boundaryRecord(entry, frameLabel);
+    allowFields(frame, ["id", "name", "width", "height", "initialState", "fixture", "background"], frameLabel);
+    const width = positiveNumber(frame.width, `${frameLabel} width`);
+    const height = positiveNumber(frame.height, `${frameLabel} height`);
+    const initialState = Object.hasOwn(frame, "initialState")
+      ? canonicalString(frame.initialState, `${frameLabel} initialState`)
+      : undefined;
+    const background = Object.hasOwn(frame, "background")
+      ? canonicalString(frame.background, `${frameLabel} background`)
+      : undefined;
+    const fixture = Object.hasOwn(frame, "fixture")
+      ? canonicalJsonObject(frame.fixture, `${frameLabel} fixture`)
+      : undefined;
+    return {
+      id: canonicalString(frame.id, `${frameLabel} id`),
+      name: canonicalString(frame.name, `${frameLabel} name`),
+      width,
+      height,
+      ...(initialState === undefined ? {} : { initialState }),
+      ...(fixture === undefined ? {} : { fixture }),
+      ...(background === undefined ? {} : { background }),
+    };
+  });
+  const frameIds = new Set<string>();
+  for (const frame of responsiveFrames) {
+    if (frameIds.has(frame.id)) throw new WorkspaceStoreCodecError(`duplicate Kernel responsive frame ${frame.id}`);
+    frameIds.add(frame.id);
+  }
+  const quality = boundaryRecord(payload.qualityProfile, `${label} qualityProfile`);
+  allowFields(quality, [
+    "requiredFrameIds",
+    "blockingSeverities",
+    "requireRuntimeChecks",
+    "requireVisualReview",
+  ], `${label} qualityProfile`);
+  const requiredFrameIds = canonicalStringArray(quality.requiredFrameIds, `${label} requiredFrameIds`);
+  for (const frameId of requiredFrameIds) {
+    if (!frameIds.has(frameId)) throw new WorkspaceStoreCodecError(`Kernel required frame ${frameId} does not exist`);
+  }
+  const blockingSeverities = canonicalStringArray(quality.blockingSeverities, `${label} blockingSeverities`);
+  if (blockingSeverities.some((severity) => severity !== "P0" && severity !== "P1" && severity !== "P2")) {
+    throw new WorkspaceStoreCodecError("Kernel blocking severity must be P0, P1, or P2");
+  }
+  if (typeof quality.requireRuntimeChecks !== "boolean" || typeof quality.requireVisualReview !== "boolean") {
+    throw new WorkspaceStoreCodecError("Kernel quality flags must be booleans");
+  }
+  if (typeof payload.brief !== "string") throw new WorkspaceStoreCodecError("Kernel brief must be a string");
+  if (!isWellFormedUtf16(payload.brief)) {
+    throw new WorkspaceStoreCodecError("Kernel brief must contain well-formed Unicode");
+  }
+  const sharedAssetRevisionIds = canonicalStringArray(
+    payload.sharedAssetRevisionIds,
+    `${label} sharedAssetRevisionIds`,
+  );
+  if (new Set(sharedAssetRevisionIds).size !== sharedAssetRevisionIds.length) {
+    throw new WorkspaceStoreCodecError("Kernel shared Asset Revision ids must be unique");
+  }
+  sharedAssetRevisionIds.sort(compareBinary);
+  if (new Set(requiredFrameIds).size !== requiredFrameIds.length) {
+    throw new WorkspaceStoreCodecError("Kernel required frame ids must be unique");
+  }
+  if (new Set(blockingSeverities).size !== blockingSeverities.length) {
+    throw new WorkspaceStoreCodecError("Kernel blocking severities must be unique");
+  }
+  return {
+    tokens,
+    typography: canonicalJsonObject(payload.typography, `${label} typography`),
+    sharedAssetRevisionIds,
+    brief: payload.brief,
+    terminology,
+    exclusions: canonicalStringArray(payload.exclusions, `${label} exclusions`),
+    responsiveFrames,
+    qualityProfile: {
+      requiredFrameIds,
+      blockingSeverities: blockingSeverities as SharedDesignKernelRevision["qualityProfile"]["blockingSeverities"],
+      requireRuntimeChecks: quality.requireRuntimeChecks,
+      requireVisualReview: quality.requireVisualReview,
+    },
+  };
+}
+
+export function normalizeCreateKernelRevisionInput(value: unknown): CreateKernelRevisionInput {
+  const input = boundaryRecord(value, "create Kernel Revision input");
+  allowFields(input, [
+    "workspaceId",
+    "parentRevisionId",
+    "tokens",
+    "typography",
+    "sharedAssetRevisionIds",
+    "brief",
+    "terminology",
+    "exclusions",
+    "responsiveFrames",
+    "qualityProfile",
+  ], "create Kernel Revision input");
+  const payload = normalizeKernelPayload({
+    tokens: input.tokens,
+    typography: input.typography,
+    sharedAssetRevisionIds: input.sharedAssetRevisionIds,
+    brief: input.brief,
+    terminology: input.terminology,
+    exclusions: input.exclusions,
+    responsiveFrames: input.responsiveFrames,
+    qualityProfile: input.qualityProfile,
+  }, "Kernel Revision payload");
+  return {
+    workspaceId: canonicalString(input.workspaceId, "Kernel Workspace id"),
+    parentRevisionId: canonicalString(input.parentRevisionId, "parent Kernel Revision id"),
+    ...payload,
+  };
+}
+
+function normalizeExpectedId(value: unknown, label: string, nullable: boolean): string | null {
+  if (nullable && value === null) return null;
+  return canonicalString(value, label);
+}
+
+export function normalizeArtifactPublicationExpectation(value: unknown): ArtifactPublicationExpectation {
+  const expected = boundaryRecord(value, "Artifact publication expectation");
+  allowFields(expected, ["expectedHeadRevisionId", "expectedSnapshotId"], "Artifact publication expectation");
+  return {
+    expectedHeadRevisionId: normalizeExpectedId(expected.expectedHeadRevisionId, "expected Artifact Head Revision id", true),
+    expectedSnapshotId: canonicalString(expected.expectedSnapshotId, "expected active Snapshot id"),
+  };
+}
+
+export function normalizeKernelPublicationExpectation(value: unknown): KernelPublicationExpectation {
+  const expected = boundaryRecord(value, "Kernel publication expectation");
+  allowFields(expected, ["expectedKernelRevisionId", "expectedSnapshotId"], "Kernel publication expectation");
+  return {
+    expectedKernelRevisionId: canonicalString(expected.expectedKernelRevisionId, "expected active Kernel Revision id"),
+    expectedSnapshotId: canonicalString(expected.expectedSnapshotId, "expected active Snapshot id"),
+  };
+}
+
+export function normalizeWorkspaceSnapshotPublicationInput(value: unknown): WorkspaceSnapshotPublicationInput {
+  const input = boundaryRecord(value, "Workspace Snapshot publication input");
+  allowFields(input, ["expectedSnapshotId", "reason", "provenance", "createdByRunId"], "Workspace Snapshot publication input");
+  const createdByRunId = optionalNullableCanonicalString(input, "createdByRunId", "Workspace Snapshot creating Run id");
+  return {
+    expectedSnapshotId: canonicalString(input.expectedSnapshotId, "expected active Snapshot id"),
+    reason: canonicalString(input.reason, "Workspace Snapshot reason"),
+    provenance: asWorkspaceSnapshotProvenance(input.provenance),
+    ...(createdByRunId === undefined ? {} : { createdByRunId }),
+  };
+}
+
 function allowFields(value: Record<string, unknown>, fields: readonly string[], label: string): void {
   const allowed = new Set(fields);
   for (const field of Object.keys(value)) {
@@ -244,6 +704,9 @@ function allowFields(value: Record<string, unknown>, fields: readonly string[], 
 function canonicalString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new WorkspaceStoreCodecError(`${label} must be a non-empty string`);
+  }
+  if (!isWellFormedUtf16(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must contain well-formed Unicode`);
   }
   return value.trim();
 }
@@ -460,12 +923,20 @@ export function asWorkspaceSnapshotProvenance(value: unknown): WorkspaceSnapshot
       };
     }
     case "kernel-publication": {
-      allowFields(provenance, ["kind", "kernelRevisionId", "proposalId"], "kernel-publication provenance");
+      allowFields(provenance, ["kind", "kernelRevisionId", "proposalId", "impact"], "kernel-publication provenance");
       const proposalId = optional("proposalId");
+      const kernelRevisionId = exactStoredString(provenance.kernelRevisionId, "Kernel provenance Revision id");
+      const impact = Object.hasOwn(provenance, "impact")
+        ? asKernelImpactAnalysis(provenance.impact)
+        : undefined;
+      if (impact !== undefined && impact.toKernelRevisionId !== kernelRevisionId) {
+        throw new WorkspaceStoreCodecError("Kernel provenance impact target must match its Revision id");
+      }
       return {
         kind,
-        kernelRevisionId: exactStoredString(provenance.kernelRevisionId, "Kernel provenance Revision id"),
+        kernelRevisionId,
         ...(proposalId === undefined ? {} : { proposalId }),
+        ...(impact === undefined ? {} : { impact }),
       };
     }
     case "propagation":
@@ -487,6 +958,9 @@ export function asWorkspaceSnapshotProvenance(value: unknown): WorkspaceSnapshot
       allowFields(provenance, ["kind", "restoredSnapshotId", "restoredRevisionId"], "restore provenance");
       const restoredSnapshotId = optional("restoredSnapshotId");
       const restoredRevisionId = optional("restoredRevisionId");
+      if (restoredSnapshotId === undefined && restoredRevisionId === undefined) {
+        throw new WorkspaceStoreCodecError("restore provenance requires a restored Snapshot or Revision id");
+      }
       return {
         kind,
         ...(restoredSnapshotId === undefined ? {} : { restoredSnapshotId }),
@@ -499,6 +973,51 @@ export function asWorkspaceSnapshotProvenance(value: unknown): WorkspaceSnapshot
     default:
       throw new WorkspaceStoreCodecError(`unsupported Workspace Snapshot provenance kind ${kind}`);
   }
+}
+
+function asKernelImpactAnalysis(value: unknown): KernelImpactAnalysis {
+  const impact = boundaryRecord(value, "Kernel impact analysis");
+  allowFields(
+    impact,
+    ["workspaceId", "baseSnapshotId", "fromKernelRevisionId", "toKernelRevisionId", "affectedArtifactRevisions"],
+    "Kernel impact analysis",
+  );
+  const affected = boundaryArray(
+    impact.affectedArtifactRevisions,
+    "Kernel impact affected Artifact Revisions",
+  ).map((entry, index) => {
+    const record = boundaryRecord(entry, `Kernel impact affected Artifact Revision ${index}`);
+    allowFields(
+      record,
+      ["artifactId", "revisionId", "pinnedKernelRevisionId"],
+      `Kernel impact affected Artifact Revision ${index}`,
+    );
+    return {
+      artifactId: exactStoredString(record.artifactId, "Kernel impact Artifact id"),
+      revisionId: exactStoredString(record.revisionId, "Kernel impact Artifact Revision id"),
+      pinnedKernelRevisionId: exactStoredString(
+        record.pinnedKernelRevisionId,
+        "Kernel impact pinned Kernel Revision id",
+      ),
+    };
+  });
+  for (let index = 1; index < affected.length; index += 1) {
+    const previous = affected[index - 1];
+    const current = affected[index];
+    if (!previous || !current || compareBinary(previous.artifactId, current.artifactId) >= 0) {
+      throw new WorkspaceStoreCodecError("Kernel impact affected Artifact Revisions must be unique and sorted");
+    }
+  }
+  return {
+    workspaceId: exactStoredString(impact.workspaceId, "Kernel impact Workspace id"),
+    baseSnapshotId: exactStoredString(impact.baseSnapshotId, "Kernel impact base Snapshot id"),
+    fromKernelRevisionId: exactStoredString(
+      impact.fromKernelRevisionId,
+      "Kernel impact source Kernel Revision id",
+    ),
+    toKernelRevisionId: exactStoredString(impact.toKernelRevisionId, "Kernel impact target Kernel Revision id"),
+    affectedArtifactRevisions: affected,
+  };
 }
 
 function canonicalEmptyJsonObject(value: unknown, label: string): void {
@@ -553,23 +1072,104 @@ export function asArtifactTrack(row: Row): ArtifactTrackRecord {
 }
 
 export function asArtifactRevision(row: Row): ArtifactRevisionRecord {
+  sealedAggregate(row.sealed, "Artifact Revision");
   return {
     id: requiredString(row.id, "Artifact Revision id"),
     workspaceId: requiredString(row.workspace_id, "Artifact Revision workspace id"),
     artifactId: requiredString(row.artifact_id, "Artifact Revision Artifact id"),
     trackId: requiredString(row.track_id, "Artifact Revision Track id"),
-    sequence: nonNegativeInteger(row.sequence, "Artifact Revision sequence"),
+    sequence: positiveInteger(row.sequence, "Artifact Revision sequence"),
     parentRevisionId: nullableString(row.parent_revision_id, "Artifact Revision parent id"),
     sourceCommitHash: requiredString(row.source_commit_hash, "Artifact Revision source commit hash"),
     sourceTreeHash: requiredString(row.source_tree_hash, "Artifact Revision source tree hash"),
     artifactRoot: requiredString(row.artifact_root, "Artifact Revision root"),
     kernelRevisionId: requiredString(row.kernel_revision_id, "Artifact Revision Kernel id"),
-    renderSpec: jsonObject(row.render_spec_json, "Artifact Revision render spec"),
-    quality: jsonObject(row.quality_json, "Artifact Revision quality"),
+    renderSpec: canonicalJsonObject(
+      parseJson(row.render_spec_json, "Artifact Revision render spec"),
+      "Artifact Revision render spec",
+    ),
+    quality: canonicalJsonObject(
+      parseJson(row.quality_json, "Artifact Revision quality"),
+      "Artifact Revision quality",
+    ),
     contextPackHash: nullableString(row.context_pack_hash, "Artifact Revision Context Pack hash"),
     producedByRunId: nullableString(row.produced_by_run_id, "Artifact Revision producing Run id"),
     legacyRunId: nullableString(row.legacy_run_id, "Artifact Revision legacy Run id"),
     createdAt: timestamp(row.created_at, "Artifact Revision created_at"),
+  };
+}
+
+export function asSharedDesignKernelRevision(row: Row): SharedDesignKernelRevision {
+  const payloadText = requiredString(row.payload_json, "Kernel Revision payload");
+  const storedChecksum = requiredString(row.checksum, "Kernel Revision checksum");
+  const actualChecksum = createHash("sha256").update(payloadText).digest("hex");
+  if (storedChecksum !== actualChecksum) {
+    throw new WorkspaceStoreCodecError("Kernel Revision checksum does not match its immutable payload");
+  }
+  const storedPayload = parseJson(payloadText, "Kernel Revision payload");
+  const payload = normalizeKernelPayload(storedPayload, "Kernel Revision payload");
+  if (!isDeepStrictEqual(storedPayload, payload)) {
+    throw new WorkspaceStoreCodecError("Kernel Revision payload must already be canonical");
+  }
+  return {
+    id: requiredString(row.id, "Kernel Revision id"),
+    workspaceId: requiredString(row.workspace_id, "Kernel Revision workspace id"),
+    sequence: positiveInteger(row.sequence, "Kernel Revision sequence"),
+    parentRevisionId: nullableString(row.parent_revision_id, "Kernel Revision parent id"),
+    ...payload,
+    checksum: storedChecksum,
+    createdAt: timestamp(row.created_at, "Kernel Revision created_at"),
+  };
+}
+
+export function asArtifactRevisionDependency(row: Row): ArtifactRevisionDependencyRecord {
+  if (row.status !== "linked" && row.status !== "detached") {
+    throw new WorkspaceStoreCodecError("Artifact Revision dependency status must be linked or detached");
+  }
+  const designNodeId = exactStoredString(row.design_node_id, "Artifact Revision dependency design node id");
+  const storedSourceLocator = parseJson(
+    row.source_locator_json,
+    "Artifact Revision dependency source locator",
+  );
+  const sourceLocator = normalizeDesignNodeLocatorInput(
+    storedSourceLocator,
+    "Artifact Revision dependency source locator",
+  );
+  if (!isDeepStrictEqual(storedSourceLocator, sourceLocator)) {
+    throw new WorkspaceStoreCodecError(
+      "Artifact Revision dependency source locator must already be canonical",
+    );
+  }
+  if (sourceLocator.designNodeId !== designNodeId) {
+    throw new WorkspaceStoreCodecError(
+      "Artifact Revision dependency design node id must match its immutable source locator",
+    );
+  }
+  return {
+    workspaceId: exactStoredString(row.workspace_id, "Artifact Revision dependency workspace id"),
+    ownerArtifactId: exactStoredString(row.owner_artifact_id, "Artifact Revision dependency owner Artifact id"),
+    revisionId: exactStoredString(row.revision_id, "Artifact Revision dependency Revision id"),
+    instanceId: exactStoredString(row.instance_id, "Artifact Revision dependency instance id"),
+    componentArtifactId: exactStoredString(row.component_artifact_id, "Artifact Revision dependency Component id"),
+    componentRevisionId: exactStoredString(row.component_revision_id, "Artifact Revision dependency Component Revision id"),
+    variantKey: nullableString(row.variant_key, "Artifact Revision dependency variant key"),
+    stateKey: nullableString(row.state_key, "Artifact Revision dependency state key"),
+    sourceLocator,
+    overrides: canonicalJsonObject(
+      parseJson(row.overrides_json, "Artifact Revision dependency overrides"),
+      "Artifact Revision dependency overrides",
+    ),
+    status: row.status,
+  };
+}
+
+export function asArtifactRevisionResourcePin(row: Row): ArtifactRevisionResourcePinRecord {
+  return {
+    workspaceId: exactStoredString(row.workspace_id, "Artifact Revision Resource pin workspace id"),
+    ownerArtifactId: exactStoredString(row.owner_artifact_id, "Artifact Revision Resource pin owner Artifact id"),
+    revisionId: exactStoredString(row.revision_id, "Artifact Revision Resource pin Revision id"),
+    resourceId: exactStoredString(row.resource_id, "Artifact Revision Resource pin Resource id"),
+    resourceRevisionId: exactStoredString(row.resource_revision_id, "Artifact Revision pinned Resource Revision id"),
   };
 }
 
@@ -625,6 +1225,12 @@ export function asWorkspaceGraphRevision(row: Row): WorkspaceGraph {
     }
     throw error;
   }
+  const nodesJson = requiredString(row.nodes_json, "workspace graph nodes JSON");
+  const edgesJson = requiredString(row.edges_json, "workspace graph edges JSON");
+  const expectedChecksum = createHash("sha256").update(`${nodesJson}\n${edgesJson}`).digest("hex");
+  if (requiredString(row.checksum, "workspace graph checksum") !== expectedChecksum) {
+    throw new WorkspaceGraphValidationError("workspace graph checksum does not match its immutable payload");
+  }
   const graph: unknown = {
     workspaceId: requiredString(row.workspace_id, "workspace graph workspace id"),
     revision: nonNegativeInteger(row.revision, "workspace graph revision"),
@@ -636,10 +1242,11 @@ export function asWorkspaceGraphRevision(row: Row): WorkspaceGraph {
 }
 
 export function asWorkspaceSnapshotBase(row: Row): WorkspaceSnapshotBaseRecord {
+  sealedAggregate(row.sealed, "Workspace Snapshot");
   return {
     id: requiredString(row.id, "Workspace Snapshot id"),
     workspaceId: requiredString(row.workspace_id, "Workspace Snapshot workspace id"),
-    sequence: nonNegativeInteger(row.sequence, "Workspace Snapshot sequence"),
+    sequence: positiveInteger(row.sequence, "Workspace Snapshot sequence"),
     parentSnapshotId: nullableString(row.parent_snapshot_id, "Workspace Snapshot parent id"),
     graphRevision: nonNegativeInteger(row.graph_revision, "Workspace Snapshot graph revision"),
     kernelRevisionId: requiredString(row.kernel_revision_id, "Workspace Snapshot Kernel id"),

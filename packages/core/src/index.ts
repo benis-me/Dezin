@@ -38,12 +38,23 @@ export type {
 } from "./types.ts";
 export type {
   ArtifactKind,
+  ArtifactPublicationExpectation,
   ArtifactQualityProfile,
   ArtifactQualityState,
   ArtifactQualitySummary,
+  ArtifactRevisionDependency,
+  ArtifactRevisionDependencyInput,
+  ArtifactRevisionResourcePin,
+  ArtifactRevisionResourcePinInput,
   BrokenPrototypeEdge,
+  ComponentInstanceDependencyStatus,
+  CreateArtifactRevisionInput,
+  CreateKernelRevisionInput,
   DesignNodeLocator,
   InteractivePrototypeEdge,
+  KernelImpactAnalysis,
+  KernelImpactArtifactRevision,
+  KernelPublicationExpectation,
   LayoutBounds,
   NewWorkspaceEdge,
   NewWorkspaceNode,
@@ -74,6 +85,7 @@ export type {
   WorkspaceNodeKind,
   WorkspaceResourceNode,
   WorkspaceSnapshot,
+  WorkspaceSnapshotPublicationInput,
   WorkspaceSnapshotProvenance,
   WorkspaceViewport,
 } from "./workspace-types.ts";
@@ -85,10 +97,16 @@ export {
   normalizeWorkspaceGraphCommands,
   validateWorkspaceGraph,
 } from "./workspace-graph.ts";
-export { WorkspaceStore } from "./workspace-store.ts";
+export {
+  WorkspacePointerConflictError,
+  WorkspaceStore,
+  type WorkspacePointerKind,
+} from "./workspace-store.ts";
 export {
   WorkspaceStoreCodecError,
+  type ArtifactRevisionDependencyRecord,
   type ArtifactRevisionRecord,
+  type ArtifactRevisionResourcePinRecord,
   type ArtifactTrackRecord,
   type WorkspaceArtifactRecord,
   type WorkspaceSnapshotBaseRecord,

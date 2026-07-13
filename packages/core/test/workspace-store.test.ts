@@ -9,11 +9,13 @@ import { Worker } from "node:worker_threads";
 import {
   Store,
   WorkspaceCommandReplayConflictError,
+  WorkspacePointerConflictError,
   WorkspaceRevisionConflictError,
   WorkspaceStore,
   WorkspaceStoreCodecError,
   type ArtifactRevisionRecord,
   type ArtifactTrackRecord,
+  type ResourceKind,
   type StoreClock,
   type WorkspaceArtifactRecord,
   type WorkspaceGraphCommand,
@@ -30,6 +32,7 @@ const REQUIRED_WORKSPACE_TABLES = [
   "artifact_revisions",
   "component_instances",
   "artifact_revision_dependencies",
+  "artifact_revision_resources",
   "resources",
   "resource_revisions",
   "workspace_nodes",
@@ -119,12 +122,13 @@ function insertArtifact(
   id: string,
   kind: "page" | "component" = "page",
   activeTrackId: string | null = null,
+  sourceRoot = `artifacts/${id}`,
 ): void {
   db.prepare(
     `INSERT INTO workspace_artifacts
        (id, workspace_id, kind, name, source_root, active_track_id, archived_at, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, NULL, 10, 11)`,
-  ).run(id, workspaceId, kind, `Name ${id}`, `artifacts/${id}`, activeTrackId);
+  ).run(id, workspaceId, kind, `Name ${id}`, sourceRoot, activeTrackId);
 }
 
 function insertTrack(
@@ -149,15 +153,19 @@ function insertRevision(
     kernelRevisionId: string;
     sequence?: number;
     parentRevisionId?: string | null;
+    sealed?: 0 | 1;
   },
 ): void {
+  const artifactRoot = (db.prepare(
+    "SELECT source_root FROM workspace_artifacts WHERE id = ? AND workspace_id = ?",
+  ).get(input.artifactId, input.workspaceId) as { source_root: string }).source_root;
   db.prepare(
     `INSERT INTO artifact_revisions (
        id, workspace_id, artifact_id, track_id, sequence, parent_revision_id,
        source_commit_hash, source_tree_hash, artifact_root, kernel_revision_id,
        render_spec_json, quality_json, context_pack_hash, produced_by_run_id,
-       legacy_run_id, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 13)`,
+       legacy_run_id, created_at, sealed
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 13, ?)`,
   ).run(
     input.id,
     input.workspaceId,
@@ -167,19 +175,26 @@ function insertRevision(
     input.parentRevisionId ?? null,
     `commit-${input.id}`,
     `tree-${input.id}`,
-    `artifacts/${input.artifactId}`,
+    artifactRoot,
     input.kernelRevisionId,
     JSON.stringify({ frames: [{ id: "desktop", width: 1440, height: 900 }] }),
     JSON.stringify({ state: "passed", score: 98, findings: [] }),
+    input.sealed ?? 1,
   );
 }
 
-function insertResource(db: DatabaseSync, workspaceId: string, id: string, headRevisionId: string | null = null): void {
+function insertResource(
+  db: DatabaseSync,
+  workspaceId: string,
+  id: string,
+  headRevisionId: string | null = null,
+  kind: ResourceKind = "research",
+): void {
   db.prepare(
     `INSERT INTO resources (
        id, workspace_id, kind, title, head_revision_id, default_pin_policy, archived_at, created_at, updated_at
-     ) VALUES (?, ?, 'research', ?, ?, 'follow-head', NULL, 14, 15)`,
-  ).run(id, workspaceId, `Title ${id}`, headRevisionId);
+     ) VALUES (?, ?, ?, ?, ?, 'follow-head', NULL, 14, 15)`,
+  ).run(id, workspaceId, kind, `Title ${id}`, headRevisionId);
 }
 
 function insertResourceRevision(
@@ -199,9 +214,58 @@ function insertResourceRevision(
 
 function assertRejectedWithoutChanging(db: DatabaseSync, table: string, action: () => void): void {
   const before = Number((db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count);
-  assert.throws(action, /constraint|ownership|belongs|delete workspace/i);
+  assert.throws(action, /constraint|ownership|belongs|delete workspace|immutable|active state/i);
   const after = Number((db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count);
   assert.equal(after, before, `${table} changed after a rejected ownership write`);
+}
+
+interface LineageReadCounts {
+  artifactRows: number;
+  artifactReferenceReads: number;
+  kernelRows: number;
+  runOwnershipReads: number;
+  snapshotRows: number;
+}
+
+function observeLineageReads(
+  db: DatabaseSync,
+  clock: StoreClock,
+  counts: LineageReadCounts,
+): WorkspaceStore {
+  const observed = new Proxy(db, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (sql: string) => {
+          const normalized = sql.replace(/\s+/g, " ").trim();
+          if ((normalized.includes("FROM artifact_revisions parent")
+              && normalized.endsWith("WHERE parent.id = ?"))
+            || (normalized.includes("FROM artifact_revisions revision")
+              && normalized.endsWith("WHERE revision.id = ?"))) {
+            counts.artifactRows += 1;
+          }
+          if (normalized === "SELECT * FROM shared_design_kernel_revisions WHERE id = ?") {
+            counts.kernelRows += 1;
+          }
+          if (normalized === "SELECT * FROM artifact_tracks WHERE id = ?") {
+            counts.artifactReferenceReads += 1;
+          }
+          if (normalized.includes("FROM runs run JOIN project_workspaces workspace")) {
+            counts.runOwnershipReads += 1;
+          }
+          if (normalized === "SELECT * FROM workspace_snapshots WHERE id = ?") {
+            counts.snapshotRows += 1;
+          }
+          if (normalized === "SELECT * FROM workspace_snapshots WHERE workspace_id = ? AND id = ?") {
+            counts.snapshotRows += 1;
+          }
+          return target.prepare(sql);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return new WorkspaceStore(observed, clock);
 }
 
 function rowCount(db: DatabaseSync, table: string, where = "1 = 1"): number {
@@ -217,6 +281,10 @@ function expectedPathSegment(value: string): string {
 
 function expectedArtifactSourceRoot(workspaceId: string, artifactId: string): string {
   return `workspaces/${expectedPathSegment(workspaceId)}/artifacts/${expectedPathSegment(artifactId)}`;
+}
+
+function workspaceGraphChecksum(nodesJson: string, edgesJson: string): string {
+  return createHash("sha256").update(`${nodesJson}\n${edgesJson}`).digest("hex");
 }
 
 function seedSnapshotSuccessor(
@@ -235,6 +303,80 @@ function seedSnapshotSuccessor(
                '{"kind":"legacy-migration","migration":"stale-snapshot-fixture"}', NULL, 500)`,
   ).run(id, workspace.id, sequence, workspace.activeSnapshotId, workspace.activeKernelRevisionId);
   db.prepare("UPDATE project_workspaces SET active_snapshot_id = ? WHERE id = ?").run(id, workspace.id);
+}
+
+function standardArtifactRevisionInput(input: {
+  artifactId: string;
+  trackId: string;
+  parentRevisionId: string | null;
+  kernelRevisionId: string;
+  tree: string;
+  dependencies?: Array<{
+    instanceId: string;
+    componentArtifactId: string;
+    componentRevisionId: string;
+    createInstanceIdentity?: true;
+    variantKey?: string;
+    stateKey?: string;
+    sourceLocator: { designNodeId: string; sourcePath?: string; selector?: string };
+    overrides: Record<string, unknown>;
+    status: "linked" | "detached";
+  }>;
+  resourcePins?: Array<{ resourceId: string; resourceRevisionId: string }>;
+  producedByRunId?: string;
+}) {
+  return {
+    artifactId: input.artifactId,
+    trackId: input.trackId,
+    parentRevisionId: input.parentRevisionId,
+    sourceCommitHash: `commit-${input.tree}`,
+    sourceTreeHash: input.tree,
+    kernelRevisionId: input.kernelRevisionId,
+    renderSpec: { frames: [{ id: "desktop", width: 1440, height: 900 }] },
+    quality: { state: "passed", score: 98, findings: [] },
+    contextPackHash: `context-${input.tree}`,
+    ...(input.producedByRunId === undefined ? {} : { producedByRunId: input.producedByRunId }),
+    dependencies: input.dependencies ?? [],
+    resourcePins: input.resourcePins ?? [],
+  };
+}
+
+function reuseInstanceDependency<T extends { createInstanceIdentity?: true }>(dependency: T): Omit<T, "createInstanceIdentity"> {
+  const copy = { ...dependency };
+  delete copy.createInstanceIdentity;
+  return copy;
+}
+
+function addRevisionTestArtifacts(store: Store, projectId: string, expectedSnapshotId: string) {
+  const workspace = store.workspace.getWorkspace(projectId)!;
+  return store.workspace.applyGraphCommands(projectId, {
+    baseGraphRevision: workspace.graphRevision,
+    expectedSnapshotId,
+    commands: [
+      {
+        id: `add-page-${workspace.graphRevision}`,
+        type: "add-node" as const,
+        node: {
+          id: "revision-page-node",
+          kind: "page" as const,
+          name: "Revision page",
+          artifactId: "revision-page",
+          createIdentity: { initialTrackId: "revision-page-track" },
+        },
+      },
+      {
+        id: `add-component-${workspace.graphRevision}`,
+        type: "add-node" as const,
+        node: {
+          id: "revision-component-node",
+          kind: "component" as const,
+          name: "Revision component",
+          artifactId: "revision-component",
+          createIdentity: { initialTrackId: "revision-component-track" },
+        },
+      },
+    ],
+  });
 }
 
 test("fresh stores create every normalized workspace table", () => {
@@ -406,7 +548,7 @@ test("ensureWorkspaceRecord rolls back every seed row if a later insert fails", 
   store.workspace.ensureWorkspaceRecord(first.id);
   const second = store.createProject({ name: "Second", mode: "standard" });
 
-  assert.throws(() => store.workspace.ensureWorkspaceRecord(second.id), /constraint/i);
+  assert.throws(() => store.workspace.ensureWorkspaceRecord(second.id), /constraint|immutable/i);
   assert.equal(store.workspace.getWorkspace(second.id), null);
   assert.equal(
     Number((store.db.prepare("SELECT COUNT(*) AS count FROM workspace_graph_revisions WHERE workspace_id = 'workspace-2'").get() as { count: number }).count),
@@ -451,25 +593,35 @@ test("WorkspaceStore reads normalized records defensively and snapshots resolve 
   const historicalGraph = {
     workspaceId: workspace.id,
     revision: 1,
-    nodes: [{
-      id: "node-page",
-      workspaceId: workspace.id,
-      kind: "page",
-      name: "Historical page name",
-      artifactId: "artifact-page",
-    }],
+    nodes: [
+      {
+        id: "node-page",
+        workspaceId: workspace.id,
+        kind: "page",
+        name: "Name artifact-page",
+        artifactId: "artifact-page",
+      },
+      {
+        id: "node-resource",
+        workspaceId: workspace.id,
+        kind: "resource",
+        name: "Title resource-research",
+        resourceId: "resource-research",
+      },
+    ],
     edges: [],
   };
+  const historicalNodesJson = JSON.stringify(historicalGraph.nodes);
   store.db.prepare(
     `INSERT INTO workspace_graph_revisions
        (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
-     VALUES (?, 1, ?, '[]', 'graph-1', 24)`,
-  ).run(workspace.id, JSON.stringify(historicalGraph.nodes));
+     VALUES (?, 1, ?, '[]', ?, 24)`,
+  ).run(workspace.id, historicalNodesJson, workspaceGraphChecksum(historicalNodesJson, "[]"));
   store.db.prepare(
     `INSERT INTO workspace_snapshots
-       (id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id, reason, provenance_json, created_by_run_id, created_at)
+       (id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id, reason, provenance_json, created_by_run_id, created_at, sealed)
      VALUES ('snapshot-2', ?, 2, ?, 1, ?, 'test-checkpoint',
-             '{"kind":"legacy-migration","migration":"test-fixture"}', NULL, 25)`,
+             '{"kind":"legacy-migration","migration":"test-fixture"}', NULL, 25, 0)`,
   ).run(workspace.id, workspace.activeSnapshotId, workspace.activeKernelRevisionId);
   store.db.prepare(
     `INSERT INTO workspace_snapshot_artifacts (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
@@ -479,6 +631,7 @@ test("WorkspaceStore reads normalized records defensively and snapshots resolve 
     `INSERT INTO workspace_snapshot_resources (workspace_id, snapshot_id, resource_id, revision_id)
      VALUES (?, 'snapshot-2', 'resource-research', 'resource-revision-1')`,
   ).run(workspace.id);
+  store.db.prepare("UPDATE workspace_snapshots SET sealed = 1 WHERE id = 'snapshot-2'").run();
   store.db.prepare(
     "UPDATE project_workspaces SET graph_revision = 1, active_snapshot_id = 'snapshot-2' WHERE id = ?",
   ).run(workspace.id);
@@ -787,7 +940,7 @@ test("ownership triggers cover insert and update paths for every cyclic or mutab
   insertResourceRevision(store.db, workspace1.id, "resource-1", "resource-revision-1");
   insertResourceRevision(store.db, workspace2.id, "resource-2", "resource-revision-2");
 
-  const pointerFailure = (action: () => void) => assert.throws(action, /ownership|belongs/i);
+  const pointerFailure = (action: () => void) => assert.throws(action, /ownership|belongs|immutable|active state|direct child/i);
 
   store.db.exec("INSERT INTO projects (id, name, mode, sharingan, created_at, updated_at) VALUES ('project-3', 'Three', 'standard', 0, 1, 1)");
   pointerFailure(() => store.db.prepare(
@@ -900,6 +1053,7 @@ test("direct Workspace deletion is guarded while Store.deleteProject still perfo
     artifactId: "delete-page",
     trackId: "delete-page-track",
     kernelRevisionId: workspace.activeKernelRevisionId,
+    sealed: 0,
   });
   insertRevision(store.db, {
     id: "delete-component-revision",
@@ -908,10 +1062,6 @@ test("direct Workspace deletion is guarded while Store.deleteProject still perfo
     trackId: "delete-component-track",
     kernelRevisionId: workspace.activeKernelRevisionId,
   });
-  store.db.prepare("UPDATE workspace_artifacts SET active_track_id = 'delete-page-track' WHERE id = 'delete-page'").run();
-  store.db.prepare("UPDATE workspace_artifacts SET active_track_id = 'delete-component-track' WHERE id = 'delete-component'").run();
-  store.db.prepare("UPDATE artifact_tracks SET head_revision_id = 'delete-page-revision' WHERE id = 'delete-page-track'").run();
-  store.db.prepare("UPDATE artifact_tracks SET head_revision_id = 'delete-component-revision' WHERE id = 'delete-component-track'").run();
   store.db.prepare(
     `INSERT INTO component_instances
        (id, workspace_id, owner_artifact_id, component_artifact_id, created_at)
@@ -925,6 +1075,11 @@ test("direct Workspace deletion is guarded while Store.deleteProject still perfo
      ) VALUES (?, 'delete-page', 'delete-page-revision', 'delete-instance', 'delete-component',
                'delete-component-revision', NULL, NULL, 'component-node', '{}', '{}', 'linked')`,
   ).run(workspace.id);
+  store.db.prepare("UPDATE artifact_revisions SET sealed = 1 WHERE id = 'delete-page-revision'").run();
+  store.db.prepare("UPDATE workspace_artifacts SET active_track_id = 'delete-page-track' WHERE id = 'delete-page'").run();
+  store.db.prepare("UPDATE workspace_artifacts SET active_track_id = 'delete-component-track' WHERE id = 'delete-component'").run();
+  store.db.prepare("UPDATE artifact_tracks SET head_revision_id = 'delete-page-revision' WHERE id = 'delete-page-track'").run();
+  store.db.prepare("UPDATE artifact_tracks SET head_revision_id = 'delete-component-revision' WHERE id = 'delete-component-track'").run();
   insertResource(store.db, workspace.id, "delete-resource");
   insertResourceRevision(store.db, workspace.id, "delete-resource", "delete-resource-revision");
   store.db.prepare("UPDATE resources SET head_revision_id = 'delete-resource-revision' WHERE id = 'delete-resource'").run();
@@ -958,15 +1113,23 @@ test("direct Workspace deletion is guarded while Store.deleteProject still perfo
      VALUES (?, 'default', 0, 0, 1, 1)`,
   ).run(workspace.id);
   store.db.prepare(
+    `INSERT INTO workspace_snapshots (
+       id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+       reason, provenance_json, created_by_run_id, created_at, sealed
+     ) VALUES ('delete-snapshot', ?, 2, ?, 0, ?, 'delete-fixture',
+               '{"kind":"legacy-migration","migration":"delete-fixture"}', NULL, 2, 0)`,
+  ).run(workspace.id, workspace.activeSnapshotId, workspace.activeKernelRevisionId);
+  store.db.prepare(
     `INSERT INTO workspace_snapshot_artifacts
        (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
-     VALUES (?, ?, 'delete-page', 'delete-page-track', 'delete-page-revision'),
-            (?, ?, 'delete-component', 'delete-component-track', 'delete-component-revision')`,
-  ).run(workspace.id, workspace.activeSnapshotId, workspace.id, workspace.activeSnapshotId);
+     VALUES (?, 'delete-snapshot', 'delete-page', 'delete-page-track', 'delete-page-revision'),
+            (?, 'delete-snapshot', 'delete-component', 'delete-component-track', 'delete-component-revision')`,
+  ).run(workspace.id, workspace.id);
   store.db.prepare(
     `INSERT INTO workspace_snapshot_resources (workspace_id, snapshot_id, resource_id, revision_id)
-     VALUES (?, ?, 'delete-resource', 'delete-resource-revision')`,
-  ).run(workspace.id, workspace.activeSnapshotId);
+     VALUES (?, 'delete-snapshot', 'delete-resource', 'delete-resource-revision')`,
+  ).run(workspace.id);
+  store.db.prepare("UPDATE workspace_snapshots SET sealed = 1 WHERE id = 'delete-snapshot'").run();
 
   store.deleteProject(project.id);
   assert.equal(store.getProject(project.id), null);
@@ -986,7 +1149,7 @@ test("the active graph pointer cannot reference a missing Workspace graph revisi
 
   assert.throws(
     () => store.db.prepare("UPDATE project_workspaces SET graph_revision = 999 WHERE id = ?").run(workspace.id),
-    /constraint/i,
+    /constraint|active state|direct child/i,
   );
   assert.equal(store.workspace.getWorkspace(project.id)?.graphRevision, 0);
   store.close();
@@ -1005,7 +1168,7 @@ test("workspace node kind must match its owned Artifact kind on insert and updat
          (id, workspace_id, kind, artifact_id, resource_id, archived_at, created_at, updated_at)
        VALUES ('bad-node', ?, 'page', 'component-1', NULL, NULL, 1, 1)`,
     ).run(workspace.id),
-    /kind ownership/i,
+    /kind ownership|identity.*immutable/i,
   );
   store.db.prepare(
     `INSERT INTO workspace_nodes
@@ -1014,7 +1177,7 @@ test("workspace node kind must match its owned Artifact kind on insert and updat
   ).run(workspace.id);
   assert.throws(
     () => store.db.prepare("UPDATE workspace_nodes SET artifact_id = 'component-1' WHERE id = 'page-node'").run(),
-    /kind ownership/i,
+    /kind ownership|identity.*immutable/i,
   );
   assert.equal(
     (store.db.prepare("SELECT artifact_id FROM workspace_nodes WHERE id = 'page-node'").get() as { artifact_id: string }).artifact_id,
@@ -1031,7 +1194,7 @@ test("workspace node kind must match its owned Artifact kind on insert and updat
          (id, workspace_id, owner_artifact_id, component_artifact_id, created_at)
        VALUES ('bad-page-instance', ?, 'page-1', 'page-1', 1)`,
     ).run(workspace.id),
-    /component kind/i,
+    /component kind|identity.*immutable/i,
   );
   store.db.prepare(
     `INSERT INTO component_instances
@@ -1042,7 +1205,7 @@ test("workspace node kind must match its owned Artifact kind on insert and updat
     () => store.db.prepare(
       "UPDATE component_instances SET component_artifact_id = 'page-1' WHERE id = 'valid-component-instance'",
     ).run(),
-    /component kind/i,
+    /component kind|identity.*immutable/i,
   );
   store.close();
 });
@@ -1054,19 +1217,19 @@ test("active, Head, and parent pointers cannot dangle when their owned target is
 
   assert.throws(
     () => store.db.prepare("DELETE FROM workspace_snapshots WHERE id = ?").run(workspace.activeSnapshotId),
-    /constraint/i,
+    /constraint|immutable/i,
   );
   assert.throws(
     () => store.db.prepare("DELETE FROM shared_design_kernel_revisions WHERE id = ?").run(workspace.activeKernelRevisionId),
-    /constraint/i,
+    /constraint|immutable/i,
   );
   assert.throws(
     () => store.db.prepare("UPDATE project_workspaces SET active_snapshot_id = NULL WHERE id = ?").run(workspace.id),
-    /active snapshot/i,
+    /active snapshot|active state/i,
   );
   assert.throws(
     () => store.db.prepare("UPDATE project_workspaces SET active_kernel_revision_id = NULL WHERE id = ?").run(workspace.id),
-    /active kernel/i,
+    /active kernel|active state/i,
   );
   assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
 
@@ -1089,9 +1252,10 @@ test("active, Head, and parent pointers cannot dangle when their owned target is
     parentRevisionId: "revision-parent",
   });
   store.db.prepare("UPDATE workspace_artifacts SET active_track_id = 'track-parent' WHERE id = 'artifact-parent'").run();
+  store.db.prepare("UPDATE artifact_tracks SET head_revision_id = 'revision-parent' WHERE id = 'track-parent'").run();
   store.db.prepare("UPDATE artifact_tracks SET head_revision_id = 'revision-child' WHERE id = 'track-parent'").run();
-  assert.throws(() => store.db.prepare("DELETE FROM artifact_tracks WHERE id = 'track-parent'").run(), /constraint/i);
-  assert.throws(() => store.db.prepare("DELETE FROM artifact_revisions WHERE id = 'revision-parent'").run(), /constraint/i);
+  assert.throws(() => store.db.prepare("DELETE FROM artifact_tracks WHERE id = 'track-parent'").run(), /constraint|history/i);
+  assert.throws(() => store.db.prepare("DELETE FROM artifact_revisions WHERE id = 'revision-parent'").run(), /constraint|immutable/i);
   assert.ok(store.db.prepare("SELECT id FROM artifact_revisions WHERE id = 'revision-child'").get());
 
   insertResource(store.db, workspace.id, "resource-head");
@@ -1099,7 +1263,7 @@ test("active, Head, and parent pointers cannot dangle when their owned target is
   store.db.prepare("UPDATE resources SET head_revision_id = 'resource-head-revision' WHERE id = 'resource-head'").run();
   assert.throws(
     () => store.db.prepare("DELETE FROM resource_revisions WHERE id = 'resource-head-revision'").run(),
-    /constraint/i,
+    /constraint|immutable/i,
   );
   store.close();
 });
@@ -1110,18 +1274,23 @@ test("workspace codecs reject corrupt immutable JSON instead of silently replaci
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
   insertArtifact(store.db, workspace.id, "artifact-json");
   insertTrack(store.db, "artifact-json", "track-json");
-  insertRevision(store.db, {
-    id: "revision-json",
-    workspaceId: workspace.id,
-    artifactId: "artifact-json",
-    trackId: "track-json",
-    kernelRevisionId: workspace.activeKernelRevisionId,
-  });
-
-  store.db.prepare("UPDATE artifact_revisions SET render_spec_json = '{' WHERE id = 'revision-json'").run();
+  store.db.prepare(
+    `INSERT INTO artifact_revisions (
+       id, workspace_id, artifact_id, track_id, sequence, parent_revision_id,
+       source_commit_hash, source_tree_hash, artifact_root, kernel_revision_id,
+       render_spec_json, quality_json, context_pack_hash, produced_by_run_id,
+       legacy_run_id, created_at
+     ) VALUES ('revision-json', ?, 'artifact-json', 'track-json', 1, NULL,
+               'commit-json', 'tree-json', 'artifacts/artifact-json', ?,
+               '{', '{}', NULL, NULL, NULL, 13)`,
+  ).run(workspace.id, workspace.activeKernelRevisionId);
   assert.throws(() => store.workspace.listRevisions(project.id, "artifact-json"), /valid JSON/i);
-  store.db.prepare("UPDATE artifact_revisions SET render_spec_json = '{}' WHERE id = 'revision-json'").run();
-  store.db.prepare("UPDATE workspace_snapshots SET provenance_json = '[]' WHERE id = ?").run(workspace.activeSnapshotId);
+  store.db.prepare(
+    `INSERT INTO workspace_snapshots (
+       id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+       reason, provenance_json, created_by_run_id, created_at
+     ) VALUES ('snapshot-json-corrupt', ?, 2, ?, 0, ?, 'corrupt', '[]', NULL, 14)`,
+  ).run(workspace.id, workspace.activeSnapshotId, workspace.activeKernelRevisionId);
   assert.throws(() => store.workspace.listSnapshots(project.id), /must be an object/i);
 
   insertResource(store.db, workspace.id, "resource-json");
@@ -1779,14 +1948,31 @@ test("graph deltas create, attach, rename, and archive durable identity shells a
     "UPDATE resources SET head_revision_id = 'resource-new-revision' WHERE id = 'resource-new'",
   ).run();
   store.db.prepare(
+    `INSERT INTO workspace_snapshots (
+       id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+       reason, provenance_json, created_by_run_id, created_at, sealed
+     ) VALUES ('resource-pinned-snapshot', ?, 3, ?, 1, ?, 'resource-fixture',
+               '{"kind":"legacy-migration","migration":"resource-fixture"}', NULL, 30, 0)`,
+  ).run(workspace.id, created.snapshot.id, workspace.activeKernelRevisionId);
+  store.db.prepare(
+    `INSERT INTO workspace_snapshot_artifacts
+       (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
+     SELECT workspace_id, 'resource-pinned-snapshot', artifact_id, track_id, revision_id
+     FROM workspace_snapshot_artifacts WHERE snapshot_id = ?`,
+  ).run(created.snapshot.id);
+  store.db.prepare(
     `INSERT INTO workspace_snapshot_resources
        (workspace_id, snapshot_id, resource_id, revision_id)
-     VALUES (?, ?, 'resource-new', 'resource-new-revision')`,
-  ).run(workspace.id, created.snapshot.id);
+     VALUES (?, 'resource-pinned-snapshot', 'resource-new', 'resource-new-revision')`,
+  ).run(workspace.id);
+  store.db.prepare("UPDATE workspace_snapshots SET sealed = 1 WHERE id = 'resource-pinned-snapshot'").run();
+  store.db.prepare(
+    "UPDATE project_workspaces SET active_snapshot_id = 'resource-pinned-snapshot' WHERE id = ?",
+  ).run(workspace.id);
 
   const renamed = store.workspace.applyGraphCommands(project.id, {
     baseGraphRevision: 1,
-    expectedSnapshotId: created.snapshot.id,
+    expectedSnapshotId: "resource-pinned-snapshot",
     commands: [
       { id: "rename-page", type: "rename-node", nodeId: "page-node", name: "Landing" },
       { id: "rename-resource", type: "rename-node", nodeId: "resource-node", name: "Visual direction" },
@@ -1813,7 +1999,7 @@ test("graph deltas create, attach, rename, and archive durable identity shells a
   assert.deepEqual(store.workspace.getGraphRevision(project.id, 1).edges.map(({ id }) => id), ["edge-informs"]);
   assert.equal(renamed.snapshot.artifactRevisions["artifact-component"], undefined);
   assert.equal(renamed.snapshot.resourceRevisions["resource-new"], undefined);
-  const parentSnapshot = store.workspace.listSnapshots(project.id).find(({ id }) => id === created.snapshot.id);
+  const parentSnapshot = store.workspace.listSnapshots(project.id).find(({ id }) => id === "resource-pinned-snapshot");
   assert.equal(parentSnapshot?.artifactRevisions["artifact-component"], null);
   assert.equal(parentSnapshot?.resourceRevisions["resource-new"], "resource-new-revision");
   store.close();
@@ -1823,9 +2009,14 @@ test("existing identity attachment pins its exact current heads without re-deriv
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Existing pins", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
-  insertArtifact(store.db, workspace.id, "existing-artifact");
-  store.db.prepare("UPDATE workspace_artifacts SET source_root = ? WHERE id = 'existing-artifact'")
-    .run(expectedArtifactSourceRoot(workspace.id, "existing-artifact"));
+  insertArtifact(
+    store.db,
+    workspace.id,
+    "existing-artifact",
+    "page",
+    null,
+    expectedArtifactSourceRoot(workspace.id, "existing-artifact"),
+  );
   insertTrack(store.db, "existing-artifact", "existing-track");
   insertRevision(store.db, {
     id: "existing-revision",
@@ -1876,9 +2067,14 @@ test("attach-then-archive removes the transient identity mapping from only the c
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Transient identity", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
-  insertArtifact(store.db, workspace.id, "detached-artifact");
-  store.db.prepare("UPDATE workspace_artifacts SET source_root = ? WHERE id = 'detached-artifact'")
-    .run(expectedArtifactSourceRoot(workspace.id, "detached-artifact"));
+  insertArtifact(
+    store.db,
+    workspace.id,
+    "detached-artifact",
+    "page",
+    null,
+    expectedArtifactSourceRoot(workspace.id, "detached-artifact"),
+  );
   insertTrack(store.db, "detached-artifact", "detached-track");
   insertRevision(store.db, {
     id: "detached-revision",
@@ -1893,32 +2089,28 @@ test("attach-then-archive removes the transient identity mapping from only the c
   store.db.prepare(
     "UPDATE artifact_tracks SET head_revision_id = 'detached-revision' WHERE id = 'detached-track'",
   ).run();
-  store.db.prepare(
-    `INSERT INTO workspace_snapshot_artifacts
-       (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
-     VALUES (?, ?, 'detached-artifact', 'detached-track', 'detached-revision')`,
-  ).run(workspace.id, workspace.activeSnapshotId);
-
-  const result = store.workspace.applyGraphCommands(project.id, {
+  const attached = store.workspace.applyGraphCommands(project.id, {
     baseGraphRevision: 0,
     expectedSnapshotId: workspace.activeSnapshotId,
-    commands: [
-      {
-        id: "attach-detached",
-        type: "add-node",
-        node: {
-          id: "transient-node",
-          kind: "page",
-          name: "Name detached-artifact",
-          artifactId: "detached-artifact",
-        },
+    commands: [{
+      id: "attach-detached",
+      type: "add-node",
+      node: {
+        id: "transient-node",
+        kind: "page",
+        name: "Name detached-artifact",
+        artifactId: "detached-artifact",
       },
-      { id: "archive-detached", type: "archive-node", nodeId: "transient-node" },
-    ],
+    }],
+  });
+  const result = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: attached.graph.revision,
+    expectedSnapshotId: attached.snapshot.id,
+    commands: [{ id: "archive-detached", type: "archive-node", nodeId: "transient-node" }],
   });
   assert.deepEqual(result.graph.nodes, []);
   assert.equal(result.snapshot.artifactRevisions["detached-artifact"], undefined);
-  const parent = store.workspace.listSnapshots(project.id).find(({ id }) => id === workspace.activeSnapshotId);
+  const parent = store.workspace.listSnapshots(project.id).find(({ id }) => id === attached.snapshot.id);
   assert.equal(parent?.artifactRevisions["detached-artifact"], "detached-revision");
   assert.ok(store.workspace.listArtifacts(project.id).find(({ id }) => id === "detached-artifact")?.archivedAt);
   store.close();
@@ -2019,10 +2211,10 @@ test("existing Artifact attachment rejects a non-derived source root without wri
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Existing source root", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
-  insertArtifact(store.db, workspace.id, "unsafe-existing");
+  insertArtifact(store.db, workspace.id, "unsafe-existing", "page", null, "../escape");
   insertTrack(store.db, "unsafe-existing", "unsafe-existing-track");
   store.db.prepare(
-    "UPDATE workspace_artifacts SET active_track_id = 'unsafe-existing-track', source_root = '../escape' WHERE id = 'unsafe-existing'",
+    "UPDATE workspace_artifacts SET active_track_id = 'unsafe-existing-track' WHERE id = 'unsafe-existing'",
   ).run();
   const countsBefore = [
     "workspace_nodes",
@@ -2105,7 +2297,14 @@ test("graph publication copies complete Snapshot mappings and stores typed prove
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Mappings", mode: "standard" });
   const workspace = store.workspace.ensureWorkspaceRecord(project.id);
-  insertArtifact(store.db, workspace.id, "mapped-artifact");
+  insertArtifact(
+    store.db,
+    workspace.id,
+    "mapped-artifact",
+    "page",
+    null,
+    expectedArtifactSourceRoot(workspace.id, "mapped-artifact"),
+  );
   insertTrack(store.db, "mapped-artifact", "mapped-track");
   insertRevision(store.db, {
     id: "mapped-revision",
@@ -2114,22 +2313,42 @@ test("graph publication copies complete Snapshot mappings and stores typed prove
     trackId: "mapped-track",
     kernelRevisionId: workspace.activeKernelRevisionId,
   });
+  store.db.prepare(
+    "UPDATE workspace_artifacts SET active_track_id = 'mapped-track' WHERE id = 'mapped-artifact'",
+  ).run();
+  store.db.prepare("UPDATE artifact_tracks SET head_revision_id = 'mapped-revision' WHERE id = 'mapped-track'").run();
   insertResource(store.db, workspace.id, "mapped-resource");
   insertResourceRevision(store.db, workspace.id, "mapped-resource", "mapped-resource-revision");
-  store.db.prepare(
-    `INSERT INTO workspace_snapshot_artifacts
-       (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
-     VALUES (?, ?, 'mapped-artifact', 'mapped-track', 'mapped-revision')`,
-  ).run(workspace.id, workspace.activeSnapshotId);
-  store.db.prepare(
-    `INSERT INTO workspace_snapshot_resources
-       (workspace_id, snapshot_id, resource_id, revision_id)
-     VALUES (?, ?, 'mapped-resource', 'mapped-resource-revision')`,
-  ).run(workspace.id, workspace.activeSnapshotId);
-
-  const result = store.workspace.applyGraphCommands(project.id, {
+  store.db.prepare("UPDATE resources SET head_revision_id = 'mapped-resource-revision' WHERE id = 'mapped-resource'").run();
+  const attached = store.workspace.applyGraphCommands(project.id, {
     baseGraphRevision: 0,
     expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [
+      {
+        id: "attach-mapped-artifact",
+        type: "add-node",
+        node: {
+          id: "mapped-artifact-node",
+          kind: "page",
+          name: "Name mapped-artifact",
+          artifactId: "mapped-artifact",
+        },
+      },
+      {
+        id: "attach-mapped-resource",
+        type: "add-node",
+        node: {
+          id: "mapped-resource-node",
+          kind: "resource",
+          name: "Title mapped-resource",
+          resourceId: "mapped-resource",
+        },
+      },
+    ],
+  });
+  const result = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 1,
+    expectedSnapshotId: attached.snapshot.id,
     commands: [{
       id: "add-page",
       type: "add-node",
@@ -2152,7 +2371,7 @@ test("graph publication copies complete Snapshot mappings and stores typed prove
   });
   assert.deepEqual(result.snapshot.resourceRevisions, { "mapped-resource": "mapped-resource-revision" });
   assert.deepEqual(result.snapshot.provenance, { kind: "graph-command", commandIds: ["add-page"] });
-  assert.equal(result.snapshot.parentSnapshotId, workspace.activeSnapshotId);
+  assert.equal(result.snapshot.parentSnapshotId, attached.snapshot.id);
   store.close();
 });
 
@@ -2476,18 +2695,20 @@ test("graph publication rejects fractional and exhausted Snapshot sequences befo
     });
     const project = store.createProject({ name: `Snapshot sequence ${sequence}`, mode: "standard" });
     const workspace = store.workspace.ensureWorkspaceRecord(project.id);
-    if (Number.isInteger(sequence)) {
-      store.db.prepare("UPDATE workspace_snapshots SET sequence = ? WHERE id = ?")
-        .run(sequence, workspace.activeSnapshotId);
-    } else {
-      store.db.prepare(
-        `INSERT INTO workspace_snapshots (
-           id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
-           reason, provenance_json, created_by_run_id, created_at
-         ) VALUES ('fractional-sequence-fixture', ?, ?, ?, 0, ?, 'fixture',
-                   '{"kind":"legacy-migration","migration":"fractional-sequence"}', NULL, 500)`,
-      ).run(workspace.id, sequence, workspace.activeSnapshotId, workspace.activeKernelRevisionId);
-    }
+    store.db.exec("DROP TRIGGER IF EXISTS snapshot_sequence_insert_guard");
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at
+       ) VALUES (?, ?, ?, ?, 0, ?, 'fixture',
+                 '{"kind":"legacy-migration","migration":"invalid-sequence"}', NULL, 500)`,
+    ).run(
+      `invalid-sequence-fixture-${sequence}`,
+      workspace.id,
+      sequence,
+      workspace.activeSnapshotId,
+      workspace.activeKernelRevisionId,
+    );
     const idsBefore = idCalls;
     const countsBefore = [
       "workspace_artifacts",
@@ -2582,6 +2803,67 @@ test("getGraph reads revision, nodes, and edges from one SQLite snapshot", () =>
   reader.close();
 });
 
+test("aggregate Revision reads stay on one SQLite snapshot during a concurrent root cascade", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "dezin-revision-read-")), "revision.db");
+  const reader = new Store(file, fakeClock());
+  const project = reader.createProject({ name: "Revision read snapshot", mode: "standard" });
+  const workspace = reader.workspace.ensureWorkspaceRecord(project.id);
+  addRevisionTestArtifacts(reader, project.id, workspace.activeSnapshotId);
+  const component = reader.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-component",
+    trackId: "revision-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "aggregate-component",
+  }));
+  insertResource(reader.db, workspace.id, "aggregate-resource", null, "asset");
+  insertResourceRevision(reader.db, workspace.id, "aggregate-resource", "aggregate-resource-v1");
+  const page = reader.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "aggregate-page",
+    dependencies: [{
+      instanceId: "aggregate-instance",
+      componentArtifactId: "revision-component",
+      componentRevisionId: component.id,
+      createInstanceIdentity: true,
+      sourceLocator: { designNodeId: "aggregate.component" },
+      overrides: {},
+      status: "linked",
+    }],
+    resourcePins: [{
+      resourceId: "aggregate-resource",
+      resourceRevisionId: "aggregate-resource-v1",
+    }],
+  }));
+  const writer = new Store(file, fakeClock());
+  const prepare = reader.db.prepare.bind(reader.db);
+  let writerCommitted = false;
+  Object.defineProperty(reader.db, "prepare", {
+    configurable: true,
+    value(sql: string) {
+      if (!writerCommitted && sql.includes("FROM artifact_revision_dependencies")) {
+        writer.deleteProject(project.id);
+        writerCommitted = true;
+      }
+      return prepare(sql);
+    },
+  });
+  let dependencies: ReturnType<WorkspaceStore["listArtifactRevisionDependencies"]>;
+  try {
+    dependencies = reader.workspace.listArtifactRevisionDependencies(page.id);
+  } finally {
+    Reflect.deleteProperty(reader.db, "prepare");
+  }
+  assert.equal(writerCommitted, true);
+  assert.deepEqual(dependencies.map(({ instanceId }) => instanceId), ["aggregate-instance"]);
+  assert.equal(reader.workspace.getArtifactRevision(page.id), null);
+  writer.close();
+  reader.close();
+});
+
 test("a second SQLite connection waiting behind a graph writer observes the committed revision", async () => {
   const file = join(mkdtempSync(join(tmpdir(), "dezin-layout-race-")), "race.db");
   const store = new Store(file, fakeClock());
@@ -2640,15 +2922,27 @@ test("a second SQLite connection waiting behind a graph writer observes the comm
     store.db.prepare(
       `INSERT INTO workspace_graph_revisions
          (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
-       VALUES (?, 2, ?, ?, 'race-graph-2', 700)`,
-    ).run(workspace.id, graphRow.nodes_json, graphRow.edges_json);
+       VALUES (?, 2, ?, ?, ?, 700)`,
+    ).run(
+      workspace.id,
+      graphRow.nodes_json,
+      graphRow.edges_json,
+      workspaceGraphChecksum(graphRow.nodes_json, graphRow.edges_json),
+    );
     store.db.prepare(
       `INSERT INTO workspace_snapshots (
          id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
-         reason, provenance_json, created_by_run_id, created_at
+         reason, provenance_json, created_by_run_id, created_at, sealed
        ) VALUES ('race-snapshot-2', ?, 3, ?, 2, ?, 'race',
-                 '{"kind":"graph-command","commandIds":["race-manual"]}', NULL, 701)`,
+                 '{"kind":"graph-command","commandIds":["race-manual"]}', NULL, 701, 0)`,
     ).run(workspace.id, first.snapshot.id, workspace.activeKernelRevisionId);
+    store.db.prepare(
+      `INSERT INTO workspace_snapshot_artifacts
+         (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
+       SELECT workspace_id, 'race-snapshot-2', artifact_id, track_id, revision_id
+       FROM workspace_snapshot_artifacts WHERE snapshot_id = ?`,
+    ).run(first.snapshot.id);
+    store.db.prepare("UPDATE workspace_snapshots SET sealed = 1 WHERE id = 'race-snapshot-2'").run();
     store.db.prepare(
       "UPDATE project_workspaces SET graph_revision = 2, active_snapshot_id = 'race-snapshot-2' WHERE id = ?",
     ).run(workspace.id);
@@ -2671,6 +2965,7 @@ test("a second SQLite connection waiting behind a graph writer observes the comm
     store.db.exec("COMMIT");
   } catch (error) {
     if (store.db.isTransaction) store.db.exec("ROLLBACK");
+    await worker.terminate();
     throw error;
   }
   assert.ok(resultPromise);
@@ -2680,5 +2975,2606 @@ test("a second SQLite connection waiting behind a graph writer observes the comm
   assert.equal(result.name, "WorkspaceRevisionConflictError");
   assert.equal(rowCount(store.db, "workspace_layout_nodes"), 0);
   await worker.terminate();
+  store.close();
+});
+
+test("Artifact Revision candidates are monotonic, explicit, immutable dependency locks", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Revision candidates", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+
+  insertResource(store.db, workspace.id, "revision-resource");
+  insertResourceRevision(store.db, workspace.id, "revision-resource", "revision-resource-v1");
+  const component = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-component",
+    trackId: "revision-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "component-v1",
+  }));
+  const componentSnapshot = store.workspace.publishArtifactRevision(component.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  });
+  const dependency = {
+    instanceId: "hero-button",
+    componentArtifactId: "revision-component",
+    componentRevisionId: component.id,
+    createInstanceIdentity: true as const,
+    variantKey: "primary",
+    stateKey: "default",
+    sourceLocator: { designNodeId: "hero.button", sourcePath: "src/page.tsx", selector: "[data-design-node=hero-button]" },
+    overrides: { label: "Start now", tone: { foreground: "accent" } },
+    status: "linked" as const,
+  };
+  const first = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "page-v1",
+    dependencies: [dependency],
+    resourcePins: [{ resourceId: "revision-resource", resourceRevisionId: "revision-resource-v1" }],
+  }));
+  const second = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "page-v2",
+    dependencies: [reuseInstanceDependency(dependency)],
+    resourcePins: [{ resourceId: "revision-resource", resourceRevisionId: "revision-resource-v1" }],
+  }));
+  assert.equal(first.sequence, 1);
+  assert.equal(second.sequence, 2);
+  assert.equal(first.parentRevisionId, null);
+  assert.equal(first.artifactRoot, expectedArtifactSourceRoot(workspace.id, "revision-page"));
+  assert.deepEqual(store.workspace.getArtifactRevision(first.id), first);
+  assert.deepEqual(store.workspace.listArtifactRevisionDependencies(first.id), [{
+    workspaceId: workspace.id,
+    ownerArtifactId: "revision-page",
+    revisionId: first.id,
+    instanceId: "hero-button",
+    componentArtifactId: "revision-component",
+    componentRevisionId: component.id,
+    variantKey: "primary",
+    stateKey: "default",
+    sourceLocator: dependency.sourceLocator,
+    overrides: dependency.overrides,
+    status: "linked",
+  }]);
+  assert.deepEqual(store.workspace.listArtifactRevisionResourcePins(first.id), [{
+    workspaceId: workspace.id,
+    ownerArtifactId: "revision-page",
+    revisionId: first.id,
+    resourceId: "revision-resource",
+    resourceRevisionId: "revision-resource-v1",
+  }]);
+  assert.equal(componentSnapshot.artifactRevisions["revision-component"], component.id);
+
+  const counts = {
+    revisions: rowCount(store.db, "artifact_revisions"),
+    instances: rowCount(store.db, "component_instances"),
+    dependencies: rowCount(store.db, "artifact_revision_dependencies"),
+    resources: rowCount(store.db, "artifact_revision_resources"),
+  };
+  assert.throws(() => store.workspace.createArtifactRevision({
+    ...standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "bad-duplicate",
+      dependencies: [reuseInstanceDependency(dependency), reuseInstanceDependency(dependency)],
+    }),
+  }), /duplicate.*instance/i);
+  assert.throws(() => store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "bad-instance-recreate",
+    dependencies: [dependency],
+  })), /instance.*exists|collision/i);
+  assert.deepEqual({
+    revisions: rowCount(store.db, "artifact_revisions"),
+    instances: rowCount(store.db, "component_instances"),
+    dependencies: rowCount(store.db, "artifact_revision_dependencies"),
+    resources: rowCount(store.db, "artifact_revision_resources"),
+  }, counts);
+  store.close();
+});
+
+test("Artifact candidate boundaries reject stale parents, unsafe nested JSON, cross-owner pins, and exhausted sequences", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Revision boundaries", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const otherProject = store.createProject({ name: "Other revision owner", mode: "standard" });
+  const otherWorkspace = store.workspace.ensureWorkspaceRecord(otherProject.id);
+  insertResource(store.db, otherWorkspace.id, "foreign-resource");
+  insertResourceRevision(store.db, otherWorkspace.id, "foreign-resource", "foreign-resource-v1");
+
+  assert.throws(() => store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: "missing-parent",
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "stale-parent",
+  })), WorkspacePointerConflictError);
+  assert.throws(() => store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "foreign-resource",
+    resourcePins: [{ resourceId: "foreign-resource", resourceRevisionId: "foreign-resource-v1" }],
+  })), /workspace|ownership|pin/i);
+  let getterCalls = 0;
+  const unsafeQuality = { state: "passed", score: 100 } as Record<string, unknown>;
+  Object.defineProperty(unsafeQuality, "findings", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return [];
+    },
+  });
+  assert.throws(() => store.workspace.createArtifactRevision({
+    ...standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "unsafe-json",
+    }),
+    quality: unsafeQuality,
+  }), WorkspaceStoreCodecError);
+  assert.equal(getterCalls, 0);
+
+  insertRevision(store.db, {
+    id: "exhausted-revision",
+    workspaceId: workspace.id,
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    sequence: Number.MAX_SAFE_INTEGER,
+  });
+  const revisionsBefore = rowCount(store.db, "artifact_revisions");
+  assert.throws(() => store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "exhausted",
+  })), /sequence.*safe integer|exhaust/i);
+  assert.equal(rowCount(store.db, "artifact_revisions"), revisionsBefore);
+  store.close();
+});
+
+test("Artifact publication independently CASes active Track Head and active Snapshot", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Artifact publication CAS", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const input = (tree: string, parentRevisionId: string | null) => standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree,
+  });
+  const candidateA = store.workspace.createArtifactRevision(input("tree-a", null));
+  const candidateB = store.workspace.createArtifactRevision(input("tree-b", null));
+  const publishedA = store.workspace.publishArtifactRevision(candidateA.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  });
+  const snapshotsAfterA = rowCount(store.db, "workspace_snapshots");
+  assert.throws(
+    () => store.workspace.publishArtifactRevision(candidateB.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: publishedA.id,
+    }),
+    (error: unknown) => error instanceof WorkspacePointerConflictError
+      && error.pointer === "artifact-head"
+      && error.expectedId === null
+      && error.actualId === candidateA.id,
+  );
+  const candidateC = store.workspace.createArtifactRevision(input("tree-c", candidateA.id));
+  assert.throws(
+    () => store.workspace.publishArtifactRevision(candidateC.id, {
+      expectedHeadRevisionId: candidateA.id,
+      expectedSnapshotId: graph.snapshot.id,
+    }),
+    (error: unknown) => error instanceof WorkspacePointerConflictError
+      && error.pointer === "active-snapshot"
+      && error.expectedId === graph.snapshot.id
+      && error.actualId === publishedA.id,
+  );
+  assert.equal(store.workspace.getTrack("revision-page-track")?.headRevisionId, candidateA.id);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, publishedA.id);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), snapshotsAfterA);
+  assert.deepEqual(store.workspace.getArtifactRevision(candidateB.id), candidateB);
+  assert.deepEqual(store.workspace.getArtifactRevision(candidateC.id), candidateC);
+  store.close();
+});
+
+test("derived uses edges advance once from exact linked pins and no-op for an unchanged set", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Derived uses", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const component = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-component",
+    trackId: "revision-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "component-derived",
+  }));
+  const componentSnapshot = store.workspace.publishArtifactRevision(component.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  });
+  assert.equal(componentSnapshot.graphRevision, 1, "publishing without linked instances is a graph no-op");
+  const dependency = {
+    instanceId: "derived-instance",
+    componentArtifactId: "revision-component",
+    componentRevisionId: component.id,
+    createInstanceIdentity: true as const,
+    sourceLocator: { designNodeId: "page.component" },
+    overrides: {},
+    status: "linked" as const,
+  };
+  const pageOne = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "page-derived-one",
+    dependencies: [dependency],
+  }));
+  const pageOneSnapshot = store.workspace.publishArtifactRevision(pageOne.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: componentSnapshot.id,
+  });
+  assert.equal(pageOneSnapshot.graphRevision, 2);
+  assert.deepEqual(pageOneSnapshot.graph.edges.map((edge) => ({
+    kind: edge.kind,
+    sourceNodeId: edge.sourceNodeId,
+    targetNodeId: edge.targetNodeId,
+  })), [{
+    kind: "uses",
+    sourceNodeId: "revision-page-node",
+    targetNodeId: "revision-component-node",
+  }]);
+  assert.deepEqual(store.workspace.getGraphRevision(project.id, 2), pageOneSnapshot.graph);
+
+  const pageTwo = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: pageOne.id,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "page-derived-two",
+    dependencies: [reuseInstanceDependency(dependency)],
+  }));
+  const pageTwoSnapshot = store.workspace.publishArtifactRevision(pageTwo.id, {
+    expectedHeadRevisionId: pageOne.id,
+    expectedSnapshotId: pageOneSnapshot.id,
+  });
+  assert.equal(pageTwoSnapshot.graphRevision, 2, "the same canonical uses set must not mint a graph revision");
+  assert.equal(rowCount(store.db, "workspace_graph_revisions"), 3);
+
+  const detached = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: pageTwo.id,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "page-detached",
+    dependencies: [{ ...reuseInstanceDependency(dependency), status: "detached" }],
+  }));
+  const detachedSnapshot = store.workspace.publishArtifactRevision(detached.id, {
+    expectedHeadRevisionId: pageTwo.id,
+    expectedSnapshotId: pageTwoSnapshot.id,
+  });
+  assert.equal(detachedSnapshot.graphRevision, 3);
+  assert.deepEqual(detachedSnapshot.graph.edges, []);
+  assert.equal(store.workspace.getGraph(project.id).revision, 3);
+  store.close();
+});
+
+test("derived uses publication rejects component cycles, edge-id collisions, and graph exhaustion atomically", () => {
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Uses cycle", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const graph = store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: 0,
+      expectedSnapshotId: workspace.activeSnapshotId,
+      commands: [
+        {
+          id: "add-component-a",
+          type: "add-node",
+          node: {
+            id: "component-a-node",
+            kind: "component",
+            name: "Component A",
+            artifactId: "component-a",
+            createIdentity: { initialTrackId: "component-a-track" },
+          },
+        },
+        {
+          id: "add-component-b",
+          type: "add-node",
+          node: {
+            id: "component-b-node",
+            kind: "component",
+            name: "Component B",
+            artifactId: "component-b",
+            createIdentity: { initialTrackId: "component-b-track" },
+          },
+        },
+      ],
+    });
+    const componentBBase = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "component-b",
+      trackId: "component-b-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "component-b-base",
+    }));
+    const componentA = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "component-a",
+      trackId: "component-a-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "component-a-uses-b",
+      dependencies: [{
+        instanceId: "component-a-uses-b",
+        componentArtifactId: "component-b",
+        componentRevisionId: componentBBase.id,
+        createInstanceIdentity: true,
+        sourceLocator: { designNodeId: "a.b" },
+        overrides: {},
+        status: "linked",
+      }],
+    }));
+    const componentASnapshot = store.workspace.publishArtifactRevision(componentA.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: graph.snapshot.id,
+    });
+    const componentBCycle = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "component-b",
+      trackId: "component-b-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "component-b-uses-a",
+      dependencies: [{
+        instanceId: "component-b-uses-a",
+        componentArtifactId: "component-a",
+        componentRevisionId: componentA.id,
+        createInstanceIdentity: true,
+        sourceLocator: { designNodeId: "b.a" },
+        overrides: {},
+        status: "linked",
+      }],
+    }));
+    const snapshotCount = rowCount(store.db, "workspace_snapshots");
+    assert.throws(() => store.workspace.publishArtifactRevision(componentBCycle.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: componentASnapshot.id,
+    }), /cycle/i);
+    assert.equal(store.workspace.getTrack("component-b-track")?.headRevisionId, null);
+    assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, componentASnapshot.id);
+    assert.equal(rowCount(store.db, "workspace_snapshots"), snapshotCount);
+    store.close();
+  }
+
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Uses collision", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const collisionId = `derived-uses-${createHash("sha256")
+      .update(`uses-v1\0${workspace.id}\0revision-page\0revision-component`)
+      .digest("hex")}`;
+    const graph = store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: 0,
+      expectedSnapshotId: workspace.activeSnapshotId,
+      commands: [
+        {
+          id: "collision-page",
+          type: "add-node",
+          node: {
+            id: "revision-page-node",
+            kind: "page",
+            name: "Page",
+            artifactId: "revision-page",
+            createIdentity: { initialTrackId: "revision-page-track" },
+          },
+        },
+        {
+          id: "collision-component",
+          type: "add-node",
+          node: {
+            id: "revision-component-node",
+            kind: "component",
+            name: "Component",
+            artifactId: "revision-component",
+            createIdentity: { initialTrackId: "revision-component-track" },
+          },
+        },
+        {
+          id: "collision-resource",
+          type: "add-node",
+          node: {
+            id: "collision-resource-node",
+            kind: "resource",
+            name: "Research",
+            resourceId: "collision-resource",
+            createIdentity: { resourceKind: "research", defaultPinPolicy: "manual" },
+          },
+        },
+        {
+          id: "collision-edge",
+          type: "add-edge",
+          edge: {
+            id: collisionId,
+            workspaceId: workspace.id,
+            kind: "informs",
+            sourceNodeId: "collision-resource-node",
+            targetNodeId: "revision-page-node",
+          },
+        },
+      ],
+    });
+    const component = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-component",
+      trackId: "revision-component-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "collision-component",
+    }));
+    const componentSnapshot = store.workspace.publishArtifactRevision(component.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: graph.snapshot.id,
+    });
+    const page = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "collision-page",
+      dependencies: [{
+        instanceId: "collision-instance",
+        componentArtifactId: "revision-component",
+        componentRevisionId: component.id,
+        createInstanceIdentity: true,
+        sourceLocator: { designNodeId: "collision" },
+        overrides: {},
+        status: "linked",
+      }],
+    }));
+    const snapshotCount = rowCount(store.db, "workspace_snapshots");
+    assert.throws(() => store.workspace.publishArtifactRevision(page.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: componentSnapshot.id,
+    }), /identity collision/i);
+    assert.equal(store.workspace.getTrack("revision-page-track")?.headRevisionId, null);
+    assert.equal(rowCount(store.db, "workspace_snapshots"), snapshotCount);
+    store.close();
+  }
+
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Uses graph exhaustion", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+    const component = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-component",
+      trackId: "revision-component-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "exhausted-component",
+    }));
+    const componentSnapshot = store.workspace.publishArtifactRevision(component.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: graph.snapshot.id,
+    });
+    const page = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "exhausted-page",
+      dependencies: [{
+        instanceId: "exhausted-instance",
+        componentArtifactId: "revision-component",
+        componentRevisionId: component.id,
+        createInstanceIdentity: true,
+        sourceLocator: { designNodeId: "exhausted" },
+        overrides: {},
+        status: "linked",
+      }],
+    }));
+    const currentGraph = store.workspace.getGraph(project.id);
+    const nodesJson = JSON.stringify(currentGraph.nodes);
+    const edgesJson = JSON.stringify(currentGraph.edges);
+    store.db.prepare(
+      `INSERT INTO workspace_graph_revisions
+         (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
+       VALUES (?, ?, ?, ?, ?, 800)`,
+    ).run(
+      workspace.id,
+      Number.MAX_SAFE_INTEGER,
+      nodesJson,
+      edgesJson,
+      workspaceGraphChecksum(nodesJson, edgesJson),
+    );
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES ('exhausted-graph-snapshot', ?, 4, ?, ?, ?, 'fixture',
+                 '{"kind":"legacy-migration","migration":"graph-exhaustion"}', NULL, 801, 0)`,
+    ).run(
+      workspace.id,
+      componentSnapshot.id,
+      Number.MAX_SAFE_INTEGER,
+      workspace.activeKernelRevisionId,
+    );
+    store.db.prepare(
+      `INSERT INTO workspace_snapshot_artifacts
+         (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
+       SELECT workspace_id, 'exhausted-graph-snapshot', artifact_id, track_id, revision_id
+       FROM workspace_snapshot_artifacts WHERE snapshot_id = ?`,
+    ).run(componentSnapshot.id);
+    store.db.prepare("UPDATE workspace_snapshots SET sealed = 1 WHERE id = 'exhausted-graph-snapshot'").run();
+    store.db.prepare(
+      `UPDATE project_workspaces
+       SET graph_revision = ?, active_snapshot_id = 'exhausted-graph-snapshot'
+       WHERE id = ?`,
+    ).run(Number.MAX_SAFE_INTEGER, workspace.id);
+    const snapshotCount = rowCount(store.db, "workspace_snapshots");
+    assert.throws(() => store.workspace.publishArtifactRevision(page.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: "exhausted-graph-snapshot",
+    }), /graph revision is exhausted/i);
+    assert.equal(store.workspace.getTrack("revision-page-track")?.headRevisionId, null);
+    assert.equal(rowCount(store.db, "workspace_snapshots"), snapshotCount);
+    store.close();
+  }
+});
+
+test("Kernel candidates and publication use independent Kernel and Snapshot CAS with impact-safe pins", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Kernel publication", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  insertResource(store.db, workspace.id, "shared-asset", null, "asset");
+  insertResourceRevision(store.db, workspace.id, "shared-asset", "shared-asset-v1");
+  const kernelInput = (brief: string) => ({
+    workspaceId: workspace.id,
+    parentRevisionId: workspace.activeKernelRevisionId,
+    tokens: { accent: "#6633ff", radius: 12 },
+    typography: { display: { family: "Inter", weight: 700 } },
+    sharedAssetRevisionIds: ["shared-asset-v1"],
+    brief,
+    terminology: { cta: "primary action" },
+    exclusions: ["generic dashboard"],
+    responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1440, height: 900 }],
+    qualityProfile: {
+      requiredFrameIds: ["desktop"],
+      blockingSeverities: ["P0" as const, "P1" as const],
+      requireRuntimeChecks: true,
+      requireVisualReview: true,
+    },
+  });
+  const candidateA = store.workspace.createKernelRevision(kernelInput("Direction A"));
+  const candidateB = store.workspace.createKernelRevision(kernelInput("Direction B"));
+  assert.equal(candidateA.sequence, 2);
+  assert.equal(candidateB.sequence, 3);
+  assert.deepEqual(store.workspace.getKernelRevision(candidateA.id), candidateA);
+  const publishedA = store.workspace.publishKernelRevision(candidateA.id, {
+    expectedKernelRevisionId: workspace.activeKernelRevisionId,
+    expectedSnapshotId: workspace.activeSnapshotId,
+  });
+  assert.equal(publishedA.kernelRevisionId, candidateA.id);
+  assert.equal(publishedA.provenance.kind, "kernel-publication");
+  assert.throws(
+    () => store.workspace.publishKernelRevision(candidateB.id, {
+      expectedKernelRevisionId: workspace.activeKernelRevisionId,
+      expectedSnapshotId: publishedA.id,
+    }),
+    (error: unknown) => error instanceof WorkspacePointerConflictError && error.pointer === "kernel-head",
+  );
+  const candidateC = store.workspace.createKernelRevision({
+    ...kernelInput("Direction C"),
+    parentRevisionId: candidateA.id,
+  });
+  assert.throws(
+    () => store.workspace.publishKernelRevision(candidateC.id, {
+      expectedKernelRevisionId: candidateA.id,
+      expectedSnapshotId: workspace.activeSnapshotId,
+    }),
+    (error: unknown) => error instanceof WorkspacePointerConflictError && error.pointer === "active-snapshot",
+  );
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeKernelRevisionId, candidateA.id);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, publishedA.id);
+  store.close();
+});
+
+test("checkpoint publication always creates a fresh direct child and CASes the active Snapshot", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Snapshot checkpoint", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const inactive = store.workspace.createWorkspaceSnapshot(project.id, {
+    expectedSnapshotId: workspace.activeSnapshotId,
+    reason: "manual-checkpoint",
+    provenance: {
+      kind: "plan-checkpoint",
+      proposalId: "inactive-proposal",
+      planId: "inactive-plan",
+      checkpointId: "inactive-checkpoint",
+    },
+  });
+  assert.equal(inactive.parentSnapshotId, workspace.activeSnapshotId);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, workspace.activeSnapshotId);
+  const published = store.workspace.publishSnapshot(project.id, {
+    expectedSnapshotId: workspace.activeSnapshotId,
+    reason: "plan-checkpoint",
+    provenance: {
+      kind: "plan-checkpoint",
+      proposalId: "proposal-1",
+      planId: "plan-1",
+      checkpointId: "checkpoint-1",
+    },
+  });
+  assert.notEqual(published.id, inactive.id);
+  assert.equal(published.parentSnapshotId, workspace.activeSnapshotId);
+  assert.deepEqual(published.artifactRevisions, inactive.artifactRevisions);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, published.id);
+  const snapshotCount = rowCount(store.db, "workspace_snapshots");
+  assert.throws(() => store.workspace.publishSnapshot(project.id, {
+    expectedSnapshotId: workspace.activeSnapshotId,
+    reason: "stale-checkpoint",
+    provenance: {
+      kind: "plan-checkpoint",
+      proposalId: "stale-proposal",
+      planId: "stale-plan",
+      checkpointId: "stale-checkpoint",
+    },
+  }), WorkspacePointerConflictError);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), snapshotCount);
+  assert.throws(
+    () => store.db.prepare("UPDATE project_workspaces SET active_snapshot_id = ? WHERE id = ?").run(inactive.id, workspace.id),
+    /direct child|active state|snapshot/i,
+  );
+  assert.throws(
+    () => store.workspace.createWorkspaceSnapshot(project.id, {
+      expectedSnapshotId: published.id,
+      reason: "restore-is-not-a-checkpoint",
+      provenance: { kind: "restore", restoredSnapshotId: inactive.id },
+    }),
+    /cannot claim restore/i,
+  );
+  assert.throws(
+    () => store.workspace.createWorkspaceSnapshot(project.id, {
+      expectedSnapshotId: published.id,
+      reason: "invalid-restore-provenance",
+      provenance: { kind: "restore" },
+    }),
+    WorkspaceStoreCodecError,
+  );
+  store.close();
+});
+
+test("all revision, dependency, Snapshot, and identity history rejects mutation and replacement but root cascade succeeds", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Immutable publication history", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  insertResource(store.db, workspace.id, "immutable-resource");
+  insertResourceRevision(store.db, workspace.id, "immutable-resource", "immutable-resource-v1");
+  store.db.prepare("UPDATE resources SET head_revision_id = 'immutable-resource-v1' WHERE id = 'immutable-resource'").run();
+  const resourceGraph = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: graph.graph.revision,
+    expectedSnapshotId: graph.snapshot.id,
+    commands: [{
+      id: "attach-immutable-resource",
+      type: "add-node",
+      node: {
+        id: "immutable-resource-node",
+        kind: "resource",
+        name: "Title immutable-resource",
+        resourceId: "immutable-resource",
+      },
+    }],
+  });
+  const component = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-component",
+    trackId: "revision-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "immutable-component",
+  }));
+  const componentSnapshot = store.workspace.publishArtifactRevision(component.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: resourceGraph.snapshot.id,
+  });
+  const page = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "immutable-page",
+    dependencies: [{
+      instanceId: "immutable-instance",
+      componentArtifactId: "revision-component",
+      componentRevisionId: component.id,
+      createInstanceIdentity: true,
+      sourceLocator: { designNodeId: "immutable.node" },
+      overrides: {},
+      status: "linked",
+    }],
+    resourcePins: [{ resourceId: "immutable-resource", resourceRevisionId: "immutable-resource-v1" }],
+  }));
+  const pageSnapshot = store.workspace.publishArtifactRevision(page.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: componentSnapshot.id,
+  });
+
+  const immutableRows = [
+    ["shared_design_kernel_revisions", `id = '${workspace.activeKernelRevisionId}'`, "checksum"],
+    ["artifact_revisions", `id = '${page.id}'`, "source_tree_hash"],
+    ["artifact_revision_dependencies", `revision_id = '${page.id}'`, "status"],
+    ["artifact_revision_resources", `revision_id = '${page.id}'`, "resource_revision_id"],
+    ["resource_revisions", "id = 'immutable-resource-v1'", "checksum"],
+    ["workspace_graph_revisions", `workspace_id = '${workspace.id}' AND revision = ${pageSnapshot.graphRevision}`, "checksum"],
+    ["workspace_snapshots", `id = '${pageSnapshot.id}'`, "reason"],
+    ["workspace_snapshot_artifacts", `snapshot_id = '${pageSnapshot.id}' AND artifact_id = 'revision-page'`, "revision_id"],
+    ["workspace_snapshot_resources", `snapshot_id = '${pageSnapshot.id}' AND resource_id = 'immutable-resource'`, "revision_id"],
+  ] as const;
+  for (const [table, where, column] of immutableRows) {
+    assert.throws(() => store.db.prepare(`UPDATE ${table} SET ${column} = ${column} WHERE ${where}`).run(), /immutable/i);
+    assert.throws(() => store.db.prepare(`DELETE FROM ${table} WHERE ${where}`).run(), /immutable/i);
+    assert.throws(
+      () => store.db.prepare(`INSERT OR REPLACE INTO ${table} SELECT * FROM ${table} WHERE ${where}`).run(),
+      /immutable/i,
+    );
+    assert.throws(
+      () => store.db.prepare(
+        `INSERT INTO ${table} SELECT * FROM ${table} WHERE ${where} AND true
+         ON CONFLICT DO UPDATE SET ${column} = excluded.${column}`,
+      ).run(),
+      /immutable/i,
+    );
+  }
+  for (const [table, where] of [
+    ["workspace_artifacts", "id = 'revision-page'"],
+    ["artifact_tracks", "id = 'revision-page-track'"],
+    ["resources", "id = 'immutable-resource'"],
+    ["component_instances", "id = 'immutable-instance'"],
+  ] as const) {
+    assert.throws(() => store.db.prepare(`DELETE FROM ${table} WHERE ${where}`).run(), /archive|immutable|history/i);
+    assert.throws(
+      () => store.db.prepare(`INSERT OR REPLACE INTO ${table} SELECT * FROM ${table} WHERE ${where}`).run(),
+      /archive|immutable|history/i,
+    );
+  }
+  assert.throws(() => store.db.prepare(
+    `INSERT OR REPLACE INTO workspace_nodes
+       (id, workspace_id, kind, artifact_id, resource_id, archived_at, created_at, updated_at)
+     VALUES ('replacement-node-id', ?, 'page', 'shell-page', NULL, NULL, 2, 2)`,
+  ).run(workspace.id), /immutable|replace|archive|history|ownership/i);
+  store.deleteProject(project.id);
+  for (const table of [...REQUIRED_WORKSPACE_TABLES, "artifact_revision_resources"] as const) {
+    assert.equal(rowCount(store.db, table), 0, `${table} survived the root Project cascade`);
+  }
+  assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
+  store.close();
+});
+
+test("candidate and Snapshot provenance reject foreign Project Runs at API and SQLite boundaries", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Run owner", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const foreignProject = store.createProject({ name: "Foreign Run owner", mode: "standard" });
+  const foreignWorkspace = store.workspace.ensureWorkspaceRecord(foreignProject.id);
+  store.db.prepare(
+    "INSERT INTO conversations (id, project_id, title, created_at) VALUES ('foreign-conversation', ?, 'Foreign', 1)",
+  ).run(foreignProject.id);
+  store.db.prepare(
+    `INSERT INTO runs
+       (id, project_id, conversation_id, status, created_at)
+     VALUES ('foreign-run', ?, 'foreign-conversation', 'succeeded', 2)`,
+  ).run(foreignProject.id);
+
+  const foreignRunInput = {
+    ...standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "foreign-run",
+    }),
+    producedByRunId: "foreign-run",
+  };
+  assert.throws(() => store.workspace.createArtifactRevision(foreignRunInput), /another Project/i);
+  assert.throws(
+    () => store.db.prepare(
+      `INSERT INTO artifact_revisions (
+         id, workspace_id, artifact_id, track_id, sequence, parent_revision_id,
+         source_commit_hash, source_tree_hash, artifact_root, kernel_revision_id,
+         render_spec_json, quality_json, context_pack_hash, produced_by_run_id,
+         legacy_run_id, created_at
+       ) VALUES ('foreign-run-revision', ?, 'revision-page', 'revision-page-track', 1, NULL,
+                 'commit', 'tree', 'root', ?, '{}', '{}', NULL, 'foreign-run', NULL, 3)`,
+    ).run(workspace.id, workspace.activeKernelRevisionId),
+    /another Project/i,
+  );
+  assert.throws(() => store.workspace.publishSnapshot(project.id, {
+    expectedSnapshotId: store.workspace.getWorkspace(project.id)!.activeSnapshotId,
+    reason: "foreign-run-checkpoint",
+    provenance: {
+      kind: "plan-checkpoint",
+      proposalId: "proposal-run",
+      planId: "plan-run",
+      checkpointId: "checkpoint-run",
+    },
+    createdByRunId: "foreign-run",
+  }), /another Project/i);
+  assert.equal(rowCount(store.db, "artifact_revisions", `workspace_id = '${workspace.id}'`), 0);
+  assert.equal(rowCount(store.db, "workspace_snapshots", `workspace_id = '${workspace.id}'`), 2);
+  assert.equal(rowCount(store.db, "workspace_snapshots", `workspace_id = '${foreignWorkspace.id}'`), 1);
+  store.close();
+});
+
+test("Kernel and graph readers reject polluted payloads and checksum mismatches", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Checksummed history", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const unsafeTokens = JSON.parse('{"__proto__":"polluted"}') as Record<string, string>;
+  assert.throws(() => store.workspace.createKernelRevision({
+    workspaceId: workspace.id,
+    parentRevisionId: workspace.activeKernelRevisionId,
+    tokens: unsafeTokens,
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "Unsafe",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  }), WorkspaceStoreCodecError);
+  store.db.prepare(
+    `INSERT INTO shared_design_kernel_revisions
+       (id, workspace_id, sequence, parent_revision_id, payload_json, checksum, created_at)
+     SELECT 'bad-kernel-checksum', workspace_id, 2, id, payload_json, 'bad', 5
+     FROM shared_design_kernel_revisions WHERE id = ?`,
+  ).run(workspace.activeKernelRevisionId);
+  assert.throws(() => store.workspace.getKernelRevision("bad-kernel-checksum"), /checksum/i);
+  store.db.prepare(
+    `INSERT INTO workspace_graph_revisions
+       (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
+     VALUES (?, 1, '[]', '[]', 'bad', 6)`,
+  ).run(workspace.id);
+  assert.throws(() => store.workspace.getGraphRevision(project.id, 1), /checksum/i);
+  store.close();
+});
+
+test("two SQLite connections serialize candidate sequences and publication CAS", async () => {
+  const file = join(mkdtempSync(join(tmpdir(), "dezin-publication-race-")), "race.db");
+  const store = new Store(file, fakeClock());
+  const project = store.createProject({ name: "Publication race", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const candidateA = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "race-a",
+  }));
+  const candidateB = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "race-b",
+  }));
+
+  const runWorker = (operation: string, payload: unknown, prefix: string) => new Promise<Record<string, unknown>>((resolve, reject) => {
+    const worker = new Worker(`
+      const { parentPort, workerData } = require("node:worker_threads");
+      import(workerData.moduleUrl).then(({ Store }) => {
+        let id = 0;
+        const store = new Store(workerData.file, {
+          now: () => 20_000 + ++id,
+          id: () => workerData.prefix + "-" + ++id,
+        });
+        try {
+          const result = store.workspace[workerData.operation](...workerData.payload);
+          parentPort.postMessage({ ok: true, result });
+        } catch (error) {
+          parentPort.postMessage({
+            ok: false,
+            name: error?.name,
+            message: error?.message,
+            pointer: error?.pointer,
+            expectedId: error?.expectedId,
+            actualId: error?.actualId,
+          });
+        } finally {
+          store.close();
+        }
+      }).catch((error) => parentPort.postMessage({ ok: false, name: error?.name, message: error?.stack }));
+    `, {
+      eval: true,
+      workerData: {
+        file,
+        operation,
+        payload,
+        prefix,
+        moduleUrl: new URL("../src/index.ts", import.meta.url).href,
+      },
+    });
+    worker.once("message", (message) => {
+      resolve(message as Record<string, unknown>);
+      void worker.terminate();
+    });
+    worker.once("error", reject);
+  });
+
+  const publicationResults = await Promise.all([
+    runWorker("publishArtifactRevision", [candidateA.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: graph.snapshot.id,
+    }], "publisher-a"),
+    runWorker("publishArtifactRevision", [candidateB.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: graph.snapshot.id,
+    }], "publisher-b"),
+  ]);
+  assert.equal(publicationResults.filter(({ ok }) => ok === true).length, 1);
+  const publicationLoser = publicationResults.find(({ ok }) => ok === false)!;
+  assert.equal(publicationLoser.name, "WorkspacePointerConflictError");
+  assert.equal(publicationLoser.pointer, "artifact-head");
+  assert.doesNotMatch(String(publicationLoser.message), /SQLITE_BUSY/i);
+  const publishedHead = store.workspace.getTrack("revision-page-track")!.headRevisionId!;
+  const afterPublication = store.workspace.getWorkspace(project.id)!;
+  assert.equal(store.workspace.listSnapshots(project.id).length, 3);
+
+  const concurrentInput = (tree: string) => standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: publishedHead,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree,
+  });
+  const candidateResults = await Promise.all([
+    runWorker("createArtifactRevision", [concurrentInput("race-c")], "candidate-c"),
+    runWorker("createArtifactRevision", [concurrentInput("race-d")], "candidate-d"),
+  ]);
+  assert.ok(candidateResults.every(({ ok }) => ok === true));
+  assert.deepEqual(
+    candidateResults.map(({ result }) => (result as { sequence: number }).sequence).sort((left, right) => left - right),
+    [3, 4],
+  );
+
+  const kernelBase = store.workspace.getWorkspace(project.id)!;
+  const kernelInput = (brief: string) => ({
+    workspaceId: workspace.id,
+    parentRevisionId: kernelBase.activeKernelRevisionId,
+    tokens: {},
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief,
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  });
+  const kernelA = store.workspace.createKernelRevision(kernelInput("Race A"));
+  const kernelB = store.workspace.createKernelRevision(kernelInput("Race B"));
+  const kernelResults = await Promise.all([
+    runWorker("publishKernelRevision", [kernelA.id, {
+      expectedKernelRevisionId: kernelBase.activeKernelRevisionId,
+      expectedSnapshotId: afterPublication.activeSnapshotId,
+    }], "kernel-a"),
+    runWorker("publishKernelRevision", [kernelB.id, {
+      expectedKernelRevisionId: kernelBase.activeKernelRevisionId,
+      expectedSnapshotId: afterPublication.activeSnapshotId,
+    }], "kernel-b"),
+  ]);
+  assert.equal(kernelResults.filter(({ ok }) => ok === true).length, 1);
+  const kernelLoser = kernelResults.find(({ ok }) => ok === false)!;
+  assert.equal(kernelLoser.name, "WorkspacePointerConflictError");
+  assert.equal(kernelLoser.pointer, "kernel-head");
+  assert.doesNotMatch(String(kernelLoser.message), /SQLITE_BUSY/i);
+  assert.equal(store.workspace.listSnapshots(project.id).length, 4);
+  store.close();
+});
+
+test("sealed Artifact Revisions and Snapshots reject new child mappings after construction", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Sealed child sets", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const component = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-component",
+    trackId: "revision-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "sealed-component",
+  }));
+  const componentSnapshot = store.workspace.publishArtifactRevision(component.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  });
+  const page = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "sealed-page",
+  }));
+  const pageSnapshot = store.workspace.publishArtifactRevision(page.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: componentSnapshot.id,
+  });
+
+  store.db.prepare(
+    `INSERT INTO component_instances
+       (id, workspace_id, owner_artifact_id, component_artifact_id, created_at)
+     VALUES ('late-instance', ?, 'revision-page', 'revision-component', 1)`,
+  ).run(workspace.id);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO artifact_revision_dependencies (
+       workspace_id, owner_artifact_id, revision_id, instance_id, component_artifact_id,
+       component_revision_id, variant_key, state_key, design_node_id,
+       source_locator_json, overrides_json, status
+     ) VALUES (?, 'revision-page', ?, 'late-instance', 'revision-component', ?,
+               NULL, NULL, 'late.node', '{"designNodeId":"late.node"}', '{}', 'linked')`,
+  ).run(workspace.id, page.id, component.id), /sealed|immutable/i);
+
+  insertResource(store.db, workspace.id, "late-resource");
+  insertResourceRevision(store.db, workspace.id, "late-resource", "late-resource-v1");
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO artifact_revision_resources
+       (workspace_id, owner_artifact_id, revision_id, resource_id, resource_revision_id)
+     VALUES (?, 'revision-page', ?, 'late-resource', 'late-resource-v1')`,
+  ).run(workspace.id, page.id), /sealed|immutable/i);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO workspace_snapshot_resources
+       (workspace_id, snapshot_id, resource_id, revision_id)
+     VALUES (?, ?, 'late-resource', 'late-resource-v1')`,
+  ).run(workspace.id, pageSnapshot.id), /sealed|immutable/i);
+
+  insertArtifact(store.db, workspace.id, "late-artifact");
+  insertTrack(store.db, "late-artifact", "late-track");
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO workspace_snapshot_artifacts
+       (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
+     VALUES (?, ?, 'late-artifact', 'late-track', NULL)`,
+  ).run(workspace.id, pageSnapshot.id), /sealed|immutable/i);
+  assert.equal(store.workspace.listArtifactRevisionDependencies(page.id).length, 0);
+  assert.equal(store.workspace.listArtifactRevisionResourcePins(page.id).length, 0);
+  store.close();
+});
+
+test("childless durable identities cannot be reparented, replaced, or upsert-mutated with recursive triggers off", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Identity shells", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const otherProject = store.createProject({ name: "Other owner", mode: "standard" });
+  const otherWorkspace = store.workspace.ensureWorkspaceRecord(otherProject.id);
+  insertArtifact(store.db, workspace.id, "shell-page");
+  insertArtifact(store.db, workspace.id, "shell-page-other");
+  insertArtifact(store.db, workspace.id, "shell-component", "component");
+  insertTrack(store.db, "shell-page", "shell-track");
+  insertResource(store.db, workspace.id, "shell-resource");
+  store.db.prepare(
+    `INSERT INTO component_instances
+       (id, workspace_id, owner_artifact_id, component_artifact_id, created_at)
+     VALUES ('shell-instance', ?, 'shell-page', 'shell-component', 1)`,
+  ).run(workspace.id);
+  store.db.prepare(
+    `INSERT INTO workspace_nodes
+       (id, workspace_id, kind, artifact_id, resource_id, archived_at, created_at, updated_at)
+     VALUES ('shell-node', ?, 'page', 'shell-page', NULL, NULL, 1, 1)`,
+  ).run(workspace.id);
+  store.db.exec("PRAGMA recursive_triggers = OFF");
+
+  for (const [table, where] of [
+    ["workspace_artifacts", "id = 'shell-page'"],
+    ["artifact_tracks", "id = 'shell-track'"],
+    ["resources", "id = 'shell-resource'"],
+    ["component_instances", "id = 'shell-instance'"],
+    ["workspace_nodes", "id = 'shell-node'"],
+  ] as const) {
+    assert.throws(
+      () => store.db.prepare(`DELETE FROM ${table} WHERE ${where}`).run(),
+      /immutable|archive|history/i,
+      `${table} allowed direct identity deletion`,
+    );
+    assert.throws(
+      () => store.db.prepare(`INSERT OR REPLACE INTO ${table} SELECT * FROM ${table} WHERE ${where}`).run(),
+      /immutable|replace|archive|history/i,
+      `${table} allowed INSERT OR REPLACE with recursive_triggers=OFF`,
+    );
+  }
+
+  assert.throws(
+    () => store.db.prepare("UPDATE workspace_artifacts SET source_root = '../../outside' WHERE id = 'shell-page'").run(),
+    /identity|immutable/i,
+  );
+  store.db.prepare("UPDATE workspace_artifacts SET active_track_id = 'shell-track' WHERE id = 'shell-page'").run();
+  assert.throws(
+    () => store.db.prepare("UPDATE workspace_artifacts SET active_track_id = NULL WHERE id = 'shell-page'").run(),
+    /cannot be cleared/i,
+  );
+  assert.throws(
+    () => store.db.prepare("UPDATE artifact_tracks SET legacy_variant_id = 'moved-variant' WHERE id = 'shell-track'").run(),
+    /identity|immutable/i,
+  );
+  assert.throws(
+    () => store.db.prepare("UPDATE resources SET kind = 'asset' WHERE id = 'shell-resource'").run(),
+    /identity|immutable/i,
+  );
+  assert.throws(
+    () => store.db.prepare("UPDATE workspace_nodes SET artifact_id = 'shell-page-other' WHERE id = 'shell-node'").run(),
+    /identity|immutable/i,
+  );
+  assert.throws(
+    () => store.db.prepare("UPDATE component_instances SET owner_artifact_id = 'shell-page-other' WHERE id = 'shell-instance'").run(),
+    /identity|immutable/i,
+  );
+
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO workspace_artifacts
+       SELECT id, ?, kind, name, source_root, active_track_id, archived_at, created_at, updated_at
+       FROM workspace_artifacts WHERE id = 'shell-page'
+     ON CONFLICT(id) DO UPDATE SET workspace_id = excluded.workspace_id`,
+  ).run(otherWorkspace.id), /identity|immutable/i);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO artifact_tracks
+       SELECT id, 'shell-page-other', name, head_revision_id, legacy_variant_id, created_at
+       FROM artifact_tracks WHERE id = 'shell-track'
+     ON CONFLICT(id) DO UPDATE SET artifact_id = excluded.artifact_id`,
+  ).run(), /identity|immutable/i);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO resources
+       SELECT id, ?, kind, title, head_revision_id, default_pin_policy, archived_at, created_at, updated_at
+       FROM resources WHERE id = 'shell-resource'
+     ON CONFLICT(id) DO UPDATE SET workspace_id = excluded.workspace_id`,
+  ).run(otherWorkspace.id), /identity|immutable/i);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO workspace_nodes
+       SELECT id, workspace_id, kind, 'shell-page-other', resource_id, archived_at, created_at, updated_at
+       FROM workspace_nodes WHERE id = 'shell-node'
+     ON CONFLICT(id) DO UPDATE SET artifact_id = excluded.artifact_id`,
+  ).run(), /identity|immutable/i);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO component_instances
+       SELECT id, workspace_id, 'shell-page-other', component_artifact_id, created_at
+       FROM component_instances WHERE id = 'shell-instance'
+     ON CONFLICT(id) DO UPDATE SET owner_artifact_id = excluded.owner_artifact_id`,
+  ).run(), /identity|immutable/i);
+
+  store.db.prepare("UPDATE workspace_artifacts SET name = 'Renamed shell' WHERE id = 'shell-page'").run();
+  store.db.prepare("UPDATE artifact_tracks SET name = 'Renamed track' WHERE id = 'shell-track'").run();
+  store.db.prepare(
+    "UPDATE resources SET title = 'Renamed resource', default_pin_policy = 'manual' WHERE id = 'shell-resource'",
+  ).run();
+  store.db.prepare("UPDATE workspace_nodes SET archived_at = 123, updated_at = 124 WHERE id = 'shell-node'").run();
+  assert.equal(store.workspace.getArtifact("shell-page")?.name, "Renamed shell");
+  assert.equal(store.workspace.getTrack("shell-track")?.name, "Renamed track");
+  store.close();
+});
+
+test("sequence allocation rejects corrupt lower rows and SQLite rejects new unsafe revision sequences", () => {
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Artifact sequence audit", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+    store.db.exec("DROP TRIGGER IF EXISTS artifact_revision_sequence_insert_guard");
+    insertRevision(store.db, {
+      id: "artifact-sequence-zero",
+      workspaceId: workspace.id,
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      sequence: 0,
+    });
+    assert.throws(() => store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "after-zero",
+    })), /positive safe integer/i);
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Kernel sequence audit", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    store.db.exec("DROP TRIGGER IF EXISTS kernel_revision_sequence_insert_guard");
+    store.db.prepare(
+      `INSERT INTO shared_design_kernel_revisions
+         (id, workspace_id, sequence, parent_revision_id, payload_json, checksum, created_at)
+       SELECT 'kernel-sequence-zero', workspace_id, 0, NULL, payload_json, checksum, 2
+       FROM shared_design_kernel_revisions WHERE id = ?`,
+    ).run(workspace.activeKernelRevisionId);
+    assert.throws(() => store.workspace.createKernelRevision({
+      workspaceId: workspace.id,
+      parentRevisionId: workspace.activeKernelRevisionId,
+      tokens: {},
+      typography: {},
+      sharedAssetRevisionIds: [],
+      brief: "after zero",
+      terminology: {},
+      exclusions: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+    }), /positive safe integer/i);
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Snapshot sequence audit", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    store.db.exec("DROP TRIGGER IF EXISTS snapshot_sequence_insert_guard");
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at
+       ) VALUES ('snapshot-sequence-zero', ?, 0, NULL, 0, ?, 'corrupt',
+                 '{"kind":"legacy-migration","migration":"sequence-zero"}', NULL, 2)`,
+    ).run(workspace.id, workspace.activeKernelRevisionId);
+    assert.throws(() => store.workspace.createWorkspaceSnapshot(project.id, {
+      expectedSnapshotId: workspace.activeSnapshotId,
+      reason: "after-zero",
+      provenance: {
+        kind: "plan-checkpoint",
+        proposalId: "sequence-proposal",
+        planId: "sequence-plan",
+        checkpointId: "sequence-checkpoint",
+      },
+    }), /positive safe integer/i);
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Resource sequence guard", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    insertResource(store.db, workspace.id, "guarded-resource");
+    assert.throws(
+      () => insertResourceRevision(store.db, workspace.id, "guarded-resource", "resource-sequence-zero", 0),
+      /positive safe integer/i,
+    );
+    assert.throws(() => store.db.prepare(
+      `INSERT INTO resource_revisions (
+         id, workspace_id, resource_id, sequence, manifest_path, summary,
+         metadata_json, checksum, provenance_json, created_by_run_id, created_at
+       ) VALUES ('resource-sequence-fraction', ?, 'guarded-resource', 0.5, 'x', 'x', '{}', 'x', '{}', NULL, 1)`,
+    ).run(workspace.id), /positive safe integer/i);
+    store.close();
+  }
+});
+
+test("a graph Resource with a Head requires an explicit Snapshot pin before checkpoint publication", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Resource pin completeness", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-headless-resource",
+      type: "add-node",
+      node: {
+        id: "headless-resource-node",
+        kind: "resource",
+        name: "Headless resource",
+        resourceId: "headless-resource",
+        createIdentity: { resourceKind: "research", defaultPinPolicy: "follow-head" },
+      },
+    }],
+  });
+  assert.equal(graph.snapshot.resourceRevisions["headless-resource"], undefined);
+  insertResourceRevision(store.db, workspace.id, "headless-resource", "headless-resource-v1");
+  store.db.prepare(
+    "UPDATE resources SET head_revision_id = 'headless-resource-v1' WHERE id = 'headless-resource'",
+  ).run();
+  const before = rowCount(store.db, "workspace_snapshots");
+  assert.throws(() => store.workspace.publishSnapshot(project.id, {
+    expectedSnapshotId: graph.snapshot.id,
+    reason: "missing-resource-pin",
+    provenance: {
+      kind: "plan-checkpoint",
+      proposalId: "resource-proposal",
+      planId: "resource-plan",
+      checkpointId: "resource-checkpoint",
+    },
+  }), /explicit Snapshot pin|Resource mapping/i);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), before);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, graph.snapshot.id);
+  store.close();
+});
+
+test("Artifact source roots are immutable and candidate creation fails closed on stored path corruption", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Artifact root integrity", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  assert.throws(
+    () => store.db.prepare("UPDATE workspace_artifacts SET source_root = '../../outside' WHERE id = 'revision-page'").run(),
+    /identity|immutable/i,
+  );
+  store.db.exec("DROP TRIGGER IF EXISTS workspace_artifact_identity_update_immutable");
+  store.db.prepare("UPDATE workspace_artifacts SET source_root = '../../outside' WHERE id = 'revision-page'").run();
+  assert.throws(() => store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "corrupt-root",
+  })), /server-derived source root/i);
+  assert.equal(rowCount(store.db, "artifact_revisions", "artifact_id = 'revision-page'"), 0);
+  store.close();
+});
+
+test("Run and Workspace ownership cannot be reparented after immutable history references them", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Stable provenance owner", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const otherProject = store.createProject({ name: "Other provenance owner", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(otherProject.id);
+  store.db.prepare(
+    "INSERT INTO conversations (id, project_id, title, created_at) VALUES ('stable-owner-chat', ?, 'Stable', 1)",
+  ).run(project.id);
+  store.db.prepare(
+    `INSERT INTO runs (id, project_id, conversation_id, status, created_at)
+     VALUES ('stable-owner-run', ?, 'stable-owner-chat', 'succeeded', 2)`,
+  ).run(project.id);
+  store.workspace.createArtifactRevision({
+    ...standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "stable-run-owner",
+    }),
+    producedByRunId: "stable-owner-run",
+  });
+  assert.throws(
+    () => store.db.prepare("UPDATE runs SET project_id = ? WHERE id = 'stable-owner-run'").run(otherProject.id),
+    /immutable|owning Project/i,
+  );
+  assert.throws(
+    () => store.db.prepare("UPDATE project_workspaces SET project_id = ? WHERE id = ?").run(otherProject.id, workspace.id),
+    /immutable|owning Project/i,
+  );
+  store.close();
+});
+
+test("Kernel impact analysis is deterministic, auditable, and rejects corrupt exact pins atomically", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Kernel impact audit", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const component = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-component",
+    trackId: "revision-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "impact-component",
+  }));
+  const componentSnapshot = store.workspace.publishArtifactRevision(component.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  });
+  const page = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "impact-page",
+    dependencies: [{
+      instanceId: "impact-instance",
+      componentArtifactId: "revision-component",
+      componentRevisionId: component.id,
+      createInstanceIdentity: true,
+      sourceLocator: { designNodeId: "impact.component" },
+      overrides: {},
+      status: "linked",
+    }],
+  }));
+  const pageSnapshot = store.workspace.publishArtifactRevision(page.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: componentSnapshot.id,
+  });
+  const kernel = store.workspace.createKernelRevision({
+    workspaceId: workspace.id,
+    parentRevisionId: workspace.activeKernelRevisionId,
+    tokens: { accent: "#7c3aed" },
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "Impact candidate",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  });
+  const impact = store.workspace.analyzeKernelImpact(kernel.id, pageSnapshot.id);
+  assert.deepEqual(impact, {
+    workspaceId: workspace.id,
+    baseSnapshotId: pageSnapshot.id,
+    fromKernelRevisionId: workspace.activeKernelRevisionId,
+    toKernelRevisionId: kernel.id,
+    affectedArtifactRevisions: [
+      {
+        artifactId: "revision-component",
+        revisionId: component.id,
+        pinnedKernelRevisionId: workspace.activeKernelRevisionId,
+      },
+      {
+        artifactId: "revision-page",
+        revisionId: page.id,
+        pinnedKernelRevisionId: workspace.activeKernelRevisionId,
+      },
+    ],
+  });
+  const published = store.workspace.publishKernelRevision(kernel.id, {
+    expectedKernelRevisionId: workspace.activeKernelRevisionId,
+    expectedSnapshotId: pageSnapshot.id,
+  });
+  assert.deepEqual(published.provenance, {
+    kind: "kernel-publication",
+    kernelRevisionId: kernel.id,
+    impact,
+  });
+
+  const nextKernel = store.workspace.createKernelRevision({
+    workspaceId: workspace.id,
+    parentRevisionId: kernel.id,
+    tokens: { accent: "#2563eb" },
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "Corrupt impact candidate",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  });
+  store.db.exec("PRAGMA foreign_keys = OFF");
+  store.db.exec("DROP TRIGGER IF EXISTS artifact_revision_update_immutable");
+  store.db.prepare("UPDATE artifact_revisions SET kernel_revision_id = 'missing-kernel' WHERE id = ?").run(page.id);
+  store.db.exec("PRAGMA foreign_keys = ON");
+  const beforeSnapshots = rowCount(store.db, "workspace_snapshots");
+  assert.throws(() => store.workspace.publishKernelRevision(nextKernel.id, {
+    expectedKernelRevisionId: kernel.id,
+    expectedSnapshotId: published.id,
+  }), /Kernel impact|pinned Kernel|not found/i);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), beforeSnapshots);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeKernelRevisionId, kernel.id);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, published.id);
+  store.close();
+});
+
+test("imported Artifact and Kernel candidates fail closed on invalid roots and shared Asset pins", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Imported candidate validation", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  store.db.exec("DROP TRIGGER artifact_revision_root_insert_ownership");
+  store.db.prepare(
+    `INSERT INTO artifact_revisions (
+       id, workspace_id, artifact_id, track_id, sequence, parent_revision_id,
+       source_commit_hash, source_tree_hash, artifact_root, kernel_revision_id,
+       render_spec_json, quality_json, context_pack_hash, produced_by_run_id,
+       legacy_run_id, created_at, sealed
+     ) VALUES ('imported-bad-root', ?, 'revision-page', 'revision-page-track', 1, NULL,
+               'commit', 'tree', '../../outside', ?, '{}', '{}', NULL, NULL, NULL, 1, 1)`,
+  ).run(workspace.id, workspace.activeKernelRevisionId);
+  assert.throws(() => store.workspace.getArtifactRevision("imported-bad-root"), /owning Artifact source root/i);
+  assert.throws(() => store.workspace.listRevisions(project.id, "revision-page"), /owning Artifact source root/i);
+  const beforeSnapshots = rowCount(store.db, "workspace_snapshots");
+  assert.throws(() => store.workspace.publishArtifactRevision("imported-bad-root", {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  }), /owning Artifact source root/i);
+  assert.equal(store.workspace.getTrack("revision-page-track")?.headRevisionId, null);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), beforeSnapshots);
+
+  const invalidKernelPayload = JSON.stringify({
+    tokens: {},
+    typography: {},
+    sharedAssetRevisionIds: ["missing-asset-revision"],
+    brief: "Imported invalid asset",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  });
+  store.db.prepare(
+    `INSERT INTO shared_design_kernel_revisions
+       (id, workspace_id, sequence, parent_revision_id, payload_json, checksum, created_at)
+     VALUES ('imported-bad-kernel', ?, 2, ?, ?, ?, 2)`,
+  ).run(
+    workspace.id,
+    workspace.activeKernelRevisionId,
+    invalidKernelPayload,
+    createHash("sha256").update(invalidKernelPayload).digest("hex"),
+  );
+  assert.throws(() => store.workspace.getKernelRevision("imported-bad-kernel"), /Shared Asset Revision/i);
+  assert.throws(() => store.workspace.publishKernelRevision("imported-bad-kernel", {
+    expectedKernelRevisionId: workspace.activeKernelRevisionId,
+    expectedSnapshotId: graph.snapshot.id,
+  }), /Shared Asset Revision/i);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeKernelRevisionId, workspace.activeKernelRevisionId);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), beforeSnapshots);
+  store.close();
+});
+
+test("stored Kernel payloads and duplicated dependency locators must already be canonical", () => {
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Canonical Kernel storage", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    for (const [resourceId, revisionId] of [["asset-a-resource", "asset-a"], ["asset-z-resource", "asset-z"]]) {
+      insertResource(store.db, workspace.id, resourceId!, null, "asset");
+      insertResourceRevision(store.db, workspace.id, resourceId!, revisionId!);
+    }
+    const insertKernel = (id: string, sequence: number, sharedAssetRevisionIds: string[]) => {
+      const payload = JSON.stringify({
+        tokens: {},
+        typography: {},
+        sharedAssetRevisionIds,
+        brief: "Imported canonicality fixture",
+        terminology: {},
+        exclusions: [],
+        responsiveFrames: [],
+        qualityProfile: {
+          requiredFrameIds: [],
+          blockingSeverities: [],
+          requireRuntimeChecks: false,
+          requireVisualReview: false,
+        },
+      });
+      store.db.prepare(
+        `INSERT INTO shared_design_kernel_revisions
+           (id, workspace_id, sequence, parent_revision_id, payload_json, checksum, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        workspace.id,
+        sequence,
+        workspace.activeKernelRevisionId,
+        payload,
+        createHash("sha256").update(payload).digest("hex"),
+        sequence,
+      );
+    };
+    insertKernel("whitespace-kernel", 2, [" asset-a "]);
+    insertKernel("unsorted-kernel", 3, ["asset-z", "asset-a"]);
+    assert.throws(() => store.workspace.getKernelRevision("whitespace-kernel"), /already be canonical/i);
+    assert.throws(() => store.workspace.getKernelRevision("unsorted-kernel"), /already be canonical/i);
+    store.close();
+  }
+
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Dependency locator binding", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+    const component = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-component",
+      trackId: "revision-component-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "locator-component",
+    }));
+    const page = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "locator-page",
+      dependencies: [{
+        instanceId: "locator-instance",
+        componentArtifactId: "revision-component",
+        componentRevisionId: component.id,
+        createInstanceIdentity: true,
+        sourceLocator: { designNodeId: "locator.original" },
+        overrides: {},
+        status: "linked",
+      }],
+    }));
+    store.db.exec("DROP TRIGGER artifact_revision_dependency_update_immutable");
+    store.db.prepare(
+      "UPDATE artifact_revision_dependencies SET design_node_id = 'locator.corrupt' WHERE revision_id = ?",
+    ).run(page.id);
+    assert.throws(
+      () => store.workspace.listArtifactRevisionDependencies(page.id),
+      /design node id must match/i,
+    );
+    store.close();
+  }
+});
+
+test("Artifact publication revalidates imported aggregate pins and the base Snapshot Kernel", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Imported aggregate publication", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const component = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-component",
+    trackId: "revision-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "aggregate-component-pin",
+  }));
+  insertResource(store.db, workspace.id, "aggregate-pin-resource", null, "asset");
+  insertResourceRevision(store.db, workspace.id, "aggregate-pin-resource", "aggregate-pin-resource-v1");
+  const page = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "aggregate-page-pin",
+    dependencies: [{
+      instanceId: "aggregate-pin-instance",
+      componentArtifactId: "revision-component",
+      componentRevisionId: component.id,
+      createInstanceIdentity: true,
+      sourceLocator: { designNodeId: "aggregate.pin" },
+      overrides: {},
+      status: "linked",
+    }],
+    resourcePins: [{
+      resourceId: "aggregate-pin-resource",
+      resourceRevisionId: "aggregate-pin-resource-v1",
+    }],
+  }));
+  const futureKernel = store.workspace.createKernelRevision({
+    workspaceId: workspace.id,
+    parentRevisionId: workspace.activeKernelRevisionId,
+    tokens: {},
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "Inactive future Kernel",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  });
+  const futurePinnedPage = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: futureKernel.id,
+    tree: "future-kernel-page",
+  }));
+  const before = {
+    snapshots: rowCount(store.db, "workspace_snapshots"),
+    graphs: rowCount(store.db, "workspace_graph_revisions"),
+  };
+  assert.throws(() => store.workspace.publishArtifactRevision(futurePinnedPage.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  }), /Kernel must match the expected base Snapshot Kernel/i);
+
+  store.db.exec("PRAGMA foreign_keys = OFF");
+  store.db.exec(`
+    DROP TRIGGER artifact_revision_dependency_update_immutable;
+    DROP TRIGGER artifact_revision_resource_update_immutable;
+    DROP TRIGGER artifact_revision_update_immutable;
+  `);
+  store.db.prepare(
+    "UPDATE artifact_revision_dependencies SET component_revision_id = 'missing-component-revision' WHERE revision_id = ?",
+  ).run(page.id);
+  assert.throws(() => store.workspace.listArtifactRevisionDependencies(page.id), /not found|Component Revision/i);
+  assert.throws(() => store.workspace.publishArtifactRevision(page.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  }), /not found|Component Revision/i);
+  store.db.prepare(
+    "UPDATE artifact_revision_dependencies SET component_revision_id = ? WHERE revision_id = ?",
+  ).run(component.id, page.id);
+  store.db.prepare(
+    "UPDATE artifact_revision_resources SET resource_revision_id = 'missing-resource-revision' WHERE revision_id = ?",
+  ).run(page.id);
+  assert.throws(() => store.workspace.listArtifactRevisionResourcePins(page.id), /exact same-Workspace Resource pin/i);
+  assert.throws(() => store.workspace.publishArtifactRevision(page.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  }), /exact same-Workspace Resource pin/i);
+  store.db.prepare(
+    "UPDATE artifact_revision_resources SET resource_revision_id = 'aggregate-pin-resource-v1' WHERE revision_id = ?",
+  ).run(page.id);
+  store.db.prepare(
+    "UPDATE artifact_revisions SET kernel_revision_id = 'missing-kernel-revision' WHERE id = ?",
+  ).run(page.id);
+  assert.throws(() => store.workspace.getArtifactRevision(page.id), /Kernel Revision not found/i);
+  assert.throws(() => store.workspace.publishArtifactRevision(page.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  }), /Kernel Revision not found/i);
+  assert.equal(store.workspace.getTrack("revision-page-track")?.headRevisionId, null);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, graph.snapshot.id);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), before.snapshots);
+  assert.equal(rowCount(store.db, "workspace_graph_revisions"), before.graphs);
+  store.close();
+});
+
+test("Task 4 trigger upgrades self-heal stale definitions and first activation is coherent", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "dezin-task4-trigger-upgrade-")), "upgrade.db");
+  const created = new Store(file, fakeClock());
+  created.close();
+  const stale = new DatabaseSync(file);
+  stale.exec(`
+    DROP TRIGGER workspace_active_snapshot_update_ownership;
+    CREATE TRIGGER workspace_active_snapshot_update_ownership
+    BEFORE UPDATE OF active_snapshot_id, id ON project_workspaces
+    WHEN NEW.active_snapshot_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM workspace_snapshots
+      WHERE id = NEW.active_snapshot_id AND workspace_id = NEW.id
+    )
+    BEGIN SELECT RAISE(ABORT, 'stale ownership trigger'); END;
+    DROP TRIGGER workspace_active_state_transition_guard;
+    CREATE TRIGGER workspace_active_state_transition_guard
+    BEFORE UPDATE OF active_snapshot_id ON project_workspaces
+    WHEN OLD.active_snapshot_id IS NOT NULL AND NEW.active_snapshot_id IS NULL
+    BEGIN SELECT RAISE(ABORT, 'stale active transition trigger'); END;
+  `);
+  stale.close();
+
+  const upgraded = new Store(file, fakeClock());
+  const triggerSql = (name: string) => (upgraded.db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+  ).get(name) as { sql: string }).sql;
+  assert.match(triggerSql("workspace_active_snapshot_update_ownership"), /sealed\s*=\s*1/i);
+  assert.match(triggerSql("workspace_active_state_transition_guard"), /json_each\(graph\.nodes_json\)/i);
+  assert.match(triggerSql("kernel_parent_insert_ownership"), /sequence\s*<\s*NEW\.sequence/i);
+
+  const project = upgraded.createProject({ name: "First activation coherence", mode: "standard" });
+  const kernelPayload = JSON.stringify({
+    tokens: {},
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "Initial Kernel",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  });
+  upgraded.db.exec("BEGIN IMMEDIATE");
+  try {
+    upgraded.db.prepare(
+      `INSERT INTO project_workspaces
+         (id, project_id, graph_revision, active_snapshot_id, active_kernel_revision_id, created_at, updated_at)
+       VALUES ('initial-activation-workspace', ?, 0, NULL, NULL, 1, 1)`,
+    ).run(project.id);
+    const emptyChecksum = workspaceGraphChecksum("[]", "[]");
+    upgraded.db.prepare(
+      `INSERT INTO workspace_graph_revisions
+         (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
+       VALUES ('initial-activation-workspace', 0, '[]', '[]', ?, 1),
+              ('initial-activation-workspace', 1, '[]', '[]', ?, 2)`,
+    ).run(emptyChecksum, emptyChecksum);
+    upgraded.db.prepare(
+      `INSERT INTO shared_design_kernel_revisions
+         (id, workspace_id, sequence, parent_revision_id, payload_json, checksum, created_at)
+       VALUES ('initial-activation-kernel', 'initial-activation-workspace', 1, NULL, ?, ?, 1)`,
+    ).run(kernelPayload, createHash("sha256").update(kernelPayload).digest("hex"));
+    upgraded.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES ('initial-activation-snapshot', 'initial-activation-workspace', 1, NULL, 1,
+                 'initial-activation-kernel', 'initial',
+                 '{"kind":"workspace-created"}', NULL, 1, 1)`,
+    ).run();
+    assert.throws(
+      () => upgraded.db.prepare(
+        `UPDATE project_workspaces
+         SET active_snapshot_id = 'initial-activation-snapshot',
+             active_kernel_revision_id = 'initial-activation-kernel', graph_revision = 0
+         WHERE id = 'initial-activation-workspace'`,
+      ).run(),
+      /coherent direct child|active state/i,
+    );
+  } finally {
+    upgraded.db.exec("ROLLBACK");
+  }
+  const workspace = upgraded.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(upgraded, project.id, workspace.activeSnapshotId);
+  const storedGraph = upgraded.db.prepare(
+    "SELECT nodes_json, edges_json FROM workspace_graph_revisions WHERE workspace_id = ? AND revision = 1",
+  ).get(workspace.id) as { nodes_json: string; edges_json: string };
+  const validNodes = JSON.parse(storedGraph.nodes_json) as Array<Record<string, unknown>>;
+  const duplicateIdNodes = validNodes.map((node) => ({ ...node }));
+  duplicateIdNodes[1]!.id = duplicateIdNodes[0]!.id;
+  const kindMismatchNodes = validNodes.map((node) => ({ ...node }));
+  const pageIndex = kindMismatchNodes.findIndex((node) => node.artifactId === "revision-page");
+  kindMismatchNodes[pageIndex]!.kind = "component";
+  for (const [revision, snapshotId, nodes] of [
+    [2, "kind-mismatch-snapshot", kindMismatchNodes],
+    [3, "duplicate-node-snapshot", duplicateIdNodes],
+  ] as const) {
+    const nodesJson = JSON.stringify(nodes);
+    upgraded.db.prepare(
+      `INSERT INTO workspace_graph_revisions
+         (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      workspace.id,
+      revision,
+      nodesJson,
+      storedGraph.edges_json,
+      workspaceGraphChecksum(nodesJson, storedGraph.edges_json),
+      revision,
+    );
+    upgraded.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES (?, ?, ?, ?, ?, ?, 'corrupt-graph-shape',
+                 '{"kind":"legacy-migration","migration":"corrupt-graph-shape"}', NULL, ?, 0)`,
+    ).run(
+      snapshotId,
+      workspace.id,
+      revision + 1,
+      graph.snapshot.id,
+      revision,
+      workspace.activeKernelRevisionId,
+      revision,
+    );
+    upgraded.db.prepare(
+      `INSERT INTO workspace_snapshot_artifacts
+         (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
+       SELECT workspace_id, ?, artifact_id, track_id, revision_id
+       FROM workspace_snapshot_artifacts WHERE snapshot_id = ?`,
+    ).run(snapshotId, graph.snapshot.id);
+    upgraded.db.prepare("UPDATE workspace_snapshots SET sealed = 1 WHERE id = ?").run(snapshotId);
+    assert.throws(
+      () => upgraded.db.prepare(
+        "UPDATE project_workspaces SET graph_revision = ?, active_snapshot_id = ? WHERE id = ?",
+      ).run(revision, snapshotId, workspace.id),
+      /coherent direct child|active state/i,
+    );
+  }
+  assert.throws(
+    () => upgraded.workspace.listSnapshots(project.id),
+    /exact owned Revision pin|Artifact mapping/i,
+  );
+  upgraded.close();
+});
+
+test("public readers reject imported backward parent lineages", () => {
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Artifact parent read", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    insertArtifact(store.db, workspace.id, "lineage-artifact");
+    insertTrack(store.db, "lineage-artifact", "lineage-track");
+    store.db.exec("DROP TRIGGER artifact_revision_parent_insert_ownership");
+    insertRevision(store.db, {
+      id: "lineage-artifact-parent",
+      workspaceId: workspace.id,
+      artifactId: "lineage-artifact",
+      trackId: "lineage-track",
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      sequence: 2,
+    });
+    insertRevision(store.db, {
+      id: "lineage-artifact-child",
+      workspaceId: workspace.id,
+      artifactId: "lineage-artifact",
+      trackId: "lineage-track",
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      sequence: 1,
+      parentRevisionId: "lineage-artifact-parent",
+    });
+    assert.throws(
+      () => store.workspace.getArtifactRevision("lineage-artifact-child"),
+      /earlier sealed Revision on the same Track/i,
+    );
+    store.db.exec(`
+      DROP TRIGGER artifact_revision_update_immutable;
+      DROP TRIGGER artifact_revision_parent_update_ownership;
+      PRAGMA foreign_keys = OFF;
+    `);
+    store.db.prepare(
+      "UPDATE artifact_revisions SET parent_revision_id = 'missing-artifact-parent' WHERE id = 'lineage-artifact-child'",
+    ).run();
+    assert.throws(
+      () => store.workspace.getArtifactRevision("lineage-artifact-child"),
+      /parent is not resolvable/i,
+    );
+    const foreignProject = store.createProject({ name: "Foreign Artifact parent", mode: "standard" });
+    const foreignWorkspace = store.workspace.ensureWorkspaceRecord(foreignProject.id);
+    insertArtifact(store.db, foreignWorkspace.id, "foreign-lineage-artifact");
+    insertTrack(store.db, "foreign-lineage-artifact", "foreign-lineage-track");
+    insertRevision(store.db, {
+      id: "foreign-lineage-artifact-parent",
+      workspaceId: foreignWorkspace.id,
+      artifactId: "foreign-lineage-artifact",
+      trackId: "foreign-lineage-track",
+      kernelRevisionId: foreignWorkspace.activeKernelRevisionId,
+    });
+    store.db.prepare(
+      "UPDATE artifact_revisions SET parent_revision_id = 'foreign-lineage-artifact-parent' WHERE id = 'lineage-artifact-child'",
+    ).run();
+    assert.throws(
+      () => store.workspace.getArtifactRevision("lineage-artifact-child"),
+      /earlier sealed Revision on the same Track/i,
+    );
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Kernel parent read", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    store.db.exec("DROP TRIGGER kernel_parent_insert_ownership");
+    store.db.prepare(
+      `INSERT INTO shared_design_kernel_revisions
+         (id, workspace_id, sequence, parent_revision_id, payload_json, checksum, created_at)
+       SELECT 'lineage-kernel-parent', workspace_id, 3, NULL, payload_json, checksum, 3
+       FROM shared_design_kernel_revisions WHERE id = ?`,
+    ).run(workspace.activeKernelRevisionId);
+    store.db.prepare(
+      `INSERT INTO shared_design_kernel_revisions
+         (id, workspace_id, sequence, parent_revision_id, payload_json, checksum, created_at)
+       SELECT 'lineage-kernel-child', workspace_id, 2, 'lineage-kernel-parent', payload_json, checksum, 2
+       FROM shared_design_kernel_revisions WHERE id = ?`,
+    ).run(workspace.activeKernelRevisionId);
+    assert.throws(
+      () => store.workspace.getKernelRevision("lineage-kernel-child"),
+      /earlier Revision in the same Workspace/i,
+    );
+    store.db.exec(`
+      DROP TRIGGER kernel_revision_update_immutable;
+      DROP TRIGGER kernel_parent_update_ownership;
+      PRAGMA foreign_keys = OFF;
+    `);
+    store.db.prepare(
+      "UPDATE shared_design_kernel_revisions SET parent_revision_id = 'missing-kernel-parent' WHERE id = 'lineage-kernel-child'",
+    ).run();
+    assert.throws(() => store.workspace.getKernelRevision("lineage-kernel-child"), /parent is not resolvable/i);
+    const foreignProject = store.createProject({ name: "Foreign Kernel parent", mode: "standard" });
+    const foreignWorkspace = store.workspace.ensureWorkspaceRecord(foreignProject.id);
+    store.db.prepare(
+      "UPDATE shared_design_kernel_revisions SET parent_revision_id = ? WHERE id = 'lineage-kernel-child'",
+    ).run(foreignWorkspace.activeKernelRevisionId);
+    assert.throws(
+      () => store.workspace.getKernelRevision("lineage-kernel-child"),
+      /earlier Revision in the same Workspace/i,
+    );
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Snapshot parent read", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    store.db.exec("DROP TRIGGER snapshot_parent_insert_ownership");
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES ('lineage-snapshot-parent', ?, 3, NULL, 0, ?, 'parent',
+                 '{"kind":"legacy-migration","migration":"parent"}', NULL, 3, 1),
+                ('lineage-snapshot-child', ?, 2, 'lineage-snapshot-parent', 0, ?, 'child',
+                 '{"kind":"legacy-migration","migration":"child"}', NULL, 2, 1)`,
+    ).run(
+      workspace.id,
+      workspace.activeKernelRevisionId,
+      workspace.id,
+      workspace.activeKernelRevisionId,
+    );
+    assert.throws(
+      () => store.workspace.listSnapshots(project.id),
+      /earlier sealed Snapshot in the same Workspace/i,
+    );
+    store.db.exec(`
+      DROP TRIGGER workspace_snapshot_update_immutable;
+      DROP TRIGGER snapshot_parent_update_ownership;
+      PRAGMA foreign_keys = OFF;
+    `);
+    store.db.prepare(
+      "UPDATE workspace_snapshots SET parent_snapshot_id = 'missing-snapshot-parent' WHERE id = 'lineage-snapshot-child'",
+    ).run();
+    assert.throws(() => store.workspace.listSnapshots(project.id), /parent is not resolvable/i);
+    const foreignProject = store.createProject({ name: "Foreign Snapshot parent", mode: "standard" });
+    const foreignWorkspace = store.workspace.ensureWorkspaceRecord(foreignProject.id);
+    store.db.prepare(
+      "UPDATE workspace_snapshots SET parent_snapshot_id = ? WHERE id = 'lineage-snapshot-child'",
+    ).run(foreignWorkspace.activeSnapshotId);
+    assert.throws(
+      () => store.workspace.listSnapshots(project.id),
+      /earlier sealed Snapshot in the same Workspace/i,
+    );
+    store.close();
+  }
+});
+
+test("unsealed aggregates and stale active Snapshot mappings cannot become public state", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Sealed activation", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const inactive = store.workspace.createWorkspaceSnapshot(project.id, {
+    expectedSnapshotId: graph.snapshot.id,
+    reason: "pre-head-checkpoint",
+    provenance: {
+      kind: "plan-checkpoint",
+      proposalId: "activation-proposal",
+      planId: "activation-plan",
+      checkpointId: "activation-checkpoint",
+    },
+  });
+  const candidate = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "activation-candidate",
+  }));
+  store.db.exec("BEGIN IMMEDIATE");
+  try {
+    store.db.prepare(
+      "UPDATE artifact_tracks SET head_revision_id = ? WHERE id = 'revision-page-track'",
+    ).run(candidate.id);
+    assert.throws(
+      () => store.db.prepare("UPDATE project_workspaces SET active_snapshot_id = ? WHERE id = ?")
+        .run(inactive.id, workspace.id),
+      /coherent direct child|active state/i,
+    );
+  } finally {
+    store.db.exec("ROLLBACK");
+  }
+  assert.equal(store.workspace.getTrack("revision-page-track")?.headRevisionId, null);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, graph.snapshot.id);
+
+  insertRevision(store.db, {
+    id: "unsealed-artifact-revision",
+    workspaceId: workspace.id,
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    sequence: 2,
+    parentRevisionId: candidate.id,
+    sealed: 0,
+  });
+  assert.throws(() => store.workspace.getArtifactRevision("unsealed-artifact-revision"), /must be sealed/i);
+  assert.throws(
+    () => store.workspace.listArtifactRevisionDependencies("unsealed-artifact-revision"),
+    /must be sealed/i,
+  );
+  assert.throws(
+    () => store.workspace.listArtifactRevisionResourcePins("unsealed-artifact-revision"),
+    /must be sealed/i,
+  );
+  assert.throws(() => store.workspace.listArtifactRevisionDependencies("missing-revision"), /not found/i);
+  assert.throws(() => store.workspace.listArtifactRevisionResourcePins("missing-revision"), /not found/i);
+  assert.throws(
+    () => store.db.prepare(
+      "UPDATE artifact_tracks SET head_revision_id = 'unsealed-artifact-revision' WHERE id = 'revision-page-track'",
+    ).run(),
+    /ownership|sealed/i,
+  );
+  store.db.prepare(
+    `INSERT INTO workspace_snapshots (
+       id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+       reason, provenance_json, created_by_run_id, created_at, sealed
+     ) VALUES ('unsealed-snapshot', ?, 4, ?, 1, ?, 'unsealed',
+               '{"kind":"legacy-migration","migration":"unsealed"}', NULL, 4, 0)`,
+  ).run(workspace.id, graph.snapshot.id, workspace.activeKernelRevisionId);
+  assert.throws(() => store.workspace.listSnapshots(project.id), /must be sealed/i);
+  assert.throws(
+    () => store.db.prepare("UPDATE project_workspaces SET active_snapshot_id = 'unsealed-snapshot' WHERE id = ?")
+      .run(workspace.id),
+    /ownership|sealed|active state/i,
+  );
+  store.close();
+});
+
+test("Snapshot readback binds mappings and Kernel impact to immutable history", () => {
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Snapshot mapping readback", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES ('corrupt-mapping-snapshot', ?, 3, ?, 1, ?, 'corrupt',
+                 '{"kind":"legacy-migration","migration":"missing-mapping"}', NULL, 3, 1)`,
+    ).run(workspace.id, graph.snapshot.id, workspace.activeKernelRevisionId);
+    store.db.prepare(
+      "UPDATE workspace_artifacts SET archived_at = 99 WHERE id IN ('revision-page', 'revision-component')",
+    ).run();
+    assert.throws(() => store.workspace.listSnapshots(project.id), /exactly match its immutable graph/i);
+    assert.throws(
+      () => store.db.prepare(
+        "UPDATE project_workspaces SET active_snapshot_id = 'corrupt-mapping-snapshot' WHERE id = ?",
+      ).run(workspace.id),
+      /coherent direct child|active state/i,
+    );
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Artifact audit readback", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+    const mapped = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "mapped-audit-candidate",
+    }));
+    const unrelated = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "unrelated-audit-candidate",
+    }));
+    const sequence = Number((store.db.prepare(
+      "SELECT MAX(sequence) + 1 AS sequence FROM workspace_snapshots WHERE workspace_id = ?",
+    ).get(workspace.id) as { sequence: number }).sequence);
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES ('corrupt-artifact-audit', ?, ?, ?, 1, ?, 'corrupt-audit', ?, NULL, ?, 0)`,
+    ).run(
+      workspace.id,
+      sequence,
+      graph.snapshot.id,
+      workspace.activeKernelRevisionId,
+      JSON.stringify({ kind: "artifact-publication", revisionId: unrelated.id }),
+      sequence,
+    );
+    store.db.prepare(
+      `INSERT INTO workspace_snapshot_artifacts
+         (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
+       SELECT workspace_id, 'corrupt-artifact-audit', artifact_id, track_id,
+              CASE WHEN artifact_id = 'revision-page' THEN ? ELSE revision_id END
+       FROM workspace_snapshot_artifacts WHERE snapshot_id = ?`,
+    ).run(mapped.id, graph.snapshot.id);
+    store.db.prepare("UPDATE workspace_snapshots SET sealed = 1 WHERE id = 'corrupt-artifact-audit'").run();
+    assert.throws(
+      () => store.workspace.listSnapshots(project.id),
+      /Artifact publication Snapshot.*audit provenance does not match immutable history/i,
+    );
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Resource identity readback", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const nodesJson = JSON.stringify([{
+      id: "missing-resource-node",
+      workspaceId: workspace.id,
+      kind: "resource",
+      name: "Missing resource",
+      resourceId: "missing-resource",
+    }]);
+    const edgesJson = "[]";
+    store.db.prepare(
+      `INSERT INTO workspace_graph_revisions
+         (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
+       VALUES (?, 1, ?, ?, ?, 2)`,
+    ).run(workspace.id, nodesJson, edgesJson, workspaceGraphChecksum(nodesJson, edgesJson));
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES ('missing-resource-identity-snapshot', ?, 2, ?, 1, ?, 'corrupt-resource',
+                 '{"kind":"legacy-migration","migration":"missing-resource-identity"}', NULL, 2, 1)`,
+    ).run(workspace.id, workspace.activeSnapshotId, workspace.activeKernelRevisionId);
+    assert.throws(
+      () => store.workspace.listSnapshots(project.id),
+      /Resource missing-resource has no owned identity/i,
+    );
+    assert.throws(
+      () => store.db.prepare(
+        `UPDATE project_workspaces
+         SET graph_revision = 1, active_snapshot_id = 'missing-resource-identity-snapshot'
+         WHERE id = ?`,
+      ).run(workspace.id),
+      /coherent direct child|active state/i,
+    );
+    store.close();
+  }
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Kernel audit readback", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+    const kernel = store.workspace.createKernelRevision({
+      workspaceId: workspace.id,
+      parentRevisionId: workspace.activeKernelRevisionId,
+      tokens: {},
+      typography: {},
+      sharedAssetRevisionIds: [],
+      brief: "Audit target",
+      terminology: {},
+      exclusions: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+    });
+    const fakeImpact = {
+      workspaceId: "fake-workspace",
+      baseSnapshotId: "fake-snapshot",
+      fromKernelRevisionId: workspace.activeKernelRevisionId,
+      toKernelRevisionId: kernel.id,
+      affectedArtifactRevisions: [],
+    };
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES ('corrupt-kernel-audit', ?, 3, ?, 1, ?, 'corrupt-audit', ?, NULL, 3, 0)`,
+    ).run(
+      workspace.id,
+      graph.snapshot.id,
+      kernel.id,
+      JSON.stringify({ kind: "kernel-publication", kernelRevisionId: kernel.id, impact: fakeImpact }),
+    );
+    store.db.prepare(
+      `INSERT INTO workspace_snapshot_artifacts
+         (workspace_id, snapshot_id, artifact_id, track_id, revision_id)
+       SELECT workspace_id, 'corrupt-kernel-audit', artifact_id, track_id, revision_id
+       FROM workspace_snapshot_artifacts WHERE snapshot_id = ?`,
+    ).run(graph.snapshot.id);
+    store.db.prepare("UPDATE workspace_snapshots SET sealed = 1 WHERE id = 'corrupt-kernel-audit'").run();
+    assert.throws(() => store.workspace.listSnapshots(project.id), /impact audit does not match/i);
+    store.close();
+  }
+});
+
+test("durable identifier ordering uses binary code-point order", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Binary ordering", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const revisionIds = ["z", "ä", "A", "a", "\ue000", "😀"];
+  for (const revisionId of revisionIds) {
+    insertResource(store.db, workspace.id, `asset-${revisionId}`, null, "asset");
+    insertResourceRevision(store.db, workspace.id, `asset-${revisionId}`, revisionId);
+  }
+  const kernel = store.workspace.createKernelRevision({
+    workspaceId: workspace.id,
+    parentRevisionId: workspace.activeKernelRevisionId,
+    tokens: { "😀": 1, "\ue000": 2 },
+    typography: {},
+    sharedAssetRevisionIds: revisionIds,
+    brief: "Binary order",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  });
+  const sqliteOrder = (store.db.prepare(
+    "SELECT id FROM resource_revisions WHERE workspace_id = ? ORDER BY id COLLATE BINARY ASC",
+  ).all(workspace.id) as Array<{ id: string }>).map(({ id }) => id);
+  assert.deepEqual(kernel.sharedAssetRevisionIds, ["A", "a", "z", "ä", "\ue000", "😀"]);
+  assert.deepEqual(kernel.sharedAssetRevisionIds, sqliteOrder);
+  assert.deepEqual(Object.keys(kernel.tokens), ["\ue000", "😀"]);
+  assert.throws(() => store.workspace.createKernelRevision({
+    workspaceId: workspace.id,
+    parentRevisionId: workspace.activeKernelRevisionId,
+    tokens: {},
+    typography: {},
+    sharedAssetRevisionIds: ["\ud800"],
+    brief: "Malformed id",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  }), /well-formed Unicode/i);
+  assert.throws(() => store.workspace.createKernelRevision({
+    workspaceId: workspace.id,
+    parentRevisionId: workspace.activeKernelRevisionId,
+    tokens: { "\ud800": 1 },
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "Malformed key",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  }), /keys must contain well-formed Unicode/i);
+  const nodesBefore = rowCount(store.db, "workspace_nodes");
+  assert.throws(() => store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "malformed-unicode-command",
+      type: "add-node",
+      node: {
+        id: "\ud800",
+        kind: "page",
+        name: "Malformed",
+        artifactId: "malformed-unicode-artifact",
+        createIdentity: { initialTrackId: "malformed-unicode-track" },
+      },
+    }],
+  }), /well-formed Unicode/i);
+  assert.equal(rowCount(store.db, "workspace_nodes"), nodesBefore);
+  store.close();
+});
+
+test("Kernel impact publication and readback share SQLite UTF-8 identifier order", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "UTF-8 Kernel impact", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [
+      {
+        id: "add-bmp-artifact",
+        type: "add-node",
+        node: {
+          id: "bmp-node",
+          kind: "page",
+          name: "BMP page",
+          artifactId: "\ue000",
+          createIdentity: { initialTrackId: "bmp-track" },
+        },
+      },
+      {
+        id: "add-astral-artifact",
+        type: "add-node",
+        node: {
+          id: "astral-node",
+          kind: "page",
+          name: "Astral page",
+          artifactId: "😀",
+          createIdentity: { initialTrackId: "astral-track" },
+        },
+      },
+    ],
+  });
+  const bmpRevision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "\ue000",
+    trackId: "bmp-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "bmp-impact",
+  }));
+  const bmpSnapshot = store.workspace.publishArtifactRevision(bmpRevision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  });
+  const astralRevision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "😀",
+    trackId: "astral-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "astral-impact",
+  }));
+  const artifactsSnapshot = store.workspace.publishArtifactRevision(astralRevision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: bmpSnapshot.id,
+  });
+  const kernel = store.workspace.createKernelRevision({
+    workspaceId: workspace.id,
+    parentRevisionId: workspace.activeKernelRevisionId,
+    tokens: { accent: "#111827" },
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "UTF-8 impact",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  });
+  const published = store.workspace.publishKernelRevision(kernel.id, {
+    expectedKernelRevisionId: workspace.activeKernelRevisionId,
+    expectedSnapshotId: artifactsSnapshot.id,
+  });
+  const provenance = published.provenance;
+  assert.equal(provenance.kind, "kernel-publication");
+  if (provenance.kind !== "kernel-publication") throw new Error("expected Kernel publication provenance");
+  assert.deepEqual(
+    provenance.impact?.affectedArtifactRevisions.map(({ artifactId }) => artifactId),
+    ["\ue000", "😀"],
+  );
+  const readback = store.workspace.listSnapshots(project.id).at(-1);
+  assert.deepEqual(readback?.provenance, provenance);
+  store.close();
+});
+
+test("history reads validate each distinct Artifact, Kernel, and Snapshot lineage row once per transaction", () => {
+  const clock = fakeClock();
+  const store = new Store(":memory:", clock);
+  const project = store.createProject({ name: "Linear history reads", mode: "standard" });
+  const conversation = store.createConversation(project.id, "Lineage validation");
+  const run = store.createRun(project.id, conversation.id);
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  let activeSnapshot = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId).snapshot;
+  let artifactHead: string | null = null;
+  const artifactHistorySize = 64;
+  const kernelHistorySize = 32;
+
+  for (let index = 0; index < artifactHistorySize; index += 1) {
+    const revision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "revision-page",
+      trackId: "revision-page-track",
+      parentRevisionId: artifactHead,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: `linear-${index}`,
+      producedByRunId: run.id,
+    }));
+    activeSnapshot = store.workspace.publishArtifactRevision(revision.id, {
+      expectedHeadRevisionId: artifactHead,
+      expectedSnapshotId: activeSnapshot.id,
+    });
+    artifactHead = revision.id;
+  }
+
+  let activeKernelRevisionId = workspace.activeKernelRevisionId;
+  for (let index = 0; index < kernelHistorySize; index += 1) {
+    const kernel = store.workspace.createKernelRevision({
+      workspaceId: workspace.id,
+      parentRevisionId: activeKernelRevisionId,
+      tokens: { accent: `#00000${index}` },
+      typography: {},
+      sharedAssetRevisionIds: [],
+      brief: `Linear Kernel ${index}`,
+      terminology: {},
+      exclusions: [],
+      responsiveFrames: [],
+      qualityProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+    });
+    activeSnapshot = store.workspace.publishKernelRevision(kernel.id, {
+      expectedKernelRevisionId: activeKernelRevisionId,
+      expectedSnapshotId: activeSnapshot.id,
+    });
+    activeKernelRevisionId = kernel.id;
+  }
+
+  const counts: LineageReadCounts = {
+    artifactRows: 0,
+    artifactReferenceReads: 0,
+    kernelRows: 0,
+    runOwnershipReads: 0,
+    snapshotRows: 0,
+  };
+  const observed = observeLineageReads(store.db, clock, counts);
+  const resetCounts = () => {
+    counts.artifactRows = 0;
+    counts.artifactReferenceReads = 0;
+    counts.kernelRows = 0;
+    counts.runOwnershipReads = 0;
+    counts.snapshotRows = 0;
+  };
+
+  const revisions = observed.listRevisions(project.id, "revision-page");
+  assert.equal(revisions.length, artifactHistorySize);
+  assert.equal(counts.artifactRows, 0, "the list query must preload every Artifact Revision header");
+  assert.equal(counts.artifactReferenceReads, revisions.length);
+  assert.equal(counts.runOwnershipReads, revisions.length);
+  assert.equal(counts.kernelRows, 1);
+
+  for (let read = 0; read < 2; read += 1) {
+    resetCounts();
+    assert.equal(observed.getArtifactRevision(artifactHead!)?.id, artifactHead);
+    assert.equal(counts.artifactRows, revisions.length, "each outer read needs a fresh, linear Artifact context");
+    assert.equal(
+      counts.artifactReferenceReads,
+      revisions.length,
+      "each Artifact reference must be validated once in that outer read",
+    );
+    assert.equal(counts.runOwnershipReads, revisions.length);
+    assert.equal(counts.kernelRows, 1);
+  }
+
+  resetCounts();
+  const snapshots = observed.listSnapshots(project.id);
+  assert.equal(snapshots.at(-1)?.id, activeSnapshot.id);
+  assert.equal(counts.snapshotRows, 0, "the list query must preload every Snapshot header");
+  assert.equal(counts.artifactRows, revisions.length);
+  assert.equal(counts.artifactReferenceReads, revisions.length);
+  assert.equal(counts.runOwnershipReads, revisions.length * 2);
+  assert.equal(counts.kernelRows, kernelHistorySize + 1);
+
+  resetCounts();
+  const checkpoint = observed.publishSnapshot(project.id, {
+    expectedSnapshotId: activeSnapshot.id,
+    reason: "linear-history-checkpoint",
+    provenance: {
+      kind: "plan-checkpoint",
+      proposalId: "linear-proposal",
+      planId: "linear-plan",
+      checkpointId: "linear-checkpoint",
+    },
+  });
+  assert.equal(checkpoint.parentSnapshotId, activeSnapshot.id);
+  assert.equal(counts.snapshotRows, snapshots.length + 1);
+  assert.equal(counts.artifactRows, revisions.length);
+  assert.equal(counts.artifactReferenceReads, revisions.length);
+  assert.equal(counts.runOwnershipReads, revisions.length * 2);
+  assert.equal(counts.kernelRows, kernelHistorySize + 1);
   store.close();
 });
