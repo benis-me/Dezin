@@ -36,4 +36,37 @@ export type {
   ExtensionCredential,
   ExtensionCredentialRecord,
 } from "./types.ts";
+export type {
+  ArtifactKind,
+  ArtifactQualityProfile,
+  ArtifactQualityState,
+  ArtifactQualitySummary,
+  DesignNodeLocator,
+  NewWorkspaceEdge,
+  NewWorkspaceNode,
+  ProjectWorkspace,
+  PrototypeBinding,
+  PrototypeEdge,
+  PrototypeEdgeStatus,
+  PrototypeTransition,
+  PrototypeTrigger,
+  RenderFrameSpec,
+  ResourceKind,
+  ResourcePinPolicy,
+  SharedDesignKernelRevision,
+  WorkspaceArtifactNode,
+  WorkspaceEdge,
+  WorkspaceEdgeKind,
+  WorkspaceGraph,
+  WorkspaceGraphCommand,
+  WorkspaceNode,
+  WorkspaceNodeKind,
+  WorkspaceResourceNode,
+} from "./workspace-types.ts";
+export {
+  WorkspaceGraphValidationError,
+  WorkspaceRevisionConflictError,
+  applyWorkspaceGraphCommands,
+  validateWorkspaceGraph,
+} from "./workspace-graph.ts";
 export { Store, type StoreClock } from "./store.ts";
