@@ -688,6 +688,76 @@ WHEN NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'component instance component kind ownership violation'); END;
 
+CREATE TRIGGER IF NOT EXISTS workspace_node_layout_group_insert_collision
+BEFORE INSERT ON workspace_nodes
+WHEN EXISTS (
+  SELECT 1 FROM workspace_layout_nodes layout
+  WHERE layout.workspace_id = NEW.workspace_id
+    AND layout.object_id = NEW.id
+    AND layout.object_kind = 'group'
+)
+BEGIN SELECT RAISE(ABORT, 'layout group collides with semantic node identity'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_node_layout_group_update_collision
+BEFORE UPDATE OF id, workspace_id ON workspace_nodes
+WHEN EXISTS (
+  SELECT 1 FROM workspace_layout_nodes layout
+  WHERE layout.workspace_id = NEW.workspace_id
+    AND layout.object_id = NEW.id
+    AND layout.object_kind = 'group'
+)
+BEGIN SELECT RAISE(ABORT, 'layout group collides with semantic node identity'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_layout_group_node_insert_collision
+BEFORE INSERT ON workspace_layout_nodes
+WHEN NEW.object_kind = 'group' AND EXISTS (
+  SELECT 1 FROM workspace_nodes node
+  WHERE node.workspace_id = NEW.workspace_id AND node.id = NEW.object_id
+)
+BEGIN SELECT RAISE(ABORT, 'layout group collides with semantic node identity'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_layout_group_node_update_collision
+BEFORE UPDATE OF workspace_id, object_id, object_kind ON workspace_layout_nodes
+WHEN NEW.object_kind = 'group' AND EXISTS (
+  SELECT 1 FROM workspace_nodes node
+  WHERE node.workspace_id = NEW.workspace_id AND node.id = NEW.object_id
+)
+BEGIN SELECT RAISE(ABORT, 'layout group collides with semantic node identity'); END;
+
+CREATE TRIGGER IF NOT EXISTS workspace_graph_revision_insert_immutable
+BEFORE INSERT ON workspace_graph_revisions
+WHEN EXISTS (
+  SELECT 1 FROM workspace_graph_revisions existing
+  WHERE existing.workspace_id = NEW.workspace_id AND existing.revision = NEW.revision
+)
+BEGIN SELECT RAISE(ABORT, 'workspace graph revisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_graph_revision_update_immutable
+BEFORE UPDATE ON workspace_graph_revisions
+BEGIN SELECT RAISE(ABORT, 'workspace graph revisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_graph_revision_delete_immutable
+BEFORE DELETE ON workspace_graph_revisions
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'workspace graph revisions are immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS workspace_graph_command_insert_immutable
+BEFORE INSERT ON workspace_graph_commands
+WHEN EXISTS (
+  SELECT 1 FROM workspace_graph_commands existing
+  WHERE existing.workspace_id = NEW.workspace_id AND existing.command_id = NEW.command_id
+)
+BEGIN SELECT RAISE(ABORT, 'workspace graph commands are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_graph_command_update_immutable
+BEFORE UPDATE ON workspace_graph_commands
+BEGIN SELECT RAISE(ABORT, 'workspace graph commands are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_graph_command_delete_immutable
+BEFORE DELETE ON workspace_graph_commands
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'workspace graph commands are immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS project_workspace_insert_guard
+BEFORE INSERT ON project_workspaces
+WHEN EXISTS (
+  SELECT 1 FROM project_workspaces existing
+  WHERE existing.id = NEW.id OR existing.project_id = NEW.project_id
+)
+BEGIN SELECT RAISE(ABORT, 'cannot replace workspace while Project exists'); END;
 CREATE TRIGGER IF NOT EXISTS project_workspace_delete_guard
 BEFORE DELETE ON project_workspaces
 WHEN EXISTS (SELECT 1 FROM projects WHERE id = OLD.project_id)

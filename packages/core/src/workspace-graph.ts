@@ -56,12 +56,32 @@ export class WorkspaceGraphValidationError extends Error {
 export class WorkspaceRevisionConflictError extends Error {
   readonly expectedRevision: number;
   readonly actualRevision: number;
+  readonly expectedSnapshotId?: string;
+  readonly actualSnapshotId?: string;
 
-  constructor(expectedRevision: number, actualRevision: number) {
-    super(`workspace graph revision conflict: expected ${expectedRevision}, current ${actualRevision}`);
+  constructor(
+    expectedRevision: number,
+    actualRevision: number,
+    snapshots?: { expectedSnapshotId: string; actualSnapshotId: string },
+  ) {
+    super(snapshots
+      ? `workspace revision conflict: graph expected ${expectedRevision}, current ${actualRevision}; Snapshot expected ${snapshots.expectedSnapshotId}, current ${snapshots.actualSnapshotId}`
+      : `workspace graph revision conflict: expected ${expectedRevision}, current ${actualRevision}`);
     this.name = "WorkspaceRevisionConflictError";
     this.expectedRevision = expectedRevision;
     this.actualRevision = actualRevision;
+    this.expectedSnapshotId = snapshots?.expectedSnapshotId;
+    this.actualSnapshotId = snapshots?.actualSnapshotId;
+  }
+}
+
+export class WorkspaceCommandReplayConflictError extends WorkspaceGraphValidationError {
+  readonly commandIds: string[];
+
+  constructor(commandIds: readonly string[]) {
+    super(`workspace command replay conflict for command ids: ${commandIds.join(", ")}`);
+    this.name = "WorkspaceCommandReplayConflictError";
+    this.commandIds = [...commandIds];
   }
 }
 
@@ -809,6 +829,8 @@ function addEdge(graph: WorkspaceGraph, edge: NewWorkspaceEdge): void {
   if (edge.workspaceId !== graph.workspaceId) {
     invalid(`edge ${edge.id} belongs to workspace ${edge.workspaceId}, not ${graph.workspaceId}`);
   }
+  requireNode(graph, edge.sourceNodeId);
+  requireNode(graph, edge.targetNodeId);
   if (edge.kind === "prototype") {
     graph.edges.push({ ...edge, prototype: { status: "planned" } });
     return;

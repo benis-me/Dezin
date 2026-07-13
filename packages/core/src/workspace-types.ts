@@ -149,6 +149,102 @@ export interface WorkspaceGraph {
   edges: WorkspaceEdge[];
 }
 
+export type WorkspaceSnapshotProvenance =
+  | { kind: "workspace-created" }
+  | { kind: "graph-command"; commandIds: string[] }
+  | { kind: "proposal-approval"; proposalId: string; proposalRevision: number; planId?: string }
+  | { kind: "artifact-publication"; revisionId: string; runId?: string; planId?: string; taskId?: string }
+  | { kind: "resource-publication"; resourceRevisionId: string; runId?: string; planId?: string; taskId?: string }
+  | { kind: "kernel-publication"; kernelRevisionId: string; proposalId?: string }
+  | { kind: "propagation"; proposalId: string; batchId: string }
+  | { kind: "plan-checkpoint"; proposalId: string; planId: string; checkpointId: string }
+  | { kind: "restore"; restoredSnapshotId?: string; restoredRevisionId?: string }
+  | { kind: "legacy-migration"; migration: string };
+
+export interface WorkspaceSnapshot {
+  id: string;
+  workspaceId: string;
+  sequence: number;
+  parentSnapshotId: string | null;
+  graphRevision: number;
+  kernelRevisionId: string;
+  reason: string;
+  provenance: WorkspaceSnapshotProvenance;
+  createdByRunId: string | null;
+  createdAt: number;
+  graph: WorkspaceGraph;
+  artifactTracks: Record<string, string>;
+  artifactRevisions: Record<string, string | null>;
+  resourceRevisions: Record<string, string>;
+}
+
+export interface WorkspaceGraphMutationInput {
+  baseGraphRevision: number;
+  expectedSnapshotId: string;
+  commands: readonly WorkspaceGraphCommand[];
+}
+
+export interface WorkspaceGraphMutationResult {
+  graph: WorkspaceGraph;
+  snapshot: WorkspaceSnapshot;
+}
+
+export interface LayoutBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface WorkspaceViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+export type WorkspaceLayoutCommand =
+  | { type: "add-group"; groupId: string; label: string; bounds: LayoutBounds }
+  | { type: "rename-group"; groupId: string; label: string }
+  | { type: "delete-group"; groupId: string; ungroupChildren: true }
+  | { type: "set-parent"; objectId: string; parentGroupId: string | null }
+  | { type: "move"; objectId: string; x: number; y: number }
+  | { type: "resize-group"; groupId: string; width: number; height: number }
+  | { type: "set-collapsed"; groupId: string; collapsed: boolean }
+  | { type: "set-viewport"; viewport: WorkspaceViewport };
+
+export interface WorkspaceLayoutPatch {
+  layoutId?: string;
+  graphRevision: number;
+  commands: readonly WorkspaceLayoutCommand[];
+}
+
+export interface WorkspaceLayoutNode {
+  id: string;
+  kind: "node";
+  x: number;
+  y: number;
+  parentGroupId: string | null;
+}
+
+export interface WorkspaceLayoutGroup {
+  id: string;
+  kind: "group";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  parentGroupId: string | null;
+  label: string;
+  collapsed: boolean;
+}
+
+export interface WorkspaceLayout {
+  workspaceId: string;
+  layoutId: string;
+  objects: Array<WorkspaceLayoutNode | WorkspaceLayoutGroup>;
+  viewport: WorkspaceViewport;
+}
+
 export type NewWorkspaceNode =
   | {
     id: string;
