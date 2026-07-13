@@ -309,6 +309,12 @@ export class WorkspaceStore {
         edges: this.listEdges(workspace.id),
       };
       validateWorkspaceGraph(graph);
+      const immutable = this.requireGraphRevision(workspace.id, workspace.graphRevision);
+      if (!graphsAreSemanticallyEqual(graph, immutable)) {
+        throw new WorkspaceGraphValidationError(
+          "mutable workspace graph does not match immutable graph revision",
+        );
+      }
       return graph;
     });
   }

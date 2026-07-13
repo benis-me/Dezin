@@ -609,14 +609,26 @@ test("WorkspaceStore reads normalized records defensively and snapshots resolve 
         resourceId: "resource-research",
       },
     ],
-    edges: [],
+    edges: [{
+      id: "edge-informs",
+      workspaceId: workspace.id,
+      kind: "informs" as const,
+      sourceNodeId: "node-resource",
+      targetNodeId: "node-page",
+    }],
   };
   const historicalNodesJson = JSON.stringify(historicalGraph.nodes);
+  const historicalEdgesJson = JSON.stringify(historicalGraph.edges);
   store.db.prepare(
     `INSERT INTO workspace_graph_revisions
        (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
-     VALUES (?, 1, ?, '[]', ?, 24)`,
-  ).run(workspace.id, historicalNodesJson, workspaceGraphChecksum(historicalNodesJson, "[]"));
+     VALUES (?, 1, ?, ?, ?, 24)`,
+  ).run(
+    workspace.id,
+    historicalNodesJson,
+    historicalEdgesJson,
+    workspaceGraphChecksum(historicalNodesJson, historicalEdgesJson),
+  );
   store.db.prepare(
     `INSERT INTO workspace_snapshots
        (id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id, reason, provenance_json, created_by_run_id, created_at, sealed)
@@ -1309,7 +1321,10 @@ test("workspace codecs reject corrupt immutable JSON instead of silently replaci
   store.db.prepare("UPDATE workspace_edges SET payload_json = '{\"unexpected\":true}' WHERE id = 'edge-json'").run();
   assert.throws(() => store.workspace.getGraph(project.id), /canonical empty object/i);
   store.db.prepare("UPDATE workspace_edges SET payload_json = '{}' WHERE id = 'edge-json'").run();
-  assert.equal(store.workspace.getGraph(project.id).edges.length, 1);
+  assert.throws(
+    () => store.workspace.getGraph(project.id),
+    /mutable workspace graph does not match immutable graph revision/i,
+  );
   store.close();
 });
 
@@ -1482,6 +1497,133 @@ test("graph publication rolls back when the durable index misses an applied delt
     "workspace_snapshots",
   ].map((table) => rowCount(store.db, table)), countsBefore);
   assert.equal(store.workspace.getGraph(project.id).revision, 0);
+  store.close();
+});
+
+test("getGraph rejects a raw semantic node rename that is absent from the immutable revision", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Mutable rename drift", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const published = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-rename-drift-page",
+      type: "add-node",
+      node: {
+        id: "rename-drift-page-node",
+        kind: "page",
+        name: "Original page",
+        artifactId: "rename-drift-page",
+        createIdentity: { initialTrackId: "rename-drift-page-track" },
+      },
+    }],
+  });
+  const immutable = store.workspace.getGraphRevision(project.id, published.graph.revision);
+
+  store.db.prepare(
+    "UPDATE workspace_artifacts SET name = 'Raw renamed page' WHERE id = 'rename-drift-page'",
+  ).run();
+
+  assert.throws(
+    () => store.workspace.getGraph(project.id),
+    /mutable workspace graph does not match immutable graph revision/i,
+  );
+  assert.deepEqual(store.workspace.getGraphRevision(project.id, published.graph.revision), immutable);
+  store.close();
+});
+
+test("applyGraphCommands rejects a headless Resource-node drift without durable writes", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Headless Resource drift", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const published = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-headless-drift-page",
+      type: "add-node",
+      node: {
+        id: "headless-drift-page-node",
+        kind: "page",
+        name: "Stable page",
+        artifactId: "headless-drift-page",
+        createIdentity: { initialTrackId: "headless-drift-page-track" },
+      },
+    }],
+  });
+  store.workspace.saveLayout(project.id, {
+    layoutId: "drift-layout",
+    graphRevision: published.graph.revision,
+    commands: [
+      { type: "move", objectId: "headless-drift-page-node", x: 120, y: 80 },
+      { type: "set-viewport", viewport: { x: -10, y: 20, zoom: 0.75 } },
+    ],
+  });
+  insertResource(store.db, workspace.id, "headless-drift-resource");
+  store.db.prepare(
+    `INSERT INTO workspace_nodes
+       (id, workspace_id, kind, artifact_id, resource_id, archived_at, created_at, updated_at)
+     VALUES ('headless-drift-resource-node', ?, 'resource', NULL,
+             'headless-drift-resource', NULL, 900, 900)`,
+  ).run(workspace.id);
+
+  assert.throws(
+    () => store.workspace.getGraph(project.id),
+    /mutable workspace graph does not match immutable graph revision/i,
+  );
+  const trackedTables = [
+    "workspace_artifacts",
+    "artifact_tracks",
+    "resources",
+    "workspace_nodes",
+    "workspace_edges",
+    "workspace_graph_revisions",
+    "workspace_graph_commands",
+    "workspace_snapshots",
+    "workspace_snapshot_artifacts",
+    "workspace_snapshot_resources",
+    "workspace_layout_nodes",
+    "workspace_layout_viewports",
+  ] as const;
+  const countsBefore = trackedTables.map((table) => rowCount(store.db, table));
+  const workspaceBefore = store.workspace.getWorkspace(project.id);
+  const immutableBefore = store.workspace.getGraphRevision(project.id, published.graph.revision);
+  const layoutBefore = store.db.prepare(
+    `SELECT * FROM workspace_layout_nodes WHERE workspace_id = ? AND layout_id = 'drift-layout'
+     ORDER BY object_kind, object_id`,
+  ).all(workspace.id);
+  const viewportBefore = store.db.prepare(
+    "SELECT * FROM workspace_layout_viewports WHERE workspace_id = ? AND layout_id = 'drift-layout'",
+  ).all(workspace.id);
+
+  assert.throws(() => store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: published.graph.revision,
+    expectedSnapshotId: published.snapshot.id,
+    commands: [{
+      id: "rename-after-headless-drift",
+      type: "rename-node",
+      nodeId: "headless-drift-page-node",
+      name: "Must roll back",
+    }],
+  }), /mutable workspace graph does not match immutable graph revision/i);
+
+  assert.deepEqual(trackedTables.map((table) => rowCount(store.db, table)), countsBefore);
+  assert.deepEqual(store.workspace.getWorkspace(project.id), workspaceBefore);
+  assert.deepEqual(store.workspace.getGraphRevision(project.id, published.graph.revision), immutableBefore);
+  assert.deepEqual(store.db.prepare(
+    `SELECT * FROM workspace_layout_nodes WHERE workspace_id = ? AND layout_id = 'drift-layout'
+     ORDER BY object_kind, object_id`,
+  ).all(workspace.id), layoutBefore);
+  assert.deepEqual(store.db.prepare(
+    "SELECT * FROM workspace_layout_viewports WHERE workspace_id = ? AND layout_id = 'drift-layout'",
+  ).all(workspace.id), viewportBefore);
+  assert.equal(
+    (store.db.prepare("SELECT name FROM workspace_artifacts WHERE id = 'headless-drift-page'").get() as {
+      name: string;
+    }).name,
+    "Stable page",
+  );
   store.close();
 });
 
