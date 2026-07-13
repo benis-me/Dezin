@@ -8,6 +8,8 @@ import type {
   CreateKernelRevisionInput,
   KernelImpactAnalysis,
   KernelPublicationExpectation,
+  LegacyWorkspaceFacts,
+  LegacyWorkspaceSeed,
   NewWorkspaceNode,
   ProjectWorkspace,
   SharedDesignKernelRevision,
@@ -47,6 +49,7 @@ import {
   normalizeCreateArtifactRevisionInput,
   normalizeCreateKernelRevisionInput,
   normalizeKernelPublicationExpectation,
+  normalizeLegacyWorkspaceSeed,
   normalizeWorkspaceGraphMutationInput,
   normalizeWorkspaceLayoutId,
   normalizeWorkspaceLayoutPatch,
@@ -57,6 +60,7 @@ import {
   type ArtifactRevisionResourcePinRecord,
   type ArtifactTrackRecord,
   type WorkspaceArtifactRecord,
+  type WorkspaceBundle,
   type WorkspaceSnapshotRecord,
 } from "./workspace-codecs.ts";
 import type { Row } from "./store-codecs.ts";
@@ -93,6 +97,32 @@ function requiredCell(value: unknown, label: string): string {
   return value;
 }
 
+function legacyTimestamp(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new WorkspaceStoreCodecError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function legacyNullableString(value: unknown, label: string): string | null {
+  return value == null ? null : requiredCell(value, label);
+}
+
+function legacyNullableText(value: unknown, label: string): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string" || !isWellFormedUtf16(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must be Unicode text or null`);
+  }
+  return value;
+}
+
+function legacyText(value: unknown, label: string): string {
+  if (typeof value !== "string" || !isWellFormedUtf16(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must be Unicode text`);
+  }
+  return value;
+}
+
 function asOwnedArtifactRevision(row: Row): ArtifactRevisionRecord {
   const revision = asArtifactRevision(row);
   if (revision.artifactRoot !== requiredCell(row.owning_source_root, "owning Artifact source root")) {
@@ -110,6 +140,12 @@ function safePathSegment(value: string): string {
 
 function artifactSourceRoot(workspaceId: string, artifactId: string): string {
   return `workspaces/${safePathSegment(workspaceId)}/artifacts/${safePathSegment(artifactId)}`;
+}
+
+function artifactHasValidSourceRoot(artifact: WorkspaceArtifactRecord): boolean {
+  return artifact.legacyWrapped
+    ? artifact.kind === "page" && artifact.sourceRoot === "."
+    : artifact.sourceRoot === artifactSourceRoot(artifact.workspaceId, artifact.id);
 }
 
 function graphsAreSemanticallyEqual(left: WorkspaceGraph, right: WorkspaceGraph): boolean {
@@ -217,6 +253,16 @@ export class WorkspacePointerConflictError extends Error {
   }
 }
 
+export class LegacyWorkspaceSeedDriftError extends Error {
+  readonly projectId: string;
+
+  constructor(projectId: string) {
+    super(`legacy Workspace seed changed before publication: ${projectId}`);
+    this.name = "LegacyWorkspaceSeedDriftError";
+    this.projectId = projectId;
+  }
+}
+
 export class WorkspaceStore {
   private readonly db: DatabaseSync;
   private readonly clock: StoreClock;
@@ -225,6 +271,274 @@ export class WorkspaceStore {
   constructor(db: DatabaseSync, clock: StoreClock) {
     this.db = db;
     this.clock = clock;
+  }
+
+  readLegacyStandardWorkspaceFacts(projectId: string): LegacyWorkspaceFacts {
+    return this.transactionRead(() => {
+      const project = this.db.prepare(
+        `SELECT id, name, skill_id, design_system_id, mode, sharingan, source_url,
+                created_at, updated_at, archived_at, active_variant_id
+         FROM projects WHERE id = ?`,
+      ).get(projectId) as Row | undefined;
+      if (!project) throw new Error(`project not found: ${projectId}`);
+      const variants = this.db.prepare(
+        `SELECT id, project_id, name, created_at
+         FROM variants WHERE project_id = ?
+         ORDER BY created_at ASC, id COLLATE BINARY ASC`,
+      ).all(projectId) as Row[];
+      const successfulRuns = this.db.prepare(
+        `SELECT id, project_id, variant_id, status, commit_hash, created_at, finished_at
+         FROM runs WHERE project_id = ? AND status = 'succeeded'
+         ORDER BY created_at ASC, id COLLATE BINARY ASC`,
+      ).all(projectId) as Row[];
+      if (project.mode !== "standard" && project.mode !== "prototype" && project.mode != null) {
+        throw new WorkspaceStoreCodecError("legacy Project mode must be standard prototype or null");
+      }
+      if (project.sharingan !== 0 && project.sharingan !== 1) {
+        throw new WorkspaceStoreCodecError("legacy Project sharingan must be zero or one");
+      }
+      return {
+        project: {
+          id: requiredCell(project.id, "legacy Project id"),
+          name: legacyText(project.name, "legacy Project name"),
+          mode: project.mode === "standard" ? "standard" : "prototype",
+          skillId: legacyNullableText(project.skill_id, "legacy Project skill id"),
+          designSystemId: legacyNullableText(project.design_system_id, "legacy Project design system id"),
+          sharingan: project.sharingan === 1,
+          sourceUrl: legacyNullableText(project.source_url, "legacy Project source URL"),
+          createdAt: legacyTimestamp(project.created_at, "legacy Project created_at"),
+          updatedAt: legacyTimestamp(project.updated_at, "legacy Project updated_at"),
+          archivedAt: project.archived_at == null
+            ? null
+            : legacyTimestamp(project.archived_at, "legacy Project archived_at"),
+          activeVariantId: legacyNullableString(project.active_variant_id, "legacy active Variant id"),
+        },
+        variants: variants.map((variant) => ({
+          id: requiredCell(variant.id, "legacy Variant id"),
+          projectId: requiredCell(variant.project_id, "legacy Variant Project id"),
+          name: legacyText(variant.name, "legacy Variant name"),
+          createdAt: legacyTimestamp(variant.created_at, "legacy Variant created_at"),
+        })),
+        successfulRuns: successfulRuns.map((run) => ({
+          id: requiredCell(run.id, "legacy Run id"),
+          projectId: requiredCell(run.project_id, "legacy Run Project id"),
+          variantId: run.variant_id == null ? null : requiredCell(run.variant_id, "legacy Run Variant id"),
+          status: "succeeded",
+          commitHash: legacyNullableText(run.commit_hash, "legacy Run commit hash"),
+          createdAt: legacyTimestamp(run.created_at, "legacy Run created_at"),
+          finishedAt: run.finished_at == null ? null : legacyTimestamp(run.finished_at, "legacy Run finished_at"),
+        })),
+      };
+    });
+  }
+
+  getBundleByProjectId(projectId: string): WorkspaceBundle | null {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return null;
+      const graph = this.getGraph(projectId);
+      const snapshots = this.listSnapshots(projectId);
+      const activeSnapshot = snapshots.find((snapshot) => snapshot.id === workspace.activeSnapshotId);
+      if (!activeSnapshot) throw new WorkspaceGraphValidationError("Workspace active Snapshot is not resolvable");
+      const activeKernelRevision = this.requireKernelRevision(workspace.activeKernelRevisionId);
+      const artifacts = this.listArtifacts(projectId);
+      if (artifacts.some((artifact) => artifact.legacyWrapped) && workspace.mode !== "standard") {
+        throw new WorkspaceGraphValidationError("legacy-wrapped Workspace must belong to a Standard Project");
+      }
+      const tracks = artifacts.flatMap((artifact) => this.listTracks(projectId, artifact.id));
+      const revisions = artifacts.flatMap((artifact) => this.listRevisions(projectId, artifact.id));
+      const bundle = { workspace, graph, activeSnapshot, activeKernelRevision, artifacts, tracks, revisions, snapshots };
+      if (artifacts.some((artifact) => artifact.legacyWrapped)) {
+        this.requireCompletedLegacyStandardWorkspaceBundle(bundle);
+      }
+      return bundle;
+    });
+  }
+
+  ensureLegacyStandardWorkspace(unsafeSeed: LegacyWorkspaceSeed): WorkspaceBundle {
+    const seed = normalizeLegacyWorkspaceSeed(unsafeSeed);
+    return this.transactionImmediate(() => {
+      let workspace = this.getWorkspace(seed.project.id);
+      if (workspace) {
+        const wrapped = this.db.prepare(
+          "SELECT 1 FROM workspace_artifacts WHERE workspace_id = ? AND legacy_wrapped = 1 LIMIT 1",
+        ).get(workspace.id);
+        if (wrapped) {
+          const existing = this.getBundleByProjectId(seed.project.id);
+          if (!existing || existing.workspace.mode !== "standard") {
+            throw new WorkspaceGraphValidationError("legacy-wrapped Workspace is not a valid Standard Workspace");
+          }
+          return existing;
+        }
+      }
+
+      const currentFacts = this.readLegacyStandardWorkspaceFacts(seed.project.id);
+      const expectedFacts: LegacyWorkspaceFacts = {
+        project: seed.project,
+        variants: seed.variants,
+        successfulRuns: seed.successfulRuns.map(({ gitSnapshot: _gitSnapshot, ...run }) => run),
+      };
+      if (!isDeepStrictEqual(currentFacts, expectedFacts)) {
+        throw new LegacyWorkspaceSeedDriftError(seed.project.id);
+      }
+      const knownVariantIds = new Set(seed.variants.map((variant) => variant.id));
+      for (const run of seed.successfulRuns) {
+        if (run.variantId !== null && !knownVariantIds.has(run.variantId)) {
+          throw new WorkspaceGraphValidationError(`legacy Run ${run.id} references an unknown Variant`);
+        }
+      }
+
+      if (!workspace) {
+        workspace = this.insertWorkspaceFoundationInTransaction(seed.project.id);
+      } else {
+        this.requireEmptyWorkspaceFoundation(workspace);
+      }
+
+      const now = this.clock.now();
+      const artifactId = this.clock.id();
+      const nodeId = this.clock.id();
+      this.db.prepare(
+        `INSERT INTO workspace_artifacts (
+           id, workspace_id, kind, name, source_root, legacy_wrapped,
+           active_track_id, archived_at, created_at, updated_at
+         ) VALUES (?, ?, 'page', ?, '.', 1, NULL, NULL, ?, ?)`,
+      ).run(artifactId, workspace.id, seed.project.name.trim() || "Legacy page", now, now);
+
+      const tracksByVariant = new Map<string, string>();
+      const trackIds: string[] = [];
+      for (const variant of seed.variants) {
+        const trackId = this.clock.id();
+        this.db.prepare(
+          `INSERT INTO artifact_tracks
+             (id, artifact_id, name, head_revision_id, legacy_variant_id, created_at)
+           VALUES (?, ?, ?, NULL, ?, ?)`,
+        ).run(
+          trackId,
+          artifactId,
+          variant.name.trim() || `Legacy variant ${variant.id}`,
+          variant.id,
+          variant.createdAt,
+        );
+        tracksByVariant.set(variant.id, trackId);
+        trackIds.push(trackId);
+      }
+      const needsUnassigned = seed.variants.length === 0
+        || seed.successfulRuns.some((run) => run.variantId === null && run.gitSnapshot.status === "verified");
+      let unassignedTrackId: string | null = null;
+      if (needsUnassigned) {
+        unassignedTrackId = this.clock.id();
+        this.db.prepare(
+          `INSERT INTO artifact_tracks
+             (id, artifact_id, name, head_revision_id, legacy_variant_id, created_at)
+           VALUES (?, ?, 'Legacy unassigned', NULL, NULL, ?)`,
+        ).run(unassignedTrackId, artifactId, now);
+        trackIds.push(unassignedTrackId);
+      }
+
+      let activeTrackId: string | null = null;
+      if (seed.project.activeVariantId !== null) {
+        activeTrackId = tracksByVariant.get(seed.project.activeVariantId) ?? null;
+      }
+      const firstVariant = seed.variants[0];
+      if (activeTrackId === null && firstVariant) {
+        activeTrackId = tracksByVariant.get(firstVariant.id) ?? null;
+      }
+      if (activeTrackId === null) activeTrackId = unassignedTrackId;
+      if (activeTrackId === null) throw new WorkspaceGraphValidationError("legacy Page has no selectable Track");
+
+      const runsByTrack = new Map<string, typeof seed.successfulRuns>();
+      for (const trackId of trackIds) runsByTrack.set(trackId, []);
+      for (const run of seed.successfulRuns) {
+        if (run.gitSnapshot.status !== "verified") continue;
+        const trackId = run.variantId === null ? unassignedTrackId : tracksByVariant.get(run.variantId) ?? null;
+        if (trackId === null) throw new WorkspaceGraphValidationError(`legacy Run ${run.id} has no Track`);
+        runsByTrack.get(trackId)!.push(run);
+      }
+      for (const [trackId, runs] of runsByTrack) {
+        let parentRevisionId: string | null = null;
+        for (let index = 0; index < runs.length; index += 1) {
+          const run = runs[index]!;
+          if (run.gitSnapshot.status !== "verified") continue;
+          const revisionId = this.clock.id();
+          this.db.prepare(
+            `INSERT INTO artifact_revisions (
+               id, workspace_id, artifact_id, track_id, sequence, parent_revision_id,
+               source_commit_hash, source_tree_hash, artifact_root, kernel_revision_id,
+               render_spec_json, quality_json, context_pack_hash, produced_by_run_id,
+               legacy_run_id, created_at, sealed
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '.', ?, ?, ?, NULL, NULL, ?, ?, 0)`,
+          ).run(
+            revisionId,
+            workspace.id,
+            artifactId,
+            trackId,
+            index + 1,
+            parentRevisionId,
+            run.gitSnapshot.sourceCommitHash,
+            run.gitSnapshot.sourceTreeHash,
+            workspace.activeKernelRevisionId,
+            JSON.stringify({ frames: [] }),
+            JSON.stringify({ state: "unassessed", score: null, findings: [] }),
+            run.id,
+            run.createdAt,
+          );
+          this.requireOneChange(
+            this.db.prepare("UPDATE artifact_revisions SET sealed = 1 WHERE id = ? AND sealed = 0").run(revisionId),
+            `seal legacy Artifact Revision ${revisionId}`,
+          );
+          this.requireOneChange(
+            this.db.prepare("UPDATE artifact_tracks SET head_revision_id = ? WHERE id = ? AND head_revision_id IS ?")
+              .run(revisionId, trackId, parentRevisionId),
+            `advance legacy Artifact Track ${trackId}`,
+          );
+          parentRevisionId = revisionId;
+        }
+      }
+
+      this.requireOneChange(
+        this.db.prepare("UPDATE workspace_artifacts SET active_track_id = ? WHERE id = ? AND active_track_id IS NULL")
+          .run(activeTrackId, artifactId),
+        `activate legacy Artifact Track ${activeTrackId}`,
+      );
+      this.db.prepare(
+        `INSERT INTO workspace_nodes
+           (id, workspace_id, kind, artifact_id, resource_id, archived_at, created_at, updated_at)
+         VALUES (?, ?, 'page', ?, NULL, NULL, ?, ?)`,
+      ).run(nodeId, workspace.id, artifactId, now, now);
+      const graph: WorkspaceGraph = {
+        workspaceId: workspace.id,
+        revision: 1,
+        nodes: this.listNodes(workspace.id),
+        edges: this.listEdges(workspace.id),
+      };
+      validateWorkspaceGraph(graph);
+      this.insertImmutableGraphRevision(graph);
+      const activeHead = this.requireTrack(activeTrackId).headRevisionId;
+      const snapshot = this.createSnapshotInTransaction(workspace.id, {
+        expectedSnapshotId: workspace.activeSnapshotId,
+        graphRevision: 1,
+        reason: "legacy-standard-wrap",
+        provenance: { kind: "legacy-migration", migration: "legacy-standard-v1" },
+        artifactOverrides: [{ artifactId, trackId: activeTrackId, revisionId: activeHead }],
+      });
+      this.requireOneChange(
+        this.db.prepare(
+          `UPDATE project_workspaces
+           SET graph_revision = 1, active_snapshot_id = ?, updated_at = ?
+           WHERE id = ? AND graph_revision = 0 AND active_snapshot_id = ? AND active_kernel_revision_id = ?`,
+        ).run(
+          snapshot.id,
+          this.clock.now(),
+          workspace.id,
+          workspace.activeSnapshotId,
+          workspace.activeKernelRevisionId,
+        ),
+        `activate legacy Workspace Snapshot ${snapshot.id}`,
+      );
+      const bundle = this.getBundleByProjectId(seed.project.id);
+      if (!bundle) throw new WorkspaceGraphValidationError("legacy Workspace bundle was not published");
+      return bundle;
+    });
   }
 
   ensureWorkspaceRecord(projectId: string): ProjectWorkspace {
@@ -238,44 +552,7 @@ export class WorkspaceStore {
         this.db.exec("COMMIT");
         return concurrent;
       }
-      const project = this.db.prepare("SELECT id FROM projects WHERE id = ?").get(projectId) as Row | undefined;
-      if (!project) throw new Error(`project not found: ${projectId}`);
-
-      const workspaceId = this.clock.id();
-      const kernelRevisionId = this.clock.id();
-      const snapshotId = this.clock.id();
-      const now = this.clock.now();
-      const emptyNodes = "[]";
-      const emptyEdges = "[]";
-      const kernelPayload = JSON.stringify(DEFAULT_KERNEL_PAYLOAD);
-
-      this.db.prepare(
-        `INSERT INTO project_workspaces (
-           id, project_id, graph_revision, active_snapshot_id,
-           active_kernel_revision_id, created_at, updated_at
-         ) VALUES (?, ?, 0, NULL, NULL, ?, ?)`,
-      ).run(workspaceId, projectId, now, now);
-      this.db.prepare(
-        `INSERT INTO workspace_graph_revisions
-           (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
-         VALUES (?, 0, ?, ?, ?, ?)`,
-      ).run(workspaceId, emptyNodes, emptyEdges, checksum(`${emptyNodes}\n${emptyEdges}`), now);
-      this.db.prepare(
-        `INSERT INTO shared_design_kernel_revisions
-           (id, workspace_id, sequence, parent_revision_id, payload_json, checksum, created_at)
-         VALUES (?, ?, 1, NULL, ?, ?, ?)`,
-      ).run(kernelRevisionId, workspaceId, kernelPayload, checksum(kernelPayload), now);
-      this.db.prepare(
-        `INSERT INTO workspace_snapshots (
-           id, workspace_id, sequence, parent_snapshot_id, graph_revision,
-           kernel_revision_id, reason, provenance_json, created_by_run_id, created_at
-         ) VALUES (?, ?, 1, NULL, 0, ?, 'workspace-created', ?, NULL, ?)`,
-      ).run(snapshotId, workspaceId, kernelRevisionId, JSON.stringify({ kind: "workspace-created" }), now);
-      this.db.prepare(
-        `UPDATE project_workspaces
-         SET active_snapshot_id = ?, active_kernel_revision_id = ?
-         WHERE id = ?`,
-      ).run(snapshotId, kernelRevisionId, workspaceId);
+      this.insertWorkspaceFoundationInTransaction(projectId);
       this.db.exec("COMMIT");
     } catch (error) {
       try {
@@ -506,7 +783,7 @@ export class WorkspaceStore {
       const artifact = this.requireArtifact(input.artifactId);
       const track = this.requireTrack(input.trackId);
       if (artifact.archivedAt !== null) throw new WorkspaceGraphValidationError(`Artifact ${artifact.id} is archived`);
-      if (artifact.sourceRoot !== artifactSourceRoot(artifact.workspaceId, artifact.id)) {
+      if (!artifactHasValidSourceRoot(artifact)) {
         throw new WorkspaceGraphValidationError(`Artifact ${artifact.id} does not have its server-derived source root`);
       }
       if (artifact.activeTrackId !== track.id || track.artifactId !== artifact.id) {
@@ -631,7 +908,7 @@ export class WorkspaceStore {
         || track.artifactId !== artifact.id) {
         throw new WorkspaceGraphValidationError("Artifact publication target is not the active Track");
       }
-      if (artifact.sourceRoot !== artifactSourceRoot(artifact.workspaceId, artifact.id)
+      if (!artifactHasValidSourceRoot(artifact)
         || revision.artifactRoot !== artifact.sourceRoot) {
         throw new WorkspaceGraphValidationError(
           "Artifact publication root must match the owning Artifact's server-derived source root",
@@ -988,6 +1265,209 @@ export class WorkspaceStore {
     });
   }
 
+  private insertWorkspaceFoundationInTransaction(projectId: string): ProjectWorkspace {
+    if (!this.db.isTransaction) throw new Error("Workspace foundation insertion requires a transaction");
+    const project = this.db.prepare("SELECT id FROM projects WHERE id = ?").get(projectId) as Row | undefined;
+    if (!project) throw new Error(`project not found: ${projectId}`);
+    const workspaceId = this.clock.id();
+    const kernelRevisionId = this.clock.id();
+    const snapshotId = this.clock.id();
+    const now = this.clock.now();
+    const emptyNodes = "[]";
+    const emptyEdges = "[]";
+    const kernelPayload = JSON.stringify(DEFAULT_KERNEL_PAYLOAD);
+    this.db.prepare(
+      `INSERT INTO project_workspaces (
+         id, project_id, graph_revision, active_snapshot_id,
+         active_kernel_revision_id, created_at, updated_at
+       ) VALUES (?, ?, 0, NULL, NULL, ?, ?)`,
+    ).run(workspaceId, projectId, now, now);
+    this.db.prepare(
+      `INSERT INTO workspace_graph_revisions
+         (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
+       VALUES (?, 0, ?, ?, ?, ?)`,
+    ).run(workspaceId, emptyNodes, emptyEdges, checksum(`${emptyNodes}\n${emptyEdges}`), now);
+    this.db.prepare(
+      `INSERT INTO shared_design_kernel_revisions
+         (id, workspace_id, sequence, parent_revision_id, payload_json, checksum, created_at)
+       VALUES (?, ?, 1, NULL, ?, ?, ?)`,
+    ).run(kernelRevisionId, workspaceId, kernelPayload, checksum(kernelPayload), now);
+    this.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision,
+         kernel_revision_id, reason, provenance_json, created_by_run_id, created_at
+       ) VALUES (?, ?, 1, NULL, 0, ?, 'workspace-created', ?, NULL, ?)`,
+    ).run(snapshotId, workspaceId, kernelRevisionId, JSON.stringify({ kind: "workspace-created" }), now);
+    this.requireOneChange(
+      this.db.prepare(
+        `UPDATE project_workspaces
+         SET active_snapshot_id = ?, active_kernel_revision_id = ?
+         WHERE id = ? AND active_snapshot_id IS NULL AND active_kernel_revision_id IS NULL`,
+      ).run(snapshotId, kernelRevisionId, workspaceId),
+      `activate Workspace foundation ${workspaceId}`,
+    );
+    return requireWorkspace(this.getWorkspace(projectId), projectId);
+  }
+
+  private requireEmptyWorkspaceFoundation(workspace: ProjectWorkspace): void {
+    if (workspace.graphRevision !== 0) {
+      throw new WorkspaceGraphValidationError("legacy migration requires an empty Workspace foundation");
+    }
+    const graph = this.getGraph(workspace.projectId);
+    const snapshots = this.listSnapshots(workspace.projectId);
+    const kernel = this.requireKernelRevision(workspace.activeKernelRevisionId);
+    const count = (table: string): number => Number((this.db.prepare(
+      `SELECT COUNT(*) AS count FROM ${table} WHERE workspace_id = ?`,
+    ).get(workspace.id) as { count: number }).count);
+    const empty = graph.nodes.length === 0
+      && graph.edges.length === 0
+      && count("workspace_artifacts") === 0
+      && count("resources") === 0
+      && count("workspace_nodes") === 0
+      && count("workspace_edges") === 0
+      && count("workspace_layout_nodes") === 0
+      && count("workspace_layout_viewports") === 0
+      && count("workspace_graph_commands") === 0
+      && count("workspace_graph_revisions") === 1
+      && count("shared_design_kernel_revisions") === 1
+      && snapshots.length === 1;
+    const foundation = snapshots[0];
+    const kernelPayload = {
+      tokens: kernel.tokens,
+      typography: kernel.typography,
+      sharedAssetRevisionIds: kernel.sharedAssetRevisionIds,
+      brief: kernel.brief,
+      terminology: kernel.terminology,
+      exclusions: kernel.exclusions,
+      responsiveFrames: kernel.responsiveFrames,
+      qualityProfile: kernel.qualityProfile,
+    };
+    if (!empty
+      || !foundation
+      || foundation.id !== workspace.activeSnapshotId
+      || foundation.sequence !== 1
+      || foundation.parentSnapshotId !== null
+      || foundation.graphRevision !== 0
+      || foundation.kernelRevisionId !== workspace.activeKernelRevisionId
+      || foundation.reason !== "workspace-created"
+      || foundation.createdByRunId !== null
+      || foundation.provenance.kind !== "workspace-created"
+      || Object.keys(foundation.artifactTracks).length !== 0
+      || Object.keys(foundation.artifactRevisions).length !== 0
+      || Object.keys(foundation.resourceRevisions).length !== 0
+      || kernel.sequence !== 1
+      || kernel.parentRevisionId !== null
+      || !isDeepStrictEqual(kernelPayload, DEFAULT_KERNEL_PAYLOAD)) {
+      throw new WorkspaceGraphValidationError("legacy migration requires the canonical empty Workspace foundation");
+    }
+  }
+
+  private requireCompletedLegacyStandardWorkspaceBundle(bundle: WorkspaceBundle): void {
+    const invalid = (detail: string): never => {
+      throw new WorkspaceGraphValidationError(`completed legacy Workspace migration is invalid: ${detail}`);
+    };
+    if (bundle.workspace.mode !== "standard") invalid("Project mode is not Standard");
+    if (bundle.workspace.graphRevision < 1) invalid("active graph precedes the migration graph");
+    if (bundle.activeSnapshot.id !== bundle.workspace.activeSnapshotId
+      || bundle.activeSnapshot.graphRevision !== bundle.workspace.graphRevision
+      || bundle.activeSnapshot.kernelRevisionId !== bundle.workspace.activeKernelRevisionId
+      || bundle.activeKernelRevision.id !== bundle.workspace.activeKernelRevisionId
+      || !graphsAreSemanticallyEqual(bundle.activeSnapshot.graph, bundle.graph)) {
+      invalid("current Workspace pointers are incoherent");
+    }
+
+    const wrappers = bundle.artifacts.filter((artifact) => artifact.legacyWrapped);
+    if (wrappers.length !== 1) invalid("expected exactly one wrapped Page");
+    const wrapper = wrappers[0]!;
+    if (wrapper.kind !== "page" || wrapper.sourceRoot !== "." || wrapper.activeTrackId === null) {
+      invalid("wrapped Page identity is incomplete");
+    }
+    const activeTrack = bundle.tracks.find((track) => track.id === wrapper.activeTrackId);
+    if (!activeTrack || activeTrack.artifactId !== wrapper.id) {
+      invalid("wrapped Page active Track is not owned by the Page");
+    }
+
+    const foundations = bundle.snapshots.filter((snapshot) => snapshot.sequence === 1);
+    const migrations = bundle.snapshots.filter(
+      (snapshot) => snapshot.provenance.kind === "legacy-migration"
+        && snapshot.provenance.migration === "legacy-standard-v1",
+    );
+    if (foundations.length !== 1 || migrations.length !== 1) {
+      invalid("canonical foundation or migration Snapshot is missing");
+    }
+    const foundation = foundations[0]!;
+    const migration = migrations[0]!;
+    if (foundation.parentSnapshotId !== null
+      || foundation.graphRevision !== 0
+      || foundation.reason !== "workspace-created"
+      || foundation.createdByRunId !== null
+      || foundation.provenance.kind !== "workspace-created"
+      || foundation.graph.revision !== 0
+      || foundation.graph.nodes.length !== 0
+      || foundation.graph.edges.length !== 0
+      || Object.keys(foundation.artifactTracks).length !== 0
+      || Object.keys(foundation.artifactRevisions).length !== 0
+      || Object.keys(foundation.resourceRevisions).length !== 0) {
+      invalid("foundation Snapshot is not canonical");
+    }
+    if (migration.sequence !== 2
+      || migration.parentSnapshotId !== foundation.id
+      || migration.graphRevision !== 1
+      || migration.kernelRevisionId !== foundation.kernelRevisionId
+      || migration.reason !== "legacy-standard-wrap"
+      || migration.createdByRunId !== null
+      || migration.provenance.kind !== "legacy-migration"
+      || migration.provenance.migration !== "legacy-standard-v1"
+      || migration.graph.revision !== 1
+      || migration.graph.nodes.length !== 1
+      || migration.graph.edges.length !== 0
+      || Object.keys(migration.artifactTracks).length !== 1
+      || Object.keys(migration.artifactRevisions).length !== 1
+      || Object.keys(migration.resourceRevisions).length !== 0) {
+      invalid("migration Snapshot is not canonical");
+    }
+    const migrationNode = migration.graph.nodes[0];
+    const migrationTrackId = migration.artifactTracks[wrapper.id];
+    const migrationRevisionId = migration.artifactRevisions[wrapper.id];
+    if (!migrationNode
+      || migrationNode.kind !== "page"
+      || migrationNode.artifactId !== wrapper.id
+      || migrationTrackId === undefined
+      || migrationRevisionId === undefined) {
+      invalid("migration Snapshot does not map the wrapped Page exactly");
+    }
+    const migrationTrack = bundle.tracks.find((track) => track.id === migrationTrackId);
+    if (!migrationTrack || migrationTrack.artifactId !== wrapper.id) {
+      invalid("migration Snapshot Track is not owned by the wrapped Page");
+    }
+    if (migrationRevisionId !== null) {
+      const migrationRevision = bundle.revisions.find((revision) => revision.id === migrationRevisionId);
+      if (!migrationRevision
+        || migrationRevision.artifactId !== wrapper.id
+        || migrationRevision.trackId !== migrationTrackId) {
+        invalid("migration Snapshot Revision is not owned by its mapped Track");
+      }
+    }
+
+    const foundationKernel = this.requireKernelRevision(foundation.kernelRevisionId);
+    const foundationKernelPayload = {
+      tokens: foundationKernel.tokens,
+      typography: foundationKernel.typography,
+      sharedAssetRevisionIds: foundationKernel.sharedAssetRevisionIds,
+      brief: foundationKernel.brief,
+      terminology: foundationKernel.terminology,
+      exclusions: foundationKernel.exclusions,
+      responsiveFrames: foundationKernel.responsiveFrames,
+      qualityProfile: foundationKernel.qualityProfile,
+    };
+    if (foundationKernel.workspaceId !== bundle.workspace.id
+      || foundationKernel.sequence !== 1
+      || foundationKernel.parentRevisionId !== null
+      || !isDeepStrictEqual(foundationKernelPayload, DEFAULT_KERNEL_PAYLOAD)) {
+      invalid("foundation Kernel is not canonical");
+    }
+  }
+
   private requireWorkspaceById(workspaceId: string): ProjectWorkspace {
     const row = this.db.prepare(
       `SELECT workspace.*, project.mode
@@ -1056,9 +1536,14 @@ export class WorkspaceStore {
   }
 
   private validateArtifactRevisionReferences(revision: ArtifactRevisionRecord): void {
+    const artifact = this.requireArtifact(revision.artifactId);
     const track = this.requireTrack(revision.trackId);
     const kernel = this.requireKernelRevision(revision.kernelRevisionId);
-    if (track.artifactId !== revision.artifactId || kernel.workspaceId !== revision.workspaceId) {
+    if (artifact.workspaceId !== revision.workspaceId
+      || !artifactHasValidSourceRoot(artifact)
+      || revision.artifactRoot !== artifact.sourceRoot
+      || track.artifactId !== revision.artifactId
+      || kernel.workspaceId !== revision.workspaceId) {
       throw new WorkspaceGraphValidationError(
         `Artifact Revision ${revision.id} has a cross-owner Track or Kernel reference`,
       );
@@ -1893,15 +2378,16 @@ export class WorkspaceStore {
       if (node.createIdentity !== undefined) {
         throw new WorkspaceGraphValidationError(`Artifact identity collision: ${node.artifactId}`);
       }
-      if (existing.workspace_id === workspaceId && existing.source_root !== derivedRoot) {
+      const artifact = asWorkspaceArtifact(existing);
+      if (artifact.workspaceId === workspaceId && !artifactHasValidSourceRoot(artifact)) {
         throw new WorkspaceGraphValidationError(`Artifact ${node.artifactId} source root is not server-derived`);
       }
-      const matches = existing.workspace_id === workspaceId
-        && existing.kind === node.kind
-        && existing.name === node.name
-        && existing.source_root === derivedRoot
-        && existing.archived_at == null
-        && existing.active_track_id != null;
+      const matches = artifact.workspaceId === workspaceId
+        && artifact.kind === node.kind
+        && artifact.name === node.name
+        && artifactHasValidSourceRoot(artifact)
+        && artifact.archivedAt == null
+        && artifact.activeTrackId != null;
       if (!matches) throw new WorkspaceGraphValidationError(`Artifact identity collision: ${node.artifactId}`);
       return;
     }

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import {
   Store,
+  LegacyWorkspaceSeedDriftError,
   WorkspaceCommandReplayConflictError,
   WorkspacePointerConflictError,
   WorkspaceRevisionConflictError,
@@ -122,7 +123,7 @@ function insertArtifact(
   id: string,
   kind: "page" | "component" = "page",
   activeTrackId: string | null = null,
-  sourceRoot = `artifacts/${id}`,
+  sourceRoot = expectedArtifactSourceRoot(workspaceId, id),
 ): void {
   db.prepare(
     `INSERT INTO workspace_artifacts
@@ -687,7 +688,8 @@ test("WorkspaceStore reads normalized records defensively and snapshots resolve 
     workspaceId: workspace.id,
     kind: "page",
     name: "Name artifact-page",
-    sourceRoot: "artifacts/artifact-page",
+    sourceRoot: expectedArtifactSourceRoot(workspace.id, "artifact-page"),
+    legacyWrapped: false,
     activeTrackId: "track-main",
     archivedAt: null,
     createdAt: 10,
@@ -710,7 +712,7 @@ test("WorkspaceStore reads normalized records defensively and snapshots resolve 
     parentRevisionId: null,
     sourceCommitHash: "commit-revision-page-1",
     sourceTreeHash: "tree-revision-page-1",
-    artifactRoot: "artifacts/artifact-page",
+    artifactRoot: expectedArtifactSourceRoot(workspace.id, "artifact-page"),
     kernelRevisionId: workspace.activeKernelRevisionId,
     renderSpec: { frames: [{ id: "desktop", width: 1440, height: 900 }] },
     quality: { state: "passed", score: 98, findings: [] },
@@ -1293,9 +1295,13 @@ test("workspace codecs reject corrupt immutable JSON instead of silently replaci
        render_spec_json, quality_json, context_pack_hash, produced_by_run_id,
        legacy_run_id, created_at
      ) VALUES ('revision-json', ?, 'artifact-json', 'track-json', 1, NULL,
-               'commit-json', 'tree-json', 'artifacts/artifact-json', ?,
+               'commit-json', 'tree-json', ?, ?,
                '{', '{}', NULL, NULL, NULL, 13)`,
-  ).run(workspace.id, workspace.activeKernelRevisionId);
+  ).run(
+    workspace.id,
+    expectedArtifactSourceRoot(workspace.id, "artifact-json"),
+    workspace.activeKernelRevisionId,
+  );
   assert.throws(() => store.workspace.listRevisions(project.id, "artifact-json"), /valid JSON/i);
   store.db.prepare(
     `INSERT INTO workspace_snapshots (
@@ -4284,7 +4290,7 @@ test("childless durable identities cannot be reparented, replaced, or upsert-mut
 
   assert.throws(() => store.db.prepare(
     `INSERT INTO workspace_artifacts
-       SELECT id, ?, kind, name, source_root, active_track_id, archived_at, created_at, updated_at
+       SELECT id, ?, kind, name, source_root, legacy_wrapped, active_track_id, archived_at, created_at, updated_at
        FROM workspace_artifacts WHERE id = 'shell-page'
      ON CONFLICT(id) DO UPDATE SET workspace_id = excluded.workspace_id`,
   ).run(otherWorkspace.id), /identity|immutable/i);
@@ -5037,6 +5043,89 @@ test("Task 4 trigger upgrades self-heal stale definitions and first activation i
   upgraded.close();
 });
 
+test("Task 5 upgrades an old Task 4 Artifact table without changing normal identities", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "dezin-task5-schema-upgrade-")), "upgrade.db");
+  const created = new Store(file, fakeClock());
+  const normalProject = created.createProject({ name: "Existing Workspace", mode: "standard" });
+  const normalWorkspace = created.workspace.ensureWorkspaceRecord(normalProject.id);
+  created.workspace.applyGraphCommands(normalProject.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: normalWorkspace.activeSnapshotId,
+    commands: [{
+      id: "add-existing-page",
+      type: "add-node",
+      node: {
+        id: "existing-page-node",
+        kind: "page",
+        name: "Existing page",
+        artifactId: "existing-page-artifact",
+        createIdentity: { initialTrackId: "existing-page-track" },
+      },
+    }],
+  });
+  const legacyProject = created.createProject({ name: "Legacy to wrap", mode: "standard" });
+  const normalBefore = created.db.prepare(
+    `SELECT id, workspace_id, kind, name, source_root, active_track_id, archived_at, created_at, updated_at
+     FROM workspace_artifacts WHERE id = 'existing-page-artifact'`,
+  ).get();
+  created.close();
+
+  const task4 = new DatabaseSync(file);
+  task4.exec(`
+    DROP INDEX idx_workspace_artifacts_one_legacy_wrapper;
+    DROP TRIGGER workspace_artifact_identity_update_immutable;
+    DROP TRIGGER workspace_artifact_legacy_wrapper_insert_guard;
+    DROP TRIGGER project_mode_legacy_workspace_guard;
+    ALTER TABLE workspace_artifacts DROP COLUMN legacy_wrapped;
+  `);
+  assert.equal(
+    (task4.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('workspace_artifacts') WHERE name = 'legacy_wrapped'")
+      .get() as { count: number }).count,
+    0,
+  );
+  task4.close();
+
+  const upgraded = new Store(file, fakeClock());
+  const markerColumn = upgraded.db.prepare(
+    `SELECT "notnull" AS not_null, dflt_value
+     FROM pragma_table_info('workspace_artifacts') WHERE name = 'legacy_wrapped'`,
+  ).get() as { not_null: number; dflt_value: string };
+  assert.deepEqual([markerColumn.not_null, markerColumn.dflt_value], [1, "0"]);
+  assert.deepEqual(upgraded.db.prepare(
+    `SELECT id, workspace_id, kind, name, source_root, active_track_id, archived_at, created_at, updated_at
+     FROM workspace_artifacts WHERE id = 'existing-page-artifact'`,
+  ).get(), normalBefore);
+  assert.equal(upgraded.workspace.getArtifact("existing-page-artifact")?.legacyWrapped, false);
+  const identityTrigger = upgraded.db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'workspace_artifact_identity_update_immutable'",
+  ).get() as { sql: string };
+  const wrapperIndex = upgraded.db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_workspace_artifacts_one_legacy_wrapper'",
+  ).get() as { sql: string };
+  assert.match(identityTrigger.sql, /legacy_wrapped/i);
+  assert.match(wrapperIndex.sql, /WHERE legacy_wrapped = 1/i);
+  assert.throws(
+    () => upgraded.db.prepare(
+      `INSERT INTO workspace_artifacts (
+         id, workspace_id, kind, name, source_root,
+         active_track_id, archived_at, created_at, updated_at
+       ) VALUES ('invalid-upgraded-dot-root', ?, 'page', 'Invalid', '.', NULL, NULL, 1, 1)`,
+    ).run(normalWorkspace.id),
+    /legacy-wrapped/i,
+  );
+
+  const facts = upgraded.workspace.readLegacyStandardWorkspaceFacts(legacyProject.id);
+  const migrated = upgraded.workspace.ensureLegacyStandardWorkspace({
+    version: 1,
+    ...facts,
+    project: { ...facts.project, mode: "standard" },
+    successfulRuns: [],
+  });
+  assert.deepEqual(migrated.artifacts.map((artifact) => [artifact.legacyWrapped, artifact.sourceRoot]), [[true, "."]]);
+  assert.deepEqual(upgraded.db.prepare("PRAGMA foreign_key_check").all(), []);
+  upgraded.close();
+});
+
 test("public readers reject imported backward parent lineages", () => {
   {
     const store = new Store(":memory:", fakeClock());
@@ -5718,5 +5807,515 @@ test("history reads validate each distinct Artifact, Kernel, and Snapshot lineag
   assert.equal(counts.artifactReferenceReads, revisions.length);
   assert.equal(counts.runOwnershipReads, revisions.length * 2);
   assert.equal(counts.kernelRows, kernelHistorySize + 1);
+  store.close();
+});
+
+test("legacy Standard migration adopts the empty foundation as one wrapped Page", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Legacy Standard", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const beforeProject = store.db.prepare("SELECT * FROM projects WHERE id = ?").get(project.id);
+
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  const bundle = store.workspace.ensureLegacyStandardWorkspace({
+    version: 1,
+    ...facts,
+    project: { ...facts.project, mode: "standard" },
+    successfulRuns: facts.successfulRuns.map((run) => ({
+      ...run,
+      gitSnapshot: { status: "unavailable" as const },
+    })),
+  });
+
+  assert.equal(bundle.workspace.graphRevision, 1);
+  assert.equal(bundle.graph.nodes.length, 1);
+  assert.equal(bundle.artifacts.length, 1);
+  assert.equal(bundle.artifacts[0]?.kind, "page");
+  assert.equal(bundle.artifacts[0]?.sourceRoot, ".");
+  assert.equal(bundle.artifacts[0]?.legacyWrapped, true);
+  assert.equal(bundle.tracks.length, 1);
+  assert.equal(bundle.tracks[0]?.name, "Legacy unassigned");
+  assert.equal(bundle.tracks[0]?.legacyVariantId, null);
+  assert.equal(bundle.revisions.length, 0);
+  assert.equal(bundle.snapshots.length, 2);
+  assert.equal(bundle.snapshots[1]?.parentSnapshotId, foundation.activeSnapshotId);
+  assert.deepEqual(bundle.snapshots[1]?.provenance, {
+    kind: "legacy-migration",
+    migration: "legacy-standard-v1",
+  });
+  assert.deepEqual(store.db.prepare("SELECT * FROM projects WHERE id = ?").get(project.id), beforeProject);
+  assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
+  store.close();
+});
+
+test("legacy Standard migration preserves Variant and Run aliases with per-Track lineage", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Legacy history", mode: "standard" });
+  const conversation = store.createConversation(project.id, "History");
+  const variantA = store.createVariant(project.id, "A");
+  const variantB = store.createVariant(project.id, "B");
+  store.setActiveVariant(project.id, variantB.id);
+  const runs = [
+    store.createImportedRun(project.id, conversation.id, {
+      variantId: variantA.id,
+      status: "succeeded",
+      commitHash: "1".repeat(40),
+      createdAt: 10,
+      finishedAt: 11,
+      lintPassed: true,
+      score: 100,
+    }),
+    store.createImportedRun(project.id, conversation.id, {
+      variantId: variantB.id,
+      status: "succeeded",
+      commitHash: "2".repeat(40),
+      createdAt: 20,
+      finishedAt: 21,
+    }),
+    store.createImportedRun(project.id, conversation.id, {
+      variantId: variantA.id,
+      status: "succeeded",
+      commitHash: "3".repeat(40),
+      createdAt: 30,
+      finishedAt: 31,
+    }),
+    store.createImportedRun(project.id, conversation.id, {
+      variantId: null,
+      status: "succeeded",
+      commitHash: "4".repeat(40),
+      createdAt: 40,
+      finishedAt: 41,
+    }),
+  ];
+  const legacyBefore = {
+    project: store.db.prepare("SELECT * FROM projects WHERE id = ?").get(project.id),
+    variants: store.db.prepare("SELECT * FROM variants WHERE project_id = ? ORDER BY id").all(project.id),
+    runs: store.db.prepare("SELECT * FROM runs WHERE project_id = ? ORDER BY id").all(project.id),
+  };
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  const seed = {
+    version: 1 as const,
+    ...facts,
+    project: { ...facts.project, mode: "standard" as const },
+    successfulRuns: facts.successfulRuns.map((run, index) => ({
+      ...run,
+      gitSnapshot: {
+        status: "verified" as const,
+        sourceCommitHash: run.commitHash!,
+        sourceTreeHash: String.fromCharCode(97 + index).repeat(40),
+        artifactRoot: "." as const,
+      },
+    })),
+  };
+
+  const first = store.workspace.ensureLegacyStandardWorkspace(seed);
+  const second = store.workspace.ensureLegacyStandardWorkspace(seed);
+  assert.deepEqual(second, first);
+  const aliased = new Map(first.tracks.filter((track) => track.legacyVariantId).map((track) => [track.legacyVariantId, track]));
+  assert.equal(aliased.size, 2);
+  assert.equal(first.artifacts[0]?.activeTrackId, aliased.get(variantB.id)?.id);
+  assert.equal(first.tracks.filter((track) => track.legacyVariantId === null).length, 1);
+  const revisionsByRun = new Map(first.revisions.map((revision) => [revision.legacyRunId, revision]));
+  assert.deepEqual([...revisionsByRun.keys()].sort(), runs.map((run) => run.id).sort());
+  const revisionA1 = revisionsByRun.get(runs[0]!.id)!;
+  const revisionA2 = revisionsByRun.get(runs[2]!.id)!;
+  assert.equal(revisionA1.trackId, aliased.get(variantA.id)?.id);
+  assert.equal(revisionA1.sequence, 1);
+  assert.equal(revisionA1.parentRevisionId, null);
+  assert.equal(revisionA2.sequence, 2);
+  assert.equal(revisionA2.parentRevisionId, revisionA1.id);
+  assert.deepEqual(revisionA1.quality, { state: "unassessed", score: null, findings: [] });
+  assert.equal(revisionA1.producedByRunId, null);
+  assert.deepEqual({
+    project: store.db.prepare("SELECT * FROM projects WHERE id = ?").get(project.id),
+    variants: store.db.prepare("SELECT * FROM variants WHERE project_id = ? ORDER BY id").all(project.id),
+    runs: store.db.prepare("SELECT * FROM runs WHERE project_id = ? ORDER BY id").all(project.id),
+  }, legacyBefore);
+  assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
+  store.close();
+});
+
+test("legacy Workspace fact capture rejects corrupt legacy scalar values", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Corrupt facts", mode: "standard" });
+  store.db.prepare("UPDATE projects SET sharingan = 2 WHERE id = ?").run(project.id);
+  assert.throws(
+    () => store.workspace.readLegacyStandardWorkspaceFacts(project.id),
+    /sharingan.*zero or one/i,
+  );
+  assert.equal(store.workspace.getWorkspace(project.id), null);
+  store.close();
+});
+
+test("legacy migration rejects a shape-compatible but noncanonical foundation", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Corrupt foundation", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  const row = store.db.prepare(
+    "SELECT payload_json FROM shared_design_kernel_revisions WHERE id = ?",
+  ).get(foundation.activeKernelRevisionId) as { payload_json: string };
+  const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  payload.brief = "not the Task 2 foundation";
+  const payloadJson = JSON.stringify(payload);
+  store.db.exec("DROP TRIGGER kernel_revision_update_immutable");
+  store.db.prepare(
+    "UPDATE shared_design_kernel_revisions SET payload_json = ?, checksum = ? WHERE id = ?",
+  ).run(
+    payloadJson,
+    createHash("sha256").update(payloadJson).digest("hex"),
+    foundation.activeKernelRevisionId,
+  );
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  assert.throws(
+    () => store.workspace.ensureLegacyStandardWorkspace({
+      version: 1,
+      ...facts,
+      project: { ...facts.project, mode: "standard" },
+      successfulRuns: [],
+    }),
+    /canonical empty Workspace foundation/i,
+  );
+  assert.equal(store.workspace.getWorkspace(project.id)?.graphRevision, 0);
+  assert.equal(store.workspace.listArtifacts(project.id).length, 0);
+  assert.equal(store.workspace.listSnapshots(project.id).length, 1);
+  store.close();
+});
+
+test("legacy migration rejects a foundation polluted by layout state and rolls back", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Layout pollution", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  store.db.prepare(
+    `INSERT INTO workspace_layout_nodes (
+       workspace_id, layout_id, object_id, object_kind, x, y,
+       width, height, parent_group_id, label, collapsed, updated_at
+     ) VALUES (?, 'legacy-layout', 'legacy-group', 'group', 10, 20, 30, 40, NULL, 'Legacy', 0, 50)`,
+  ).run(foundation.id);
+  store.db.prepare(
+    `INSERT INTO workspace_layout_viewports (workspace_id, layout_id, x, y, zoom, updated_at)
+     VALUES (?, 'legacy-layout', 1, 2, 0.5, 50)`,
+  ).run(foundation.id);
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+
+  assert.throws(
+    () => store.workspace.ensureLegacyStandardWorkspace({
+      version: 1,
+      ...facts,
+      project: { ...facts.project, mode: "standard" },
+      successfulRuns: [],
+    }),
+    /canonical empty Workspace foundation/i,
+  );
+  assert.equal(store.workspace.getWorkspace(project.id)?.graphRevision, 0);
+  assert.equal(store.workspace.listArtifacts(project.id).length, 0);
+  assert.equal(store.workspace.listSnapshots(project.id).length, 1);
+  assert.equal((store.db.prepare(
+    "SELECT COUNT(*) AS count FROM workspace_layout_nodes WHERE workspace_id = ?",
+  ).get(foundation.id) as { count: number }).count, 1);
+  assert.equal((store.db.prepare(
+    "SELECT COUNT(*) AS count FROM workspace_layout_viewports WHERE workspace_id = ?",
+  ).get(foundation.id) as { count: number }).count, 1);
+  assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
+  store.close();
+});
+
+test("legacy migration preserves exact legacy names while canonicalizing Workspace display names", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "  Legacy name  ", mode: "standard" });
+  const variant = store.createVariant(project.id, "  Branch name  ");
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  assert.equal(facts.project.name, "  Legacy name  ");
+  assert.equal(facts.variants[0]?.name, "  Branch name  ");
+  const bundle = store.workspace.ensureLegacyStandardWorkspace({
+    version: 1,
+    ...facts,
+    project: { ...facts.project, mode: "standard" },
+    successfulRuns: [],
+  });
+  assert.equal(bundle.artifacts[0]?.name, "Legacy name");
+  assert.equal(bundle.tracks.find((track) => track.legacyVariantId === variant.id)?.name, "Branch name");
+  assert.equal(store.getProject(project.id)?.name, "  Legacy name  ");
+  assert.equal(store.getVariant(variant.id)?.name, "  Branch name  ");
+  store.close();
+});
+
+test("legacy migration gives deterministic display names to blank legacy names", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "   ", mode: "standard" });
+  const variant = store.createVariant(project.id, "\t  ");
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  const bundle = store.workspace.ensureLegacyStandardWorkspace({
+    version: 1,
+    ...facts,
+    project: { ...facts.project, mode: "standard" },
+    successfulRuns: [],
+  });
+  assert.equal(bundle.artifacts[0]?.name, "Legacy page");
+  assert.equal(
+    bundle.tracks.find((track) => track.legacyVariantId === variant.id)?.name,
+    `Legacy variant ${variant.id}`,
+  );
+  assert.equal(store.getProject(project.id)?.name, "   ");
+  assert.equal(store.getVariant(variant.id)?.name, "\t  ");
+  store.close();
+});
+
+test("Prototype legacy seed is rejected without creating Workspace state", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Prototype", mode: "prototype" });
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  assert.throws(
+    () => store.workspace.ensureLegacyStandardWorkspace({
+      version: 1,
+      ...facts,
+      successfulRuns: [],
+    } as never),
+    /mode is unsupported/i,
+  );
+  assert.equal(store.workspace.getWorkspace(project.id), null);
+  assert.equal(store.workspace.listArtifacts(project.id).length, 0);
+  store.close();
+});
+
+test("verified legacy Git snapshots reject noncanonical full object ids before writing", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Strict Git seed", mode: "standard" });
+  const conversation = store.createConversation(project.id, "Strict Git");
+  const variant = store.createVariant(project.id, "Main");
+  store.createImportedRun(project.id, conversation.id, {
+    variantId: variant.id,
+    status: "succeeded",
+    commitHash: "a".repeat(12),
+    createdAt: 10,
+    finishedAt: 11,
+  });
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  assert.throws(
+    () => store.workspace.ensureLegacyStandardWorkspace({
+      version: 1,
+      ...facts,
+      project: { ...facts.project, mode: "standard" },
+      successfulRuns: facts.successfulRuns.map((run) => ({
+        ...run,
+        gitSnapshot: {
+          status: "verified" as const,
+          sourceCommitHash: `${"a".repeat(40)} `,
+          sourceTreeHash: "b".repeat(40),
+          artifactRoot: "." as const,
+        },
+      })),
+    }),
+    /verified Git snapshot is not canonical|source commit hash must be canonical/i,
+  );
+  assert.equal(store.workspace.getWorkspace(project.id), null);
+  assert.equal(store.workspace.listArtifacts(project.id).length, 0);
+  store.close();
+});
+
+test("an unavailable successful Run with an unknown Variant fails closed", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Unknown Variant", mode: "standard" });
+  const conversation = store.createConversation(project.id, "Unknown Variant");
+  const variant = store.createVariant(project.id, "Main");
+  const run = store.createImportedRun(project.id, conversation.id, {
+    variantId: variant.id,
+    status: "succeeded",
+    commitHash: null,
+    createdAt: 10,
+    finishedAt: 11,
+  });
+  store.db.exec("PRAGMA foreign_keys = OFF");
+  store.db.prepare("UPDATE runs SET variant_id = 'missing-variant' WHERE id = ?").run(run.id);
+  store.db.exec("PRAGMA foreign_keys = ON");
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+
+  assert.throws(
+    () => store.workspace.ensureLegacyStandardWorkspace({
+      version: 1,
+      ...facts,
+      project: { ...facts.project, mode: "standard" },
+      successfulRuns: facts.successfulRuns.map((candidate) => ({
+        ...candidate,
+        gitSnapshot: { status: "unavailable" as const },
+      })),
+    }),
+    /references an unknown Variant/i,
+  );
+  assert.equal(store.workspace.getWorkspace(project.id), null);
+  assert.equal(store.workspace.listArtifacts(project.id).length, 0);
+  store.close();
+});
+
+test("legacy seed drift rolls back all Workspace writes", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Drift", mode: "standard" });
+  const variant = store.createVariant(project.id, "Before");
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  store.renameVariant(variant.id, "After");
+  assert.throws(
+    () => store.workspace.ensureLegacyStandardWorkspace({
+      version: 1,
+      ...facts,
+      project: { ...facts.project, mode: "standard" },
+      successfulRuns: [],
+    }),
+    LegacyWorkspaceSeedDriftError,
+  );
+  assert.equal(store.workspace.getWorkspace(project.id), null);
+  assert.equal(
+    (store.db.prepare("SELECT COUNT(*) AS count FROM workspace_artifacts").get() as { count: number }).count,
+    0,
+  );
+  store.close();
+});
+
+test("a partial raw legacy marker is not treated as a completed migration", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Partial marker", mode: "standard" });
+  const foundation = store.workspace.ensureWorkspaceRecord(project.id);
+  store.db.prepare(
+    `INSERT INTO workspace_artifacts (
+       id, workspace_id, kind, name, source_root, legacy_wrapped,
+       active_track_id, archived_at, created_at, updated_at
+     ) VALUES ('partial-wrapper', ?, 'page', 'Partial', '.', 1, NULL, NULL, 10, 10)`,
+  ).run(foundation.id);
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+
+  assert.throws(
+    () => store.workspace.ensureLegacyStandardWorkspace({
+      version: 1,
+      ...facts,
+      project: { ...facts.project, mode: "standard" },
+      successfulRuns: [],
+    }),
+    /completed legacy Workspace migration is invalid/i,
+  );
+  assert.equal(store.workspace.getWorkspace(project.id)?.graphRevision, 0);
+  assert.equal(store.workspace.listArtifacts(project.id).length, 1);
+  assert.equal(store.workspace.listTracks(project.id, "partial-wrapper").length, 0);
+  assert.equal(store.workspace.listSnapshots(project.id).length, 1);
+  store.close();
+});
+
+test("legacy wrapper marker and dot root reject raw mutation and REPLACE", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Marker boundary", mode: "standard" });
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  const bundle = store.workspace.ensureLegacyStandardWorkspace({
+    version: 1,
+    ...facts,
+    project: { ...facts.project, mode: "standard" },
+    successfulRuns: [],
+  });
+  const artifact = bundle.artifacts[0]!;
+  assert.throws(
+    () => store.db.prepare(
+      `INSERT INTO workspace_artifacts (
+         id, workspace_id, kind, name, source_root, legacy_wrapped,
+         active_track_id, archived_at, created_at, updated_at
+       ) VALUES ('replacement-wrapper', ?, 'page', 'Replacement', '.', 1, NULL, NULL, 1, 1)`,
+    ).run(bundle.workspace.id),
+    /legacy-wrapped|unique/i,
+  );
+  assert.throws(
+    () => store.db.prepare(
+      `INSERT OR REPLACE INTO workspace_artifacts (
+         id, workspace_id, kind, name, source_root, legacy_wrapped,
+         active_track_id, archived_at, created_at, updated_at
+       ) VALUES ('replacement-wrapper', ?, 'page', 'Replacement', '.', 1, NULL, NULL, 1, 1)`,
+    ).run(bundle.workspace.id),
+    /legacy-wrapped|history|immutable/i,
+  );
+  assert.throws(
+    () => store.db.prepare(
+      "UPDATE workspace_artifacts SET legacy_wrapped = 0, source_root = 'other' WHERE id = ?",
+    ).run(artifact.id),
+    /identity|immutable/i,
+  );
+  assert.throws(
+    () => store.db.prepare(
+      `INSERT INTO workspace_artifacts (
+         id, workspace_id, kind, name, source_root, legacy_wrapped,
+         active_track_id, archived_at, created_at, updated_at
+       ) VALUES ('normal-dot', ?, 'page', 'Invalid', '.', 0, NULL, NULL, 1, 1)`,
+    ).run(bundle.workspace.id),
+    /legacy-wrapped/i,
+  );
+  assert.equal(store.workspace.getArtifact(artifact.id)?.legacyWrapped, true);
+  assert.equal(store.workspace.listArtifacts(project.id).length, 1);
+  assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
+  store.close();
+});
+
+test("a wrapped Page remains usable by graph commands and Artifact publication", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Editable wrapper", mode: "standard" });
+  const facts = store.workspace.readLegacyStandardWorkspaceFacts(project.id);
+  const migrated = store.workspace.ensureLegacyStandardWorkspace({
+    version: 1,
+    ...facts,
+    project: { ...facts.project, mode: "standard" },
+    successfulRuns: [],
+  });
+  const artifact = migrated.artifacts[0]!;
+  const track = migrated.tracks[0]!;
+  const renamed = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: migrated.graph.revision,
+    expectedSnapshotId: migrated.activeSnapshot.id,
+    commands: [{
+      id: "rename-wrapped-page",
+      type: "rename-node",
+      nodeId: migrated.graph.nodes[0]!.id,
+      name: "Renamed wrapper",
+    }],
+  });
+  const revision = store.workspace.createArtifactRevision({
+    artifactId: artifact.id,
+    trackId: track.id,
+    parentRevisionId: null,
+    sourceCommitHash: "a".repeat(40),
+    sourceTreeHash: "b".repeat(40),
+    kernelRevisionId: migrated.workspace.activeKernelRevisionId,
+    renderSpec: { frames: [] },
+    quality: { state: "unassessed", score: null, findings: [] },
+    dependencies: [],
+    resourcePins: [],
+  });
+  assert.equal(revision.artifactRoot, ".");
+  const published = store.workspace.publishArtifactRevision(revision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: renamed.snapshot.id,
+  });
+  assert.equal(published.artifactRevisions[artifact.id], revision.id);
+  assert.equal(store.workspace.getTrack(track.id)?.headRevisionId, revision.id);
+  assert.equal(store.workspace.getArtifact(artifact.id)?.name, "Renamed wrapper");
+  const idempotent = store.workspace.ensureLegacyStandardWorkspace({
+    version: 1,
+    ...facts,
+    project: { ...facts.project, mode: "standard" },
+    successfulRuns: [],
+  });
+  assert.equal(idempotent.workspace.graphRevision, 2);
+  assert.equal(idempotent.activeSnapshot.id, published.id);
+  assert.equal(idempotent.revisions.some((candidate) => candidate.id === revision.id), true);
+  const archived = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: idempotent.graph.revision,
+    expectedSnapshotId: idempotent.activeSnapshot.id,
+    commands: [{
+      id: "archive-wrapped-page",
+      type: "archive-node",
+      nodeId: migrated.graph.nodes[0]!.id,
+    }],
+  });
+  const afterArchive = store.workspace.ensureLegacyStandardWorkspace({
+    version: 1,
+    ...facts,
+    project: { ...facts.project, mode: "standard" },
+    successfulRuns: [],
+  });
+  assert.equal(afterArchive.workspace.graphRevision, 3);
+  assert.equal(afterArchive.activeSnapshot.id, archived.snapshot.id);
+  assert.equal(afterArchive.graph.nodes.length, 0);
+  assert.equal(afterArchive.artifacts[0]?.archivedAt !== null, true);
   store.close();
 });

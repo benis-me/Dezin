@@ -17,6 +17,11 @@ import type {
   DesignNodeLocator,
   KernelImpactAnalysis,
   KernelPublicationExpectation,
+  LegacyWorkspaceFacts,
+  LegacyWorkspaceProjectFact,
+  LegacyWorkspaceRunFact,
+  LegacyWorkspaceSeed,
+  LegacyWorkspaceVariantFact,
   ProjectWorkspace,
   SharedDesignKernelRevision,
   WorkspaceEdge,
@@ -30,6 +35,7 @@ import type {
   WorkspaceSnapshotProvenance,
 } from "./workspace-types.ts";
 import type { Row } from "./store-codecs.ts";
+import type { ProjectMode } from "./types.ts";
 
 const OBJECT_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Object.prototype));
 const ARRAY_PROTOTYPE_KEYS = new Set<PropertyKey>(Reflect.ownKeys(Array.prototype));
@@ -72,6 +78,7 @@ export interface WorkspaceArtifactRecord {
   kind: ArtifactKind;
   name: string;
   sourceRoot: string;
+  legacyWrapped: boolean;
   activeTrackId: string | null;
   archivedAt: number | null;
   createdAt: number;
@@ -123,6 +130,17 @@ export interface WorkspaceSnapshotBaseRecord extends Omit<WorkspaceSnapshot, "gr
 }
 
 export interface WorkspaceSnapshotRecord extends WorkspaceSnapshot {}
+
+export interface WorkspaceBundle {
+  workspace: ProjectWorkspace;
+  graph: WorkspaceGraph;
+  activeSnapshot: WorkspaceSnapshotRecord;
+  activeKernelRevision: SharedDesignKernelRevision;
+  artifacts: WorkspaceArtifactRecord[];
+  tracks: ArtifactTrackRecord[];
+  revisions: ArtifactRevisionRecord[];
+  snapshots: WorkspaceSnapshotRecord[];
+}
 
 export class WorkspaceStoreCodecError extends Error {
   constructor(message: string) {
@@ -694,6 +712,150 @@ export function normalizeWorkspaceSnapshotPublicationInput(value: unknown): Work
   };
 }
 
+function normalizeLegacyProjectFact(value: unknown, requireStandard: boolean): LegacyWorkspaceProjectFact {
+  const input = boundaryRecord(value, "legacy Workspace Project fact");
+  allowFields(input, [
+    "id",
+    "name",
+    "mode",
+    "skillId",
+    "designSystemId",
+    "sharingan",
+    "sourceUrl",
+    "createdAt",
+    "updatedAt",
+    "archivedAt",
+    "activeVariantId",
+  ], "legacy Workspace Project fact");
+  if (requireStandard
+    ? input.mode !== "standard"
+    : input.mode !== "standard" && input.mode !== "prototype") {
+    throw new WorkspaceStoreCodecError("legacy Workspace Project mode is unsupported");
+  }
+  if (typeof input.sharingan !== "boolean") {
+    throw new WorkspaceStoreCodecError("legacy Workspace Project sharingan must be boolean");
+  }
+  const mode: ProjectMode = input.mode === "standard" ? "standard" : "prototype";
+  const legacyText = (text: unknown, label: string, allowBlank = false): string => {
+    if (typeof text !== "string" || (!allowBlank && text.trim().length === 0) || !isWellFormedUtf16(text)) {
+      throw new WorkspaceStoreCodecError(`${label} is invalid`);
+    }
+    return text;
+  };
+  const nullableLegacyText = (text: unknown, label: string): string | null => (
+    text === null ? null : legacyText(text, label, true)
+  );
+  return {
+    id: canonicalString(input.id, "legacy Workspace Project id"),
+    name: legacyText(input.name, "legacy Workspace Project name", true),
+    mode,
+    skillId: nullableLegacyText(input.skillId, "legacy Workspace Project skill id"),
+    designSystemId: nullableLegacyText(input.designSystemId, "legacy Workspace Project design system id"),
+    sharingan: input.sharingan,
+    sourceUrl: nullableLegacyText(input.sourceUrl, "legacy Workspace Project source URL"),
+    createdAt: timestamp(input.createdAt, "legacy Workspace Project created_at"),
+    updatedAt: timestamp(input.updatedAt, "legacy Workspace Project updated_at"),
+    archivedAt: input.archivedAt === null
+      ? null
+      : timestamp(input.archivedAt, "legacy Workspace Project archived_at"),
+    activeVariantId: nullableCanonicalString(input.activeVariantId, "legacy Workspace active Variant id"),
+  };
+}
+
+function normalizeLegacyVariantFact(value: unknown, index: number): LegacyWorkspaceVariantFact {
+  const label = `legacy Workspace Variant fact at index ${index}`;
+  const input = boundaryRecord(value, label);
+  allowFields(input, ["id", "projectId", "name", "createdAt"], label);
+  return {
+    id: canonicalString(input.id, `${label} id`),
+    projectId: canonicalString(input.projectId, `${label} Project id`),
+    name: typeof input.name === "string" && isWellFormedUtf16(input.name)
+      ? input.name
+      : (() => { throw new WorkspaceStoreCodecError(`${label} name is invalid`); })(),
+    createdAt: timestamp(input.createdAt, `${label} created_at`),
+  };
+}
+
+function normalizeLegacyRunFact(value: unknown, index: number): LegacyWorkspaceRunFact & { gitSnapshot: LegacyWorkspaceSeed["successfulRuns"][number]["gitSnapshot"] } {
+  const label = `legacy Workspace successful Run fact at index ${index}`;
+  const input = boundaryRecord(value, label);
+  allowFields(input, [
+    "id",
+    "projectId",
+    "variantId",
+    "status",
+    "commitHash",
+    "createdAt",
+    "finishedAt",
+    "gitSnapshot",
+  ], label);
+  if (input.status !== "succeeded") throw new WorkspaceStoreCodecError(`${label} must be succeeded`);
+  const commitHash = input.commitHash === null
+    ? null
+    : typeof input.commitHash === "string" && isWellFormedUtf16(input.commitHash)
+      ? input.commitHash
+      : (() => { throw new WorkspaceStoreCodecError(`${label} commit hash is invalid`); })();
+  const snapshot = boundaryRecord(input.gitSnapshot, `${label} Git snapshot`);
+  let gitSnapshot: LegacyWorkspaceSeed["successfulRuns"][number]["gitSnapshot"];
+  if (snapshot.status === "unavailable") {
+    allowFields(snapshot, ["status"], `${label} Git snapshot`);
+    gitSnapshot = { status: "unavailable" };
+  } else if (snapshot.status === "verified") {
+    allowFields(snapshot, ["status", "sourceCommitHash", "sourceTreeHash", "artifactRoot"], `${label} Git snapshot`);
+    const sourceCommitHash = exactStoredString(snapshot.sourceCommitHash, `${label} source commit hash`);
+    const sourceTreeHash = exactStoredString(snapshot.sourceTreeHash, `${label} source tree hash`);
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sourceCommitHash)
+      || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sourceTreeHash)
+      || sourceCommitHash.length !== sourceTreeHash.length
+      || commitHash === null
+      || !/^[0-9a-f]{7,64}$/i.test(commitHash)
+      || !sourceCommitHash.startsWith(commitHash.toLowerCase())
+      || snapshot.artifactRoot !== ".") {
+      throw new WorkspaceStoreCodecError(`${label} verified Git snapshot is not canonical`);
+    }
+    gitSnapshot = { status: "verified", sourceCommitHash, sourceTreeHash, artifactRoot: "." };
+  } else {
+    throw new WorkspaceStoreCodecError(`${label} Git snapshot status is unsupported`);
+  }
+  return {
+    id: canonicalString(input.id, `${label} id`),
+    projectId: canonicalString(input.projectId, `${label} Project id`),
+    variantId: nullableCanonicalString(input.variantId, `${label} Variant id`),
+    status: "succeeded",
+    commitHash,
+    createdAt: timestamp(input.createdAt, `${label} created_at`),
+    finishedAt: input.finishedAt === null ? null : timestamp(input.finishedAt, `${label} finished_at`),
+    gitSnapshot,
+  };
+}
+
+export function normalizeLegacyWorkspaceSeed(value: unknown): LegacyWorkspaceSeed {
+  const input = boundaryRecord(value, "legacy Workspace seed");
+  allowFields(input, ["version", "project", "variants", "successfulRuns"], "legacy Workspace seed");
+  if (input.version !== 1) throw new WorkspaceStoreCodecError("legacy Workspace seed version must be one");
+  const project = normalizeLegacyProjectFact(input.project, true) as LegacyWorkspaceSeed["project"];
+  const variants = boundaryArray(input.variants, "legacy Workspace Variants").map(normalizeLegacyVariantFact);
+  const successfulRuns = boundaryArray(input.successfulRuns, "legacy Workspace successful Runs").map(normalizeLegacyRunFact);
+  const variantIds = new Set<string>();
+  for (const variant of variants) {
+    if (variant.projectId !== project.id) throw new WorkspaceStoreCodecError("legacy Workspace Variant belongs to another Project");
+    if (variantIds.has(variant.id)) throw new WorkspaceStoreCodecError(`duplicate legacy Workspace Variant ${variant.id}`);
+    variantIds.add(variant.id);
+  }
+  const runIds = new Set<string>();
+  for (const run of successfulRuns) {
+    if (run.projectId !== project.id) throw new WorkspaceStoreCodecError("legacy Workspace Run belongs to another Project");
+    if (runIds.has(run.id)) throw new WorkspaceStoreCodecError(`duplicate legacy Workspace Run ${run.id}`);
+    runIds.add(run.id);
+  }
+  const byCreatedAtAndId = <T extends { createdAt: number; id: string }>(left: T, right: T): number => (
+    left.createdAt - right.createdAt || compareBinary(left.id, right.id)
+  );
+  variants.sort(byCreatedAtAndId);
+  successfulRuns.sort(byCreatedAtAndId);
+  return { version: 1, project, variants, successfulRuns };
+}
+
 function allowFields(value: Record<string, unknown>, fields: readonly string[], label: string): void {
   const allowed = new Set(fields);
   for (const field of Object.keys(value)) {
@@ -1047,12 +1209,22 @@ export function asWorkspaceArtifact(row: Row): WorkspaceArtifactRecord {
   if (row.kind !== "page" && row.kind !== "component") {
     throw new WorkspaceStoreCodecError(`unsupported workspace Artifact kind ${String(row.kind)}`);
   }
+  if (row.legacy_wrapped !== 0 && row.legacy_wrapped !== 1) {
+    throw new WorkspaceStoreCodecError("Artifact legacy-wrapped marker must be zero or one");
+  }
+  const sourceRoot = requiredString(row.source_root, "Artifact source root");
+  const legacyWrapped = row.legacy_wrapped === 1;
+  if ((legacyWrapped && (row.kind !== "page" || sourceRoot !== "."))
+    || (!legacyWrapped && sourceRoot === ".")) {
+    throw new WorkspaceStoreCodecError("Artifact legacy-wrapped marker does not match its kind and source root");
+  }
   return {
     id: requiredString(row.id, "Artifact id"),
     workspaceId: requiredString(row.workspace_id, "Artifact workspace id"),
     kind: row.kind,
     name: requiredString(row.name, "Artifact name"),
-    sourceRoot: requiredString(row.source_root, "Artifact source root"),
+    sourceRoot,
+    legacyWrapped,
     activeTrackId: nullableString(row.active_track_id, "Artifact active Track id"),
     archivedAt: row.archived_at == null ? null : timestamp(row.archived_at, "Artifact archived_at"),
     createdAt: timestamp(row.created_at, "Artifact created_at"),

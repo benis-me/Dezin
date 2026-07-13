@@ -55,6 +55,12 @@ export type {
   KernelImpactAnalysis,
   KernelImpactArtifactRevision,
   KernelPublicationExpectation,
+  LegacyGitSnapshot,
+  LegacyWorkspaceFacts,
+  LegacyWorkspaceProjectFact,
+  LegacyWorkspaceRunFact,
+  LegacyWorkspaceSeed,
+  LegacyWorkspaceVariantFact,
   LayoutBounds,
   NewWorkspaceEdge,
   NewWorkspaceNode,
@@ -98,6 +104,7 @@ export {
   validateWorkspaceGraph,
 } from "./workspace-graph.ts";
 export {
+  LegacyWorkspaceSeedDriftError,
   WorkspacePointerConflictError,
   WorkspaceStore,
   type WorkspacePointerKind,
@@ -109,6 +116,7 @@ export {
   type ArtifactRevisionResourcePinRecord,
   type ArtifactTrackRecord,
   type WorkspaceArtifactRecord,
+  type WorkspaceBundle,
   type WorkspaceSnapshotBaseRecord,
   type WorkspaceSnapshotRecord,
 } from "./workspace-codecs.ts";

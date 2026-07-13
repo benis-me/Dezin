@@ -350,6 +350,7 @@ CREATE TABLE IF NOT EXISTS workspace_artifacts (
   kind TEXT NOT NULL CHECK(kind IN ('page','component')),
   name TEXT NOT NULL,
   source_root TEXT NOT NULL,
+  legacy_wrapped INTEGER NOT NULL DEFAULT 0 CHECK(legacy_wrapped IN (0, 1)),
   active_track_id TEXT,
   archived_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -1404,6 +1405,55 @@ WHEN NEW.parent_snapshot_id IS NOT NULL AND NOT EXISTS (
 BEGIN SELECT RAISE(ABORT, 'snapshot parent ownership violation'); END;
 `;
 
+const TASK5_LEGACY_WRAPPER_TRIGGER_UPGRADE_SCHEMA = `
+DROP TRIGGER IF EXISTS workspace_artifact_identity_update_immutable;
+DROP TRIGGER IF EXISTS workspace_artifact_legacy_wrapper_insert_guard;
+DROP TRIGGER IF EXISTS project_mode_legacy_workspace_guard;
+
+CREATE TRIGGER workspace_artifact_identity_update_immutable
+BEFORE UPDATE OF id, workspace_id, kind, source_root, legacy_wrapped ON workspace_artifacts
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.kind IS NOT OLD.kind
+  OR NEW.source_root IS NOT OLD.source_root
+  OR NEW.legacy_wrapped IS NOT OLD.legacy_wrapped
+BEGIN SELECT RAISE(ABORT, 'Workspace Artifact identity kind source root and legacy marker are immutable'); END;
+
+CREATE TRIGGER workspace_artifact_legacy_wrapper_insert_guard
+BEFORE INSERT ON workspace_artifacts
+WHEN (
+  (NEW.legacy_wrapped = 1 AND (
+    NEW.kind IS NOT 'page'
+    OR NEW.source_root IS NOT '.'
+    OR EXISTS (
+      SELECT 1 FROM workspace_artifacts existing
+      WHERE existing.workspace_id = NEW.workspace_id AND existing.legacy_wrapped = 1
+    )
+    OR NOT EXISTS (
+      SELECT 1
+      FROM project_workspaces workspace
+      JOIN projects project ON project.id = workspace.project_id
+      WHERE workspace.id = NEW.workspace_id AND project.mode = 'standard'
+    )
+  ))
+  OR (NEW.legacy_wrapped = 0 AND NEW.source_root IS '.')
+)
+BEGIN SELECT RAISE(ABORT, 'legacy-wrapped Artifacts must be Standard Page roots at dot'); END;
+
+CREATE TRIGGER project_mode_legacy_workspace_guard
+BEFORE UPDATE OF mode ON projects
+WHEN NEW.mode IS NOT 'standard' AND EXISTS (
+  SELECT 1
+  FROM project_workspaces workspace
+  JOIN workspace_artifacts artifact ON artifact.workspace_id = workspace.id
+  WHERE workspace.project_id = NEW.id AND artifact.legacy_wrapped = 1
+)
+BEGIN SELECT RAISE(ABORT, 'a legacy-wrapped Workspace must remain Standard'); END;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_artifacts_one_legacy_wrapper
+  ON workspace_artifacts(workspace_id) WHERE legacy_wrapped = 1;
+`;
+
 /** Additive migrations for databases created before a column existed. */
 export function migrateStoreSchema(db: DatabaseSync): void {
   const ensureColumn = (table: string, column: string, decl: string): boolean => {
@@ -1465,7 +1515,13 @@ export function migrateStoreSchema(db: DatabaseSync): void {
     "sealed",
     "sealed INTEGER NOT NULL DEFAULT 1 CHECK(sealed IN (0, 1))",
   );
+  ensureColumn(
+    "workspace_artifacts",
+    "legacy_wrapped",
+    "legacy_wrapped INTEGER NOT NULL DEFAULT 0 CHECK(legacy_wrapped IN (0, 1))",
+  );
   db.exec(TASK4_OWNERSHIP_TRIGGER_UPGRADE_SCHEMA);
+  db.exec(TASK5_LEGACY_WRAPPER_TRIGGER_UPGRADE_SCHEMA);
   db.exec(`CREATE TABLE IF NOT EXISTS moodboard_conversations (
     id TEXT PRIMARY KEY,
     board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,

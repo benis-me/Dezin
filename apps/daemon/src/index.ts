@@ -7,6 +7,12 @@ export { RuntimeSupervisor, RuntimeScopeUnavailableError, type RuntimeScope, typ
 export { matchPath, contentTypeFor } from "./http-util.ts";
 export { projectDir, safeJoin } from "./serve-static.ts";
 export {
+  ensureStandardProjectWorkspace,
+  type EnsureStandardProjectWorkspaceResult,
+  type WorkspaceMigrationDeps,
+  type WorkspaceMigrationOptions,
+} from "./workspace-migration.ts";
+export {
   StoreExtensionPairingService,
   type ExtensionPairingService,
   type RequestPrincipal,

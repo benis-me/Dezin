@@ -50,6 +50,58 @@ export interface ProjectWorkspace {
   updatedAt: number;
 }
 
+export interface LegacyWorkspaceProjectFact {
+  id: string;
+  name: string;
+  mode: ProjectMode;
+  skillId: string | null;
+  designSystemId: string | null;
+  sharingan: boolean;
+  sourceUrl: string | null;
+  createdAt: number;
+  updatedAt: number;
+  archivedAt: number | null;
+  activeVariantId: string | null;
+}
+
+export interface LegacyWorkspaceVariantFact {
+  id: string;
+  projectId: string;
+  name: string;
+  createdAt: number;
+}
+
+export interface LegacyWorkspaceRunFact {
+  id: string;
+  projectId: string;
+  variantId: string | null;
+  status: "succeeded";
+  commitHash: string | null;
+  createdAt: number;
+  finishedAt: number | null;
+}
+
+export interface LegacyWorkspaceFacts {
+  project: LegacyWorkspaceProjectFact;
+  variants: LegacyWorkspaceVariantFact[];
+  successfulRuns: LegacyWorkspaceRunFact[];
+}
+
+export type LegacyGitSnapshot =
+  | {
+    status: "verified";
+    sourceCommitHash: string;
+    sourceTreeHash: string;
+    artifactRoot: ".";
+  }
+  | { status: "unavailable" };
+
+export interface LegacyWorkspaceSeed extends Omit<LegacyWorkspaceFacts, "project" | "successfulRuns"> {
+  version: 1;
+  project: LegacyWorkspaceProjectFact & { mode: "standard" };
+  successfulRuns: Array<LegacyWorkspaceRunFact & { gitSnapshot: LegacyGitSnapshot }>;
+}
+
 export interface SharedDesignKernelRevision {
   id: string;
   workspaceId: string;
