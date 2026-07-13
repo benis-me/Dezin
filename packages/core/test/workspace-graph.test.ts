@@ -594,3 +594,272 @@ test("non-prototype edges reject prototype payloads", () => {
 
   assert.throws(() => validateWorkspaceGraph(graph), WorkspaceGraphValidationError);
 });
+
+test("graph-resident prototype strings and broken reasons must already be canonical", () => {
+  const binding = bindingFixture();
+  const nonCanonicalBindings: unknown[] = [
+    { ...binding, sourceArtifactId: " artifact-page-1 " },
+    { ...binding, sourceRevisionId: " revision-page-1 " },
+    { ...binding, sourceLocator: { ...binding.sourceLocator, designNodeId: " checkout-cta " } },
+    { ...binding, trigger: " click " },
+    { ...binding, targetArtifactId: " artifact-page-2 " },
+    { ...binding, targetState: " default " },
+    { ...binding, transition: { ...binding.transition, type: " fade " } },
+    { ...binding, transition: { ...binding.transition, easing: " ease-in-out " } },
+  ];
+  for (const candidate of nonCanonicalBindings) {
+    const graph = {
+      ...graphWith(pageNode("page-1"), pageNode("page-2")),
+      edges: [{
+        id: "edge-1",
+        workspaceId: WORKSPACE_ID,
+        kind: "prototype",
+        sourceNodeId: "page-1",
+        targetNodeId: "page-2",
+        prototype: { status: "interactive", binding: candidate },
+      }],
+    } as unknown as WorkspaceGraph;
+    assert.throws(() => validateWorkspaceGraph(graph), WorkspaceGraphValidationError);
+  }
+
+  const broken = {
+    ...graphWith(pageNode("page-1"), pageNode("page-2")),
+    edges: [{
+      id: "edge-1",
+      workspaceId: WORKSPACE_ID,
+      kind: "prototype",
+      sourceNodeId: "page-1",
+      targetNodeId: "page-2",
+      prototype: { status: "broken", brokenReason: " locator missing " },
+    }],
+  } as unknown as WorkspaceGraph;
+  assert.throws(() => validateWorkspaceGraph(broken), WorkspaceGraphValidationError);
+});
+
+test("graph revisions are safe integers and cannot advance beyond MAX_SAFE_INTEGER", () => {
+  const unsafe = { ...emptyWorkspaceGraph(), revision: Number.MAX_SAFE_INTEGER + 1 };
+  assert.throws(() => validateWorkspaceGraph(unsafe), WorkspaceGraphValidationError);
+
+  const exhausted = { ...graphWith(pageNode("page-1")), revision: Number.MAX_SAFE_INTEGER };
+  assert.throws(
+    () => applyWorkspaceGraphCommands(exhausted, [
+      { id: "command-rename", type: "rename-node", nodeId: "page-1", name: "Renamed" },
+    ]),
+    WorkspaceGraphValidationError,
+  );
+  assert.equal(exhausted.nodes[0]?.name, "page-1");
+
+  const lastAvailable = { ...graphWith(pageNode("page-1")), revision: Number.MAX_SAFE_INTEGER - 1 };
+  const next = applyWorkspaceGraphCommands(lastAvailable, [
+    { id: "command-rename", type: "rename-node", nodeId: "page-1", name: "Renamed" },
+  ]);
+  assert.equal(next.revision, Number.MAX_SAFE_INTEGER);
+});
+
+test("standalone normalization rejects duplicate canonical command ids", () => {
+  assert.throws(
+    () => normalizeWorkspaceGraphCommands([
+      { id: " command-1 ", type: "rename-node", nodeId: "page-1", name: "First" },
+      { id: "command-1", type: "rename-node", nodeId: "page-1", name: "Second" },
+    ]),
+    /duplicate command id command-1/,
+  );
+});
+
+test("object and array accessors are rejected without invocation", () => {
+  let getterCalls = 0;
+  const command = { id: "command-1", type: "rename-node", nodeId: "page-1" } as Record<string, unknown>;
+  Object.defineProperty(command, "name", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return "Renamed";
+    },
+  });
+  assert.throws(() => normalizeWorkspaceGraphCommands([command]), WorkspaceGraphValidationError);
+  assert.equal(getterCalls, 0);
+
+  const throwing = { type: "rename-node", nodeId: "page-1", name: "Renamed" } as Record<string, unknown>;
+  Object.defineProperty(throwing, "id", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      throw new Error("getter escaped");
+    },
+  });
+  assert.throws(() => normalizeWorkspaceGraphCommands([throwing]), WorkspaceGraphValidationError);
+  assert.equal(getterCalls, 0);
+
+  const commands: unknown[] = [{ id: "command-1", type: "rename-node", nodeId: "page-1", name: "Renamed" }];
+  const first = commands[0];
+  Object.defineProperty(commands, "0", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return first;
+    },
+  });
+  assert.throws(() => normalizeWorkspaceGraphCommands(commands), WorkspaceGraphValidationError);
+  assert.equal(getterCalls, 0);
+});
+
+test("boundary decoding does not invoke inherited array accessors", () => {
+  const mapDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "map");
+  let result: ReturnType<typeof normalizeWorkspaceGraphCommands> | undefined;
+  let escaped: unknown;
+  Object.defineProperty(Array.prototype, "map", {
+    configurable: true,
+    get() {
+      throw new Error("inherited map getter invoked");
+    },
+  });
+  try {
+    try {
+      result = normalizeWorkspaceGraphCommands([
+        { id: "command-1", type: "rename-node", nodeId: "page-1", name: "Renamed" },
+      ]);
+    } catch (error) {
+      escaped = error;
+    }
+  } finally {
+    if (mapDescriptor) Object.defineProperty(Array.prototype, "map", mapDescriptor);
+  }
+  if (escaped) throw escaped;
+  assert.deepEqual(result, [
+    { id: "command-1", type: "rename-node", nodeId: "page-1", name: "Renamed" },
+  ]);
+});
+
+test("revoked proxies are reported as graph validation errors", () => {
+  const commandBatch = Proxy.revocable([], {});
+  commandBatch.revoke();
+  assert.throws(
+    () => normalizeWorkspaceGraphCommands(commandBatch.proxy),
+    WorkspaceGraphValidationError,
+  );
+
+  const graph = Proxy.revocable(emptyWorkspaceGraph(), {});
+  graph.revoke();
+  assert.throws(() => validateWorkspaceGraph(graph.proxy), WorkspaceGraphValidationError);
+});
+
+test("required command fields cannot come from Object.prototype", () => {
+  const existing = Object.getOwnPropertyDescriptor(Object.prototype, "type");
+  let getterCalls = 0;
+  Object.defineProperty(Object.prototype, "type", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return "rename-node";
+    },
+  });
+  try {
+    assert.throws(
+      () => normalizeWorkspaceGraphCommands([{ id: "command-1", nodeId: "page-1", name: "Renamed" }]),
+      WorkspaceGraphValidationError,
+    );
+    assert.equal(getterCalls, 0);
+  } finally {
+    if (existing) Object.defineProperty(Object.prototype, "type", existing);
+    else delete (Object.prototype as { type?: unknown }).type;
+  }
+});
+
+test("symbol and non-enumerable fields are rejected on objects and arrays", () => {
+  const symbolCommand = { id: "command-1", type: "rename-node", nodeId: "page-1", name: "Renamed" };
+  Object.defineProperty(symbolCommand, Symbol("extra"), { value: true, enumerable: true });
+  assert.throws(() => normalizeWorkspaceGraphCommands([symbolCommand]), WorkspaceGraphValidationError);
+
+  const hiddenCommand = { id: "command-1", type: "rename-node", nodeId: "page-1", name: "Renamed" };
+  Object.defineProperty(hiddenCommand, "sourceRoot", { value: "/tmp/client-root", enumerable: false });
+  assert.throws(() => normalizeWorkspaceGraphCommands([hiddenCommand]), WorkspaceGraphValidationError);
+
+  const commands = [{ id: "command-1", type: "rename-node", nodeId: "page-1", name: "Renamed" }];
+  Object.defineProperty(commands, Symbol("extra"), { value: true, enumerable: true });
+  assert.throws(() => normalizeWorkspaceGraphCommands(commands), WorkspaceGraphValidationError);
+});
+
+test("graph accessors are rejected without invocation", () => {
+  let getterCalls = 0;
+  const graph = { workspaceId: WORKSPACE_ID, nodes: [], edges: [] } as Record<string, unknown>;
+  Object.defineProperty(graph, "revision", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return 0;
+    },
+  });
+
+  assert.throws(() => validateWorkspaceGraph(graph), WorkspaceGraphValidationError);
+  assert.equal(getterCalls, 0);
+});
+
+test("graph root, nodes, and edges reject unknown fields", () => {
+  assert.throws(
+    () => validateWorkspaceGraph({ ...emptyWorkspaceGraph(), extra: true }),
+    WorkspaceGraphValidationError,
+  );
+  assert.throws(
+    () => validateWorkspaceGraph(graphWith(
+      { ...pageNode("page-1"), sourceRoot: "/tmp/client-root" } as unknown as WorkspaceNode,
+    )),
+    WorkspaceGraphValidationError,
+  );
+  const graphWithExtraEdge = {
+    ...graphWith(pageNode("page-1"), pageNode("page-2")),
+    edges: [{
+      id: "edge-1",
+      workspaceId: WORKSPACE_ID,
+      kind: "prototype",
+      sourceNodeId: "page-1",
+      targetNodeId: "page-2",
+      prototype: { status: "planned" },
+      extra: true,
+    }],
+  } as unknown as WorkspaceGraph;
+  assert.throws(() => validateWorkspaceGraph(graphWithExtraEdge), WorkspaceGraphValidationError);
+});
+
+test("artifact quality accepts finite acyclic JSON data and rejects unsafe payloads", () => {
+  const valid = graphWith({
+    id: "page-1",
+    workspaceId: WORKSPACE_ID,
+    kind: "page",
+    name: "page-1",
+    artifactId: "artifact-page-1",
+    quality: { state: "unassessed" as const, score: null, findings: [] },
+  });
+  assert.doesNotThrow(() => validateWorkspaceGraph(valid));
+
+  const unsafeValues: unknown[] = [
+    { state: "unassessed", score: Number.POSITIVE_INFINITY, findings: [] },
+    { state: "unassessed", score: null, findings: [], callback: () => {} },
+  ];
+  const cyclic: Record<string, unknown> = { state: "unassessed", score: null, findings: [] };
+  cyclic.self = cyclic;
+  unsafeValues.push(cyclic);
+  for (const quality of unsafeValues) {
+    const graph = graphWith({ ...pageNode("page-1"), quality } as unknown as WorkspaceNode);
+    assert.throws(() => validateWorkspaceGraph(graph), WorkspaceGraphValidationError);
+    assert.throws(
+      () => applyWorkspaceGraphCommands(graph, [
+        { id: "command-rename", type: "rename-node", nodeId: "page-1", name: "Renamed" },
+      ]),
+      WorkspaceGraphValidationError,
+    );
+  }
+});
+
+test("frozen and null-prototype JSON-shaped commands remain accepted", () => {
+  const frozen = Object.freeze({ id: "command-1", type: "rename-node", nodeId: "page-1", name: "Renamed" });
+  const nullPrototype = Object.assign(Object.create(null) as Record<string, unknown>, {
+    id: "command-2",
+    type: "archive-node",
+    nodeId: "page-2",
+  });
+  assert.deepEqual(normalizeWorkspaceGraphCommands([frozen, nullPrototype]), [
+    { id: "command-1", type: "rename-node", nodeId: "page-1", name: "Renamed" },
+    { id: "command-2", type: "archive-node", nodeId: "page-2" },
+  ]);
+});

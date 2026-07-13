@@ -1,4 +1,5 @@
 import type {
+  ArtifactQualitySummary,
   DesignNodeLocator,
   NewWorkspaceEdge,
   NewWorkspaceNode,
@@ -39,6 +40,8 @@ const RESOURCE_PIN_POLICIES: readonly ResourcePinPolicy[] = ["follow-head", "pin
 const PROTOTYPE_TRIGGERS = ["click", "submit"] as const;
 const PROTOTYPE_TRANSITIONS = ["none", "fade", "slide"] as const;
 const PROTOTYPE_STATUSES = ["planned", "interactive", "broken"] as const;
+const OBJECT_PROTOTYPE_KEYS = new Set(Reflect.ownKeys(Object.prototype));
+const ARRAY_PROTOTYPE_KEYS = new Set(Reflect.ownKeys(Array.prototype));
 
 export class WorkspaceGraphValidationError extends Error {
   constructor(message: string) {
@@ -63,13 +66,89 @@ function invalid(message: string): never {
   throw new WorkspaceGraphValidationError(message);
 }
 
+function inspectBoundary<T>(label: string, inspect: () => T): T {
+  try {
+    return inspect();
+  } catch (error) {
+    if (error instanceof WorkspaceGraphValidationError) throw error;
+    invalid(`${label} could not be inspected safely`);
+  }
+}
+
+function isArrayBoundary(value: unknown, label: string): value is unknown[] {
+  return inspectBoundary(label, () => Array.isArray(value));
+}
+
+function rejectPrototypePollution(prototype: object, baseline: ReadonlySet<PropertyKey>, label: string): void {
+  const keys = inspectBoundary(label, () => Reflect.ownKeys(prototype));
+  for (const key of keys) {
+    if (!baseline.has(key)) invalid(`${label} has inherited field ${String(key)}`);
+  }
+}
+
 function requireRecord(value: unknown, label: string): UnknownRecord {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  if (typeof value !== "object" || value === null || isArrayBoundary(value, label)) {
     invalid(`${label} must be an object`);
   }
-  const prototype = Object.getPrototypeOf(value);
+  const prototype = inspectBoundary(label, () => Object.getPrototypeOf(value));
   if (prototype !== Object.prototype && prototype !== null) invalid(`${label} must be a plain object`);
-  return value as UnknownRecord;
+  if (prototype === Object.prototype) rejectPrototypePollution(prototype, OBJECT_PROTOTYPE_KEYS, label);
+
+  const snapshot = Object.create(null) as UnknownRecord;
+  const keys = inspectBoundary(label, () => Reflect.ownKeys(value));
+  for (const key of keys) {
+    if (typeof key !== "string") invalid(`${label} cannot contain symbol fields`);
+    const descriptor = inspectBoundary(label, () => Object.getOwnPropertyDescriptor(value, key));
+    if (!descriptor) invalid(`${label} field ${key} disappeared during inspection`);
+    if (!descriptor.enumerable) invalid(`${label} field ${key} must be enumerable`);
+    if (!("value" in descriptor)) invalid(`${label} field ${key} cannot be an accessor`);
+    Object.defineProperty(snapshot, key, {
+      value: descriptor.value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return snapshot;
+}
+
+function requireDenseArray(value: unknown, label: string): unknown[] {
+  if (!isArrayBoundary(value, label)) invalid(`${label} must be an array`);
+  const prototype = inspectBoundary(label, () => Object.getPrototypeOf(value));
+  if (prototype !== Array.prototype) invalid(`${label} must use the standard array prototype`);
+  rejectPrototypePollution(prototype, ARRAY_PROTOTYPE_KEYS, label);
+
+  const lengthDescriptor = inspectBoundary(label, () => Object.getOwnPropertyDescriptor(value, "length"));
+  if (!lengthDescriptor || !("value" in lengthDescriptor)) invalid(`${label} length must be a data field`);
+  const length = lengthDescriptor.value;
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+    invalid(`${label} length must be a non-negative safe integer`);
+  }
+
+  const keys = inspectBoundary(label, () => Reflect.ownKeys(value));
+  for (const key of keys) {
+    if (typeof key !== "string") invalid(`${label} cannot contain symbol fields`);
+    if (key === "length") continue;
+    const index = Number(key);
+    if (!Number.isInteger(index) || index < 0 || index >= length || String(index) !== key) {
+      invalid(`${label} has unexpected field ${key}`);
+    }
+  }
+
+  const snapshot = new Array<unknown>(length);
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = inspectBoundary(label, () => Object.getOwnPropertyDescriptor(value, String(index)));
+    if (!descriptor) invalid(`${label} must be dense; missing index ${index}`);
+    if (!descriptor.enumerable) invalid(`${label} index ${index} must be enumerable`);
+    if (!("value" in descriptor)) invalid(`${label} index ${index} cannot be an accessor`);
+    Object.defineProperty(snapshot, String(index), {
+      value: descriptor.value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return snapshot;
 }
 
 function rejectUnexpectedFields(value: UnknownRecord, allowed: readonly string[], label: string): void {
@@ -168,6 +247,114 @@ function normalizePrototypeBinding(value: unknown): PrototypeBinding {
     ...(targetState === undefined ? {} : { targetState }),
     ...(transition === undefined ? {} : { transition }),
   };
+}
+
+function validateCanonicalDesignNodeLocator(value: unknown): DesignNodeLocator {
+  const locator = requireRecord(value, "prototype source locator");
+  rejectUnexpectedFields(locator, ["designNodeId", "sourcePath", "selector"], "prototype source locator");
+  const sourcePath = locator.sourcePath === undefined ? undefined : exactString(locator.sourcePath, "prototype source path");
+  const selector = locator.selector === undefined ? undefined : exactString(locator.selector, "prototype selector");
+  return {
+    designNodeId: exactString(locator.designNodeId, "prototype source locator design node id"),
+    ...(sourcePath === undefined ? {} : { sourcePath }),
+    ...(selector === undefined ? {} : { selector }),
+  };
+}
+
+function validateCanonicalPrototypeTransition(value: unknown): PrototypeTransition {
+  const transition = requireRecord(value, "prototype transition");
+  rejectUnexpectedFields(transition, ["type", "durationMs", "easing"], "prototype transition");
+  const durationMs = transition.durationMs;
+  if (durationMs !== undefined && (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0)) {
+    invalid("prototype transition duration must be a non-negative number");
+  }
+  const easing = transition.easing === undefined ? undefined : exactString(transition.easing, "prototype transition easing");
+  return {
+    type: exactEnum(transition.type, "prototype transition", PROTOTYPE_TRANSITIONS),
+    ...(durationMs === undefined ? {} : { durationMs }),
+    ...(easing === undefined ? {} : { easing }),
+  };
+}
+
+function validateCanonicalPrototypeBinding(value: unknown): PrototypeBinding {
+  const binding = requireRecord(value, "prototype binding");
+  rejectUnexpectedFields(
+    binding,
+    [
+      "sourceArtifactId",
+      "sourceRevisionId",
+      "sourceLocator",
+      "trigger",
+      "targetArtifactId",
+      "targetState",
+      "transition",
+    ],
+    "prototype binding",
+  );
+  const targetState = binding.targetState === undefined
+    ? undefined
+    : exactString(binding.targetState, "prototype target state");
+  const transition = binding.transition === undefined
+    ? undefined
+    : validateCanonicalPrototypeTransition(binding.transition);
+  return {
+    sourceArtifactId: exactString(binding.sourceArtifactId, "prototype source artifact id"),
+    sourceRevisionId: exactString(binding.sourceRevisionId, "prototype source revision id"),
+    sourceLocator: validateCanonicalDesignNodeLocator(binding.sourceLocator),
+    trigger: exactEnum(binding.trigger, "prototype trigger", PROTOTYPE_TRIGGERS),
+    targetArtifactId: exactString(binding.targetArtifactId, "prototype target artifact id"),
+    ...(targetState === undefined ? {} : { targetState }),
+    ...(transition === undefined ? {} : { transition }),
+  };
+}
+
+function snapshotJsonValue(
+  value: unknown,
+  label: string,
+  ancestors = new Set<object>(),
+  depth = 0,
+): unknown {
+  if (depth > 100) invalid(`${label} exceeds the maximum JSON depth`);
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) invalid(`${label} numbers must be finite`);
+    return value;
+  }
+  if (typeof value !== "object") invalid(`${label} must contain only JSON-shaped data`);
+  if (ancestors.has(value)) invalid(`${label} must be acyclic`);
+  ancestors.add(value);
+  try {
+    if (isArrayBoundary(value, label)) {
+      const items = requireDenseArray(value, label);
+      const snapshot = new Array<unknown>(items.length);
+      for (let index = 0; index < items.length; index += 1) {
+        snapshot[index] = snapshotJsonValue(items[index], `${label}[${index}]`, ancestors, depth + 1);
+      }
+      return snapshot;
+    }
+    const record = requireRecord(value, label);
+    const snapshot = Object.create(null) as UnknownRecord;
+    for (const [key, item] of Object.entries(record)) {
+      Object.defineProperty(snapshot, key, {
+        value: snapshotJsonValue(item, `${label}.${key}`, ancestors, depth + 1),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return snapshot;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function safeStructuredClone<T>(value: T, label: string): T {
+  try {
+    return structuredClone(value);
+  } catch (error) {
+    if (error instanceof WorkspaceGraphValidationError) throw error;
+    invalid(`${label} could not be cloned safely`);
+  }
 }
 
 function normalizeWorkspaceNode(value: unknown): NewWorkspaceNode {
@@ -274,9 +461,18 @@ function normalizeWorkspaceGraphCommand(value: unknown, index: number): Workspac
 }
 
 export function normalizeWorkspaceGraphCommands(commands: unknown): WorkspaceGraphCommand[] {
-  if (!Array.isArray(commands)) invalid("workspace graph commands must be an array");
-  if (commands.length === 0) invalid("workspace graph command batch must contain at least one command");
-  return Array.from(commands, (command, index) => normalizeWorkspaceGraphCommand(command, index));
+  const inputs = requireDenseArray(commands, "workspace graph commands");
+  if (inputs.length === 0) invalid("workspace graph command batch must contain at least one command");
+  const normalized = new Array<WorkspaceGraphCommand>(inputs.length);
+  for (let index = 0; index < inputs.length; index += 1) {
+    normalized[index] = normalizeWorkspaceGraphCommand(inputs[index], index);
+  }
+  const commandIds = new Set<string>();
+  for (const command of normalized) {
+    if (commandIds.has(command.id)) invalid(`duplicate command id ${command.id}`);
+    commandIds.add(command.id);
+  }
+  return normalized;
 }
 
 function requireNode(graph: WorkspaceGraph, nodeId: string): WorkspaceNode {
@@ -302,21 +498,35 @@ function validateNode(value: unknown, workspaceId: string): WorkspaceNode {
   if (nodeWorkspaceId !== workspaceId) {
     invalid(`node ${id} belongs to workspace ${nodeWorkspaceId}, not ${workspaceId}`);
   }
-  exactString(node.name, `node ${id} name`);
+  const name = exactString(node.name, `node ${id} name`);
   const kind = exactEnum(node.kind, "workspace node kind", NODE_KINDS);
 
   if (kind === "page" || kind === "component") {
-    exactString(node.artifactId, `${kind} node ${id} artifactId`);
-    if (node.resourceId !== undefined) invalid(`${kind} node ${id} cannot reference resourceId`);
-  } else {
-    exactString(node.resourceId, `resource node ${id} resourceId`);
-    if (node.artifactId !== undefined) invalid(`resource node ${id} must reference resourceId only`);
+    const artifactId = exactString(node.artifactId, `${kind} node ${id} artifactId`);
+    rejectUnexpectedFields(
+      node,
+      ["id", "workspaceId", "kind", "name", "artifactId", "quality"],
+      `${kind} node ${id}`,
+    );
+    const quality = Object.hasOwn(node, "quality")
+      ? snapshotJsonValue(node.quality, `${kind} node ${id} quality`) as ArtifactQualitySummary
+      : undefined;
+    return {
+      id,
+      workspaceId: nodeWorkspaceId,
+      kind,
+      name,
+      artifactId,
+      ...(quality === undefined ? {} : { quality }),
+    };
   }
-  return value as WorkspaceNode;
+  const resourceId = exactString(node.resourceId, `resource node ${id} resourceId`);
+  rejectUnexpectedFields(node, ["id", "workspaceId", "kind", "name", "resourceId"], `resource node ${id}`);
+  return { id, workspaceId: nodeWorkspaceId, kind: "resource", name, resourceId };
 }
 
-function validateBinding(value: unknown, source: WorkspaceNode, target: WorkspaceNode): void {
-  const binding = normalizePrototypeBinding(value);
+function validateBinding(value: unknown, source: WorkspaceNode, target: WorkspaceNode): PrototypeBinding {
+  const binding = validateCanonicalPrototypeBinding(value);
   if (source.kind !== "page" || target.kind !== "page") invalid("prototype bindings require page to page nodes");
   if (binding.sourceArtifactId !== source.artifactId) {
     invalid("prototype binding source artifact does not match edge source");
@@ -324,6 +534,7 @@ function validateBinding(value: unknown, source: WorkspaceNode, target: Workspac
   if (binding.targetArtifactId !== target.artifactId) {
     invalid("prototype binding target artifact does not match edge target");
   }
+  return binding;
 }
 
 function validatePrototypePayload(
@@ -340,18 +551,17 @@ function validatePrototypePayload(
 
   if (status === "planned") {
     if (hasBinding || hasBrokenReason) invalid(`planned prototype edge ${edgeId} cannot carry binding or brokenReason`);
-    return value as PrototypeEdge;
+    return { status: "planned" };
   }
   if (status === "interactive") {
     if (!hasBinding || prototype.binding === undefined) invalid(`interactive prototype edge ${edgeId} requires a binding`);
     if (hasBrokenReason) invalid(`interactive prototype edge ${edgeId} cannot carry brokenReason`);
-    validateBinding(prototype.binding, source, target);
-    return value as PrototypeEdge;
+    return { status: "interactive", binding: validateBinding(prototype.binding, source, target) };
   }
 
-  canonicalString(prototype.brokenReason, `broken prototype edge ${edgeId} reason`);
-  if (prototype.binding !== undefined) validateBinding(prototype.binding, source, target);
-  return value as PrototypeEdge;
+  const brokenReason = exactString(prototype.brokenReason, `broken prototype edge ${edgeId} reason`);
+  const binding = prototype.binding === undefined ? undefined : validateBinding(prototype.binding, source, target);
+  return { status: "broken", brokenReason, ...(binding === undefined ? {} : { binding }) };
 }
 
 function validateEdge(
@@ -372,32 +582,42 @@ function validateEdge(
   if (!source) invalid(`edge ${id} source node ${sourceNodeId} does not exist`);
   const target = nodesById.get(targetNodeId);
   if (!target) invalid(`edge ${id} target node ${targetNodeId} does not exist`);
+  const base = { id, workspaceId: edgeWorkspaceId, sourceNodeId, targetNodeId };
 
   switch (kind) {
-    case "prototype":
+    case "prototype": {
+      rejectUnexpectedFields(
+        edge,
+        ["id", "workspaceId", "kind", "sourceNodeId", "targetNodeId", "prototype"],
+        `prototype edge ${id}`,
+      );
       if (source.kind !== "page" || target.kind !== "page") invalid(`prototype edge ${id} must connect page to page`);
-      validatePrototypePayload(edge.prototype, id, source, target);
-      break;
+      return { ...base, kind, prototype: validatePrototypePayload(edge.prototype, id, source, target) };
+    }
     case "uses":
-      if (Object.hasOwn(edge, "prototype")) invalid(`non-prototype edge ${id} cannot carry prototype payload`);
+      rejectUnexpectedFields(edge, ["id", "workspaceId", "kind", "sourceNodeId", "targetNodeId"], `uses edge ${id}`);
       if (!isArtifactNode(source) || target.kind !== "component") {
         invalid(`uses edge ${id} must connect page or component to component`);
       }
       break;
     case "informs":
-      if (Object.hasOwn(edge, "prototype")) invalid(`non-prototype edge ${id} cannot carry prototype payload`);
+      rejectUnexpectedFields(edge, ["id", "workspaceId", "kind", "sourceNodeId", "targetNodeId"], `informs edge ${id}`);
       if (source.kind !== "resource" || !isArtifactNode(target)) {
         invalid(`informs edge ${id} must connect resource to page or component`);
       }
       break;
     case "derives-from":
-      if (Object.hasOwn(edge, "prototype")) invalid(`non-prototype edge ${id} cannot carry prototype payload`);
+      rejectUnexpectedFields(
+        edge,
+        ["id", "workspaceId", "kind", "sourceNodeId", "targetNodeId"],
+        `derives-from edge ${id}`,
+      );
       if (!isArtifactNode(source) || target.kind !== "resource") {
         invalid(`derives-from edge ${id} must connect page or component to resource`);
       }
       break;
   }
-  return value as WorkspaceEdge;
+  return { ...base, kind } as WorkspaceEdge;
 }
 
 function validateComponentDependencies(
@@ -431,19 +651,23 @@ function validateComponentDependencies(
   for (const nodeId of dependencies.keys()) visit(nodeId);
 }
 
-export function validateWorkspaceGraph(value: unknown): asserts value is WorkspaceGraph {
+function snapshotWorkspaceGraph(value: unknown): WorkspaceGraph {
   const graph = requireRecord(value, "workspace graph");
+  rejectUnexpectedFields(graph, ["workspaceId", "revision", "nodes", "edges"], "workspace graph");
   const workspaceId = exactString(graph.workspaceId, "workspace id");
-  if (!Number.isInteger(graph.revision) || (graph.revision as number) < 0) {
-    invalid("workspace graph revision must be a non-negative integer");
+  if (typeof graph.revision !== "number" || !Number.isSafeInteger(graph.revision) || graph.revision < 0) {
+    invalid("workspace graph revision must be a non-negative safe integer");
   }
-  if (!Array.isArray(graph.nodes)) invalid("workspace graph nodes must be an array");
-  if (!Array.isArray(graph.edges)) invalid("workspace graph edges must be an array");
+  const nodeInputs = requireDenseArray(graph.nodes, "workspace graph nodes");
+  const edgeInputs = requireDenseArray(graph.edges, "workspace graph edges");
 
   const nodesById = new Map<string, WorkspaceNode>();
   const artifactIds = new Set<string>();
   const resourceIds = new Set<string>();
-  const nodes = Array.from(graph.nodes, (node) => validateNode(node, workspaceId));
+  const nodes = new Array<WorkspaceNode>(nodeInputs.length);
+  for (let index = 0; index < nodeInputs.length; index += 1) {
+    nodes[index] = validateNode(nodeInputs[index], workspaceId);
+  }
   for (const node of nodes) {
     if (nodesById.has(node.id)) invalid(`duplicate node id ${node.id}`);
     nodesById.set(node.id, node);
@@ -457,12 +681,20 @@ export function validateWorkspaceGraph(value: unknown): asserts value is Workspa
   }
 
   const edgeIds = new Set<string>();
-  const edges = Array.from(graph.edges, (edge) => validateEdge(edge, workspaceId, nodesById));
+  const edges = new Array<WorkspaceEdge>(edgeInputs.length);
+  for (let index = 0; index < edgeInputs.length; index += 1) {
+    edges[index] = validateEdge(edgeInputs[index], workspaceId, nodesById);
+  }
   for (const edge of edges) {
     if (edgeIds.has(edge.id)) invalid(`duplicate edge id ${edge.id}`);
     edgeIds.add(edge.id);
   }
   validateComponentDependencies(nodes, edges, nodesById);
+  return { workspaceId, revision: graph.revision, nodes, edges };
+}
+
+export function validateWorkspaceGraph(value: unknown): asserts value is WorkspaceGraph {
+  snapshotWorkspaceGraph(value);
 }
 
 function addNode(graph: WorkspaceGraph, node: NewWorkspaceNode): void {
@@ -511,8 +743,11 @@ function bindPrototype(graph: WorkspaceGraph, edgeId: string, binding: Prototype
   if (edge.kind !== "prototype") invalid(`edge ${edgeId} is not a prototype edge`);
   const source = requireNode(graph, edge.sourceNodeId);
   const target = requireNode(graph, edge.targetNodeId);
-  validateBinding(binding, source, target);
-  edge.prototype = { status: "interactive", binding: structuredClone(binding) };
+  const canonicalBinding = validateBinding(binding, source, target);
+  edge.prototype = {
+    status: "interactive",
+    binding: safeStructuredClone(canonicalBinding, `prototype edge ${edgeId} binding`),
+  };
 }
 
 function applyOne(graph: WorkspaceGraph, command: WorkspaceGraphCommand): void {
@@ -550,14 +785,15 @@ function applyOne(graph: WorkspaceGraph, command: WorkspaceGraphCommand): void {
 
 export function applyWorkspaceGraphCommands(graph: WorkspaceGraph, commands: unknown): WorkspaceGraph {
   const normalizedCommands = normalizeWorkspaceGraphCommands(commands);
-  validateWorkspaceGraph(graph);
-  const next = structuredClone(graph);
-  const commandIds = new Set<string>();
+  const graphSnapshot = snapshotWorkspaceGraph(graph);
+  if (graphSnapshot.revision === Number.MAX_SAFE_INTEGER) {
+    invalid("workspace graph revision is exhausted and cannot advance");
+  }
+  const nextRevision = graphSnapshot.revision + 1;
+  const next = safeStructuredClone(graphSnapshot, "workspace graph");
   for (const command of normalizedCommands) {
-    if (commandIds.has(command.id)) invalid(`duplicate command id ${command.id}`);
-    commandIds.add(command.id);
     applyOne(next, command);
   }
-  validateWorkspaceGraph(next);
-  return { ...next, revision: graph.revision + 1 };
+  const validatedNext = snapshotWorkspaceGraph(next);
+  return { ...validatedNext, revision: nextRevision };
 }
