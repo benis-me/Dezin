@@ -97,6 +97,18 @@ import {
   type PreviewLease,
   type PreviewLeaseManager,
 } from "./preview-lease.ts";
+import {
+  handleGetArtifactRevision,
+  handleGetWorkspace,
+  handleGetWorkspaceArtifact,
+  handleGetWorkspaceSnapshot,
+  handleGraphCommands,
+  handleListArtifactRevisions,
+  handleListArtifactTracks,
+  handleListWorkspaceArtifacts,
+  handleListWorkspaceSnapshots,
+  handlePutWorkspaceLayout,
+} from "./workspace-handler.ts";
 
 export type DevServerLease = Pick<PreviewLease, "url"> & Partial<Omit<PreviewLease, "url">>;
 
@@ -297,6 +309,56 @@ function validateRouteParams(params: Record<string, string>): void {
 }
 
 const routes: Route[] = [
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/workspace",
+    handler: handleGetWorkspace,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/workspace/graph/commands",
+    handler: handleGraphCommands,
+  },
+  {
+    method: "PUT",
+    pattern: "/api/projects/:id/workspace/layout",
+    handler: handlePutWorkspaceLayout,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/artifacts",
+    handler: handleListWorkspaceArtifacts,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/artifacts/:artifactId",
+    handler: handleGetWorkspaceArtifact,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/artifacts/:artifactId/tracks",
+    handler: handleListArtifactTracks,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/artifacts/:artifactId/revisions",
+    handler: handleListArtifactRevisions,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/artifacts/:artifactId/revisions/:revisionId",
+    handler: handleGetArtifactRevision,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/workspace/snapshots",
+    handler: handleListWorkspaceSnapshots,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/workspace/snapshots/:snapshotId",
+    handler: handleGetWorkspaceSnapshot,
+  },
   {
     method: "GET",
     pattern: "/api/health",

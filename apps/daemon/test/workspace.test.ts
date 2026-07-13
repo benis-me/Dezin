@@ -1,11 +1,38 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Store } from "../../../packages/core/src/index.ts";
+import { createApp, createRuntimeSupervisor, type AppDeps } from "../src/index.ts";
 import { ensureStandardProjectWorkspace } from "../src/workspace-migration.ts";
+
+interface WorkspaceServerContext {
+  base: string;
+  dataDir: string;
+  store: Store;
+}
+
+async function withWorkspaceServer(
+  run: (context: WorkspaceServerContext) => Promise<void>,
+  extraDeps: Partial<AppDeps> = {},
+): Promise<void> {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-workspace-http-"));
+  const store = new Store(join(dataDir, "store.db"));
+  const runtimeSupervisor = extraDeps.runtimeSupervisor ?? createRuntimeSupervisor({ dataDir, store });
+  const server = createApp({ ...extraDeps, store, dataDir, runtimeSupervisor });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    await run({ base: `http://127.0.0.1:${port}`, dataDir, store });
+  } finally {
+    await runtimeSupervisor.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+  }
+}
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -22,6 +49,610 @@ function captureGit(root: string): Record<string, string> {
     source: readFileSync(join(root, "index.html"), "utf8"),
   };
 }
+
+test("GET workspace lazily exposes a Standard project with its default layout", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "HTTP Workspace", mode: "standard" });
+
+    const response = await fetch(`${base}/api/projects/${project.id}/workspace`);
+
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      status: string;
+      workspace: { id: string; projectId: string; graphRevision: number };
+      graph: { revision: number };
+      layout: { layoutId: string; workspaceId: string };
+    };
+    assert.equal(body.status, "ready");
+    assert.equal(body.workspace.projectId, project.id);
+    assert.equal(body.graph.revision, 1);
+    assert.equal(body.layout.layoutId, "default");
+    assert.equal(body.layout.workspaceId, body.workspace.id);
+  });
+});
+
+test("concurrent HTTP workspace reads converge on one ready bundle", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Concurrent HTTP Workspace", mode: "standard" });
+    const responses = await Promise.all(Array.from(
+      { length: 6 },
+      () => fetch(`${base}/api/projects/${project.id}/workspace`),
+    ));
+    assert.deepEqual(responses.map((response) => response.status), [200, 200, 200, 200, 200, 200]);
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+    for (const body of bodies.slice(1)) assert.deepEqual(body, bodies[0]);
+    assert.equal((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_artifacts WHERE legacy_wrapped = 1",
+    ).get() as { count: number }).count, 1);
+    assert.equal((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_snapshots",
+    ).get() as { count: number }).count, 2);
+  });
+});
+
+test("workspace routes reject missing projects and malformed path encodings without writing", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const missing = await fetch(`${base}/api/projects/missing/workspace`);
+    const malformed = await fetch(`${base}/api/projects/%ZZ/workspace`);
+    const encodedSlash = await fetch(`${base}/api/projects/a%2Fb/workspace`);
+    const wrongMethod = await fetch(`${base}/api/projects/missing/workspace`, { method: "DELETE" });
+
+    assert.equal(missing.status, 404);
+    assert.equal(malformed.status, 400);
+    assert.equal(encodedSlash.status, 400);
+    assert.equal(wrongMethod.status, 405);
+    assert.equal((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM project_workspaces",
+    ).get() as { count: number }).count, 0);
+
+    const internalFailure = store.createProject({ name: "Internal URIError", mode: "standard" });
+    const originalGetProject = store.getProject.bind(store);
+    store.getProject = ((projectId: string) => {
+      if (projectId === internalFailure.id) throw new URIError("internal URI failure");
+      return originalGetProject(projectId);
+    }) as typeof store.getProject;
+    const internal = await fetch(`${base}/api/projects/${internalFailure.id}/workspace`);
+    assert.equal(internal.status, 500, "internal URIError must not be mislabeled as a bad path");
+    store.getProject = originalGetProject;
+
+    const deleted = store.createProject({ name: "Deleted during migration", mode: "standard" });
+    const originalReadFacts = store.workspace.readLegacyStandardWorkspaceFacts.bind(store.workspace);
+    store.workspace.readLegacyStandardWorkspaceFacts = ((projectId: string) => {
+      const facts = originalReadFacts(projectId);
+      if (projectId === deleted.id) store.deleteProject(projectId);
+      return facts;
+    }) as typeof store.workspace.readLegacyStandardWorkspaceFacts;
+    const deletionRace = await fetch(`${base}/api/projects/${deleted.id}/workspace`);
+    assert.equal(deletionRace.status, 404);
+    assert.equal(store.workspace.getWorkspace(deleted.id), null);
+  });
+});
+
+test("malformed graph and layout bodies fail before Standard workspace migration", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const cases: Array<{
+      name: string;
+      path: "graph" | "layout";
+      expectedStatus: number;
+      headers: Record<string, string>;
+      body: string;
+    }> = [
+      {
+        name: "invalid-json",
+        path: "graph",
+        expectedStatus: 400,
+        headers: { "content-type": "application/json" },
+        body: "{",
+      },
+      {
+        name: "wrong-content-type",
+        path: "graph",
+        expectedStatus: 415,
+        headers: { "content-type": "text/plain" },
+        body: "{}",
+      },
+      {
+        name: "empty-command-batch",
+        path: "graph",
+        expectedStatus: 400,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseGraphRevision: 0, expectedSnapshotId: "snapshot", commands: [] }),
+      },
+      {
+        name: "unknown-envelope-field",
+        path: "graph",
+        expectedStatus: 400,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseGraphRevision: 0,
+          expectedSnapshotId: "snapshot",
+          commands: [{
+            id: "command",
+            type: "add-node",
+            node: {
+              id: "page-node",
+              kind: "page",
+              name: "Page",
+              artifactId: "page-artifact",
+              createIdentity: { initialTrackId: "page-track" },
+            },
+          }],
+          unexpected: true,
+        }),
+      },
+      {
+        name: "empty-layout-patch",
+        path: "layout",
+        expectedStatus: 400,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ graphRevision: 0, commands: [] }),
+      },
+      {
+        name: "non-finite-layout-number",
+        path: "layout",
+        expectedStatus: 400,
+        headers: { "content-type": "application/json" },
+        body: '{"graphRevision":0,"commands":[{"type":"set-viewport","viewport":{"x":0,"y":0,"zoom":1e999}}]}',
+      },
+      {
+        name: "oversized-json-body",
+        path: "graph",
+        expectedStatus: 413,
+        headers: { "content-type": "application/json" },
+        body: `{"padding":"${"x".repeat(4 * 1024 * 1024)}"}`,
+      },
+    ];
+
+    for (const fixture of cases) {
+      const project = store.createProject({ name: fixture.name, mode: "standard" });
+      const suffix = fixture.path === "graph" ? "workspace/graph/commands" : "workspace/layout";
+      const response = await fetch(`${base}/api/projects/${project.id}/${suffix}`, {
+        method: fixture.path === "graph" ? "POST" : "PUT",
+        headers: fixture.headers,
+        body: fixture.body,
+      });
+      assert.equal(response.status, fixture.expectedStatus, fixture.name);
+      assert.equal(store.workspace.getWorkspace(project.id), null, `${fixture.name} migrated the Project`);
+    }
+    assert.equal((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_artifacts",
+    ).get() as { count: number }).count, 0);
+  });
+});
+
+test("Prototype workspace reads stay typed and every Standard-only route is zero-write", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Prototype HTTP", mode: "prototype" });
+    const workspace = await fetch(`${base}/api/projects/${project.id}/workspace`);
+    assert.equal(workspace.status, 200);
+    assert.deepEqual(await workspace.json(), {
+      status: "unsupported",
+      code: "workspace_requires_standard_project",
+      projectId: project.id,
+      projectMode: "prototype",
+    });
+
+    const readPaths = [
+      "artifacts",
+      "artifacts/missing-artifact",
+      "artifacts/missing-artifact/tracks",
+      "artifacts/missing-artifact/revisions",
+      "artifacts/missing-artifact/revisions/missing-revision",
+      "workspace/snapshots",
+      "workspace/snapshots/missing-snapshot",
+    ];
+    for (const path of readPaths) {
+      const response = await fetch(`${base}/api/projects/${project.id}/${path}`);
+      assert.equal(response.status, 409, path);
+      assert.equal(
+        (await response.json() as { code: string }).code,
+        "workspace_requires_standard_project",
+        path,
+      );
+    }
+
+    const graph = await fetch(`${base}/api/projects/${project.id}/workspace/graph/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseGraphRevision: 0,
+        expectedSnapshotId: "unused-snapshot",
+        commands: [{
+          id: "prototype-command",
+          type: "add-node",
+          node: {
+            id: "prototype-page-node",
+            kind: "page",
+            name: "Never created",
+            artifactId: "prototype-page",
+            createIdentity: { initialTrackId: "prototype-track" },
+          },
+        }],
+      }),
+    });
+    assert.equal(graph.status, 409);
+    assert.equal((await graph.json() as { code: string }).code, "workspace_requires_standard_project");
+
+    const layout = await fetch(`${base}/api/projects/${project.id}/workspace/layout`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        graphRevision: 0,
+        commands: [{ type: "set-viewport", viewport: { x: 1, y: 2, zoom: 1 } }],
+      }),
+    });
+    assert.equal(layout.status, 409);
+    assert.equal(store.workspace.getWorkspace(project.id), null);
+    assert.equal((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_artifacts",
+    ).get() as { count: number }).count, 0);
+  });
+});
+
+test("workspace graph HTTP commands preserve exact replay and expose typed conflicts", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Graph HTTP", mode: "standard" });
+    const initialResponse = await fetch(`${base}/api/projects/${project.id}/workspace`);
+    const initial = await initialResponse.json() as {
+      graph: { revision: number };
+      activeSnapshot: { id: string };
+      workspace: { id: string };
+    };
+    const request = {
+      baseGraphRevision: initial.graph.revision,
+      expectedSnapshotId: initial.activeSnapshot.id,
+      commands: [{
+        id: "add-http-page",
+        type: "add-node",
+        node: {
+          id: "http-page-node",
+          kind: "page",
+          name: "HTTP page",
+          artifactId: "http-page",
+          createIdentity: { initialTrackId: "http-page-track" },
+        },
+      }],
+    };
+    const apply = () => fetch(`${base}/api/projects/${project.id}/workspace/graph/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+
+    const first = await apply();
+    assert.equal(first.status, 200);
+    const firstBody = await first.json() as { graph: { revision: number }; snapshot: { id: string } };
+    const replay = await apply();
+    assert.equal(replay.status, 200);
+    assert.deepEqual(await replay.json(), firstBody);
+
+    const reused = await fetch(`${base}/api/projects/${project.id}/workspace/graph/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...request,
+        commands: [{
+          ...request.commands[0],
+          node: { ...request.commands[0]!.node, name: "Conflicting page name" },
+        }],
+      }),
+    });
+    assert.equal(reused.status, 409);
+    assert.equal((await reused.json() as { code: string }).code, "workspace_command_replay_conflict");
+
+    const staleGraph = await fetch(`${base}/api/projects/${project.id}/workspace/graph/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseGraphRevision: initial.graph.revision,
+        expectedSnapshotId: initial.activeSnapshot.id,
+        commands: [{ id: "stale-rename", type: "rename-node", nodeId: "http-page-node", name: "Stale" }],
+      }),
+    });
+    assert.equal(staleGraph.status, 409);
+    assert.equal((await staleGraph.json() as { code: string }).code, "workspace_revision_conflict");
+
+    const staleSnapshot = await fetch(`${base}/api/projects/${project.id}/workspace/graph/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseGraphRevision: firstBody.graph.revision,
+        expectedSnapshotId: initial.activeSnapshot.id,
+        commands: [{ id: "stale-snapshot", type: "rename-node", nodeId: "http-page-node", name: "Stale" }],
+      }),
+    });
+    assert.equal(staleSnapshot.status, 409);
+
+    const laterBatch = await fetch(`${base}/api/projects/${project.id}/workspace/graph/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseGraphRevision: firstBody.graph.revision,
+        expectedSnapshotId: firstBody.snapshot.id,
+        commands: [{ id: "later-rename", type: "rename-node", nodeId: "http-page-node", name: "Later name" }],
+      }),
+    });
+    assert.equal(laterBatch.status, 200);
+    const historicalReplay = await apply();
+    assert.equal(historicalReplay.status, 200);
+    assert.deepEqual(await historicalReplay.json(), firstBody);
+
+    const counts = {
+      graphs: (store.db.prepare(
+        "SELECT COUNT(*) AS count FROM workspace_graph_revisions WHERE workspace_id = ?",
+      ).get(initial.workspace.id) as { count: number }).count,
+      snapshots: (store.db.prepare(
+        "SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?",
+      ).get(initial.workspace.id) as { count: number }).count,
+    };
+    assert.deepEqual(counts, { graphs: 4, snapshots: 4 });
+  });
+});
+
+test("workspace layout HTTP persistence stays outside semantic history and stale writes roll back", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Layout HTTP", mode: "standard" });
+    const initial = await (await fetch(`${base}/api/projects/${project.id}/workspace`)).json() as {
+      graph: { revision: number; nodes: Array<{ id: string }> };
+      snapshots: unknown[];
+    };
+    const nodeId = initial.graph.nodes[0]!.id;
+    const saved = await fetch(`${base}/api/projects/${project.id}/workspace/layout`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        graphRevision: initial.graph.revision,
+        commands: [
+          { type: "move", objectId: nodeId, x: 42, y: 84 },
+          { type: "set-viewport", viewport: { x: -20, y: 10, zoom: 0.75 } },
+        ],
+      }),
+    });
+    assert.equal(saved.status, 200);
+    const savedLayout = await saved.json() as {
+      objects: Array<{ id: string; x: number; y: number }>;
+      viewport: { x: number; y: number; zoom: number };
+    };
+    assert.deepEqual(savedLayout.viewport, { x: -20, y: 10, zoom: 0.75 });
+    assert.deepEqual(savedLayout.objects.find((object) => object.id === nodeId), {
+      id: nodeId,
+      kind: "node",
+      x: 42,
+      y: 84,
+      parentGroupId: null,
+    });
+
+    const refreshed = await (await fetch(`${base}/api/projects/${project.id}/workspace`)).json() as {
+      graph: { revision: number };
+      snapshots: unknown[];
+      layout: typeof savedLayout;
+    };
+    assert.equal(refreshed.graph.revision, initial.graph.revision);
+    assert.equal(refreshed.snapshots.length, initial.snapshots.length);
+    assert.deepEqual(refreshed.layout, savedLayout);
+
+    const stale = await fetch(`${base}/api/projects/${project.id}/workspace/layout`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        graphRevision: initial.graph.revision - 1,
+        commands: [{ type: "set-viewport", viewport: { x: 99, y: 99, zoom: 2 } }],
+      }),
+    });
+    assert.equal(stale.status, 409);
+    assert.deepEqual(store.workspace.getLayout(project.id).viewport, { x: -20, y: 10, zoom: 0.75 });
+  });
+});
+
+test("workspace nested HTTP reads enforce Project and parent ownership without foreign decoding", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const projectA = store.createProject({ name: "Owned A", mode: "standard" });
+    const projectB = store.createProject({ name: "Owned B", mode: "standard" });
+    const readyA = await (await fetch(`${base}/api/projects/${projectA.id}/workspace`)).json() as {
+      workspace: { id: string; activeKernelRevisionId: string };
+      graph: { revision: number };
+      activeSnapshot: { id: string };
+      artifacts: Array<{ id: string }>;
+      tracks: Array<{ id: string; artifactId: string }>;
+      snapshots: Array<{ id: string }>;
+    };
+    const readyB = await (await fetch(`${base}/api/projects/${projectB.id}/workspace`)).json() as {
+      workspace: { id: string };
+      graph: { revision: number };
+      activeSnapshot: { id: string };
+      artifacts: Array<{ id: string }>;
+    };
+    const artifactA = readyA.artifacts[0]!;
+    const trackA = readyA.tracks.find((track) => track.artifactId === artifactA.id)!;
+    const revisionA = store.workspace.createArtifactRevision({
+      artifactId: artifactA.id,
+      trackId: trackA.id,
+      parentRevisionId: null,
+      sourceCommitHash: "a".repeat(40),
+      sourceTreeHash: "b".repeat(40),
+      kernelRevisionId: readyA.workspace.activeKernelRevisionId,
+      renderSpec: { frames: [] },
+      quality: { state: "unassessed", score: null, findings: [] },
+      dependencies: [],
+      resourcePins: [],
+    });
+
+    const artifacts = await fetch(`${base}/api/projects/${projectA.id}/artifacts`);
+    assert.equal(artifacts.status, 200);
+    assert.equal((await artifacts.json() as Array<{ id: string }>)[0]?.id, artifactA.id);
+    assert.equal((await fetch(`${base}/api/projects/${projectA.id}/artifacts/${artifactA.id}`)).status, 200);
+    assert.equal((await fetch(`${base}/api/projects/${projectA.id}/artifacts/${artifactA.id}/tracks`)).status, 200);
+    const revisions = await fetch(`${base}/api/projects/${projectA.id}/artifacts/${artifactA.id}/revisions`);
+    assert.equal(revisions.status, 200);
+    assert.equal((await revisions.json() as Array<{ id: string }>)[0]?.id, revisionA.id);
+    assert.equal((await fetch(
+      `${base}/api/projects/${projectA.id}/artifacts/${artifactA.id}/revisions/${revisionA.id}`,
+    )).status, 200);
+    const snapshots = await fetch(`${base}/api/projects/${projectA.id}/workspace/snapshots`);
+    assert.equal(snapshots.status, 200);
+    assert.equal((await snapshots.json() as Array<{ id: string }>).length, 2);
+    assert.equal((await fetch(
+      `${base}/api/projects/${projectA.id}/workspace/snapshots/${readyA.snapshots[1]!.id}`,
+    )).status, 200);
+
+    const foreignArtifact = await fetch(`${base}/api/projects/${projectB.id}/artifacts/${artifactA.id}`);
+    const missingArtifact = await fetch(`${base}/api/projects/${projectB.id}/artifacts/missing-artifact`);
+    assert.equal(foreignArtifact.status, 404);
+    assert.equal(missingArtifact.status, 404);
+    assert.deepEqual(await foreignArtifact.json(), await missingArtifact.json());
+    assert.equal((await fetch(
+      `${base}/api/projects/${projectB.id}/artifacts/${artifactA.id}/revisions/${revisionA.id}`,
+    )).status, 404);
+    assert.equal((await fetch(
+      `${base}/api/projects/${projectB.id}/workspace/snapshots/${readyA.snapshots[1]!.id}`,
+    )).status, 404);
+
+    store.workspace.applyGraphCommands(projectA.id, {
+      baseGraphRevision: readyA.graph.revision,
+      expectedSnapshotId: readyA.activeSnapshot.id,
+      commands: [{
+        id: "add-second-owned-page",
+        type: "add-node",
+        node: {
+          id: "owned-a-second-node",
+          kind: "page",
+          name: "Owned A second page",
+          artifactId: "owned-a-second-artifact",
+          createIdentity: { initialTrackId: "owned-a-second-track" },
+        },
+      }],
+    });
+    assert.equal((await fetch(
+      `${base}/api/projects/${projectA.id}/artifacts/owned-a-second-artifact/revisions/${revisionA.id}`,
+    )).status, 404, "a Revision must belong to the path Artifact even inside one Workspace");
+
+    const crossIdentity = await fetch(`${base}/api/projects/${projectB.id}/workspace/graph/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseGraphRevision: readyB.graph.revision,
+        expectedSnapshotId: readyB.activeSnapshot.id,
+        commands: [{
+          id: "claim-foreign-artifact",
+          type: "add-node",
+          node: {
+            id: "foreign-artifact-node",
+            kind: "page",
+            name: "Owned A",
+            artifactId: artifactA.id,
+          },
+        }],
+      }),
+    });
+    assert.equal(crossIdentity.status, 400);
+    const afterB = await (await fetch(`${base}/api/projects/${projectB.id}/workspace`)).json() as {
+      graph: { revision: number };
+      activeSnapshot: { id: string };
+    };
+    assert.equal(afterB.graph.revision, readyB.graph.revision);
+    assert.equal(afterB.activeSnapshot.id, readyB.activeSnapshot.id);
+
+    store.db.prepare("UPDATE workspace_artifacts SET name = 'Raw foreign corruption' WHERE id = ?").run(artifactA.id);
+    assert.equal((await fetch(`${base}/api/projects/${projectB.id}/artifacts/${artifactA.id}`)).status, 404);
+    assert.equal((await fetch(`${base}/api/projects/${projectA.id}/workspace`)).status, 500);
+    assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
+  });
+});
+
+test("workspace mutations never relabel durable graph or layout corruption as client errors", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const layoutProject = store.createProject({ name: "Layout corruption race", mode: "standard" });
+    const layoutReady = await (await fetch(`${base}/api/projects/${layoutProject.id}/workspace`)).json() as {
+      workspace: { id: string };
+      graph: { revision: number };
+    };
+    const readViewport = (): { x: number; y: number; zoom: number } | null => {
+      const row = store.db.prepare(`
+        SELECT x, y, zoom FROM workspace_layout_viewports
+        WHERE workspace_id = ? AND layout_id = 'default'
+      `).get(layoutReady.workspace.id) as { x: number; y: number; zoom: number } | undefined;
+      return row ? { x: row.x, y: row.y, zoom: row.zoom } : null;
+    };
+    const viewportBefore = readViewport();
+    const originalSaveLayout = store.workspace.saveLayout.bind(store.workspace);
+    let injectedLayoutCorruption = false;
+    store.workspace.saveLayout = ((...args: Parameters<typeof originalSaveLayout>) => {
+      if (!injectedLayoutCorruption) {
+        injectedLayoutCorruption = true;
+        const insert = store.db.prepare(`
+          INSERT INTO workspace_layout_nodes (
+            workspace_id, layout_id, object_id, object_kind, x, y, width, height,
+            parent_group_id, label, collapsed, updated_at
+          ) VALUES (?, 'default', ?, 'group', 0, 0, 100, 100, ?, ?, 0, ?)
+        `);
+        insert.run(layoutReady.workspace.id, "race-group-a", null, "A", 1);
+        insert.run(layoutReady.workspace.id, "race-group-b", "race-group-a", "B", 1);
+        store.db.prepare(`
+          UPDATE workspace_layout_nodes
+          SET parent_group_id = 'race-group-b'
+          WHERE workspace_id = ? AND layout_id = 'default' AND object_id = 'race-group-a'
+        `).run(layoutReady.workspace.id);
+      }
+      return originalSaveLayout(...args);
+    }) as typeof store.workspace.saveLayout;
+
+    const corruptLayout = await fetch(`${base}/api/projects/${layoutProject.id}/workspace/layout`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        graphRevision: layoutReady.graph.revision,
+        commands: [{ type: "set-viewport", viewport: { x: 99, y: 88, zoom: 1.5 } }],
+      }),
+    });
+    assert.equal(corruptLayout.status, 500);
+    assert.deepEqual(readViewport(), viewportBefore);
+    assert.equal((store.db.prepare(`
+      SELECT COUNT(*) AS count FROM workspace_layout_nodes
+      WHERE workspace_id = ? AND object_kind = 'group'
+    `).get(layoutReady.workspace.id) as { count: number }).count, 2);
+
+    const graphProject = store.createProject({ name: "Graph corruption race", mode: "standard" });
+    const graphReady = await (await fetch(`${base}/api/projects/${graphProject.id}/workspace`)).json() as {
+      workspace: { id: string };
+      graph: { revision: number; nodes: Array<{ id: string; artifactId?: string }> };
+      activeSnapshot: { id: string };
+      artifacts: Array<{ id: string }>;
+      snapshots: unknown[];
+    };
+    const graphArtifact = graphReady.artifacts[0]!;
+    const graphNode = graphReady.graph.nodes.find((node) => node.artifactId === graphArtifact.id)!;
+    const originalApplyGraphCommands = store.workspace.applyGraphCommands.bind(store.workspace);
+    let injectedGraphCorruption = false;
+    store.workspace.applyGraphCommands = ((...args: Parameters<typeof originalApplyGraphCommands>) => {
+      if (!injectedGraphCorruption) {
+        injectedGraphCorruption = true;
+        store.db.prepare("UPDATE workspace_artifacts SET name = 'Raw graph drift' WHERE id = ?")
+          .run(graphArtifact.id);
+      }
+      return originalApplyGraphCommands(...args);
+    }) as typeof store.workspace.applyGraphCommands;
+
+    const corruptGraph = await fetch(`${base}/api/projects/${graphProject.id}/workspace/graph/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseGraphRevision: graphReady.graph.revision,
+        expectedSnapshotId: graphReady.activeSnapshot.id,
+        commands: [{ id: "rename-after-drift", type: "rename-node", nodeId: graphNode.id, name: "Renamed" }],
+      }),
+    });
+    assert.equal(corruptGraph.status, 500);
+    const graphState = store.db.prepare(`
+      SELECT graph_revision AS graphRevision, active_snapshot_id AS activeSnapshotId
+      FROM project_workspaces WHERE id = ?
+    `).get(graphReady.workspace.id) as { graphRevision: number; activeSnapshotId: string };
+    assert.equal(graphState.graphRevision, graphReady.graph.revision);
+    assert.equal(graphState.activeSnapshotId, graphReady.activeSnapshot.id);
+    assert.equal((store.db.prepare(`
+      SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?
+    `).get(graphReady.workspace.id) as { count: number }).count, graphReady.snapshots.length);
+  });
+});
 
 test("Standard workspace migration verifies Git without changing Git or legacy rows", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-workspace-migration-"));

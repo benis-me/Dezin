@@ -111,6 +111,8 @@ export {
 } from "./workspace-store.ts";
 export {
   WorkspaceStoreCodecError,
+  normalizeWorkspaceGraphMutationInput,
+  normalizeWorkspaceLayoutPatch,
   type ArtifactRevisionDependencyRecord,
   type ArtifactRevisionRecord,
   type ArtifactRevisionResourcePinRecord,

@@ -140,6 +140,14 @@ export interface RouteMatch {
   params: Record<string, string>;
 }
 
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new HttpError(400, "invalid URL encoding");
+  }
+}
+
 /**
  * Match a URL path against a pattern. Pattern segments may be literals, `:param`,
  * or a trailing `*rest` that captures the remainder (decoded, slash-joined).
@@ -152,12 +160,12 @@ export function matchPath(pattern: string, path: string): RouteMatch | null {
   for (let i = 0; i < pp.length; i++) {
     const seg = pp[i]!;
     if (seg.startsWith("*")) {
-      params[seg.slice(1) || "rest"] = up.slice(i).map(decodeURIComponent).join("/");
+      params[seg.slice(1) || "rest"] = up.slice(i).map(decodePathSegment).join("/");
       return { params };
     }
     if (up[i] === undefined) return null;
     if (seg.startsWith(":")) {
-      params[seg.slice(1)] = decodeURIComponent(up[i]!);
+      params[seg.slice(1)] = decodePathSegment(up[i]!);
     } else if (seg !== up[i]) {
       return null;
     }
