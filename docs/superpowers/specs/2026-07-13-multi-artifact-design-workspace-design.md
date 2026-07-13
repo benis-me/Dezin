@@ -132,7 +132,7 @@ An Artifact Revision is immutable and contains:
 - internal source snapshot identity (`commitHash` plus source root or equivalent);
 - content checksum;
 - pinned Shared Design Kernel revision;
-- pinned Resource revisions;
+- canonical exact Resource revision pins (which remain valid when a Resource Head advances);
 - pinned Component revisions used by the artifact;
 - Render Spec and fixtures;
 - screenshot, runtime, lint, and visual-review evidence;
@@ -668,7 +668,10 @@ changes rerun only the dependency closure plus workspace graph gates.
    artifact revision, resource revision, context pack, instance, and target tables.
 2. `ensureWorkspace(projectId)` lazily creates a workspace for existing projects.
 3. Existing single artifacts appear as one synthesized Page node without moving
-   source files or rewriting history.
+   source files or rewriting history. That Page carries a durable
+   `legacyWrapped` marker; only this migration-only identity may use `.` as its
+   source root, while every newly created Artifact keeps a server-derived
+   namespaced root.
 4. Existing Standard Runs backfill into the synthesized Page lineage where their
    source snapshot is available.
 5. The first multi-artifact release enables Project Workspace only for Standard

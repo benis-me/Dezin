@@ -222,7 +222,8 @@ test("workspace schema migrates an existing database without changing legacy row
   assert.equal(store.listProjects().length, 1);
   assert.deepEqual(requiredWorkspaceTables(store.db), [
     "project_workspaces", "workspace_artifacts", "artifact_tracks", "shared_design_kernel_revisions",
-    "artifact_revisions", "component_instances", "artifact_revision_dependencies", "resources", "resource_revisions",
+    "artifact_revisions", "component_instances", "artifact_revision_dependencies", "artifact_revision_resources",
+    "resources", "resource_revisions",
     "workspace_nodes", "workspace_edges", "workspace_graph_revisions", "workspace_graph_commands",
     "workspace_layout_nodes", "workspace_layout_viewports", "workspace_snapshots",
     "workspace_snapshot_artifacts", "workspace_snapshot_resources",
@@ -366,6 +367,16 @@ CREATE TABLE IF NOT EXISTS resource_revisions (
   UNIQUE(id, workspace_id),
   UNIQUE(resource_id, sequence)
 );
+CREATE TABLE IF NOT EXISTS artifact_revision_resources (
+  workspace_id TEXT NOT NULL,
+  owner_artifact_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  resource_revision_id TEXT NOT NULL,
+  FOREIGN KEY(revision_id, owner_artifact_id, workspace_id) REFERENCES artifact_revisions(id, artifact_id, workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY(resource_revision_id, resource_id, workspace_id) REFERENCES resource_revisions(id, resource_id, workspace_id) ON DELETE CASCADE,
+  PRIMARY KEY(revision_id, resource_id)
+);
 CREATE TABLE IF NOT EXISTS workspace_nodes (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
@@ -494,6 +505,10 @@ CREATE INDEX IF NOT EXISTS idx_workspace_snapshots_workspace ON workspace_snapsh
 `artifact_revision_dependencies` stores the complete immutable instance pin,
 state, override, and locator for one owner Artifact Revision. This separation lets
 successor Revisions reuse an instance ID without mutating historical state.
+`artifact_revision_resources` stores every exact Resource Revision consumed by an
+Artifact Revision. An older explicit Resource pin remains valid after Resource
+Head advances; publication validates ownership and sealing, but never silently
+rewrites the pin to the current Head.
 
 - [ ] **Step 4: Compose WorkspaceStore into Store**
 
@@ -791,7 +806,7 @@ git commit -m "feat(core): apply workspace commands with CAS"
 **Interfaces:**
 
 - Consumes: the Task 3 snapshot-publication primitive and immutable graph revisions.
-- Produces: createKernelRevision(), createArtifactRevision(), publishArtifactRevision(), publishKernelRevision(), createWorkspaceSnapshot(), publishSnapshot(), immutable revision dependencies.
+- Produces: createKernelRevision(), createArtifactRevision(), publishArtifactRevision(), publishKernelRevision(), createWorkspaceSnapshot(), publishSnapshot(), immutable component dependency and Resource pin rows.
 
 - [ ] **Step 1: Write immutable revision and stale Head tests**
 
@@ -863,6 +878,15 @@ creation always requires an explicit kernelRevisionId. Standalone checkpoint and
 restore Snapshot publication also require `expectedSnapshotId`; no public helper
 may move the active pointer without the same CAS.
 
+Artifact Revision creation also persists a canonical set of exact Resource
+Revision pins. Publication revalidates imported/raw candidates at the trust
+boundary: the Artifact root still equals its owning Artifact's immutable root,
+all referenced component/Resource/Kernel revisions exist in the same Workspace,
+referenced component Artifact Revisions are sealed, and every parent sequence
+moves forward. The candidate's Kernel pin must equal the expected base Snapshot's
+Kernel Revision. Resource Head movement does not rewrite an older exact Artifact
+pin.
+
 Before Artifact publication, derive `uses` edges from the candidate Revision's
 linked instance pins plus every other Artifact mapping in the expected Snapshot.
 If that set differs, the same transaction creates a new immutable graph revision,
@@ -903,13 +927,16 @@ git commit -m "feat(core): publish artifact revisions safely"
 **Files:**
 
 - Create: apps/daemon/src/workspace-migration.ts
+- Modify: packages/core/src/store-schema.ts
+- Modify: packages/core/src/workspace-types.ts
+- Modify: packages/core/src/workspace-codecs.ts
 - Modify: packages/core/src/workspace-store.ts
 - Test: packages/core/test/workspace-store.test.ts
 - Test: apps/daemon/test/workspace.test.ts
 
 **Interfaces:**
 
-- Produces: ensureStandardProjectWorkspace(deps, projectId), LegacyWorkspaceSeed, legacy Variant to ArtifactTrack and Run to ArtifactRevision aliases.
+- Produces: ensureStandardProjectWorkspace(deps, projectId), strict LegacyWorkspaceSeed, a durable `legacyWrapped` Artifact marker, and legacy Variant to ArtifactTrack / Run to ArtifactRevision aliases.
 
 - [ ] **Step 1: Write migration invariants**
 
@@ -921,10 +948,17 @@ test("lazy migration wraps Standard history without moving source or rewriting l
   assert.deepEqual(second, first);
   assert.deepEqual(await captureGitAndLegacyState(fixture), before);
   assert.deepEqual(first.artifacts.map((item) => item.kind), ["page"]);
+  assert.deepEqual(first.artifacts.map((item) => [item.legacyWrapped, item.sourceRoot]), [[true, "."]]);
   assert.deepEqual(first.tracks.map((track) => track.legacyVariantId), fixture.variantIds);
   assert.deepEqual(first.revisions.map((revision) => revision.legacyRunId), fixture.reproducibleRunIds);
 });
 ~~~
+
+Also cover a Project whose Task 2/3 foundation Workspace already exists: migration
+adopts that empty foundation, advances graph revision `0 -> 1`, and publishes a
+fresh `legacy-migration` Snapshot as a direct child of the foundation Snapshot.
+Concurrent callers converge on the same result. Prototype projects return a typed
+unsupported result without creating or changing Workspace state.
 
 - [ ] **Step 2: Run and confirm failure**
 
@@ -936,53 +970,83 @@ Expected: FAIL because workspace-migration.ts is missing.
 
 ~~~ts
 export async function ensureStandardProjectWorkspace(deps: AppDeps, projectId: string): Promise<WorkspaceBundle> {
+  const existing = deps.store.workspace.getBundleByProjectId(projectId);
+  if (existing?.artifacts.some((artifact) => artifact.legacyWrapped)) return existing;
   const project = deps.store.getProject(projectId);
   if (!project) throw new WorkspaceNotFoundError(projectId);
   if (project.mode !== "standard") throw new WorkspaceUnsupportedProjectError(projectId, project.mode);
-  const main = deps.store.ensureMainVariant(project.id);
   const variants = deps.store.listVariants(project.id);
   const runs = deps.store.listRuns(project.id).filter((run) => run.status === "succeeded" && run.commitHash);
   const verifiedRuns = [];
-  for (const run of runs.reverse()) {
-    if (await canMaterializeStandardVersion(deps, project, run)) verifiedRuns.push(run);
+  for (const run of stableOldestFirst(runs)) {
+    if (await canReadStandardVersionWithoutMaterializing(deps, project, run)) verifiedRuns.push(run);
   }
   return deps.store.workspace.ensureLegacyStandardWorkspace({
-    project,
-    variants,
-    activeVariantId: deps.store.getActiveVariantId(project.id) ?? main.id,
+    project: immutableProjectSeed(project),
+    variants: variants.map(immutableVariantSeed),
+    activeVariantId: deps.store.getActiveVariantId(project.id),
     verifiedRuns,
   });
 }
 ~~~
+
+Git verification is read-only and must not call `ensureMainVariant()`,
+`standardVersionArtifactDir()`, checkout/reset, or any helper that creates a
+worktree. Because verification is asynchronous, `LegacyWorkspaceSeed` carries the
+resolved immutable Project/Variant/Run fields; the Core transaction re-reads and
+matches those legacy rows before using the verified results. If state changed,
+the caller retries from a new seed rather than combining two points in time.
 
 - [ ] **Step 4: Implement one-transaction idempotent seed**
 
 ~~~ts
 ensureLegacyStandardWorkspace(seed: LegacyWorkspaceSeed): WorkspaceBundle {
   return this.transactionImmediate(() => {
-    const existing = this.getWorkspace(seed.project.id);
-    if (existing) return this.getBundle(seed.project.id);
-    const workspace = this.insertWorkspace(seed.project.id);
-    const kernel = this.insertKernelRevision(workspace.id, defaultKernelFromProject(seed.project));
-    const page = this.insertArtifact(workspace.id, { kind: "page", name: seed.project.name, sourceRoot: "." });
+    const workspace = this.getWorkspace(seed.project.id) ?? this.insertWorkspaceFoundation(seed.project.id);
+    const existing = this.getBundle(seed.project.id);
+    if (existing.artifacts.some((artifact) => artifact.legacyWrapped)) return existing;
+    this.revalidateLegacySeed(seed);
+    this.requireEmptyFoundation(existing);
+    const kernel = existing.activeKernelRevision ?? this.insertKernelRevision(workspace.id, defaultKernelFromProject(seed.project));
+    const page = this.insertLegacyWrappedArtifact(workspace.id, { kind: "page", name: seed.project.name });
     const tracks = seed.variants.map((variant) => this.insertLegacyTrack(page.id, variant));
     this.insertVerifiedLegacyRevisions(workspace.id, page.id, kernel.id, tracks, seed.verifiedRuns);
     this.insertWorkspaceNode(workspace.id, page);
     this.activateLegacyTrack(page.id, seed.activeVariantId);
-    this.insertImmutableGraphRevision(this.getGraphByWorkspaceId(workspace.id));
+    this.insertImmutableGraphRevision(this.getGraphByWorkspaceId(workspace.id), 1);
     const snapshot = this.createSnapshotInTransaction(workspace.id, {
-      expectedSnapshotId: null,
+      expectedSnapshotId: existing.workspace.activeSnapshotId,
       reason: "legacy-standard-wrap",
       provenance: { kind: "legacy-migration", migration: "legacy-standard-v1" },
     });
-    this.compareAndSetActiveSnapshot(workspace.id, null, snapshot.id);
+    this.compareAndSetActiveSnapshot(workspace.id, existing.workspace.activeSnapshotId, snapshot.id);
     return this.getBundle(seed.project.id);
   });
 }
 ~~~
 
-The transaction records legacy IDs but never switches Git branches, writes source
-files, or edits Run/Variant rows.
+Task 5 adds `workspace_artifacts.legacy_wrapped INTEGER NOT NULL DEFAULT 0` and
+exposes it as `Artifact.legacyWrapped`. Normal Artifact creation continues to
+derive a namespaced root server-side. Only the private migration insertion may
+write `source_root = '.'`, and it must atomically set `legacy_wrapped = 1`;
+constraints and read validation reject every other dot-root combination. Both
+fields are immutable. Existing-identity validation and Artifact Revision creation
+recognize that marked dot-root as valid, so subsequent graph commands and edits
+work without weakening the normal derived-root rule. The transaction records
+legacy IDs but never switches Git branches, writes source files, or edits
+Project/Run/Variant rows.
+
+Create one aliased Track per legacy Variant. If the Project has no Variant or a
+verified Run has `variantId = null`, create one additional unaliased
+`Legacy unassigned` Track and map only those null-Variant Runs to it; never guess
+from current UI state. A non-null unknown Variant is corruption. Choose the active
+Track from the valid active Variant, otherwise the earliest Variant in binary
+`(createdAt,id)` order, otherwise the unassigned Track. Revision sequence and
+parent lineage are independent per Track, and the migrated Snapshot pins the
+selected Track's exact final Head (which may be null).
+Wrapped Revisions use `quality.state = 'unassessed'` unless a compatible modern
+evidence record is actually present; legacy success or a numeric score alone is
+not fabricated into passing runtime/visual evidence.
 
 - [ ] **Step 5: Run focused and legacy regression tests**
 
@@ -995,7 +1059,7 @@ Expected: PASS; Prototype fixture returns an explicit unsupported result and rem
 - [ ] **Step 6: Commit**
 
 ~~~bash
-git add apps/daemon/src/workspace-migration.ts packages/core/src/workspace-store.ts packages/core/test/workspace-store.test.ts apps/daemon/test/workspace.test.ts
+git add apps/daemon/src/workspace-migration.ts packages/core/src/store-schema.ts packages/core/src/workspace-types.ts packages/core/src/workspace-codecs.ts packages/core/src/workspace-store.ts packages/core/test/workspace-store.test.ts apps/daemon/test/workspace.test.ts
 git commit -m "feat(daemon): wrap Standard projects as workspaces"
 ~~~
 
