@@ -51,6 +51,7 @@ import {
   type Row,
 } from "./store-codecs.ts";
 import { migrateStoreSchema, STORE_SCHEMA } from "./store-schema.ts";
+import { WorkspaceStore } from "./workspace-store.ts";
 
 const DEFAULT_SETTINGS: Settings = {
   agentCommand: "claude",
@@ -94,6 +95,7 @@ const DEFAULT_CLOCK: StoreClock = { now: () => Date.now(), id: () => randomUUID(
 
 export class Store {
   readonly db: DatabaseSync;
+  readonly workspace: WorkspaceStore;
   private clock: StoreClock;
 
   constructor(path = ":memory:", clock: StoreClock = DEFAULT_CLOCK) {
@@ -101,9 +103,21 @@ export class Store {
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
-    this.db.exec(STORE_SCHEMA);
-    migrateStoreSchema(this.db);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(STORE_SCHEMA);
+      migrateStoreSchema(this.db);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the schema or migration error if SQLite already ended the transaction.
+      }
+      throw error;
+    }
     this.clock = clock;
+    this.workspace = new WorkspaceStore(this.db, clock);
   }
 
   close(): void {
