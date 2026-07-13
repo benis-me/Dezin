@@ -41,9 +41,12 @@ export type {
   ArtifactQualityProfile,
   ArtifactQualityState,
   ArtifactQualitySummary,
+  BrokenPrototypeEdge,
   DesignNodeLocator,
+  InteractivePrototypeEdge,
   NewWorkspaceEdge,
   NewWorkspaceNode,
+  PlannedPrototypeEdge,
   ProjectWorkspace,
   PrototypeBinding,
   PrototypeEdge,
@@ -67,6 +70,7 @@ export {
   WorkspaceGraphValidationError,
   WorkspaceRevisionConflictError,
   applyWorkspaceGraphCommands,
+  normalizeWorkspaceGraphCommands,
   validateWorkspaceGraph,
 } from "./workspace-graph.ts";
 export { Store, type StoreClock } from "./store.ts";

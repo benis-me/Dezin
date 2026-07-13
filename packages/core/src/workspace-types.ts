@@ -111,20 +111,36 @@ export interface PrototypeBinding {
   transition?: PrototypeTransition;
 }
 
-export interface PrototypeEdge {
-  status: PrototypeEdgeStatus;
-  binding?: PrototypeBinding;
-  brokenReason?: string;
+export interface PlannedPrototypeEdge {
+  status: "planned";
+  binding?: never;
+  brokenReason?: never;
 }
 
-export interface WorkspaceEdge {
+export interface InteractivePrototypeEdge {
+  status: "interactive";
+  binding: PrototypeBinding;
+  brokenReason?: never;
+}
+
+export interface BrokenPrototypeEdge {
+  status: "broken";
+  brokenReason: string;
+  binding?: PrototypeBinding;
+}
+
+export type PrototypeEdge = PlannedPrototypeEdge | InteractivePrototypeEdge | BrokenPrototypeEdge;
+
+interface WorkspaceEdgeBase {
   id: string;
   workspaceId: string;
-  kind: WorkspaceEdgeKind;
   sourceNodeId: string;
   targetNodeId: string;
-  prototype?: PrototypeEdge;
 }
+
+export type WorkspaceEdge =
+  | (WorkspaceEdgeBase & { kind: "prototype"; prototype: PrototypeEdge })
+  | (WorkspaceEdgeBase & { kind: Exclude<WorkspaceEdgeKind, "prototype">; prototype?: never });
 
 export interface WorkspaceGraph {
   workspaceId: string;
@@ -149,14 +165,17 @@ export type NewWorkspaceNode =
     createIdentity?: { resourceKind: ResourceKind; defaultPinPolicy: ResourcePinPolicy };
   };
 
-export interface NewWorkspaceEdge {
+interface NewWorkspaceEdgeBase {
   id: string;
   workspaceId: string;
-  kind: WorkspaceEdgeKind;
   sourceNodeId: string;
   targetNodeId: string;
-  prototype?: Partial<PrototypeEdge>;
+  prototype?: never;
 }
+
+export type NewWorkspaceEdge =
+  | (NewWorkspaceEdgeBase & { kind: "prototype" })
+  | (NewWorkspaceEdgeBase & { kind: Exclude<WorkspaceEdgeKind, "prototype"> });
 
 export type WorkspaceGraphCommand =
   | { id: string; type: "add-node"; node: NewWorkspaceNode }

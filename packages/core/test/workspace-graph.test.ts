@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   WorkspaceGraphValidationError,
   applyWorkspaceGraphCommands,
+  normalizeWorkspaceGraphCommands,
   validateWorkspaceGraph,
   type NewWorkspaceEdge,
   type PrototypeBinding,
@@ -45,6 +46,22 @@ function prototypeCommand(sourceNodeId: string, targetNodeId: string, id = "comm
     sourceNodeId,
     targetNodeId,
   });
+}
+
+function normalizeCommands(input: unknown): WorkspaceGraphCommand[] {
+  return normalizeWorkspaceGraphCommands(input);
+}
+
+function bindingFixture(): PrototypeBinding {
+  return {
+    sourceArtifactId: "artifact-page-1",
+    sourceRevisionId: "revision-page-1",
+    sourceLocator: { designNodeId: "checkout-cta" },
+    trigger: "click",
+    targetArtifactId: "artifact-page-2",
+    targetState: "default",
+    transition: { type: "fade", durationMs: 180 },
+  };
 }
 
 test("adds, renames, and archives nodes without mutating the input graph", () => {
@@ -294,4 +311,286 @@ test("commands reject missing targets and duplicate graph identities", () => {
     }]),
     /duplicate artifact identity/,
   );
+});
+
+test("normalizes graph commands deeply without mutating the untrusted input", () => {
+  const input = [
+    {
+      id: " command-add-resource ",
+      type: " add-node ",
+      node: {
+        id: " resource-node ",
+        kind: " resource ",
+        name: " Research library ",
+        resourceId: " resource-1 ",
+        createIdentity: {
+          resourceKind: " research ",
+          defaultPinPolicy: " follow-head ",
+        },
+      },
+    },
+    {
+      id: " command-bind ",
+      type: " bind-prototype ",
+      edgeId: " edge-1 ",
+      binding: {
+        sourceArtifactId: " artifact-page-1 ",
+        sourceRevisionId: " revision-page-1 ",
+        sourceLocator: {
+          designNodeId: " checkout-cta ",
+          sourcePath: " src/Page.tsx ",
+          selector: " [data-dezin-id='checkout-cta'] ",
+        },
+        trigger: " click ",
+        targetArtifactId: " artifact-page-2 ",
+        targetState: " default ",
+        transition: { type: " fade ", durationMs: 180, easing: " ease-in-out " },
+      },
+    },
+  ];
+  const before = structuredClone(input);
+
+  const normalized = normalizeCommands(input);
+
+  assert.deepEqual(input, before);
+  assert.notStrictEqual(normalized, input);
+  assert.deepEqual(normalized, [
+    {
+      id: "command-add-resource",
+      type: "add-node",
+      node: {
+        id: "resource-node",
+        kind: "resource",
+        name: "Research library",
+        resourceId: "resource-1",
+        createIdentity: { resourceKind: "research", defaultPinPolicy: "follow-head" },
+      },
+    },
+    {
+      id: "command-bind",
+      type: "bind-prototype",
+      edgeId: "edge-1",
+      binding: {
+        sourceArtifactId: "artifact-page-1",
+        sourceRevisionId: "revision-page-1",
+        sourceLocator: {
+          designNodeId: "checkout-cta",
+          sourcePath: "src/Page.tsx",
+          selector: "[data-dezin-id='checkout-cta']",
+        },
+        trigger: "click",
+        targetArtifactId: "artifact-page-2",
+        targetState: "default",
+        transition: { type: "fade", durationMs: 180, easing: "ease-in-out" },
+      },
+    },
+  ]);
+});
+
+test("normalization rejects unknown fields throughout the command payload", () => {
+  const page = {
+    id: "page-1",
+    kind: "page",
+    name: "Page",
+    artifactId: "artifact-page-1",
+    createIdentity: { initialTrackId: "track-main" },
+  };
+  const binding = bindingFixture();
+  const cases: unknown[] = [
+    [{ id: "command-1", type: "rename-node", nodeId: "page-1", name: "Page", extra: true }],
+    [{ id: "command-1", type: "add-node", node: { ...page, sourceRoot: "/tmp/client-root" } }],
+    [{ id: "command-1", type: "add-node", node: { ...page, createIdentity: { ...page.createIdentity, extra: true } } }],
+    [{
+      id: "command-1",
+      type: "add-edge",
+      edge: {
+        id: "edge-1",
+        workspaceId: WORKSPACE_ID,
+        kind: "prototype",
+        sourceNodeId: "page-1",
+        targetNodeId: "page-2",
+        prototype: { status: "interactive" },
+      },
+    }],
+    [{ id: "command-1", type: "bind-prototype", edgeId: "edge-1", binding: { ...binding, extra: true } }],
+    [{
+      id: "command-1",
+      type: "bind-prototype",
+      edgeId: "edge-1",
+      binding: { ...binding, sourceLocator: { ...binding.sourceLocator, xpath: "//button" } },
+    }],
+    [{
+      id: "command-1",
+      type: "bind-prototype",
+      edgeId: "edge-1",
+      binding: { ...binding, transition: { ...binding.transition, unsafe: true } },
+    }],
+  ];
+
+  for (const commands of cases) {
+    assert.throws(() => normalizeCommands(commands), /unexpected field/);
+  }
+});
+
+test("normalization rejects malformed nested command objects and required fields", () => {
+  const cases: unknown[] = [
+    [null],
+    [{ id: "command-1", type: "add-node", node: null }],
+    [{
+      id: "command-1",
+      type: "add-node",
+      node: {
+        id: "page-1",
+        kind: "page",
+        name: "Page",
+        artifactId: "artifact-page-1",
+        createIdentity: {},
+      },
+    }],
+    [{
+      id: "command-1",
+      type: "add-edge",
+      edge: { id: "edge-1", workspaceId: WORKSPACE_ID, kind: "prototype", sourceNodeId: "page-1" },
+    }],
+    [{
+      id: "command-1",
+      type: "bind-prototype",
+      edgeId: "edge-1",
+      binding: { ...bindingFixture(), sourceLocator: null },
+    }],
+  ];
+
+  for (const commands of cases) {
+    assert.throws(() => normalizeCommands(commands), WorkspaceGraphValidationError);
+  }
+});
+
+test("apply rejects malformed and empty batches without advancing the graph", () => {
+  const graph = graphWith(pageNode("page-1"));
+  const applyUntrusted = (commands: unknown): WorkspaceGraph => applyWorkspaceGraphCommands(graph, commands);
+  const invalidBatches: unknown[] = [
+    null,
+    {},
+    [],
+    Array(1),
+    [null],
+    [{ id: "command-unknown", type: "explode" }],
+  ];
+
+  for (const commands of invalidBatches) {
+    assert.throws(() => applyUntrusted(commands), WorkspaceGraphValidationError);
+  }
+  assert.equal(graph.revision, 0);
+  assert.deepEqual(graph.nodes, [pageNode("page-1")]);
+});
+
+test("apply detects duplicate command ids after canonical trimming", () => {
+  const graph = graphWith(pageNode("page-1"));
+  assert.throws(
+    () => applyWorkspaceGraphCommands(graph, [
+      { id: " command-1 ", type: "rename-node", nodeId: "page-1", name: "First" },
+      { id: "command-1", type: "rename-node", nodeId: "page-1", name: "Second" },
+    ]),
+    /duplicate command id command-1/,
+  );
+  assert.equal(graph.nodes[0]?.name, "page-1");
+});
+
+test("graph validation wraps null, non-object, and invalid collection inputs", () => {
+  const validateUntrusted = validateWorkspaceGraph as (graph: unknown) => void;
+  const invalidGraphs: unknown[] = [
+    null,
+    "workspace",
+    [],
+    { workspaceId: WORKSPACE_ID, revision: 0, nodes: null, edges: [] },
+    { workspaceId: WORKSPACE_ID, revision: 0, nodes: [], edges: {} },
+    { workspaceId: WORKSPACE_ID, revision: 0, nodes: Array(1), edges: [] },
+  ];
+
+  for (const graph of invalidGraphs) {
+    assert.throws(() => validateUntrusted(graph), WorkspaceGraphValidationError);
+  }
+});
+
+test("planned prototype edges reject bindings and broken reasons", () => {
+  const base = {
+    id: "edge-1",
+    workspaceId: WORKSPACE_ID,
+    kind: "prototype",
+    sourceNodeId: "page-1",
+    targetNodeId: "page-2",
+  };
+  const nodes = [pageNode("page-1"), pageNode("page-2")];
+  for (const prototype of [
+    { status: "planned", binding: bindingFixture() },
+    { status: "planned", brokenReason: "old locator is missing" },
+  ]) {
+    const graph = { ...graphWith(...nodes), edges: [{ ...base, prototype }] } as unknown as WorkspaceGraph;
+    assert.throws(() => validateWorkspaceGraph(graph), WorkspaceGraphValidationError);
+  }
+});
+
+test("interactive prototype edges require only a valid binding payload", () => {
+  const base = {
+    id: "edge-1",
+    workspaceId: WORKSPACE_ID,
+    kind: "prototype",
+    sourceNodeId: "page-1",
+    targetNodeId: "page-2",
+  };
+  const nodes = [pageNode("page-1"), pageNode("page-2")];
+  const missingBinding = {
+    ...graphWith(...nodes),
+    edges: [{ ...base, prototype: { status: "interactive" } }],
+  } as unknown as WorkspaceGraph;
+  const mixedState = {
+    ...graphWith(...nodes),
+    edges: [{ ...base, prototype: { status: "interactive", binding: bindingFixture(), brokenReason: "stale" } }],
+  } as unknown as WorkspaceGraph;
+
+  assert.throws(() => validateWorkspaceGraph(missingBinding), /requires a binding/);
+  assert.throws(() => validateWorkspaceGraph(mixedState), WorkspaceGraphValidationError);
+});
+
+test("broken prototype edges require a reason and may retain the old binding", () => {
+  const base = {
+    id: "edge-1",
+    workspaceId: WORKSPACE_ID,
+    kind: "prototype",
+    sourceNodeId: "page-1",
+    targetNodeId: "page-2",
+  };
+  const nodes = [pageNode("page-1"), pageNode("page-2")];
+  for (const brokenReason of [undefined, "   "]) {
+    const graph = {
+      ...graphWith(...nodes),
+      edges: [{ ...base, prototype: { status: "broken", brokenReason } }],
+    } as unknown as WorkspaceGraph;
+    assert.throws(() => validateWorkspaceGraph(graph), WorkspaceGraphValidationError);
+  }
+
+  const valid = {
+    ...graphWith(...nodes),
+    edges: [{
+      ...base,
+      prototype: { status: "broken", brokenReason: "source locator is missing", binding: bindingFixture() },
+    }],
+  } as WorkspaceGraph;
+  assert.doesNotThrow(() => validateWorkspaceGraph(valid));
+});
+
+test("non-prototype edges reject prototype payloads", () => {
+  const graph = {
+    ...graphWith(pageNode("page-1"), componentNode("component-1")),
+    edges: [{
+      id: "uses-1",
+      workspaceId: WORKSPACE_ID,
+      kind: "uses",
+      sourceNodeId: "page-1",
+      targetNodeId: "component-1",
+      prototype: { status: "planned" },
+    }],
+  } as unknown as WorkspaceGraph;
+
+  assert.throws(() => validateWorkspaceGraph(graph), WorkspaceGraphValidationError);
 });
