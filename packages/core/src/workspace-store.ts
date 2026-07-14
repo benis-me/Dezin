@@ -35,6 +35,7 @@ import type {
 } from "./workspace-types.ts";
 import {
   applyWorkspaceGraphCommands,
+  normalizeWorkspaceGraphCommands,
   validateWorkspaceGraph,
   WorkspaceCommandReplayConflictError,
   WorkspaceGraphValidationError,
@@ -877,6 +878,44 @@ export class WorkspaceStore {
 
   getProposalForProject(projectId: string, proposalId: string): WorkspaceProposalRecord {
     return this.transactionRead(() => this.requireProposalForProject(projectId, proposalId));
+  }
+
+  assertProposalDurableIntegrityForProject(projectId: string, proposalId?: string): void {
+    this.transactionRead(() => {
+      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+      const graph = this.getGraph(projectId);
+      const activeSnapshotState = this.db.prepare(
+        "SELECT workspace_id, sealed FROM workspace_snapshots WHERE id = ?",
+      ).get(workspace.activeSnapshotId) as { workspace_id: string; sealed: number } | undefined;
+      if (!activeSnapshotState
+        || activeSnapshotState.workspace_id !== workspace.id
+        || activeSnapshotState.sealed !== 1) {
+        throw new WorkspaceGraphValidationError(
+          "Workspace active Snapshot must be a sealed Snapshot owned by the current Workspace",
+        );
+      }
+      const activeSnapshot = this.requireSnapshot(workspace.id, workspace.activeSnapshotId);
+      if (activeSnapshot.graphRevision !== graph.revision
+        || activeSnapshot.kernelRevisionId !== workspace.activeKernelRevisionId
+        || !graphsAreSemanticallyEqual(activeSnapshot.graph, graph)) {
+        throw new WorkspaceGraphValidationError(
+          "Workspace active Snapshot does not match its current graph and Kernel pointers",
+        );
+      }
+      this.requireKernelRevision(workspace.activeKernelRevisionId);
+      this.validateCanonicalGraphResourceIdentities(workspace.id, graph);
+
+      if (proposalId !== undefined) {
+        const proposal = this.requireProposalForProject(projectId, proposalId);
+        const baseSnapshot = this.requireSnapshot(workspace.id, proposal.baseSnapshotId);
+        if (baseSnapshot.graphRevision !== proposal.baseGraphRevision
+          || !graphsAreSemanticallyEqual(baseSnapshot.graph, proposal.baseGraph)) {
+          throw new WorkspaceGraphValidationError(
+            `Workspace Proposal ${proposal.id} base Snapshot does not match its immutable base graph`,
+          );
+        }
+      }
+    });
   }
 
   listProposals(projectId: string): WorkspaceProposalRecord[] {
@@ -2120,6 +2159,69 @@ export class WorkspaceStore {
     this.validateProposalDependencies(proposal, artifactNodes, resourceNodes, resourceResolution);
     this.validateProposalPrototypeIntents(proposal, graph);
     return graph;
+  }
+
+  private validateCanonicalGraphResourceIdentities(
+    workspaceId: string,
+    graph: WorkspaceGraph,
+  ): void {
+    const creationKinds = new Map<string, string>();
+    const commandRows = this.db.prepare(
+      `SELECT command_id, payload_json
+       FROM workspace_graph_commands
+       WHERE workspace_id = ?
+       ORDER BY result_revision ASC, batch_index ASC, command_id COLLATE BINARY ASC`,
+    ).all(workspaceId) as Array<{ command_id: string; payload_json: string }>;
+    for (const row of commandRows) {
+      const [command] = normalizeWorkspaceGraphCommands([
+        parseJsonCell(row.payload_json, `Workspace graph command ${row.command_id}`),
+      ]);
+      if (command?.type !== "add-node" || command.node.kind !== "resource"
+        || command.node.createIdentity === undefined) continue;
+      const existing = creationKinds.get(command.node.resourceId);
+      const kind = command.node.createIdentity.resourceKind;
+      if (existing !== undefined && existing !== kind) {
+        throw new WorkspaceGraphValidationError(
+          `Resource ${command.node.resourceId} has conflicting immutable creation identities`,
+        );
+      }
+      creationKinds.set(command.node.resourceId, kind);
+    }
+
+    const resourceRow = this.db.prepare(
+      `SELECT kind, title, head_revision_id, archived_at
+       FROM resources WHERE id = ? AND workspace_id = ?`,
+    );
+    const ownedHead = this.db.prepare(
+      `SELECT 1 FROM resource_revisions
+       WHERE id = ? AND resource_id = ? AND workspace_id = ?`,
+    );
+    for (const node of graph.nodes) {
+      if (node.kind !== "resource") continue;
+      const resource = resourceRow.get(node.resourceId, workspaceId) as {
+        kind: string;
+        title: string;
+        head_revision_id: string | null;
+        archived_at: number | null;
+      } | undefined;
+      if (!resource || resource.archived_at !== null || resource.title !== node.name) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace graph Resource ${node.resourceId} does not match an active owned identity`,
+        );
+      }
+      const creationKind = creationKinds.get(node.resourceId);
+      if (creationKind !== undefined && resource.kind !== creationKind) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace graph Resource ${node.resourceId} does not match its immutable creation identity`,
+        );
+      }
+      if (resource.head_revision_id !== null
+        && !ownedHead.get(resource.head_revision_id, node.resourceId, workspaceId)) {
+        throw new WorkspaceGraphValidationError(
+          `Workspace graph Resource ${node.resourceId} Head is not an exact owned Revision`,
+        );
+      }
+    }
   }
 
   private validateProposalArtifactPlans(

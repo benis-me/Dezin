@@ -7021,6 +7021,167 @@ test("Proposal approval rejects an exact Resource revision policy whose owned re
   store.close();
 });
 
+test("Proposal durable integrity revalidation distinguishes canonical corruption from semantic draft references", () => {
+  const createResourceWorkspace = () => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Proposal durable Resource integrity", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const graph = store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: 0,
+      expectedSnapshotId: workspace.activeSnapshotId,
+      commands: [{
+        id: "add-durable-proposal-resource",
+        type: "add-node",
+        node: {
+          id: "durable-proposal-resource-node",
+          kind: "resource",
+          name: "Durable Proposal resource",
+          resourceId: "durable-proposal-resource",
+          createIdentity: { resourceKind: "research", defaultPinPolicy: "pin-current" },
+        },
+      }],
+    });
+    return { store, project, workspace, graph };
+  };
+
+  {
+    const { store, project, graph } = createResourceWorkspace();
+    const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        resourceOperations: [{
+          operation: "reuse",
+          nodeId: "durable-proposal-resource-node",
+          resourceId: "durable-proposal-resource",
+          kind: "research",
+          title: "Durable Proposal resource",
+          revisionPolicy: { kind: "exact", resourceRevisionId: "draft-only-missing-revision" },
+        }],
+      },
+    }));
+    store.db.prepare(
+      "UPDATE resources SET default_pin_policy = 'manual' WHERE id = 'durable-proposal-resource'",
+    ).run();
+    assert.doesNotThrow(() => store.workspace.assertProposalDurableIntegrityForProject(project.id, proposal.id));
+    assert.throws(
+      () => store.workspace.approveProposalForProject(project.id, proposal.id, "generate"),
+      WorkspaceProposalValidationError,
+    );
+    assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, graph.snapshot.id);
+    store.close();
+  }
+
+  for (const corruption of ["archived", "wrong-kind"] as const) {
+    const { store, project } = createResourceWorkspace();
+    if (corruption === "archived") {
+      store.db.prepare(
+        "UPDATE resources SET archived_at = 999 WHERE id = 'durable-proposal-resource'",
+      ).run();
+    } else {
+      store.db.exec("DROP TRIGGER IF EXISTS resource_identity_update_immutable");
+      store.db.prepare(
+        "UPDATE resources SET kind = 'asset' WHERE id = 'durable-proposal-resource'",
+      ).run();
+    }
+    assert.throws(
+      () => store.workspace.assertProposalDurableIntegrityForProject(project.id),
+      WorkspaceGraphValidationError,
+      corruption,
+    );
+    store.close();
+  }
+
+  {
+    const { store, project, workspace, graph } = createResourceWorkspace();
+    store.db.exec("DROP TRIGGER IF EXISTS workspace_active_state_transition_guard");
+    store.db.prepare(
+      "UPDATE project_workspaces SET active_snapshot_id = ? WHERE id = ?",
+    ).run(workspace.activeSnapshotId, workspace.id);
+    assert.notEqual(graph.snapshot.graphRevision, 0);
+    assert.throws(
+      () => store.workspace.assertProposalDurableIntegrityForProject(project.id),
+      WorkspaceGraphValidationError,
+      "stale active Snapshot",
+    );
+    store.close();
+  }
+
+  {
+    const { store, project, graph } = createResourceWorkspace();
+    store.db.exec("DROP TRIGGER IF EXISTS workspace_snapshot_seal_transition_guard");
+    store.db.prepare(
+      "UPDATE workspace_snapshots SET sealed = 0 WHERE id = ?",
+    ).run(graph.snapshot.id);
+    assert.throws(
+      () => store.workspace.assertProposalDurableIntegrityForProject(project.id),
+      WorkspaceGraphValidationError,
+      "unsealed active Snapshot",
+    );
+    store.close();
+  }
+
+  {
+    const { store, project, workspace } = createResourceWorkspace();
+    const foreignProject = store.createProject({ name: "Foreign active Snapshot", mode: "standard" });
+    const foreignWorkspace = store.workspace.ensureWorkspaceRecord(foreignProject.id);
+    store.db.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TRIGGER IF EXISTS workspace_active_state_transition_guard;
+      DROP TRIGGER IF EXISTS workspace_active_snapshot_update_ownership;
+    `);
+    store.db.prepare(
+      "UPDATE project_workspaces SET active_snapshot_id = ? WHERE id = ?",
+    ).run(foreignWorkspace.activeSnapshotId, workspace.id);
+    store.db.exec("PRAGMA foreign_keys = ON");
+    assert.throws(
+      () => store.workspace.assertProposalDurableIntegrityForProject(project.id),
+      WorkspaceGraphValidationError,
+      "foreign active Snapshot",
+    );
+    store.close();
+  }
+
+  {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Proposal durable Resource pin", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    insertResource(store.db, workspace.id, "durable-pinned-resource");
+    insertResourceRevision(store.db, workspace.id, "durable-pinned-resource", "durable-pinned-resource-v1");
+    store.db.prepare(
+      "UPDATE resources SET head_revision_id = 'durable-pinned-resource-v1' WHERE id = 'durable-pinned-resource'",
+    ).run();
+    const graph = store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: 0,
+      expectedSnapshotId: workspace.activeSnapshotId,
+      commands: [{
+        id: "attach-durable-pinned-resource",
+        type: "add-node",
+        node: {
+          id: "durable-pinned-resource-node",
+          kind: "resource",
+          name: "Title durable-pinned-resource",
+          resourceId: "durable-pinned-resource",
+        },
+      }],
+    });
+    assert.doesNotThrow(() => store.workspace.assertProposalDurableIntegrityForProject(project.id));
+    store.db.exec(`
+      PRAGMA foreign_keys = OFF;
+      DROP TRIGGER IF EXISTS workspace_snapshot_resource_update_immutable;
+    `);
+    store.db.prepare(
+      "UPDATE workspace_snapshot_resources SET revision_id = 'missing-durable-pin' WHERE snapshot_id = ?",
+    ).run(graph.snapshot.id);
+    store.db.exec("PRAGMA foreign_keys = ON");
+    assert.throws(
+      () => store.workspace.assertProposalDurableIntegrityForProject(project.id),
+      WorkspaceGraphValidationError,
+      "corrupt Resource Revision ownership",
+    );
+    store.close();
+  }
+});
+
 test("Resource operations and dependencies require coherent kinds, policies, identities, and pins", () => {
   type ResourceTarget = "planned" | "pinned" | "headless";
   type ResourceOperation = "create" | "revise" | "reuse" | null;

@@ -915,6 +915,134 @@ test("Proposal semantic approval errors are atomic typed 422 responses", async (
   });
 });
 
+test("Proposal 422 revalidation rejects a stale existing active Snapshot", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Proposal stale active Snapshot", mode: "standard" });
+    const initial = await readyWorkspace(base, project.id);
+    const renamed = store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: initial.graph.revision,
+      expectedSnapshotId: initial.activeSnapshot.id,
+      commands: [{
+        id: "rename-before-stale-active-snapshot",
+        type: "rename-node",
+        nodeId: initial.graph.nodes[0]!.id,
+        name: "Renamed before corruption",
+      }],
+    });
+    const ready = await readyWorkspace(base, project.id);
+    assert.equal(ready.activeSnapshot.id, renamed.snapshot.id);
+    const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(ready, "stale-active", {
+        operations: [
+          proposalPageCommand("stale-active-a", "Duplicate page"),
+          proposalPageCommand("stale-active-b", "Duplicate page"),
+        ],
+      })),
+    });
+    assert.equal(createResponse.status, 201);
+    const proposal = await createResponse.json() as { id: string };
+    const approve = store.workspace.approveProposalForProject.bind(store.workspace);
+    store.workspace.approveProposalForProject = ((
+      projectId: string,
+      proposalId: string,
+      mode: Parameters<typeof approve>[2],
+    ) => {
+      try {
+        return approve(projectId, proposalId, mode);
+      } catch (error) {
+        store.db.exec("DROP TRIGGER IF EXISTS workspace_snapshot_update_immutable");
+        store.db.prepare(
+          "UPDATE workspace_snapshots SET graph_revision = ? WHERE id = ?",
+        ).run(ready.graph.revision - 1, ready.activeSnapshot.id);
+        throw error;
+      }
+    }) as typeof store.workspace.approveProposalForProject;
+
+    const approval = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "generate" }),
+      },
+    );
+    assert.equal(approval.status, 500);
+  });
+});
+
+test("Proposal 422 revalidation rejects corrupted canonical Resource identities", async (t) => {
+  for (const corruption of ["archived", "wrong-kind"] as const) {
+    await t.test(corruption, async () => {
+      await withWorkspaceServer(async ({ base, store }) => {
+        const project = store.createProject({ name: `Proposal Resource ${corruption}`, mode: "standard" });
+        const initial = await readyWorkspace(base, project.id);
+        store.workspace.applyGraphCommands(project.id, {
+          baseGraphRevision: initial.graph.revision,
+          expectedSnapshotId: initial.activeSnapshot.id,
+          commands: [{
+            id: `add-${corruption}-proposal-resource`,
+            type: "add-node",
+            node: {
+              id: `${corruption}-proposal-resource-node`,
+              kind: "resource",
+              name: `${corruption} Proposal resource`,
+              resourceId: `${corruption}-proposal-resource`,
+              createIdentity: { resourceKind: "research", defaultPinPolicy: "pin-current" },
+            },
+          }],
+        });
+        const ready = await readyWorkspace(base, project.id);
+        const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(proposalCreateBody(ready, `resource-${corruption}`, {
+            operations: [
+              proposalPageCommand(`${corruption}-a`, "Duplicate page"),
+              proposalPageCommand(`${corruption}-b`, "Duplicate page"),
+            ],
+          })),
+        });
+        assert.equal(createResponse.status, 201);
+        const proposal = await createResponse.json() as { id: string };
+        const approve = store.workspace.approveProposalForProject.bind(store.workspace);
+        store.workspace.approveProposalForProject = ((
+          projectId: string,
+          proposalId: string,
+          mode: Parameters<typeof approve>[2],
+        ) => {
+          try {
+            return approve(projectId, proposalId, mode);
+          } catch (error) {
+            if (corruption === "archived") {
+              store.db.prepare(
+                "UPDATE resources SET archived_at = 999 WHERE id = ?",
+              ).run(`${corruption}-proposal-resource`);
+            } else {
+              store.db.exec("DROP TRIGGER IF EXISTS resource_identity_update_immutable");
+              store.db.prepare(
+                "UPDATE resources SET kind = 'asset' WHERE id = ?",
+              ).run(`${corruption}-proposal-resource`);
+            }
+            throw error;
+          }
+        }) as typeof store.workspace.approveProposalForProject;
+
+        const approval = await fetch(
+          `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: "generate" }),
+          },
+        );
+        assert.equal(approval.status, 500);
+      });
+    });
+  }
+});
+
 test("Prototype workspace reads stay typed and every Standard-only route is zero-write", async () => {
   await withWorkspaceServer(async ({ base, store }) => {
     const project = store.createProject({ name: "Prototype HTTP", mode: "prototype" });
@@ -1185,6 +1313,25 @@ test("workspace layout HTTP persistence stays outside semantic history and stale
     assert.equal(refreshed.graph.revision, initial.graph.revision);
     assert.equal(refreshed.snapshots.length, initial.snapshots.length);
     assert.deepEqual(refreshed.layout, savedLayout);
+
+    const staleChecksum = await fetch(`${base}/api/projects/${project.id}/workspace/layout`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        graphRevision: initial.graph.revision,
+        baseLayoutChecksum: initial.layout.checksum,
+        commands: [{ type: "set-viewport", viewport: { x: 88, y: 88, zoom: 1.5 } }],
+      }),
+    });
+    assert.equal(staleChecksum.status, 409);
+    assert.deepEqual(await staleChecksum.json(), {
+      error: `workspace layout conflict: expected ${initial.layout.checksum}, current ${savedLayout.checksum}`,
+      code: "workspace_layout_conflict",
+      expectedGraphRevision: initial.graph.revision,
+      actualGraphRevision: initial.graph.revision,
+      expectedLayoutChecksum: initial.layout.checksum,
+      actualLayoutChecksum: savedLayout.checksum,
+    });
 
     const stale = await fetch(`${base}/api/projects/${project.id}/workspace/layout`, {
       method: "PUT",

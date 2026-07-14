@@ -280,9 +280,7 @@ function revalidateProposalDurableState(
   proposalId?: string,
   layoutId = "default",
 ): void {
-  if (!deps.store.workspace.getBundleByProjectId(projectId)) {
-    throw new Error(`workspace not found for project: ${projectId}`);
-  }
+  deps.store.workspace.assertProposalDurableIntegrityForProject(projectId, proposalId);
   const proposal = proposalId === undefined
     ? undefined
     : deps.store.workspace.getProposalForProject(projectId, proposalId);
@@ -299,6 +297,17 @@ function sendMutationError(
       error: error.message,
       code: "workspace_command_replay_conflict",
       commandIds: error.commandIds,
+    });
+    return true;
+  }
+  if (error instanceof WorkspaceLayoutConflictError) {
+    sendJson(res, 409, {
+      error: error.message,
+      code: "workspace_layout_conflict",
+      expectedGraphRevision: error.expectedRevision,
+      actualGraphRevision: error.actualRevision,
+      expectedLayoutChecksum: error.expectedLayoutChecksum,
+      actualLayoutChecksum: error.actualLayoutChecksum,
     });
     return true;
   }
