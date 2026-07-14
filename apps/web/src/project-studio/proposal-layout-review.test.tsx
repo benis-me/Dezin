@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { useEffect, useRef } from "react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -23,9 +23,16 @@ import {
 } from "./proposal/proposal-diff.ts";
 
 const flowHarness = vi.hoisted(() => {
-  const state = { viewport: { x: 0, y: 0, zoom: 1 } };
+  type MoveHandler = (event: MouseEvent | TouchEvent | null, viewport: WorkspaceViewport) => void;
+  const state = {
+    viewport: { x: 0, y: 0, zoom: 1 },
+    onMove: null as MoveHandler | null,
+    onMoveEnd: null as MoveHandler | null,
+  };
   const setViewport = vi.fn(async (viewport: WorkspaceViewport) => {
     state.viewport = viewport;
+    state.onMove?.(null, viewport);
+    state.onMoveEnd?.(null, viewport);
     return true;
   });
   return {
@@ -48,11 +55,17 @@ vi.mock("@xyflow/react", async () => {
       defaultViewport,
       children,
       "aria-label": ariaLabel,
+      tabIndex,
+      onMove,
+      onMoveEnd,
     }: {
       onInit?: (instance: unknown) => void;
       defaultViewport: WorkspaceViewport;
       children?: ReactNode;
       "aria-label"?: string;
+      tabIndex?: number;
+      onMove?: (event: MouseEvent | TouchEvent | null, viewport: WorkspaceViewport) => void;
+      onMoveEnd?: (event: MouseEvent | TouchEvent | null, viewport: WorkspaceViewport) => void;
     }) => {
       const initialized = useRef(false);
       useEffect(() => {
@@ -61,7 +74,15 @@ vi.mock("@xyflow/react", async () => {
         flowHarness.state.viewport = defaultViewport;
         onInit?.(flowHarness);
       }, [defaultViewport, onInit]);
-      return <div role="application" aria-label={ariaLabel}>{children}</div>;
+      useEffect(() => {
+        flowHarness.state.onMove = onMove ?? null;
+        flowHarness.state.onMoveEnd = onMoveEnd ?? null;
+        return () => {
+          if (flowHarness.state.onMove === onMove) flowHarness.state.onMove = null;
+          if (flowHarness.state.onMoveEnd === onMoveEnd) flowHarness.state.onMoveEnd = null;
+        };
+      }, [onMove, onMoveEnd]);
+      return <div role="application" aria-label={ariaLabel} tabIndex={tabIndex}>{children}</div>;
     },
   };
 });
@@ -120,6 +141,8 @@ describe("proposal layout review parity", () => {
     flowHarness.getViewport.mockClear();
     flowHarness.fitView.mockClear();
     flowHarness.getNodes.mockClear();
+    flowHarness.state.onMove = null;
+    flowHarness.state.onMoveEnd = null;
   });
 
   test("materializes a newly added semantic node before move and set-parent replay", () => {
@@ -466,5 +489,88 @@ describe("proposal layout review parity", () => {
 
     await waitFor(() => expect(flowHarness.setViewport).toHaveBeenCalledWith(approvedLayout.viewport));
     expect(onSaveLayout).not.toHaveBeenCalled();
+  });
+
+  test("Review previews a proposed viewport, focuses the canvas, and restores the canonical viewport without saving", async () => {
+    const proposedViewport = { x: -188, y: 76, zoom: 0.72 };
+    const proposalInput = proposal({
+      layoutOperations: [{ type: "set-viewport", viewport: proposedViewport }],
+    });
+    const proposalDiff = buildProposalDiff(proposalInput, current());
+    const onSaveLayout = vi.fn(async (_commands: readonly WorkspaceLayoutCommand[]) => baseLayout);
+    const sharedProps = {
+      projectId: "project-1",
+      projectName: "Storefront",
+      graph: baseGraph,
+      layout: baseLayout,
+      artifactRevisionIds: {},
+      selectedNodeIds: [],
+      onSelectionChange: vi.fn(),
+      onSaveLayout,
+      onApplyGraphCommands: vi.fn(async () => {}),
+      onOpenArtifact: vi.fn(),
+    };
+    const rendered = render(
+      <ProjectCanvas
+        {...sharedProps}
+        proposal={{ id: proposalInput.id }}
+        proposalDiff={proposalDiff}
+        proposalFocus={{ key: "layout:viewport", nonce: 1 }}
+      />,
+    );
+
+    await waitFor(() => expect(flowHarness.setViewport).toHaveBeenCalledWith(proposedViewport));
+    expect(screen.getByRole("application", { name: "Project canvas" })).toHaveFocus();
+    expect(onSaveLayout).not.toHaveBeenCalled();
+
+    flowHarness.setViewport.mockClear();
+    rendered.rerender(<ProjectCanvas {...sharedProps} proposal={null} proposalDiff={null} proposalFocus={null} />);
+
+    await waitFor(() => expect(flowHarness.setViewport).toHaveBeenCalledWith(baseLayout.viewport));
+    expect(onSaveLayout).not.toHaveBeenCalled();
+  });
+
+  test("a user pan after viewport Review remains a normal persisted canvas gesture", async () => {
+    const proposedViewport = { x: -188, y: 76, zoom: 0.72 };
+    const userViewport = { x: -240, y: 92, zoom: 0.68 };
+    const proposalInput = proposal({
+      layoutOperations: [{ type: "set-viewport", viewport: proposedViewport }],
+    });
+    const onSaveLayout = vi.fn(async (commands: readonly WorkspaceLayoutCommand[]) => {
+      const command = commands.at(-1);
+      return {
+        ...baseLayout,
+        viewport: command?.type === "set-viewport" ? command.viewport : baseLayout.viewport,
+      };
+    });
+    render(
+      <ProjectCanvas
+        projectId="project-1"
+        projectName="Storefront"
+        graph={baseGraph}
+        layout={baseLayout}
+        artifactRevisionIds={{}}
+        selectedNodeIds={[]}
+        onSelectionChange={vi.fn()}
+        onSaveLayout={onSaveLayout}
+        onApplyGraphCommands={vi.fn(async () => {})}
+        onOpenArtifact={vi.fn()}
+        proposal={{ id: proposalInput.id }}
+        proposalDiff={buildProposalDiff(proposalInput, current())}
+        proposalFocus={{ key: "layout:viewport", nonce: 1 }}
+      />,
+    );
+    await waitFor(() => expect(flowHarness.setViewport).toHaveBeenCalledWith(proposedViewport));
+
+    act(() => {
+      const gesture = new MouseEvent("pointermove");
+      flowHarness.state.viewport = userViewport;
+      flowHarness.state.onMove?.(gesture, userViewport);
+      flowHarness.state.onMoveEnd?.(gesture, userViewport);
+    });
+
+    await waitFor(() => expect(onSaveLayout).toHaveBeenCalledWith([
+      { type: "set-viewport", viewport: userViewport },
+    ]));
   });
 });

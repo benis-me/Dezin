@@ -154,6 +154,7 @@ export function ProjectCanvas({
   const pendingViewportRef = useRef<WorkspaceViewport | null>(null);
   const lastMoveBatchRef = useRef<{ key: string; at: number } | null>(null);
   const handledProposalFocusRef = useRef<{ proposalId: string; nonce: number } | null>(null);
+  const proposalViewportPreviewRef = useRef<{ proposalId: string; changeKey: string } | null>(null);
   const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
   const [tool, setTool] = useState<CanvasTool>("select");
   const [edgeFilter, setEdgeFilter] = useState<WorkspaceEdgeFilter>("flow");
@@ -181,6 +182,7 @@ export function ProjectCanvas({
   const synchronizeAuthoritativeViewport = useCallback((
     instance: ReactFlowInstance<WorkspaceFlowNode, WorkspaceFlowEdge>,
   ) => {
+    proposalViewportPreviewRef.current = null;
     if (sameViewport(instance.getViewport(), viewport)) return;
     if (viewportTimerRef.current !== null) {
       window.clearTimeout(viewportTimerRef.current);
@@ -332,6 +334,38 @@ export function ProjectCanvas({
   }, [model]);
 
   useEffect(() => {
+    if (!proposal || !proposalDiff || !proposalFocus) return;
+    const handled = handledProposalFocusRef.current;
+    if (handled?.proposalId === proposal.id && handled.nonce === proposalFocus.nonce) return;
+    const viewportChange = proposalDiff.viewportChanges.find((change) => change.key === proposalFocus.key);
+    const instance = flowRef.current;
+    const nextViewport = proposalDiff.proposedLayout?.viewport;
+    if (!viewportChange || !instance || !nextViewport) return;
+    let active = true;
+    if (viewportTimerRef.current !== null) {
+      window.clearTimeout(viewportTimerRef.current);
+      viewportTimerRef.current = null;
+    }
+    pendingViewportRef.current = null;
+    proposalViewportPreviewRef.current = { proposalId: proposal.id, changeKey: viewportChange.key };
+    handledProposalFocusRef.current = {
+      proposalId: proposal.id,
+      nonce: proposalFocus.nonce,
+    };
+    setZoom(nextViewport.zoom);
+    setAdapterZoom(nextViewport.zoom);
+    void instance.setViewport(nextViewport).then(() => {
+      if (!active) return;
+      canvasRef.current
+        ?.querySelector<HTMLElement>('[role="application"][aria-label="Project canvas"]')
+        ?.focus();
+    }).catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [proposal, proposalDiff, proposalFocus]);
+
+  useEffect(() => {
     if (!proposal || !proposalFocus || (overlayModel.nodes.length === 0 && overlayModel.edges.length === 0)) return;
     const handled = handledProposalFocusRef.current;
     if (handled?.proposalId === proposal.id && handled.nonce === proposalFocus.nonce) return;
@@ -384,6 +418,17 @@ export function ProjectCanvas({
       if (focusFrame !== null) window.cancelAnimationFrame(focusFrame);
     };
   }, [overlayModel, proposal, proposalFocus]);
+
+  useEffect(() => {
+    const preview = proposalViewportPreviewRef.current;
+    if (!preview) return;
+    const previewStillExists = proposal?.id === preview.proposalId
+      && proposalDiff?.viewportChanges.some((change) => change.key === preview.changeKey) === true;
+    if (previewStillExists) return;
+    const instance = flowRef.current;
+    if (instance) synchronizeAuthoritativeViewport(instance);
+    else proposalViewportPreviewRef.current = null;
+  }, [proposal, proposalDiff, synchronizeAuthoritativeViewport]);
 
   useEffect(() => () => {
     if (viewportTimerRef.current !== null) window.clearTimeout(viewportTimerRef.current);
@@ -505,7 +550,10 @@ export function ProjectCanvas({
   const handleViewportMove = useCallback((event: MouseEvent | TouchEvent | null, next: Viewport) => {
     setZoom(next.zoom);
     setAdapterZoom((current) => semanticZoomLevel(current) === semanticZoomLevel(next.zoom) ? current : next.zoom);
-    if (event !== null) pendingViewportRef.current = next;
+    if (event !== null) {
+      proposalViewportPreviewRef.current = null;
+      pendingViewportRef.current = next;
+    }
   }, []);
 
   const handleViewportEnd = useCallback((event: MouseEvent | TouchEvent | null, next: Viewport) => {
@@ -633,6 +681,7 @@ export function ProjectCanvas({
       <div className="dezin-project-canvas__surface" data-tool={tool}>
         <ReactFlow<WorkspaceFlowNode, WorkspaceFlowEdge>
           aria-label="Project canvas"
+          tabIndex={0}
           ariaLabelConfig={CANVAS_ARIA_LABEL_CONFIG}
           nodes={nodes}
           edges={edges}
