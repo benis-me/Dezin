@@ -1435,7 +1435,6 @@ export function asWorkspaceLayoutValue(value: unknown): WorkspaceLayout {
 
 function asWorkspaceProposalReview(value: unknown): WorkspaceProposalReview {
   const review = boundaryRecord(value, "Workspace Proposal review");
-  if (Object.keys(review).length === 0) return { kind: "none" };
   const kind = exactStoredString(review.kind, "Workspace Proposal review kind");
   if (kind === "none" || kind === "rejected") {
     allowFields(review, ["kind"], "Workspace Proposal review");
@@ -1552,7 +1551,23 @@ export function asWorkspaceProposal(
 }
 
 export function asWorkspaceProposalAudit(row: Row): WorkspaceProposalRecord {
-  return asWorkspaceProposalValue(parseJson(row.payload_json, "Workspace Proposal audit payload"));
+  const proposal = asWorkspaceProposalValue(parseJson(row.payload_json, "Workspace Proposal audit payload"));
+  const proposalId = requiredString(row.proposal_id, "Workspace Proposal audit Proposal id");
+  const revision = positiveInteger(row.revision, "Workspace Proposal audit revision");
+  const createdAt = timestamp(row.created_at, "Workspace Proposal audit created_at");
+  if (proposal.id !== proposalId) {
+    throw new WorkspaceStoreCodecError("Workspace Proposal audit row Proposal id does not match its payload");
+  }
+  if (proposal.revision !== revision) {
+    throw new WorkspaceStoreCodecError("Workspace Proposal audit row revision does not match its payload");
+  }
+  if (proposal.updatedAt !== createdAt) {
+    throw new WorkspaceStoreCodecError("Workspace Proposal audit row created_at does not match its payload");
+  }
+  if (proposal.status !== "draft" || proposal.review.kind !== "none") {
+    throw new WorkspaceStoreCodecError("Workspace Proposal audit payload must capture an unreviewed draft revision");
+  }
+  return proposal;
 }
 
 export function asGenerationPlan(row: Row): GenerationPlanRecord {

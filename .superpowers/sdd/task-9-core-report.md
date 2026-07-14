@@ -89,3 +89,45 @@ Result: exit 0.
 - Verified all Core tests and the complete Node TypeScript program after the final diff.
 
 No unresolved Core concerns. Daemon/Web callers must send the new required `baseLayoutChecksum`; their Task 9 integration owns that transport update.
+
+## Fix Review
+
+Addressed every finding in `task-9-core-review-checklist.md`:
+
+- added `BEFORE INSERT` duplicate-identity guards for Proposal, Proposal audit, and Generation Plan rows, so `INSERT OR REPLACE` cannot delete immutable history even with `recursive_triggers = OFF`;
+- required Proposal base Snapshots to be sealed, same-Workspace, and pinned to the Proposal's base graph revision at both the SQL insert and strict read boundaries;
+- made audit decoding cross-check relational identity/revision/timestamp metadata, rejected `{}` reviews, and required a contiguous audit history plus exact current-revision coherence;
+- guarded the audited base layout checksum for every approval, including graph-only proposals;
+- rejected imported `component-propagation` commands before stale/conflict state can mutate;
+- validated Artifact create/revise plans against the final graph, proposed name, planned Artifact/Track identity, and exact sealed base Revision semantics while preserving valid planned identities for Task 12.
+
+The SQL/read-boundary audit found that the former base-anchor foreign keys proved only same-Workspace scalar existence. `decodeProposalRow()` did not load the base Snapshot, so raw imports could anchor a Proposal to an unsealed Snapshot or to a Snapshot from a different graph revision. The new insert trigger and strict Snapshot read close both paths.
+
+### RED
+
+The focused review tests were added before the production changes. The first complete Core run reported:
+
+```text
+tests 166; pass 157; fail 9
+```
+
+The failures covered all six review areas. In particular, the recursive-trigger-off replacement probe observed `[false, false, false]` for Proposal, audit, and Plan replacement protection, and a separate current-row rollback probe failed with `Missing expected exception` before contiguous audit verification existed.
+
+### GREEN
+
+```text
+pnpm --filter @dezin/core test
+tests 168; pass 168; fail 0; cancelled 0; skipped 0
+
+pnpm --filter @dezin/core test:coverage
+tests 168; pass 168; fail 0
+all files: lines 91.81%; branches 79.01%; functions 91.04%
+
+pnpm exec tsc -p tsconfig.check.json --noEmit
+exit 0
+
+git diff --check
+exit 0
+```
+
+The immutable-history test also verifies the exact original rows survive failed replacements, `PRAGMA foreign_key_check` remains empty, `PRAGMA quick_check` is `ok`, and root Project deletion still cascades successfully.

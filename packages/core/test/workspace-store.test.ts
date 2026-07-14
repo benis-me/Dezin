@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import {
   Store,
+  asWorkspaceProposalAudit,
   LegacyWorkspaceSeedDriftError,
   WorkspaceCommandReplayConflictError,
   WorkspaceLayoutConflictError,
@@ -26,6 +27,7 @@ import {
   type StoreClock,
   type WorkspaceArtifactRecord,
   type WorkspaceGraphCommand,
+  type WorkspaceProposal,
   type WorkspaceSnapshotRecord,
 } from "../src/index.ts";
 import { asProjectWorkspace } from "../src/workspace-codecs.ts";
@@ -354,6 +356,44 @@ function workspaceGenerationProposalInput(
     assumptions: [],
     ...overrides,
   };
+}
+
+function insertRawWorkspaceProposal(db: DatabaseSync, proposal: WorkspaceProposal): void {
+  db.prepare(
+    `INSERT INTO workspace_proposals (
+       id, workspace_id, base_graph_revision, base_snapshot_id, revision, kind, status,
+       operations_json, layout_id, base_layout_checksum, base_layout_json,
+       layout_operations_json, rationale, assumptions_json, generation_payload_json,
+       review_json, created_by_run_id, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    proposal.id,
+    proposal.workspaceId,
+    proposal.baseGraphRevision,
+    proposal.baseSnapshotId,
+    proposal.revision,
+    proposal.kind,
+    proposal.status,
+    JSON.stringify(proposal.operations),
+    proposal.layoutId,
+    proposal.baseLayoutChecksum,
+    JSON.stringify(proposal.baseLayout),
+    JSON.stringify(proposal.layoutOperations),
+    proposal.rationale,
+    JSON.stringify(proposal.assumptions),
+    JSON.stringify(proposal.generation),
+    JSON.stringify(proposal.review),
+    proposal.createdByRunId,
+    proposal.createdAt,
+    proposal.updatedAt,
+  );
+}
+
+function insertRawWorkspaceProposalAudit(db: DatabaseSync, proposal: WorkspaceProposal): void {
+  db.prepare(
+    `INSERT INTO workspace_proposal_audit (proposal_id, revision, payload_json, created_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(proposal.id, proposal.revision, JSON.stringify(proposal), proposal.updatedAt);
 }
 
 function seedSnapshotSuccessor(
@@ -6795,6 +6835,472 @@ test("Proposal approval rejects an exact Resource revision policy whose owned re
   assert.equal(store.workspace.getProposal(proposal.id)?.status, "draft");
   assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, graph.snapshot.id);
   assert.equal(rowCount(store.db, "generation_plans"), 0);
+  store.close();
+});
+
+test("Proposal, audit, and Plan identities reject INSERT OR REPLACE with recursive triggers disabled", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal replace guards", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const auditProposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const planProposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const plan = store.workspace.approveProposal(planProposal.id, "generate").plan!;
+  const replacedProposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const proposalBefore = store.db.prepare("SELECT * FROM workspace_proposals WHERE id = ?").get(replacedProposal.id);
+  const auditBefore = store.db.prepare(
+    "SELECT * FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = 1",
+  ).get(auditProposal.id);
+  const planBefore = store.db.prepare("SELECT * FROM generation_plans WHERE id = ?").get(plan.id);
+  store.db.exec("PRAGMA recursive_triggers = OFF");
+  const rejected = (action: () => void) => {
+    try {
+      action();
+      return false;
+    } catch {
+      return true;
+    }
+  };
+
+  const results = [
+    rejected(() => store.db.prepare(
+      `INSERT OR REPLACE INTO workspace_proposal_audit
+       SELECT * FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = 1`,
+    ).run(auditProposal.id)),
+    rejected(() => store.db.prepare(
+      "INSERT OR REPLACE INTO generation_plans SELECT * FROM generation_plans WHERE id = ?",
+    ).run(plan.id)),
+    rejected(() => store.db.prepare(
+      "INSERT OR REPLACE INTO workspace_proposals SELECT * FROM workspace_proposals WHERE id = ?",
+    ).run(replacedProposal.id)),
+  ];
+
+  assert.deepEqual(results, [true, true, true]);
+  assert.deepEqual(store.db.prepare("SELECT * FROM workspace_proposals WHERE id = ?").get(replacedProposal.id), proposalBefore);
+  assert.deepEqual(store.db.prepare(
+    "SELECT * FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = 1",
+  ).get(auditProposal.id), auditBefore);
+  assert.deepEqual(store.db.prepare("SELECT * FROM generation_plans WHERE id = ?").get(plan.id), planBefore);
+  assert.equal(rowCount(store.db, "workspace_proposal_audit"), 3);
+  assert.equal(rowCount(store.db, "generation_plans"), 1);
+  assert.deepEqual(store.db.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.deepEqual(
+      (store.db.prepare("PRAGMA quick_check").all() as Array<{ quick_check: string }>).map(
+        (row) => row.quick_check,
+      ),
+      ["ok"],
+    );
+  store.deleteProject(project.id);
+  assert.equal(rowCount(store.db, "workspace_proposals"), 0);
+  assert.equal(rowCount(store.db, "workspace_proposal_audit"), 0);
+  assert.equal(rowCount(store.db, "generation_plans"), 0);
+  store.close();
+});
+
+test("SQLite rejects unsealed or graph-incoherent Proposal base Snapshots", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal Snapshot anchors", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const changed = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [proposalPageCommand("snapshot-anchor")],
+  });
+  store.db.prepare(
+    `INSERT INTO workspace_snapshots (
+       id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+       reason, provenance_json, created_by_run_id, created_at, sealed
+     ) VALUES ('unsealed-proposal-base', ?, 3, ?, 0, ?, 'fixture',
+               '{"kind":"legacy-migration","migration":"proposal-anchor"}', NULL, 999, 0)`,
+  ).run(workspace.id, workspace.activeSnapshotId, workspace.activeKernelRevisionId);
+  const rejected = (candidate: WorkspaceProposal) => {
+    try {
+      insertRawWorkspaceProposal(store.db, candidate);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+
+  assert.deepEqual([
+    rejected({ ...proposal, id: "graph-incoherent-proposal", baseSnapshotId: changed.snapshot.id }),
+    rejected({ ...proposal, id: "unsealed-base-proposal", baseSnapshotId: "unsealed-proposal-base" }),
+  ], [true, true]);
+  store.close();
+});
+
+test("Proposal readback rejects an imported base Snapshot whose graph does not match the base graph", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Imported Proposal anchor", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const changed = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [proposalPageCommand("imported-anchor")],
+  });
+  store.db.exec("DROP TRIGGER IF EXISTS workspace_proposal_base_snapshot_insert_guard");
+  const imported = { ...proposal, id: "imported-incoherent-proposal", baseSnapshotId: changed.snapshot.id };
+  insertRawWorkspaceProposal(store.db, imported);
+  insertRawWorkspaceProposalAudit(store.db, imported);
+
+  assert.throws(() => store.workspace.getProposal(imported.id), /base Snapshot.*graph|Snapshot.*base graph|incoherent/i);
+  assert.throws(
+    () => store.workspace.getProposalRevision(imported.id, imported.revision),
+    /base Snapshot.*graph|Snapshot.*base graph|incoherent/i,
+  );
+  store.close();
+});
+
+test("Proposal readers require current-row coherence with the exact current audit revision", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal read coherence", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  store.db.prepare("UPDATE workspace_proposals SET rationale = 'forged current payload' WHERE id = ?")
+    .run(proposal.id);
+  const rejects = (read: () => unknown) => {
+    try {
+      read();
+      return false;
+    } catch {
+      return true;
+    }
+  };
+
+  assert.deepEqual([
+    rejects(() => store.workspace.getProposal(proposal.id)),
+    rejects(() => store.workspace.listProposals(project.id)),
+  ], [true, true]);
+  store.close();
+});
+
+test("Proposal readback rejects a current-row rollback to an older coherent audit revision", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal audit rollback", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const revisionOne = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  store.workspace.updateProposal(revisionOne.id, {
+    expectedProposalRevision: 1,
+    operations: revisionOne.operations,
+    layoutOperations: revisionOne.layoutOperations,
+    generation: revisionOne.generation,
+    rationale: "Revision two",
+    assumptions: ["newer"],
+  });
+  store.db.prepare(
+    `UPDATE workspace_proposals
+     SET revision = ?, operations_json = ?, layout_operations_json = ?, rationale = ?,
+         assumptions_json = ?, generation_payload_json = ?, review_json = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(
+    revisionOne.revision,
+    JSON.stringify(revisionOne.operations),
+    JSON.stringify(revisionOne.layoutOperations),
+    revisionOne.rationale,
+    JSON.stringify(revisionOne.assumptions),
+    JSON.stringify(revisionOne.generation),
+    JSON.stringify(revisionOne.review),
+    revisionOne.updatedAt,
+    revisionOne.id,
+  );
+
+  assert.throws(() => store.workspace.getProposal(revisionOne.id), /latest audit revision|audit history/i);
+  store.close();
+});
+
+test("Proposal audit decoding cross-checks relational metadata and rejects empty review objects", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal audit metadata", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const row = {
+    proposal_id: proposal.id,
+    revision: proposal.revision,
+    payload_json: JSON.stringify(proposal),
+    created_at: proposal.updatedAt,
+  };
+  const rejects = (candidate: Record<string, unknown>) => {
+    try {
+      asWorkspaceProposalAudit(candidate);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  store.db.prepare("UPDATE workspace_proposals SET review_json = '{}' WHERE id = ?").run(proposal.id);
+
+  assert.deepEqual([
+    rejects({ ...row, proposal_id: "different-proposal" }),
+    rejects({ ...row, revision: proposal.revision + 1 }),
+    rejects({ ...row, created_at: proposal.updatedAt + 1 }),
+  ], [true, true, true]);
+  assert.throws(() => store.workspace.getProposal(proposal.id), /review.*kind|review/i);
+  store.close();
+});
+
+test("graph-only Proposal approval conflicts when its audited base layout drifts", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Graph-only layout conflict", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [proposalPageCommand("graph-only-layout")],
+  ));
+  const layout = store.workspace.getLayout(project.id);
+  store.workspace.saveLayout(project.id, {
+    graphRevision: workspace.graphRevision,
+    baseLayoutChecksum: layout.checksum,
+    commands: [{
+      type: "add-group",
+      groupId: "concurrent-layout-group",
+      label: "Concurrent",
+      bounds: { x: 0, y: 0, width: 200, height: 120 },
+    }],
+  });
+  const conflicts: WorkspaceProposalConflictError[] = [];
+
+  assert.throws(() => store.workspace.approveProposal(proposal.id, "structure-only"), (error) => {
+    if (error instanceof WorkspaceProposalConflictError) conflicts.push(error);
+    return error instanceof WorkspaceProposalConflictError;
+  });
+  assert.equal(conflicts[0]?.summary.layoutChanged, true);
+  assert.equal(store.workspace.getProposal(proposal.id)?.status, "conflicted");
+  assert.equal(store.workspace.getGraph(project.id).revision, 0);
+  store.close();
+});
+
+test("raw component-propagation approval rejects before stale conflict mutation", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Imported propagation", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const seed = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const imported: WorkspaceProposal = {
+    ...seed,
+    id: "imported-component-propagation",
+    kind: "component-propagation",
+    generation: {
+      kind: "component-propagation",
+      impactAnalysisId: "impact-imported",
+      componentArtifactId: "component-imported",
+      fromRevisionId: "component-imported-v1",
+      toRevisionId: "component-imported-v2",
+      selectedInstanceIds: [],
+      overrideResolutions: [],
+      requiredQaFrameIds: [],
+    },
+  };
+  insertRawWorkspaceProposal(store.db, imported);
+  insertRawWorkspaceProposalAudit(store.db, imported);
+  store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [proposalPageCommand("propagation-stale")],
+  });
+
+  assert.throws(
+    () => store.workspace.approveProposal(imported.id, "generate"),
+    WorkspaceProposalValidationError,
+  );
+  const reloaded = store.workspace.getProposal(imported.id)!;
+  assert.equal(reloaded.status, "draft");
+  assert.deepEqual(reloaded.review, { kind: "none" });
+  assert.equal(rowCount(store.db, "generation_plans"), 0);
+  store.close();
+});
+
+test("Artifact create plans match proposed names, Track identities, and null base Revisions", () => {
+  const rejectsCreate = (overrides: Record<string, unknown>) => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Artifact create plan", mode: "standard" });
+    store.workspace.ensureWorkspaceRecord(project.id);
+    const command = proposalPageCommand("artifact-create");
+    const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [command], {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        artifactPlans: [{
+          operation: "create",
+          nodeId: "proposal-node-artifact-create",
+          artifactId: "proposal-artifact-artifact-create",
+          kind: "page",
+          name: "Page artifact-create",
+          trackId: "proposal-track-artifact-create",
+          baseRevisionId: null,
+          dependsOnArtifactIds: [],
+          capabilityIds: [],
+          responsiveFrameIds: [],
+          ...overrides,
+        }],
+      },
+    }));
+    try {
+      store.workspace.approveProposal(proposal.id, "generate");
+      return false;
+    } catch (error) {
+      return error instanceof WorkspaceProposalValidationError;
+    } finally {
+      store.close();
+    }
+  };
+
+  assert.deepEqual([
+    rejectsCreate({ name: "Wrong final name" }),
+    rejectsCreate({ trackId: "wrong-planned-track" }),
+    rejectsCreate({ baseRevisionId: "unexpected-base-revision" }),
+  ], [true, true, true]);
+});
+
+test("Artifact plans distinguish new planned identities from existing Revision bases", () => {
+  const rejectsExistingPlan = (overrides: Record<string, unknown>) => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Artifact revise plan", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const added = store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: 0,
+      expectedSnapshotId: workspace.activeSnapshotId,
+      commands: [proposalPageCommand("artifact-revise")],
+    });
+    const revision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+      artifactId: "proposal-artifact-artifact-revise",
+      trackId: "proposal-track-artifact-revise",
+      parentRevisionId: null,
+      kernelRevisionId: workspace.activeKernelRevisionId,
+      tree: "proposal-artifact-revise-v1",
+    }));
+    store.workspace.publishArtifactRevision(revision.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: added.snapshot.id,
+    });
+    const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        artifactPlans: [{
+          operation: "revise",
+          nodeId: "proposal-node-artifact-revise",
+          artifactId: "proposal-artifact-artifact-revise",
+          kind: "page",
+          name: "Page artifact-revise",
+          trackId: "proposal-track-artifact-revise",
+          baseRevisionId: revision.id,
+          dependsOnArtifactIds: [],
+          capabilityIds: [],
+          responsiveFrameIds: [],
+          ...overrides,
+        }],
+      },
+    }));
+    try {
+      store.workspace.approveProposal(proposal.id, "generate");
+      return false;
+    } catch (error) {
+      return error instanceof WorkspaceProposalValidationError;
+    } finally {
+      store.close();
+    }
+  };
+  const rejectsPlannedRevise = () => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Planned Artifact revise", mode: "standard" });
+    store.workspace.ensureWorkspaceRecord(project.id);
+    const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+      store,
+      project.id,
+      [proposalPageCommand("planned-revise")],
+      {
+        generation: {
+          ...emptyWorkspaceGenerationPayload(),
+          artifactPlans: [{
+            operation: "revise",
+            nodeId: "proposal-node-planned-revise",
+            artifactId: "proposal-artifact-planned-revise",
+            kind: "page",
+            name: "Page planned-revise",
+            trackId: "proposal-track-planned-revise",
+            baseRevisionId: null,
+            dependsOnArtifactIds: [],
+            capabilityIds: [],
+            responsiveFrameIds: [],
+          }],
+        },
+      },
+    ));
+    try {
+      store.workspace.approveProposal(proposal.id, "generate");
+      return false;
+    } catch (error) {
+      return error instanceof WorkspaceProposalValidationError;
+    } finally {
+      store.close();
+    }
+  };
+
+  assert.deepEqual([
+    rejectsExistingPlan({ operation: "create", baseRevisionId: null }),
+    rejectsExistingPlan({ baseRevisionId: null }),
+    rejectsExistingPlan({ trackId: "missing-track" }),
+    rejectsExistingPlan({ baseRevisionId: "missing-base-revision" }),
+    rejectsPlannedRevise(),
+  ], [true, true, true, true, true]);
+});
+
+test("valid Artifact create and revise plans preserve planned identities and exact Revision bases", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Valid Artifact plans", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const command = proposalPageCommand("valid-artifact-plan");
+  const createProposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [command], {
+    generation: {
+      ...emptyWorkspaceGenerationPayload(),
+      artifactPlans: [{
+        operation: "create",
+        nodeId: "proposal-node-valid-artifact-plan",
+        artifactId: "proposal-artifact-valid-artifact-plan",
+        kind: "page",
+        name: "Page valid-artifact-plan",
+        trackId: "proposal-track-valid-artifact-plan",
+        baseRevisionId: null,
+        dependsOnArtifactIds: [],
+        capabilityIds: [],
+        responsiveFrameIds: [],
+      }],
+    },
+  }));
+  const created = store.workspace.approveProposal(createProposal.id, "generate");
+  assert.equal(store.workspace.getArtifact("proposal-artifact-valid-artifact-plan")?.kind, "page");
+  assert.equal(store.workspace.getTrack("proposal-track-valid-artifact-plan")?.artifactId, "proposal-artifact-valid-artifact-plan");
+
+  const revision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "proposal-artifact-valid-artifact-plan",
+    trackId: "proposal-track-valid-artifact-plan",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "valid-artifact-plan-v1",
+  }));
+  store.workspace.publishArtifactRevision(revision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: created.snapshot.id,
+  });
+  const reviseProposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+    generation: {
+      ...emptyWorkspaceGenerationPayload(),
+      artifactPlans: [{
+        operation: "revise",
+        nodeId: "proposal-node-valid-artifact-plan",
+        artifactId: "proposal-artifact-valid-artifact-plan",
+        kind: "page",
+        name: "Page valid-artifact-plan",
+        trackId: "proposal-track-valid-artifact-plan",
+        baseRevisionId: revision.id,
+        dependsOnArtifactIds: [],
+        capabilityIds: [],
+        responsiveFrameIds: [],
+      }],
+    },
+  }));
+  const revised = store.workspace.approveProposal(reviseProposal.id, "generate");
+  assert.equal(revised.graph.revision, created.graph.revision);
+  assert.equal(revised.plan?.baseSnapshotId, reviseProposal.baseSnapshotId);
   store.close();
 });
 

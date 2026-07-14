@@ -655,7 +655,7 @@ CREATE TABLE IF NOT EXISTS workspace_proposals (
   rationale TEXT NOT NULL,
   assumptions_json TEXT NOT NULL,
   generation_payload_json TEXT NOT NULL,
-  review_json TEXT NOT NULL DEFAULT '{}',
+  review_json TEXT NOT NULL DEFAULT '{"kind":"none"}',
   created_by_run_id TEXT REFERENCES runs(id),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -738,6 +738,20 @@ CREATE INDEX IF NOT EXISTS idx_workspace_proposals_workspace
 CREATE INDEX IF NOT EXISTS idx_generation_plans_workspace
   ON generation_plans(workspace_id, created_at DESC, id);
 
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_insert_immutable
+BEFORE INSERT ON workspace_proposals
+WHEN EXISTS (SELECT 1 FROM workspace_proposals existing WHERE existing.id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_base_snapshot_insert_guard
+BEFORE INSERT ON workspace_proposals
+WHEN NOT EXISTS (
+  SELECT 1 FROM workspace_snapshots snapshot
+  WHERE snapshot.id = NEW.base_snapshot_id
+    AND snapshot.workspace_id = NEW.workspace_id
+    AND snapshot.graph_revision = NEW.base_graph_revision
+    AND snapshot.sealed = 1
+)
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal base Snapshot must be sealed and match its base graph'); END;
 CREATE TRIGGER IF NOT EXISTS workspace_proposal_run_insert_ownership
 BEFORE INSERT ON workspace_proposals
 WHEN NEW.created_by_run_id IS NOT NULL AND NOT EXISTS (
@@ -765,6 +779,13 @@ CREATE TRIGGER IF NOT EXISTS workspace_proposal_delete_history_guard
 BEFORE DELETE ON workspace_proposals
 WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
 BEGIN SELECT RAISE(ABORT, 'Workspace Proposal history is immutable and cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_audit_insert_immutable
+BEFORE INSERT ON workspace_proposal_audit
+WHEN EXISTS (
+  SELECT 1 FROM workspace_proposal_audit existing
+  WHERE existing.proposal_id = NEW.proposal_id AND existing.revision = NEW.revision
+)
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal audit revisions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS workspace_proposal_audit_update_immutable
 BEFORE UPDATE ON workspace_proposal_audit
 BEGIN SELECT RAISE(ABORT, 'Workspace Proposal audit revisions are immutable'); END;
@@ -776,6 +797,10 @@ WHEN EXISTS (
   WHERE proposal.id = OLD.proposal_id
 )
 BEGIN SELECT RAISE(ABORT, 'Workspace Proposal audit history is immutable and cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS generation_plan_insert_immutable
+BEFORE INSERT ON generation_plans
+WHEN EXISTS (SELECT 1 FROM generation_plans existing WHERE existing.id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'Generation Plan identity is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS generation_plan_identity_update_immutable
 BEFORE UPDATE OF id, workspace_id, proposal_id, proposal_revision, base_snapshot_id, created_at ON generation_plans
 WHEN NEW.id IS NOT OLD.id

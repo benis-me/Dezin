@@ -858,9 +858,11 @@ export class WorkspaceStore {
         now,
         now,
       );
-      const proposal = this.requireProposalById(id);
+      const row = this.proposalRow(id);
+      if (!row) throw new WorkspaceGraphValidationError(`Workspace Proposal ${id} was not inserted`);
+      const proposal = this.decodeProposalCurrentRow(row);
       this.insertProposalAuditInTransaction(proposal);
-      return proposal;
+      return this.requireProposalById(id);
     });
   }
 
@@ -898,7 +900,16 @@ export class WorkspaceStore {
       const row = this.db.prepare(
         "SELECT * FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = ?",
       ).get(proposalId, revision) as Row | undefined;
-      return row ? asWorkspaceProposalAudit(row) : null;
+      if (!row) return null;
+      const audited = asWorkspaceProposalAudit(row);
+      const currentRow = this.proposalRow(proposalId);
+      if (!currentRow) throw new WorkspaceStoreCodecError(`Workspace Proposal ${proposalId} is missing`);
+      const current = this.decodeProposalRow(currentRow);
+      if (audited.revision > current.revision) {
+        throw new WorkspaceStoreCodecError("Workspace Proposal audit revision is ahead of its current Proposal");
+      }
+      this.assertProposalAuditBaseCoherence(current, audited);
+      return audited;
     });
   }
 
@@ -1714,7 +1725,7 @@ export class WorkspaceStore {
     return row ?? null;
   }
 
-  private decodeProposalRow(row: Row): WorkspaceProposalRecord {
+  private decodeProposalCurrentRow(row: Row): WorkspaceProposalRecord {
     const workspaceId = requiredCell(row.workspace_id, "Workspace Proposal Workspace id");
     const baseGraph = this.requireGraphRevision(
       workspaceId,
@@ -1723,7 +1734,114 @@ export class WorkspaceStore {
     const baseLayout = asWorkspaceLayoutValue(
       parseJsonCell(row.base_layout_json, "Workspace Proposal base layout"),
     );
-    return asWorkspaceProposal(row, baseGraph, baseLayout);
+    const proposal = asWorkspaceProposal(row, baseGraph, baseLayout);
+    const baseSnapshot = this.requireSnapshot(workspaceId, proposal.baseSnapshotId);
+    if (baseSnapshot.graphRevision !== proposal.baseGraphRevision) {
+      throw new WorkspaceStoreCodecError(
+        `Workspace Proposal ${proposal.id} base Snapshot does not match its base graph`,
+      );
+    }
+    return proposal;
+  }
+
+  private decodeProposalRow(row: Row): WorkspaceProposalRecord {
+    const proposal = this.decodeProposalCurrentRow(row);
+    const auditHistory = this.db.prepare(
+      `SELECT COUNT(*) AS count, MIN(revision) AS first_revision, MAX(revision) AS latest_revision
+       FROM workspace_proposal_audit WHERE proposal_id = ?`,
+    ).get(proposal.id) as { count: number; first_revision: number | null; latest_revision: number | null };
+    if (auditHistory.count !== proposal.revision
+      || auditHistory.first_revision !== 1
+      || auditHistory.latest_revision !== proposal.revision) {
+      throw new WorkspaceStoreCodecError(
+        `Workspace Proposal ${proposal.id} current revision does not match its contiguous audit history`,
+      );
+    }
+    const auditRow = this.db.prepare(
+      "SELECT * FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = ?",
+    ).get(proposal.id, proposal.revision) as Row | undefined;
+    if (!auditRow) {
+      throw new WorkspaceStoreCodecError(
+        `Workspace Proposal ${proposal.id} is missing immutable audit revision ${proposal.revision}`,
+      );
+    }
+    const audited = asWorkspaceProposalAudit(auditRow);
+    this.assertProposalCurrentAuditCoherence(proposal, audited);
+    return proposal;
+  }
+
+  private assertProposalCurrentAuditCoherence(
+    proposal: WorkspaceProposalRecord,
+    audited: WorkspaceProposalRecord,
+  ): void {
+    const {
+      status: proposalStatus,
+      review: proposalReview,
+      updatedAt: proposalUpdatedAt,
+      ...proposalRevisionPayload
+    } = proposal;
+    const {
+      status: auditStatus,
+      review: auditReview,
+      updatedAt: auditUpdatedAt,
+      ...auditRevisionPayload
+    } = audited;
+    if (auditStatus !== "draft" || auditReview.kind !== "none"
+      || !isDeepStrictEqual(proposalRevisionPayload, auditRevisionPayload)) {
+      throw new WorkspaceStoreCodecError(
+        `Workspace Proposal ${proposal.id} mutable payload does not match immutable audit revision ${proposal.revision}`,
+      );
+    }
+    const reviewMatchesStatus = (proposalStatus === "draft" && proposalReview.kind === "none")
+      || (proposalStatus === "approved" && proposalReview.kind === "approved")
+      || (proposalStatus === "rejected" && proposalReview.kind === "rejected")
+      || (proposalStatus === "conflicted" && proposalReview.kind === "conflict")
+      || (proposalStatus === "superseded" && proposalReview.kind === "none");
+    const timestampIsCoherent = proposalStatus === "draft"
+      ? proposalUpdatedAt === auditUpdatedAt
+      : proposalUpdatedAt >= auditUpdatedAt;
+    if (!reviewMatchesStatus || !timestampIsCoherent) {
+      throw new WorkspaceStoreCodecError(
+        `Workspace Proposal ${proposal.id} review state does not match immutable audit revision ${proposal.revision}`,
+      );
+    }
+  }
+
+  private assertProposalAuditBaseCoherence(
+    current: WorkspaceProposalRecord,
+    audited: WorkspaceProposalRecord,
+  ): void {
+    const currentBase = {
+      id: current.id,
+      workspaceId: current.workspaceId,
+      kind: current.kind,
+      baseGraphRevision: current.baseGraphRevision,
+      baseSnapshotId: current.baseSnapshotId,
+      baseGraph: current.baseGraph,
+      layoutId: current.layoutId,
+      baseLayoutChecksum: current.baseLayoutChecksum,
+      baseLayout: current.baseLayout,
+      createdByRunId: current.createdByRunId,
+      createdAt: current.createdAt,
+    };
+    const auditBase = {
+      id: audited.id,
+      workspaceId: audited.workspaceId,
+      kind: audited.kind,
+      baseGraphRevision: audited.baseGraphRevision,
+      baseSnapshotId: audited.baseSnapshotId,
+      baseGraph: audited.baseGraph,
+      layoutId: audited.layoutId,
+      baseLayoutChecksum: audited.baseLayoutChecksum,
+      baseLayout: audited.baseLayout,
+      createdByRunId: audited.createdByRunId,
+      createdAt: audited.createdAt,
+    };
+    if (!isDeepStrictEqual(currentBase, auditBase)) {
+      throw new WorkspaceStoreCodecError(
+        `Workspace Proposal ${current.id} audit revision ${audited.revision} has incoherent base anchors`,
+      );
+    }
   }
 
   private requireProposalById(proposalId: string): WorkspaceProposalRecord {
@@ -1749,21 +1867,7 @@ export class WorkspaceStore {
     if (proposal.status !== "draft") {
       throw new WorkspaceProposalStateConflictError(proposal.id, proposal.status);
     }
-    const auditRow = this.db.prepare(
-      "SELECT * FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = ?",
-    ).get(proposal.id, proposal.revision) as Row | undefined;
-    if (!auditRow) {
-      throw new WorkspaceStoreCodecError(
-        `Workspace Proposal ${proposal.id} is missing immutable audit revision ${proposal.revision}`,
-      );
-    }
-    const audited = asWorkspaceProposalAudit(auditRow);
-    if (!isDeepStrictEqual(audited, proposal)) {
-      throw new WorkspaceStoreCodecError(
-        `Workspace Proposal ${proposal.id} mutable payload does not match immutable audit revision ${proposal.revision}`,
-      );
-    }
-    return audited;
+    return proposal;
   }
 
   private insertProposalAuditInTransaction(proposal: WorkspaceProposalRecord): void {
@@ -1851,13 +1955,16 @@ export class WorkspaceStore {
     const mode = normalizeWorkspaceProposalApprovalMode(unsafeMode);
     const outcome = this.transactionImmediate<ProposalApprovedOutcome | ProposalConflictOutcome>(() => {
       const proposal = this.requireDraftProposal(projectId, proposalId);
+      if (proposal.kind === "component-propagation") {
+        throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+      }
       const workspace = this.requireWorkspaceById(proposal.workspaceId);
       const graph = this.getGraph(workspace.projectId);
       const layout = this.getLayoutByWorkspaceId(workspace.id, proposal.layoutId);
       const summary: WorkspaceProposalConflictSummary = {
         graphChanged: graph.revision !== proposal.baseGraphRevision,
         snapshotChanged: workspace.activeSnapshotId !== proposal.baseSnapshotId,
-        layoutChanged: proposal.layoutOperations.length > 0 && layout.checksum !== proposal.baseLayoutChecksum,
+        layoutChanged: layout.checksum !== proposal.baseLayoutChecksum,
         expectedGraphRevision: proposal.baseGraphRevision,
         actualGraphRevision: graph.revision,
         expectedSnapshotId: proposal.baseSnapshotId,
@@ -1882,9 +1989,6 @@ export class WorkspaceStore {
         return { kind: "conflict", proposal: conflicted, summary };
       }
       this.validateLayoutGroups(workspace.id, proposal.layoutId, new Set(graph.nodes.map((node) => node.id)));
-      if (proposal.kind === "component-propagation") {
-        throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
-      }
 
       this.validateProposalForApproval(proposal);
       const planId = mode === "generate" ? this.clock.id() : null;
@@ -2007,12 +2111,90 @@ export class WorkspaceStore {
     const resourceNodes = new Map(
       graph.nodes.filter((node) => node.kind === "resource").map((node) => [node.resourceId, node]),
     );
+    const proposedArtifactIdentities = new Map<string, { nodeId: string; trackId: string }>();
+    for (const command of proposal.operations) {
+      if (command.type !== "add-node"
+        || command.node.kind === "resource"
+        || command.node.createIdentity === undefined) continue;
+      proposedArtifactIdentities.set(command.node.artifactId, {
+        nodeId: command.node.id,
+        trackId: command.node.createIdentity.initialTrackId,
+      });
+    }
     const capabilityIds = new Set(proposal.generation.capabilities.map((capability) => capability.id));
     const frameIds = new Set(proposal.generation.responsiveFrames.map((frame) => frame.id));
+    const plannedTrackIds = new Set<string>();
     for (const plan of proposal.generation.artifactPlans) {
       const node = artifactNodes.get(plan.artifactId);
       if (!node || node.kind !== plan.kind || node.id !== plan.nodeId) {
         throw new WorkspaceProposalValidationError(`missing generation dependency Artifact ${plan.artifactId}`);
+      }
+      if (node.name !== plan.name) {
+        throw new WorkspaceProposalValidationError(
+          `generation Artifact plan ${plan.artifactId} name does not match its final graph node`,
+        );
+      }
+      if (plannedTrackIds.has(plan.trackId)) {
+        throw new WorkspaceProposalValidationError(`duplicate generation Artifact Track ${plan.trackId}`);
+      }
+      plannedTrackIds.add(plan.trackId);
+      const artifact = this.db.prepare(
+        "SELECT id, workspace_id, kind FROM workspace_artifacts WHERE id = ?",
+      ).get(plan.artifactId) as { id: string; workspace_id: string; kind: string } | undefined;
+      if (plan.operation === "create") {
+        if (artifact) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact create plan ${plan.artifactId} already has a durable identity`,
+          );
+        }
+        if (plan.baseRevisionId !== null) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact create plan ${plan.artifactId} cannot have a base Revision`,
+          );
+        }
+        const proposedIdentity = proposedArtifactIdentities.get(plan.artifactId);
+        if (!proposedIdentity || proposedIdentity.nodeId !== plan.nodeId
+          || proposedIdentity.trackId !== plan.trackId) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact create plan ${plan.artifactId} does not match its proposed identity and Track`,
+          );
+        }
+        if (this.db.prepare("SELECT 1 FROM artifact_tracks WHERE id = ?").get(plan.trackId)) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact create Track ${plan.trackId} already exists`,
+          );
+        }
+      } else {
+        if (!artifact || artifact.workspace_id !== proposal.workspaceId || artifact.kind !== plan.kind) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact revise plan ${plan.artifactId} requires an existing owned Artifact`,
+          );
+        }
+        const track = this.db.prepare(
+          `SELECT track.id
+           FROM artifact_tracks track
+           JOIN workspace_artifacts artifact ON artifact.id = track.artifact_id
+           WHERE track.id = ? AND track.artifact_id = ? AND artifact.workspace_id = ?`,
+        ).get(plan.trackId, plan.artifactId, proposal.workspaceId);
+        if (!track) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact revise plan ${plan.artifactId} requires an existing owned Track ${plan.trackId}`,
+          );
+        }
+        if (plan.baseRevisionId === null) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact revise plan ${plan.artifactId} requires an exact base Revision`,
+          );
+        }
+        const revision = this.db.prepare(
+          `SELECT 1 FROM artifact_revisions
+           WHERE id = ? AND workspace_id = ? AND artifact_id = ? AND track_id = ? AND sealed = 1`,
+        ).get(plan.baseRevisionId, proposal.workspaceId, plan.artifactId, plan.trackId);
+        if (!revision) {
+          throw new WorkspaceProposalValidationError(
+            `generation Artifact revise plan ${plan.artifactId} base Revision is not owned by its Track`,
+          );
+        }
       }
       for (const dependencyId of plan.dependsOnArtifactIds) {
         if (!artifactNodes.has(dependencyId)) {
