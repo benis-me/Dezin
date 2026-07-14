@@ -690,6 +690,7 @@ CREATE TABLE IF NOT EXISTS generation_plans (
     REFERENCES workspace_proposal_audit(proposal_id, revision),
   FOREIGN KEY(base_snapshot_id, workspace_id)
     REFERENCES workspace_snapshots(id, workspace_id),
+  UNIQUE(proposal_id, proposal_revision),
   UNIQUE(id, workspace_id)
 );
 
@@ -737,11 +738,23 @@ CREATE INDEX IF NOT EXISTS idx_workspace_proposals_workspace
   ON workspace_proposals(workspace_id, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_generation_plans_workspace
   ON generation_plans(workspace_id, created_at DESC, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_generation_plans_proposal_revision
+  ON generation_plans(proposal_id, proposal_revision);
 
 CREATE TRIGGER IF NOT EXISTS workspace_proposal_insert_immutable
 BEFORE INSERT ON workspace_proposals
 WHEN EXISTS (SELECT 1 FROM workspace_proposals existing WHERE existing.id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'Workspace Proposal identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_initial_state_guard
+BEFORE INSERT ON workspace_proposals
+WHEN NEW.status IS NOT 'draft'
+  OR CASE
+    WHEN json_valid(NEW.review_json) = 0 THEN 1
+    WHEN json_type(NEW.review_json) IS NOT 'object' THEN 1
+    WHEN json_extract(NEW.review_json, '$.kind') IS NOT 'none' THEN 1
+    ELSE 0
+  END
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal must begin as an unreviewed draft'); END;
 CREATE TRIGGER IF NOT EXISTS workspace_proposal_base_snapshot_insert_guard
 BEFORE INSERT ON workspace_proposals
 WHEN NOT EXISTS (
@@ -775,6 +788,33 @@ WHEN NEW.id IS NOT OLD.id
   OR NEW.created_by_run_id IS NOT OLD.created_by_run_id
   OR NEW.created_at IS NOT OLD.created_at
 BEGIN SELECT RAISE(ABORT, 'Workspace Proposal base identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_state_transition_guard
+BEFORE UPDATE ON workspace_proposals
+WHEN NEW.updated_at < OLD.updated_at
+  OR (
+    OLD.status IS NOT 'draft'
+    AND (NEW.status IS NOT OLD.status OR NEW.review_json IS NOT OLD.review_json)
+  )
+  OR (
+    OLD.status IS 'draft'
+    AND CASE
+      WHEN json_valid(NEW.review_json) = 0 THEN 1
+      WHEN json_type(NEW.review_json) IS NOT 'object' THEN 1
+      WHEN NEW.status IS 'draft'
+        AND json_extract(NEW.review_json, '$.kind') IS 'none' THEN 0
+      WHEN NEW.status IS 'approved'
+        AND json_extract(NEW.review_json, '$.kind') IS 'approved'
+        AND json_extract(NEW.review_json, '$.mode') IN ('structure-only', 'generate') THEN 0
+      WHEN NEW.status IS 'rejected'
+        AND json_extract(NEW.review_json, '$.kind') IS 'rejected' THEN 0
+      WHEN NEW.status IS 'conflicted'
+        AND json_extract(NEW.review_json, '$.kind') IS 'conflict' THEN 0
+      WHEN NEW.status IS 'superseded'
+        AND json_extract(NEW.review_json, '$.kind') IS 'none' THEN 0
+      ELSE 1
+    END
+  )
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal state transition is invalid or non-monotonic'); END;
 CREATE TRIGGER IF NOT EXISTS workspace_proposal_delete_history_guard
 BEFORE DELETE ON workspace_proposals
 WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)

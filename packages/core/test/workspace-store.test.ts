@@ -6730,6 +6730,151 @@ test("layout-only generate approval reuses the guarded graph Snapshot without in
   store.close();
 });
 
+test("SQLite seals terminal Proposal state with recursive triggers disabled and enabled", () => {
+  const probe = (recursiveTriggers: "OFF" | "ON") => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: `Terminal Proposal ${recursiveTriggers}`, mode: "standard" });
+    store.workspace.ensureWorkspaceRecord(project.id);
+    const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+    const approved = store.workspace.approveProposal(proposal.id, "generate");
+    assert.ok(approved.plan);
+    store.db.exec(`PRAGMA recursive_triggers = ${recursiveTriggers}`);
+    const rejected = (action: () => void) => {
+      try {
+        action();
+        return false;
+      } catch {
+        return true;
+      }
+    };
+
+    const resetRejected = rejected(() => store.db.prepare(
+      `UPDATE workspace_proposals
+       SET status = 'draft', review_json = '{"kind":"none"}', updated_at = ?
+       WHERE id = ?`,
+    ).run(proposal.updatedAt, proposal.id));
+    const reapprovalRejected = rejected(() => store.workspace.approveProposal(proposal.id, "generate"));
+    const terminalRewriteRejected = rejected(() => store.db.prepare(
+      `UPDATE workspace_proposals
+       SET status = 'rejected', review_json = '{"kind":"rejected"}', updated_at = updated_at + 1
+       WHERE id = ?`,
+    ).run(proposal.id));
+    const result = {
+      resetRejected,
+      reapprovalRejected,
+      terminalRewriteRejected,
+      planCount: rowCount(store.db, "generation_plans"),
+      proposal: store.workspace.getProposal(proposal.id),
+    };
+    store.close();
+    return result;
+  };
+
+  for (const recursiveTriggers of ["OFF", "ON"] as const) {
+    const result = probe(recursiveTriggers);
+    assert.deepEqual([
+      result.resetRejected,
+      result.reapprovalRejected,
+      result.terminalRewriteRejected,
+      result.planCount,
+      result.proposal?.status,
+      result.proposal?.review,
+    ], [true, true, true, 1, "approved", { kind: "approved", mode: "generate" }]);
+  }
+});
+
+test("SQLite enforces Proposal review pairing and monotonic updated_at while preserving legal app transitions", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal state machine", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const invalidTerminalPair = store.workspace.createProposal(
+    workspaceGenerationProposalInput(store, project.id, []),
+  );
+  const invalidDraftPair = store.workspace.createProposal(
+    workspaceGenerationProposalInput(store, project.id, []),
+  );
+  const timestampRollback = store.workspace.createProposal(
+    workspaceGenerationProposalInput(store, project.id, []),
+  );
+  const rejected = (action: () => void) => {
+    try {
+      action();
+      return false;
+    } catch {
+      return true;
+    }
+  };
+
+  assert.deepEqual([
+    rejected(() => store.db.prepare(
+      `UPDATE workspace_proposals
+       SET status = 'approved', review_json = '{"kind":"rejected"}', updated_at = updated_at + 1
+       WHERE id = ?`,
+    ).run(invalidTerminalPair.id)),
+    rejected(() => store.db.prepare(
+      `UPDATE workspace_proposals
+       SET review_json = '{"kind":"approved","mode":"generate"}', updated_at = updated_at + 1
+       WHERE id = ?`,
+    ).run(invalidDraftPair.id)),
+    rejected(() => store.db.prepare(
+      "UPDATE workspace_proposals SET updated_at = updated_at - 1 WHERE id = ?",
+    ).run(timestampRollback.id)),
+  ], [true, true, true]);
+
+  const editable = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const edited = store.workspace.updateProposal(editable.id, {
+    expectedProposalRevision: editable.revision,
+    operations: [],
+    layoutOperations: [],
+    generation: editable.generation,
+    rationale: "A legal draft edit",
+    assumptions: [],
+  });
+  const rejectedProposal = store.workspace.rejectProposal(edited.id);
+  assert.equal(rejectedProposal.status, "rejected");
+  assert.deepEqual(rejectedProposal.review, { kind: "rejected" });
+  store.close();
+});
+
+test("Generation Plan shells are unique per exact Proposal audit revision", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Unique Proposal Plan", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const plan = store.workspace.approveProposal(proposal.id, "generate").plan!;
+  const rejected = (id: string) => {
+    try {
+      store.db.prepare(
+        `INSERT INTO generation_plans (
+           id, workspace_id, proposal_id, proposal_revision, base_snapshot_id,
+           status, compile_error_json, created_at, finished_at
+         ) SELECT ?, workspace_id, proposal_id, proposal_revision, base_snapshot_id,
+                  status, compile_error_json, created_at + 1, finished_at
+           FROM generation_plans WHERE id = ?`,
+      ).run(id, plan.id);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+
+  store.db.exec("PRAGMA recursive_triggers = OFF");
+  const withoutRecursive = rejected("duplicate-plan-without-recursive");
+  store.db.exec("PRAGMA recursive_triggers = ON");
+  const withRecursive = rejected("duplicate-plan-with-recursive");
+  const indexes = store.db.prepare("PRAGMA index_list('generation_plans')").all() as Array<{
+    name: string;
+    unique: number;
+  }>;
+  assert.deepEqual([withoutRecursive, withRecursive], [true, true]);
+  assert.equal(rowCount(store.db, "generation_plans"), 1);
+  assert.equal(
+    indexes.some(({ name, unique }) => name === "idx_generation_plans_proposal_revision" && unique === 1),
+    true,
+  );
+  store.close();
+});
+
 test("layout CAS rejects a stale checksum and Proposal validation rejects unsupported or inconsistent generation intent", () => {
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Proposal validation", mode: "standard" });
@@ -6836,6 +6981,148 @@ test("Proposal approval rejects an exact Resource revision policy whose owned re
   assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, graph.snapshot.id);
   assert.equal(rowCount(store.db, "generation_plans"), 0);
   store.close();
+});
+
+test("Resource operations and dependencies require coherent kinds, policies, identities, and pins", () => {
+  type ResourceTarget = "planned" | "pinned" | "headless";
+  type ResourceOperation = "create" | "revise" | "reuse" | null;
+  type ResourcePolicy = "generate" | "base-snapshot" | "exact";
+  const probe = (input: {
+    target: ResourceTarget;
+    operation: ResourceOperation;
+    policy?: ResourcePolicy;
+    kind?: ResourceKind;
+    dependency?: boolean;
+  }) => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Resource Proposal validation", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    insertResource(store.db, workspace.id, "pinned-resource");
+    insertResourceRevision(store.db, workspace.id, "pinned-resource", "pinned-resource-revision");
+    store.db.prepare(
+      "UPDATE resources SET head_revision_id = 'pinned-resource-revision' WHERE id = 'pinned-resource'",
+    ).run();
+    insertResource(store.db, workspace.id, "headless-resource");
+    insertResourceRevision(store.db, workspace.id, "headless-resource", "headless-resource-revision");
+    store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: 0,
+      expectedSnapshotId: workspace.activeSnapshotId,
+      commands: [
+        {
+          id: "add-resource-owner",
+          type: "add-node",
+          node: {
+            id: "resource-owner-node",
+            kind: "page",
+            name: "Resource owner",
+            artifactId: "resource-owner",
+            createIdentity: { initialTrackId: "resource-owner-track" },
+          },
+        },
+        {
+          id: "attach-pinned-resource",
+          type: "add-node",
+          node: {
+            id: "pinned-resource-node",
+            kind: "resource",
+            name: "Title pinned-resource",
+            resourceId: "pinned-resource",
+          },
+        },
+        {
+          id: "attach-headless-resource",
+          type: "add-node",
+          node: {
+            id: "headless-resource-node",
+            kind: "resource",
+            name: "Title headless-resource",
+            resourceId: "headless-resource",
+          },
+        },
+      ],
+    });
+    const descriptor = input.target === "planned"
+      ? { resourceId: "planned-resource", nodeId: "planned-resource-node", title: "Planned resource" }
+      : input.target === "pinned"
+        ? { resourceId: "pinned-resource", nodeId: "pinned-resource-node", title: "Title pinned-resource" }
+        : { resourceId: "headless-resource", nodeId: "headless-resource-node", title: "Title headless-resource" };
+    const operations: WorkspaceGraphCommand[] = input.target === "planned"
+      ? [{
+        id: "add-planned-resource",
+        type: "add-node",
+        node: {
+          id: descriptor.nodeId,
+          kind: "resource",
+          name: descriptor.title,
+          resourceId: descriptor.resourceId,
+          createIdentity: { resourceKind: "research", defaultPinPolicy: "pin-current" },
+        },
+      }]
+      : [];
+    const policy = input.policy ?? "generate";
+    const revisionPolicy = policy === "exact"
+      ? { kind: "exact" as const, resourceRevisionId: `${descriptor.resourceId}-revision` }
+      : policy === "base-snapshot"
+        ? { kind: "base-snapshot" as const }
+        : { kind: "generate" as const };
+    const resourceOperations = input.operation === null
+      ? []
+      : [{
+        operation: input.operation,
+        nodeId: descriptor.nodeId,
+        resourceId: descriptor.resourceId,
+        kind: input.kind ?? "research",
+        title: descriptor.title,
+        revisionPolicy,
+      }];
+    try {
+      const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+        store,
+        project.id,
+        operations,
+        {
+          generation: {
+            ...emptyWorkspaceGenerationPayload(),
+            resourceOperations,
+            dependencyPlans: input.dependency
+              ? [{ kind: "resource", ownerArtifactId: "resource-owner", resourceId: descriptor.resourceId }]
+              : [],
+          },
+        },
+      ) as never);
+      store.workspace.approveProposal(proposal.id, "generate");
+      return false;
+    } catch (error) {
+      return error instanceof WorkspaceProposalValidationError || error instanceof WorkspaceStoreCodecError;
+    } finally {
+      store.close();
+    }
+  };
+
+  const invalid = [
+    { target: "planned", operation: "create", policy: "generate", kind: "moodboard" },
+    { target: "pinned", operation: "create", policy: "generate" },
+    { target: "headless", operation: "revise", policy: "generate" },
+    { target: "planned", operation: "revise", policy: "generate" },
+    { target: "pinned", operation: "revise", policy: "exact" },
+    { target: "pinned", operation: "reuse", policy: "generate" },
+    { target: "pinned", operation: "reuse", policy: "base-snapshot", kind: "moodboard" },
+    { target: "headless", operation: null, dependency: true },
+    { target: "planned", operation: null, dependency: true },
+  ] as const;
+  const valid = [
+    { target: "planned", operation: "create", policy: "generate" },
+    { target: "pinned", operation: "revise", policy: "generate" },
+    { target: "pinned", operation: "reuse", policy: "base-snapshot" },
+    { target: "pinned", operation: "reuse", policy: "exact" },
+    { target: "headless", operation: "reuse", policy: "exact" },
+    { target: "pinned", operation: null, dependency: true },
+    { target: "planned", operation: "create", policy: "generate", dependency: true },
+    { target: "headless", operation: "reuse", policy: "exact", dependency: true },
+  ] as const;
+
+  assert.deepEqual(invalid.map((candidate) => probe(candidate)), invalid.map(() => true));
+  assert.deepEqual(valid.map((candidate) => probe(candidate)), valid.map(() => false));
 });
 
 test("Proposal, audit, and Plan identities reject INSERT OR REPLACE with recursive triggers disabled", () => {
@@ -6988,6 +7275,7 @@ test("Proposal readback rejects a current-row rollback to an older coherent audi
     rationale: "Revision two",
     assumptions: ["newer"],
   });
+  store.db.exec("DROP TRIGGER workspace_proposal_state_transition_guard");
   store.db.prepare(
     `UPDATE workspace_proposals
      SET revision = ?, operations_json = ?, layout_operations_json = ?, rationale = ?,
@@ -7028,6 +7316,7 @@ test("Proposal audit decoding cross-checks relational metadata and rejects empty
       return true;
     }
   };
+  store.db.exec("DROP TRIGGER workspace_proposal_state_transition_guard");
   store.db.prepare("UPDATE workspace_proposals SET review_json = '{}' WHERE id = ?").run(proposal.id);
 
   assert.deepEqual([
@@ -7108,6 +7397,220 @@ test("raw component-propagation approval rejects before stale conflict mutation"
   assert.deepEqual(reloaded.review, { kind: "none" });
   assert.equal(rowCount(store.db, "generation_plans"), 0);
   store.close();
+});
+
+test("component-instance dependency identities are unique at the Proposal codec boundary", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Unique dependency instances", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const dependency = {
+    kind: "component-instance" as const,
+    ownerArtifactId: "planned-owner",
+    instanceId: "shared-instance",
+    componentArtifactId: "planned-component",
+    componentRevisionId: null,
+    sourceLocator: { designNodeId: "component-root" },
+    overrides: {},
+    status: "detached" as const,
+  };
+
+  assert.throws(
+    () => store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        dependencyPlans: [dependency, { ...dependency, sourceLocator: { designNodeId: "component-copy" } }],
+      },
+    })),
+    /duplicate.*instance/i,
+  );
+  assert.equal(rowCount(store.db, "workspace_proposals"), 0);
+  assert.equal(rowCount(store.db, "workspace_proposal_audit"), 0);
+  store.close();
+});
+
+test("component-instance dependency revisions are exact sealed pins to the declared Component", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Component dependency pins", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const base = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const graph = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: base.graph.revision,
+    expectedSnapshotId: base.snapshot.id,
+    commands: [{
+      id: "add-other-component",
+      type: "add-node",
+      node: {
+        id: "other-component-node",
+        kind: "component",
+        name: "Other component",
+        artifactId: "other-component",
+        createIdentity: { initialTrackId: "other-component-track" },
+      },
+    }],
+  });
+  const componentRevision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-component",
+    trackId: "revision-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "proposal-component-v1",
+  }));
+  const otherRevision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "other-component",
+    trackId: "other-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "proposal-other-component-v1",
+  }));
+  insertRevision(store.db, {
+    id: "unsealed-component-revision",
+    workspaceId: workspace.id,
+    artifactId: "revision-component",
+    trackId: "revision-component-track",
+    sequence: 2,
+    parentRevisionId: componentRevision.id,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    sealed: 0,
+  });
+  const foreignProject = store.createProject({ name: "Foreign Component Revision", mode: "standard" });
+  const foreignWorkspace = store.workspace.ensureWorkspaceRecord(foreignProject.id);
+  const foreignGraph = store.workspace.applyGraphCommands(foreignProject.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: foreignWorkspace.activeSnapshotId,
+    commands: [{
+      id: "add-foreign-component",
+      type: "add-node",
+      node: {
+        id: "foreign-component-node",
+        kind: "component",
+        name: "Foreign component",
+        artifactId: "foreign-component",
+        createIdentity: { initialTrackId: "foreign-component-track" },
+      },
+    }],
+  });
+  const foreignRevision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "foreign-component",
+    trackId: "foreign-component-track",
+    parentRevisionId: null,
+    kernelRevisionId: foreignWorkspace.activeKernelRevisionId,
+    tree: "foreign-component-v1",
+  }));
+  assert.equal(graph.graph.revision, 2);
+  assert.equal(foreignGraph.graph.revision, 1);
+  const rejectsRevision = (componentRevisionId: string) => {
+    const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        dependencyPlans: [{
+          kind: "component-instance",
+          ownerArtifactId: "revision-page",
+          instanceId: `instance-${componentRevisionId}`,
+          componentArtifactId: "revision-component",
+          componentRevisionId,
+          sourceLocator: { designNodeId: "component-root" },
+          overrides: {},
+          status: "linked",
+        }],
+      },
+    }));
+    try {
+      store.workspace.approveProposal(proposal.id, "generate");
+      return false;
+    } catch (error) {
+      return error instanceof WorkspaceProposalValidationError;
+    }
+  };
+
+  assert.deepEqual([
+    rejectsRevision("missing-component-revision"),
+    rejectsRevision(otherRevision.id),
+    rejectsRevision(foreignRevision.id),
+    rejectsRevision("unsealed-component-revision"),
+  ], [true, true, true, true]);
+  const valid = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+    generation: {
+      ...emptyWorkspaceGenerationPayload(),
+      dependencyPlans: [{
+        kind: "component-instance",
+        ownerArtifactId: "revision-page",
+        instanceId: "valid-component-instance-plan",
+        componentArtifactId: "revision-component",
+        componentRevisionId: componentRevision.id,
+        sourceLocator: { designNodeId: "component-root" },
+        overrides: {},
+        status: "linked",
+      }],
+    },
+  }));
+  assert.ok(store.workspace.approveProposal(valid.id, "generate").plan);
+  store.close();
+});
+
+test("prototype intents use the exact Page Artifact endpoints of their final graph edge", () => {
+  const probe = (sourceArtifactId: string, targetArtifactId: string) => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Prototype intent endpoints", mode: "standard" });
+    const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+    const operations: WorkspaceGraphCommand[] = [
+      proposalPageCommand("prototype-source"),
+      proposalPageCommand("prototype-target"),
+      {
+        id: "add-prototype-component",
+        type: "add-node",
+        node: {
+          id: "proposal-node-prototype-component",
+          kind: "component",
+          name: "Prototype component",
+          artifactId: "proposal-artifact-prototype-component",
+          createIdentity: { initialTrackId: "proposal-track-prototype-component" },
+        },
+      },
+      {
+        id: "add-prototype-intent-edge",
+        type: "add-edge",
+        edge: {
+          id: "proposal-prototype-edge",
+          workspaceId: workspace.id,
+          kind: "prototype",
+          sourceNodeId: "proposal-node-prototype-source",
+          targetNodeId: "proposal-node-prototype-target",
+        },
+      },
+    ];
+    const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, operations, {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        prototypeIntents: [{
+          edgeId: "proposal-prototype-edge",
+          sourceArtifactId,
+          targetArtifactId,
+          trigger: "click",
+        }],
+      },
+    }));
+    try {
+      const result = store.workspace.approveProposal(proposal.id, "generate");
+      return { rejected: false, plan: result.plan !== null };
+    } catch (error) {
+      return { rejected: error instanceof WorkspaceProposalValidationError, plan: false };
+    } finally {
+      store.close();
+    }
+  };
+
+  assert.deepEqual(
+    probe("proposal-artifact-prototype-target", "proposal-artifact-prototype-source"),
+    { rejected: true, plan: false },
+  );
+  assert.deepEqual(
+    probe("proposal-artifact-prototype-component", "proposal-artifact-prototype-target"),
+    { rejected: true, plan: false },
+  );
+  assert.deepEqual(
+    probe("proposal-artifact-prototype-source", "proposal-artifact-prototype-target"),
+    { rejected: false, plan: true },
+  );
 });
 
 test("Artifact create plans match proposed names, Track identities, and null base Revisions", () => {

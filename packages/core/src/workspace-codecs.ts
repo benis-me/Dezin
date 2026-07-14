@@ -1082,19 +1082,30 @@ function normalizeGenerationResourceOperation(value: unknown, index: number): Wo
   if (input.operation !== "create" && input.operation !== "revise" && input.operation !== "reuse") {
     throw new WorkspaceStoreCodecError(`${label} operation is unsupported`);
   }
-  if (input.kind !== "research" && input.kind !== "moodboard" && input.kind !== "sharingan-capture"
-    && input.kind !== "file" && input.kind !== "asset" && input.kind !== "effect"
-    && input.kind !== "external-reference") {
+  const resourceKind = input.kind;
+  if (resourceKind !== "research" && resourceKind !== "moodboard" && resourceKind !== "sharingan-capture"
+    && resourceKind !== "file" && resourceKind !== "asset" && resourceKind !== "effect"
+    && resourceKind !== "external-reference") {
     throw new WorkspaceStoreCodecError(`${label} Resource kind is unsupported`);
   }
-  return {
-    operation: input.operation,
+  const operation = input.operation;
+  const normalized = {
     nodeId: canonicalString(input.nodeId, `${label} node id`),
     resourceId: canonicalString(input.resourceId, `${label} Resource id`),
-    kind: input.kind,
+    kind: resourceKind,
     title: canonicalString(input.title, `${label} title`),
     revisionPolicy: normalizeResourceRevisionPolicy(input.revisionPolicy, `${label} revision policy`),
-  };
+  } as const;
+  if (operation === "create" || operation === "revise") {
+    if (normalized.revisionPolicy.kind !== "generate") {
+      throw new WorkspaceStoreCodecError(`${label} ${operation} must generate a Resource Revision`);
+    }
+    return { ...normalized, operation, revisionPolicy: normalized.revisionPolicy };
+  }
+  if (normalized.revisionPolicy.kind === "generate") {
+    throw new WorkspaceStoreCodecError(`${label} reuse must pin an existing Resource Revision`);
+  }
+  return { ...normalized, operation, revisionPolicy: normalized.revisionPolicy };
 }
 
 function normalizeGenerationArtifactPlan(value: unknown, index: number): WorkspaceGenerationArtifactPlan {
@@ -1253,6 +1264,11 @@ function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGeneratio
     .map(normalizeGenerationCapability);
   uniqueBy(resourceOperations, (operation) => operation.resourceId, "Workspace generation Resource");
   uniqueBy(artifactPlans, (plan) => plan.artifactId, "Workspace generation Artifact");
+  uniqueBy(
+    dependencyPlans.filter((plan) => plan.kind === "component-instance"),
+    (plan) => plan.instanceId,
+    "Workspace generation component instance",
+  );
   uniqueBy(prototypeIntents, (intent) => intent.edgeId, "Workspace generation prototype edge");
   uniqueBy(capabilities, (capability) => capability.id, "Workspace generation capability");
   const kernelShape = normalizeKernelPayload({

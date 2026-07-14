@@ -16,6 +16,7 @@ import type {
   NewWorkspaceNode,
   ProjectWorkspace,
   SharedDesignKernelRevision,
+  WorkspaceArtifactNode,
   WorkspaceGraph,
   WorkspaceGraphCommand,
   WorkspaceGraphMutationInput,
@@ -27,6 +28,7 @@ import type {
   WorkspaceProposal,
   WorkspaceProposalApprovalMode,
   WorkspaceProposalReview,
+  WorkspaceResourceNode,
   WorkspaceSnapshotProvenance,
   WorkspaceSnapshotPublicationInput,
   UpdateWorkspaceProposalInput,
@@ -2105,12 +2107,28 @@ export class WorkspaceStore {
       throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
     }
     const artifactNodes = new Map(
-      graph.nodes.filter((node) => node.kind === "page" || node.kind === "component")
+      graph.nodes.filter((node): node is WorkspaceArtifactNode => node.kind === "page" || node.kind === "component")
         .map((node) => [node.artifactId, node]),
     );
     const resourceNodes = new Map(
-      graph.nodes.filter((node) => node.kind === "resource").map((node) => [node.resourceId, node]),
+      graph.nodes.filter((node): node is WorkspaceResourceNode => node.kind === "resource")
+        .map((node) => [node.resourceId, node]),
     );
+
+    this.validateProposalArtifactPlans(proposal, artifactNodes);
+    const resourceResolution = this.validateProposalResourceOperations(proposal, resourceNodes);
+    this.validateProposalDependencies(proposal, artifactNodes, resourceNodes, resourceResolution);
+    this.validateProposalPrototypeIntents(proposal, graph);
+    return graph;
+  }
+
+  private validateProposalArtifactPlans(
+    proposal: WorkspaceProposalRecord,
+    artifactNodes: ReadonlyMap<string, WorkspaceArtifactNode>,
+  ): void {
+    if (proposal.generation.kind !== "workspace-generation") {
+      throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+    }
     const proposedArtifactIdentities = new Map<string, { nodeId: string; trackId: string }>();
     for (const command of proposal.operations) {
       if (command.type !== "add-node"
@@ -2212,43 +2230,146 @@ export class WorkspaceStore {
         }
       }
     }
+  }
+
+  private validateProposalResourceOperations(
+    proposal: WorkspaceProposalRecord,
+    resourceNodes: ReadonlyMap<string, WorkspaceResourceNode>,
+  ): { basePinnedResourceIds: ReadonlySet<string>; operationResourceIds: ReadonlySet<string> } {
+    if (proposal.generation.kind !== "workspace-generation") {
+      throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+    }
+    const plannedResources = new Map<string, { nodeId: string; resourceKind: string }>();
+    for (const command of proposal.operations) {
+      if (command.type !== "add-node" || command.node.kind !== "resource"
+        || command.node.createIdentity === undefined) continue;
+      plannedResources.set(command.node.resourceId, {
+        nodeId: command.node.id,
+        resourceKind: command.node.createIdentity.resourceKind,
+      });
+    }
+    const basePins = new Map(
+      (this.db.prepare(
+        `SELECT mapping.resource_id, mapping.revision_id
+         FROM workspace_snapshot_resources mapping
+         JOIN workspace_snapshots snapshot
+           ON snapshot.id = mapping.snapshot_id
+          AND snapshot.workspace_id = mapping.workspace_id
+          AND snapshot.sealed = 1
+         JOIN resource_revisions revision
+           ON revision.id = mapping.revision_id
+          AND revision.resource_id = mapping.resource_id
+          AND revision.workspace_id = mapping.workspace_id
+         JOIN resources resource
+           ON resource.id = mapping.resource_id
+          AND resource.workspace_id = mapping.workspace_id
+         WHERE mapping.workspace_id = ? AND mapping.snapshot_id = ?
+           AND snapshot.graph_revision = ?`,
+      ).all(
+        proposal.workspaceId,
+        proposal.baseSnapshotId,
+        proposal.baseGraphRevision,
+      ) as Array<{ resource_id: string; revision_id: string }>).map(
+        (row) => [row.resource_id, row.revision_id] as const,
+      ),
+    );
+    const operationResourceIds = new Set<string>();
     for (const operation of proposal.generation.resourceOperations) {
       const node = resourceNodes.get(operation.resourceId);
       if (!node || node.id !== operation.nodeId || node.name !== operation.title) {
-        throw new WorkspaceProposalValidationError(`missing generation dependency Resource ${operation.resourceId}`);
-      }
-      if (operation.revisionPolicy.kind === "exact") {
-        const revision = this.db.prepare(
-          `SELECT 1 FROM resource_revisions
-           WHERE id = ? AND resource_id = ? AND workspace_id = ?`,
-        ).get(
-          operation.revisionPolicy.resourceRevisionId,
-          operation.resourceId,
-          proposal.workspaceId,
+        throw new WorkspaceProposalValidationError(
+          `missing generation dependency Resource ${operation.resourceId}`,
         );
-        if (!revision) {
+      }
+      const planned = plannedResources.get(operation.resourceId);
+      const resource = this.db.prepare(
+        "SELECT id, workspace_id, kind, archived_at FROM resources WHERE id = ?",
+      ).get(operation.resourceId) as {
+        id: string;
+        workspace_id: string;
+        kind: string;
+        archived_at: number | null;
+      } | undefined;
+      const ownedResource = resource !== undefined
+        && resource.workspace_id === proposal.workspaceId
+        && resource.archived_at === null
+        && resource.kind === operation.kind;
+      if (operation.operation === "create") {
+        if (operation.revisionPolicy.kind !== "generate" || resource !== undefined
+          || basePins.has(operation.resourceId) || !planned
+          || planned.nodeId !== operation.nodeId || planned.resourceKind !== operation.kind) {
           throw new WorkspaceProposalValidationError(
-            `missing generation dependency Resource Revision ${operation.revisionPolicy.resourceRevisionId}`,
+            `generation Resource create operation ${operation.resourceId} requires a new matching planned identity`,
           );
         }
-      } else if (operation.revisionPolicy.kind === "base-snapshot") {
-        const pin = this.db.prepare(
-          `SELECT 1 FROM workspace_snapshot_resources
-           WHERE workspace_id = ? AND snapshot_id = ? AND resource_id = ?`,
-        ).get(proposal.workspaceId, proposal.baseSnapshotId, operation.resourceId);
-        if (!pin) {
+      } else if (operation.operation === "revise") {
+        if (operation.revisionPolicy.kind !== "generate" || planned !== undefined
+          || !ownedResource || !basePins.has(operation.resourceId)) {
           throw new WorkspaceProposalValidationError(
-            `missing base Snapshot Resource revision for ${operation.resourceId}`,
+            `generation Resource revise operation ${operation.resourceId} requires an owned base Snapshot pin`,
           );
+        }
+      } else {
+        if (operation.revisionPolicy.kind === "generate" || planned !== undefined || !ownedResource) {
+          throw new WorkspaceProposalValidationError(
+            `generation Resource reuse operation ${operation.resourceId} requires an owned immutable pin`,
+          );
+        }
+        if (operation.revisionPolicy.kind === "base-snapshot") {
+          if (!basePins.has(operation.resourceId)) {
+            throw new WorkspaceProposalValidationError(
+              `missing base Snapshot Resource revision for ${operation.resourceId}`,
+            );
+          }
+        } else {
+          const revision = this.db.prepare(
+            `SELECT revision.id
+             FROM resource_revisions revision
+             JOIN resources resource
+               ON resource.id = revision.resource_id
+              AND resource.workspace_id = revision.workspace_id
+             WHERE revision.id = ? AND revision.resource_id = ? AND revision.workspace_id = ?
+               AND resource.archived_at IS NULL`,
+          ).get(
+            operation.revisionPolicy.resourceRevisionId,
+            operation.resourceId,
+            proposal.workspaceId,
+          );
+          if (!revision) {
+            throw new WorkspaceProposalValidationError(
+              `missing generation dependency Resource Revision ${operation.revisionPolicy.resourceRevisionId}`,
+            );
+          }
         }
       }
+      operationResourceIds.add(operation.resourceId);
+    }
+    return {
+      basePinnedResourceIds: new Set(basePins.keys()),
+      operationResourceIds,
+    };
+  }
+
+  private validateProposalDependencies(
+    proposal: WorkspaceProposalRecord,
+    artifactNodes: ReadonlyMap<string, WorkspaceArtifactNode>,
+    resourceNodes: ReadonlyMap<string, WorkspaceResourceNode>,
+    resourceResolution: {
+      basePinnedResourceIds: ReadonlySet<string>;
+      operationResourceIds: ReadonlySet<string>;
+    },
+  ): void {
+    if (proposal.generation.kind !== "workspace-generation") {
+      throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
     }
     for (const dependency of proposal.generation.dependencyPlans) {
       if (!artifactNodes.has(dependency.ownerArtifactId)) {
         throw new WorkspaceProposalValidationError(`missing generation dependency owner ${dependency.ownerArtifactId}`);
       }
       if (dependency.kind === "resource") {
-        if (!resourceNodes.has(dependency.resourceId)) {
+        if (!resourceNodes.has(dependency.resourceId)
+          || (!resourceResolution.basePinnedResourceIds.has(dependency.resourceId)
+            && !resourceResolution.operationResourceIds.has(dependency.resourceId))) {
           throw new WorkspaceProposalValidationError(`missing generation dependency Resource ${dependency.resourceId}`);
         }
       } else {
@@ -2258,18 +2379,51 @@ export class WorkspaceStore {
             `missing generation dependency Component ${dependency.componentArtifactId}`,
           );
         }
+        if (dependency.componentRevisionId !== null) {
+          const revision = this.db.prepare(
+            `SELECT revision.id
+             FROM artifact_revisions revision
+             JOIN workspace_artifacts artifact
+               ON artifact.id = revision.artifact_id
+              AND artifact.workspace_id = revision.workspace_id
+             JOIN artifact_tracks track
+               ON track.id = revision.track_id
+              AND track.artifact_id = revision.artifact_id
+             WHERE revision.id = ? AND revision.workspace_id = ?
+               AND revision.artifact_id = ? AND revision.sealed = 1
+               AND artifact.kind = 'component' AND artifact.archived_at IS NULL`,
+          ).get(
+            dependency.componentRevisionId,
+            proposal.workspaceId,
+            dependency.componentArtifactId,
+          );
+          if (!revision) {
+            throw new WorkspaceProposalValidationError(
+              `generation dependency Component Revision ${dependency.componentRevisionId} is not an exact owned pin`,
+            );
+          }
+        }
       }
     }
+  }
+
+  private validateProposalPrototypeIntents(
+    proposal: WorkspaceProposalRecord,
+    graph: WorkspaceGraph,
+  ): void {
+    if (proposal.generation.kind !== "workspace-generation") {
+      throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+    }
+    const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
     for (const intent of proposal.generation.prototypeIntents) {
-      if (!artifactNodes.has(intent.sourceArtifactId) || !artifactNodes.has(intent.targetArtifactId)) {
-        throw new WorkspaceProposalValidationError(`missing generation dependency for prototype ${intent.edgeId}`);
-      }
       const edge = graph.edges.find((candidate) => candidate.id === intent.edgeId);
-      if (!edge || edge.kind !== "prototype") {
+      const source = edge ? nodesById.get(edge.sourceNodeId) : undefined;
+      const target = edge ? nodesById.get(edge.targetNodeId) : undefined;
+      if (!edge || edge.kind !== "prototype" || source?.kind !== "page" || target?.kind !== "page"
+        || source.artifactId !== intent.sourceArtifactId || target.artifactId !== intent.targetArtifactId) {
         throw new WorkspaceProposalValidationError(`missing generation prototype edge ${intent.edgeId}`);
       }
     }
-    return graph;
   }
 
   private requireWorkspaceById(workspaceId: string): ProjectWorkspace {

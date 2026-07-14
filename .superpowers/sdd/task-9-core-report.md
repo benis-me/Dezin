@@ -131,3 +131,47 @@ exit 0
 ```
 
 The immutable-history test also verifies the exact original rows survive failed replacements, `PRAGMA foreign_key_check` remains empty, `PRAGMA quick_check` is `ok`, and root Project deletion still cascades successfully.
+
+### Terminal-state and generation-validation re-audit
+
+The second SQL/code re-audit closed the remaining terminal-state and cross-field validation gaps:
+
+- a database state-machine trigger now permits only legal draft edits and one-way draft-to-terminal transitions with matching review kinds, forbids terminal status/review rewrites, and enforces monotonic `updated_at` with recursive triggers both disabled and enabled;
+- Generation Plans now have both a table constraint and migration-safe unique index on `(proposal_id, proposal_revision)`, preventing a second shell for one immutable audit revision;
+- Resource operation types/codecs enforce `create|revise -> generate` and `reuse -> exact|base-snapshot`; approval separately validates final graph descriptors, planned-versus-durable identity, Resource kind, owned base/exact pins, and dependency resolution;
+- component-instance IDs are unique at the codec boundary, non-null Component Revision pins must resolve to a sealed Revision owned by the declared same-Workspace Component/Track, and prototype intents must match the directed Page endpoints of their final graph edge;
+- `validateProposalForApproval()` now delegates Artifact, Resource, dependency, and prototype checks to focused validators.
+
+#### RED
+
+Seven focused regressions were each observed failing before production changes across three focused runs:
+
+```text
+terminal reset/reapproval: [false, false, false, 2, "rejected"]
+invalid review pairing/timestamp: [false, false, false]
+duplicate Plan with recursive triggers OFF/ON: [false, false]
+duplicate component instance: Missing expected exception
+invalid Component Revision pins: [false, false, false, false]
+prototype endpoint mismatch: approved with a Plan
+invalid Resource operation/dependency matrix: [false x 9]
+```
+
+#### GREEN
+
+```text
+focused re-audit tests
+tests 7; pass 7; fail 0
+
+pnpm --filter @dezin/core test
+tests 175; pass 175; fail 0; cancelled 0; skipped 0
+
+pnpm --filter @dezin/core test:coverage
+tests 175; pass 175; fail 0
+all files: lines 92.51%; branches 79.43%; functions 91.91%
+
+pnpm typecheck
+TYPECHECK: PASS
+
+git diff --check
+exit 0
+```

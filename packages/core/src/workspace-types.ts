@@ -448,14 +448,22 @@ export type WorkspaceResourceRevisionPolicy =
   | { kind: "base-snapshot" }
   | { kind: "generate" };
 
-export interface WorkspaceGenerationResourceOperation {
-  operation: "create" | "revise" | "reuse";
+interface WorkspaceGenerationResourceOperationBase {
   nodeId: string;
   resourceId: string;
   kind: ResourceKind;
   title: string;
-  revisionPolicy: WorkspaceResourceRevisionPolicy;
 }
+
+export type WorkspaceGenerationResourceOperation =
+  | (WorkspaceGenerationResourceOperationBase & {
+    operation: "create" | "revise";
+    revisionPolicy: { kind: "generate" };
+  })
+  | (WorkspaceGenerationResourceOperationBase & {
+    operation: "reuse";
+    revisionPolicy: Extract<WorkspaceResourceRevisionPolicy, { kind: "exact" | "base-snapshot" }>;
+  });
 
 export interface WorkspaceGenerationArtifactPlan {
   operation: "create" | "revise";
