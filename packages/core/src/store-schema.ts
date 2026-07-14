@@ -639,6 +639,59 @@ CREATE TABLE IF NOT EXISTS workspace_snapshot_resources (
     REFERENCES resource_revisions(id, resource_id, workspace_id) ON DELETE CASCADE,
   PRIMARY KEY(snapshot_id, resource_id)
 );
+CREATE TABLE IF NOT EXISTS workspace_proposals (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
+  base_graph_revision INTEGER NOT NULL,
+  base_snapshot_id TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+  kind TEXT NOT NULL CHECK(kind IN ('workspace-generation','component-propagation')),
+  status TEXT NOT NULL CHECK(status IN ('draft','approved','rejected','superseded','conflicted')),
+  operations_json TEXT NOT NULL,
+  layout_id TEXT NOT NULL,
+  base_layout_checksum TEXT NOT NULL,
+  base_layout_json TEXT NOT NULL,
+  layout_operations_json TEXT NOT NULL DEFAULT '[]',
+  rationale TEXT NOT NULL,
+  assumptions_json TEXT NOT NULL,
+  generation_payload_json TEXT NOT NULL,
+  review_json TEXT NOT NULL DEFAULT '{}',
+  created_by_run_id TEXT REFERENCES runs(id),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY(workspace_id, base_graph_revision)
+    REFERENCES workspace_graph_revisions(workspace_id, revision),
+  FOREIGN KEY(base_snapshot_id, workspace_id)
+    REFERENCES workspace_snapshots(id, workspace_id),
+  UNIQUE(id, workspace_id)
+);
+CREATE TABLE IF NOT EXISTS workspace_proposal_audit (
+  proposal_id TEXT NOT NULL REFERENCES workspace_proposals(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  payload_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(proposal_id, revision)
+);
+CREATE TABLE IF NOT EXISTS generation_plans (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
+  proposal_id TEXT NOT NULL,
+  proposal_revision INTEGER NOT NULL,
+  base_snapshot_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN (
+    'approved','queued','running','succeeded','failed','compile-failed','requires-new-impact','cancelled'
+  )),
+  compile_error_json TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  FOREIGN KEY(proposal_id, workspace_id)
+    REFERENCES workspace_proposals(id, workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY(proposal_id, proposal_revision)
+    REFERENCES workspace_proposal_audit(proposal_id, revision),
+  FOREIGN KEY(base_snapshot_id, workspace_id)
+    REFERENCES workspace_snapshots(id, workspace_id),
+  UNIQUE(id, workspace_id)
+);
 
 CREATE INDEX IF NOT EXISTS idx_workspace_nodes_workspace ON workspace_nodes(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_edges_workspace ON workspace_edges(workspace_id);
@@ -680,6 +733,62 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_resources_owner
   ON workspace_snapshot_resources(resource_id, workspace_id);
 CREATE INDEX IF NOT EXISTS idx_snapshot_resources_revision
   ON workspace_snapshot_resources(revision_id, resource_id, workspace_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_proposals_workspace
+  ON workspace_proposals(workspace_id, updated_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_generation_plans_workspace
+  ON generation_plans(workspace_id, created_at DESC, id);
+
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_run_insert_ownership
+BEFORE INSERT ON workspace_proposals
+WHEN NEW.created_by_run_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1
+  FROM runs run
+  JOIN project_workspaces workspace ON workspace.project_id = run.project_id
+  WHERE run.id = NEW.created_by_run_id AND workspace.id = NEW.workspace_id
+)
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal Run belongs to another Project'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_identity_update_immutable
+BEFORE UPDATE OF id, workspace_id, base_graph_revision, base_snapshot_id, kind, layout_id,
+  base_layout_checksum, base_layout_json, created_by_run_id, created_at ON workspace_proposals
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.base_graph_revision IS NOT OLD.base_graph_revision
+  OR NEW.base_snapshot_id IS NOT OLD.base_snapshot_id
+  OR NEW.kind IS NOT OLD.kind
+  OR NEW.layout_id IS NOT OLD.layout_id
+  OR NEW.base_layout_checksum IS NOT OLD.base_layout_checksum
+  OR NEW.base_layout_json IS NOT OLD.base_layout_json
+  OR NEW.created_by_run_id IS NOT OLD.created_by_run_id
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal base identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_delete_history_guard
+BEFORE DELETE ON workspace_proposals
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal history is immutable and cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_audit_update_immutable
+BEFORE UPDATE ON workspace_proposal_audit
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal audit revisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS workspace_proposal_audit_delete_history_guard
+BEFORE DELETE ON workspace_proposal_audit
+WHEN EXISTS (
+  SELECT 1 FROM workspace_proposals proposal
+  JOIN project_workspaces workspace ON workspace.id = proposal.workspace_id
+  WHERE proposal.id = OLD.proposal_id
+)
+BEGIN SELECT RAISE(ABORT, 'Workspace Proposal audit history is immutable and cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS generation_plan_identity_update_immutable
+BEFORE UPDATE OF id, workspace_id, proposal_id, proposal_revision, base_snapshot_id, created_at ON generation_plans
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.proposal_id IS NOT OLD.proposal_id
+  OR NEW.proposal_revision IS NOT OLD.proposal_revision
+  OR NEW.base_snapshot_id IS NOT OLD.base_snapshot_id
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'Generation Plan identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS generation_plan_delete_history_guard
+BEFORE DELETE ON generation_plans
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Generation Plan history is immutable and cannot be deleted'); END;
 
 -- Forward/cyclic ownership pointers cannot all be represented as composite FKs
 -- without making the initial Workspace seed circular. Check both INSERT and

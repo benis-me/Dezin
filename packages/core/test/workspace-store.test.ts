@@ -10,7 +10,13 @@ import {
   Store,
   LegacyWorkspaceSeedDriftError,
   WorkspaceCommandReplayConflictError,
+  WorkspaceLayoutConflictError,
   WorkspacePointerConflictError,
+  WorkspaceProposalConflictError,
+  WorkspaceProposalOwnershipError,
+  WorkspaceProposalRevisionConflictError,
+  WorkspaceProposalStateConflictError,
+  WorkspaceProposalValidationError,
   WorkspaceRevisionConflictError,
   WorkspaceStore,
   WorkspaceStoreCodecError,
@@ -45,6 +51,9 @@ const REQUIRED_WORKSPACE_TABLES = [
   "workspace_snapshots",
   "workspace_snapshot_artifacts",
   "workspace_snapshot_resources",
+  "workspace_proposals",
+  "workspace_proposal_audit",
+  "generation_plans",
 ] as const;
 
 function fakeClock(): StoreClock {
@@ -286,6 +295,65 @@ function expectedArtifactSourceRoot(workspaceId: string, artifactId: string): st
 
 function workspaceGraphChecksum(nodesJson: string, edgesJson: string): string {
   return createHash("sha256").update(`${nodesJson}\n${edgesJson}`).digest("hex");
+}
+
+function emptyWorkspaceGenerationPayload() {
+  return {
+    kind: "workspace-generation" as const,
+    resourceOperations: [],
+    artifactPlans: [],
+    dependencyPlans: [],
+    prototypeIntents: [],
+    capabilities: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  };
+}
+
+function proposalPageCommand(
+  suffix: string,
+  name = `Page ${suffix}`,
+): WorkspaceGraphCommand {
+  return {
+    id: `proposal-command-${suffix}`,
+    type: "add-node",
+    node: {
+      id: `proposal-node-${suffix}`,
+      kind: "page",
+      name,
+      artifactId: `proposal-artifact-${suffix}`,
+      createIdentity: { initialTrackId: `proposal-track-${suffix}` },
+    },
+  };
+}
+
+function workspaceGenerationProposalInput(
+  store: Store,
+  projectId: string,
+  operations: WorkspaceGraphCommand[],
+  overrides: Record<string, unknown> = {},
+) {
+  const workspace = store.workspace.getWorkspace(projectId)!;
+  const layout = store.workspace.getLayout(projectId);
+  return {
+    projectId,
+    kind: "workspace-generation" as const,
+    baseGraphRevision: workspace.graphRevision,
+    baseSnapshotId: workspace.activeSnapshotId,
+    layoutId: layout.layoutId,
+    baseLayoutChecksum: layout.checksum,
+    operations,
+    layoutOperations: [],
+    generation: emptyWorkspaceGenerationPayload(),
+    rationale: "Create the proposed workspace structure",
+    assumptions: [],
+    ...overrides,
+  };
 }
 
 function seedSnapshotSuccessor(
@@ -1561,6 +1629,7 @@ test("applyGraphCommands rejects a headless Resource-node drift without durable 
   store.workspace.saveLayout(project.id, {
     layoutId: "drift-layout",
     graphRevision: published.graph.revision,
+    baseLayoutChecksum: store.workspace.getLayout(project.id, "drift-layout").checksum,
     commands: [
       { type: "move", objectId: "headless-drift-page-node", x: 120, y: 80 },
       { type: "set-viewport", viewport: { x: -10, y: 20, zoom: 0.75 } },
@@ -1888,6 +1957,7 @@ test("graph mutation and layout envelopes reject accessors and revoked proxies w
   });
   assert.throws(() => store.workspace.saveLayout(project.id, {
     graphRevision: 0,
+    baseLayoutChecksum: store.workspace.getLayout(project.id).checksum,
     commands: [layoutCommand] as never,
   }), WorkspaceStoreCodecError);
   assert.equal(getterCalls, 0);
@@ -1906,6 +1976,7 @@ test("graph mutation and layout envelopes reject accessors and revoked proxies w
   revokedCommands.revoke();
   assert.throws(() => store.workspace.saveLayout(project.id, {
     graphRevision: 0,
+    baseLayoutChecksum: store.workspace.getLayout(project.id).checksum,
     commands: revokedCommands.proxy as never,
   }), WorkspaceStoreCodecError);
   assert.equal(rowCount(store.db, "workspace_graph_commands"), 0);
@@ -2612,6 +2683,7 @@ test("layout commands validate groups atomically and stay outside semantic histo
   const layout = store.workspace.saveLayout(project.id, {
     layoutId: "default",
     graphRevision: 1,
+    baseLayoutChecksum: store.workspace.getLayout(project.id, "default").checksum,
     commands: [
       { type: "add-group", groupId: "journey", label: "Journey", bounds: { x: 10, y: 20, width: 600, height: 400 } },
       { type: "add-group", groupId: "checkout", label: "Checkout", bounds: { x: 40, y: 50, width: 300, height: 200 } },
@@ -2636,6 +2708,7 @@ test("layout commands validate groups atomically and stay outside semantic histo
   assert.throws(() => store.workspace.saveLayout(project.id, {
     layoutId: "default",
     graphRevision: 1,
+    baseLayoutChecksum: layout.checksum,
     commands: [
       { type: "add-group", groupId: "temporary", label: "Temporary", bounds: { x: 0, y: 0, width: 10, height: 10 } },
       { type: "set-parent", objectId: "journey", parentGroupId: "checkout" },
@@ -2645,11 +2718,13 @@ test("layout commands validate groups atomically and stay outside semantic histo
   assert.throws(() => store.workspace.saveLayout(project.id, {
     layoutId: "default",
     graphRevision: 1,
+    baseLayoutChecksum: layout.checksum,
     commands: [{ type: "move", objectId: "missing-node", x: 1, y: 2 }],
   }), /missing|does not exist/i);
   assert.throws(() => store.workspace.saveLayout(project.id, {
     layoutId: "default",
     graphRevision: 1,
+    baseLayoutChecksum: layout.checksum,
     commands: [
       { type: "add-group", groupId: "duplicate", label: "One", bounds: { x: 0, y: 0, width: 10, height: 10 } },
       { type: "add-group", groupId: "duplicate", label: "Two", bounds: { x: 0, y: 0, width: 10, height: 10 } },
@@ -2659,6 +2734,7 @@ test("layout commands validate groups atomically and stay outside semantic histo
   const afterDelete = store.workspace.saveLayout(project.id, {
     layoutId: "default",
     graphRevision: 1,
+    baseLayoutChecksum: layout.checksum,
     commands: [{ type: "delete-group", groupId: "checkout", ungroupChildren: true }],
   });
   assert.equal(afterDelete.objects.find(({ id }) => id === "layout-page")?.parentGroupId, null);
@@ -2694,6 +2770,7 @@ test("layout graph revision guard rejects stale writes without changing layout",
   assert.throws(() => store.workspace.saveLayout(project.id, {
     layoutId: "default",
     graphRevision: 1,
+    baseLayoutChecksum: store.workspace.getLayout(project.id, "default").checksum,
     commands: [{ type: "move", objectId: "stale-layout-node", x: 10, y: 20 }],
   }), WorkspaceRevisionConflictError);
   assert.equal(rowCount(store.db, "workspace_layout_nodes"), 0);
@@ -2707,6 +2784,7 @@ test("graph nodes cannot claim an id already used by a layout group", () => {
   store.workspace.saveLayout(project.id, {
     layoutId: "alternate",
     graphRevision: 0,
+    baseLayoutChecksum: store.workspace.getLayout(project.id, "alternate").checksum,
     commands: [{
       type: "add-group",
       groupId: "shared-id",
@@ -2778,6 +2856,7 @@ test("layout group ids remain reserved by archived semantic node history", () =>
   assert.throws(() => store.workspace.saveLayout(project.id, {
     layoutId: "default",
     graphRevision: 2,
+    baseLayoutChecksum: store.workspace.getLayout(project.id, "default").checksum,
     commands: [{
       type: "add-group",
       groupId: "historical-node-id",
@@ -3100,6 +3179,7 @@ test("a second SQLite connection waiting behind a graph writer observes the comm
       input: {
         layoutId: "default",
         graphRevision: 1,
+        baseLayoutChecksum: store.workspace.getLayout(project.id, "default").checksum,
         commands: [{ type: "move", objectId: "race-page", x: 10, y: 20 }],
       },
     });
@@ -6317,5 +6397,435 @@ test("a wrapped Page remains usable by graph commands and Artifact publication",
   assert.equal(afterArchive.activeSnapshot.id, archived.snapshot.id);
   assert.equal(afterArchive.graph.nodes.length, 0);
   assert.equal(afterArchive.artifacts[0]?.archivedAt !== null, true);
+  store.close();
+});
+
+test("Workspace Proposal drafts isolate canonical state and retain immutable CAS audit revisions", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal audit", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const baseGraph = store.workspace.getGraph(project.id);
+  const baseLayout = store.workspace.getLayout(project.id);
+  const created = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [proposalPageCommand("audit")],
+  ));
+
+  assert.equal(created.revision, 1);
+  assert.equal(created.status, "draft");
+  assert.deepEqual(created.baseGraph, baseGraph);
+  assert.deepEqual(created.baseLayout, baseLayout);
+  assert.deepEqual(store.workspace.getGraph(project.id), baseGraph);
+  assert.deepEqual(store.workspace.getLayout(project.id), baseLayout);
+  assert.deepEqual(store.workspace.getProposalRevision(created.id, 1), created);
+
+  const updated = store.workspace.updateProposal(created.id, {
+    expectedProposalRevision: 1,
+    operations: created.operations,
+    layoutOperations: [{ type: "move", objectId: "proposal-node-audit", x: 40, y: 60 }],
+    generation: created.generation,
+    rationale: "Place the proposed page deliberately",
+    assumptions: ["The page starts without generated source"],
+  });
+  assert.equal(updated.revision, 2);
+  assert.deepEqual(updated.baseGraph, baseGraph);
+  assert.deepEqual(updated.baseLayout, baseLayout);
+  assert.equal(store.workspace.getProposalRevision(created.id, 1)?.rationale, created.rationale);
+  assert.equal(store.workspace.getProposalRevision(created.id, 2)?.rationale, updated.rationale);
+  assert.throws(() => store.workspace.updateProposal(created.id, {
+    expectedProposalRevision: 1,
+    operations: updated.operations,
+    layoutOperations: updated.layoutOperations,
+    generation: updated.generation,
+    rationale: "Lost update",
+    assumptions: [],
+  }), WorkspaceProposalRevisionConflictError);
+  assert.equal(rowCount(store.db, "workspace_proposal_audit"), 2);
+  assert.throws(
+    () => store.db.prepare("UPDATE workspace_proposal_audit SET payload_json = '{}' WHERE proposal_id = ? AND revision = 1")
+      .run(created.id),
+    /immutable|audit/i,
+  );
+  assert.throws(
+    () => store.db.prepare("DELETE FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = 1").run(created.id),
+    /immutable|audit|history/i,
+  );
+
+  store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: baseGraph.revision,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [proposalPageCommand("canonical")],
+  });
+  assert.deepEqual(store.workspace.getProposal(created.id)?.baseGraph, baseGraph);
+  store.close();
+});
+
+test("Proposal approval fails closed when the mutable row diverges from its exact audited revision", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal audit guard", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [proposalPageCommand("audit-guard")],
+  ));
+  store.db.prepare(
+    "UPDATE workspace_proposals SET operations_json = '[]' WHERE id = ?",
+  ).run(proposal.id);
+
+  assert.throws(
+    () => store.workspace.approveProposal(proposal.id, "structure-only"),
+    /immutable audit revision|audited revision/i,
+  );
+  assert.equal(store.workspace.getGraph(project.id).revision, 0);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, workspace.activeSnapshotId);
+  assert.equal(rowCount(store.db, "generation_plans"), 0);
+  store.close();
+});
+
+test("Proposal creating Runs are Project-owned at API and SQLite boundaries", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal Run owner", mode: "standard" });
+  const foreignProject = store.createProject({ name: "Proposal foreign Run", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  store.workspace.ensureWorkspaceRecord(foreignProject.id);
+  const foreignConversation = store.createConversation(foreignProject.id, "Foreign Proposal Run");
+  const foreignRun = store.createRun(foreignProject.id, foreignConversation.id);
+  const input = workspaceGenerationProposalInput(store, project.id, []);
+
+  assert.throws(
+    () => store.workspace.createProposal({ ...input, createdByRunId: foreignRun.id }),
+    /another Project/i,
+  );
+  const proposal = store.workspace.createProposal(input);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO workspace_proposals (
+       id, workspace_id, base_graph_revision, base_snapshot_id, revision, kind, status,
+       operations_json, layout_id, base_layout_checksum, base_layout_json,
+       layout_operations_json, rationale, assumptions_json, generation_payload_json,
+       review_json, created_by_run_id, created_at, updated_at
+     )
+     SELECT 'raw-foreign-run-proposal', workspace_id, base_graph_revision, base_snapshot_id,
+            revision, kind, status, operations_json, layout_id, base_layout_checksum,
+            base_layout_json, layout_operations_json, rationale, assumptions_json,
+            generation_payload_json, review_json, ?, created_at, updated_at
+     FROM workspace_proposals WHERE id = ?`,
+  ).run(foreignRun.id, proposal.id), /another Project/i);
+  assert.equal(rowCount(store.db, "workspace_proposals"), 1);
+  store.close();
+});
+
+test("stale Proposal approval commits conflicted review state before throwing and writes no graph Snapshot or Plan", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal conflict", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [proposalPageCommand("stale")],
+  ));
+  store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [proposalPageCommand("user")],
+  });
+  const before = {
+    graphRevisions: rowCount(store.db, "workspace_graph_revisions"),
+    snapshots: rowCount(store.db, "workspace_snapshots"),
+    plans: rowCount(store.db, "generation_plans"),
+  };
+
+  const conflicts: WorkspaceProposalConflictError[] = [];
+  assert.throws(() => store.workspace.approveProposal(proposal.id, "structure-only"), (error) => {
+    assert.ok(error instanceof WorkspaceRevisionConflictError);
+    assert.ok(error instanceof WorkspaceProposalConflictError);
+    conflicts.push(error);
+    return true;
+  });
+  const conflict = conflicts[0];
+  assert.ok(conflict);
+  assert.equal(conflict.proposalId, proposal.id);
+  assert.equal(conflict.actualRevision, 1);
+  assert.equal(conflict.summary.graphChanged, true);
+  assert.equal(conflict.summary.snapshotChanged, true);
+  const conflicted = store.workspace.getProposal(proposal.id)!;
+  assert.equal(conflicted.status, "conflicted");
+  assert.equal(conflicted.review.kind, "conflict");
+  assert.equal(conflicted.review.actualGraphRevision, 1);
+  assert.deepEqual({
+    graphRevisions: rowCount(store.db, "workspace_graph_revisions"),
+    snapshots: rowCount(store.db, "workspace_snapshots"),
+    plans: rowCount(store.db, "generation_plans"),
+  }, before);
+  store.close();
+});
+
+test("stale approval records conflict before validating layout against a concurrently changed graph", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal stale layout", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const added = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [proposalPageCommand("stale-layout-base")],
+  });
+  const baseLayout = store.workspace.getLayout(project.id);
+  store.workspace.saveLayout(project.id, {
+    graphRevision: added.graph.revision,
+    baseLayoutChecksum: baseLayout.checksum,
+    commands: [{ type: "move", objectId: "proposal-node-stale-layout-base", x: 20, y: 30 }],
+  });
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [proposalPageCommand("stale-layout-proposed")],
+  ));
+  store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: added.graph.revision,
+    expectedSnapshotId: added.snapshot.id,
+    commands: [{
+      id: "archive-stale-layout-base",
+      type: "archive-node",
+      nodeId: "proposal-node-stale-layout-base",
+    }],
+  });
+
+  assert.throws(
+    () => store.workspace.approveProposal(proposal.id, "structure-only"),
+    WorkspaceProposalConflictError,
+  );
+  assert.equal(store.workspace.getProposal(proposal.id)?.status, "conflicted");
+  store.close();
+});
+
+test("structure-only Proposal approval applies graph and layout in one transaction with one Snapshot", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Structure approval", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [proposalPageCommand("approved")],
+    {
+      layoutOperations: [
+        { type: "add-group", groupId: "approved-group", label: "Approved", bounds: { x: 0, y: 0, width: 500, height: 300 } },
+        { type: "set-parent", objectId: "proposal-node-approved", parentGroupId: "approved-group" },
+      ],
+    },
+  ));
+  const snapshotsBefore = rowCount(store.db, "workspace_snapshots");
+  const result = store.workspace.approveProposal(proposal.id, "structure-only");
+
+  assert.equal(result.proposal.status, "approved");
+  assert.equal(result.graph.revision, 1);
+  assert.equal(result.snapshot.graphRevision, 1);
+  assert.equal(result.snapshot.provenance.kind, "proposal-approval");
+  assert.equal(result.plan, null);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), snapshotsBefore + 1);
+  assert.equal(rowCount(store.db, "generation_plans"), 0);
+  assert.equal(store.workspace.getLayout(project.id).objects.find(({ id }) => id === "proposal-node-approved")?.parentGroupId, "approved-group");
+  store.close();
+});
+
+test("generate approval creates an immutable non-executable Plan shell pinned to the approved revision and resulting Snapshot", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Generate approval", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    project.id,
+    [proposalPageCommand("generated")],
+  ));
+  const snapshotsBefore = rowCount(store.db, "workspace_snapshots");
+  const result = store.workspace.approveProposal(proposal.id, "generate");
+
+  assert.ok(result.plan);
+  assert.equal(result.plan.status, "approved");
+  assert.equal(result.plan.proposalId, proposal.id);
+  assert.equal(result.plan.proposalRevision, proposal.revision);
+  assert.equal(result.plan.baseSnapshotId, result.snapshot.id);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), snapshotsBefore + 1);
+  assert.deepEqual(store.workspace.getGenerationPlan(result.plan.id), result.plan);
+  assert.deepEqual(store.workspace.getProposalRevision(proposal.id, proposal.revision), proposal);
+  assert.throws(
+    () => store.db.prepare("UPDATE generation_plans SET proposal_revision = proposal_revision + 1 WHERE id = ?")
+      .run(result.plan!.id),
+    /immutable|identity/i,
+  );
+  assert.throws(
+    () => store.db.prepare("DELETE FROM generation_plans WHERE id = ?").run(result.plan!.id),
+    /immutable|history/i,
+  );
+  store.close();
+});
+
+test("layout-only generate approval reuses the guarded graph Snapshot without inventing semantic history", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Layout-only approval", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const baseLayout = store.workspace.getLayout(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+    layoutOperations: [{
+      type: "add-group",
+      groupId: "layout-only-group",
+      label: "Layout only",
+      bounds: { x: 10, y: 20, width: 300, height: 200 },
+    }],
+  }));
+  const counts = {
+    graphRevisions: rowCount(store.db, "workspace_graph_revisions"),
+    snapshots: rowCount(store.db, "workspace_snapshots"),
+  };
+  const result = store.workspace.approveProposal(proposal.id, "generate");
+
+  assert.equal(result.graph.revision, 0);
+  assert.equal(result.snapshot.id, workspace.activeSnapshotId);
+  assert.equal(result.plan?.baseSnapshotId, workspace.activeSnapshotId);
+  assert.notEqual(store.workspace.getLayout(project.id).checksum, baseLayout.checksum);
+  assert.deepEqual({
+    graphRevisions: rowCount(store.db, "workspace_graph_revisions"),
+    snapshots: rowCount(store.db, "workspace_snapshots"),
+  }, counts);
+  store.close();
+});
+
+test("layout CAS rejects a stale checksum and Proposal validation rejects unsupported or inconsistent generation intent", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal validation", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const baseLayout = store.workspace.getLayout(project.id);
+  const first = store.workspace.saveLayout(project.id, {
+    layoutId: "default",
+    graphRevision: 0,
+    baseLayoutChecksum: baseLayout.checksum,
+    commands: [{
+      type: "add-group",
+      groupId: "fresh-group",
+      label: "Fresh",
+      bounds: { x: 0, y: 0, width: 100, height: 100 },
+    }],
+  });
+  assert.throws(() => store.workspace.saveLayout(project.id, {
+    layoutId: "default",
+    graphRevision: 0,
+    baseLayoutChecksum: baseLayout.checksum,
+    commands: [{ type: "rename-group", groupId: "fresh-group", label: "Stale" }],
+  }), WorkspaceLayoutConflictError);
+  assert.equal(store.workspace.getLayout(project.id).checksum, first.checksum);
+
+  const duplicateNames = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [
+    proposalPageCommand("duplicate-a", "Same name"),
+    proposalPageCommand("duplicate-b", "Same name"),
+  ]));
+  assert.throws(
+    () => store.workspace.approveProposal(duplicateNames.id, "structure-only"),
+    WorkspaceProposalValidationError,
+  );
+
+  const missingDependency = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+    generation: {
+      ...emptyWorkspaceGenerationPayload(),
+      dependencyPlans: [{
+        kind: "resource",
+        ownerArtifactId: "missing-owner",
+        resourceId: "missing-resource",
+      }],
+    },
+  }));
+  assert.throws(
+    () => store.workspace.approveProposal(missingDependency.id, "generate"),
+    /missing generation dependency/i,
+  );
+  assert.throws(() => store.workspace.createProposal({
+    ...workspaceGenerationProposalInput(store, project.id, []),
+    kind: "component-propagation",
+    generation: {
+      kind: "component-propagation",
+      impactAnalysisId: "impact-1",
+      componentArtifactId: "component-1",
+      fromRevisionId: "component-v1",
+      toRevisionId: "component-v2",
+      selectedInstanceIds: [],
+      overrideResolutions: [],
+      requiredQaFrameIds: [],
+    },
+  } as never), /Task 13|component-propagation/i);
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, workspace.activeSnapshotId);
+  store.close();
+});
+
+test("Proposal approval rejects an exact Resource revision policy whose owned revision is missing", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Proposal exact Resource revision", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = store.workspace.applyGraphCommands(project.id, {
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+    commands: [{
+      id: "add-proposal-resource",
+      type: "add-node",
+      node: {
+        id: "proposal-resource-node",
+        kind: "resource",
+        name: "Proposal research",
+        resourceId: "proposal-resource",
+        createIdentity: { resourceKind: "research", defaultPinPolicy: "pin-current" },
+      },
+    }],
+  });
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, [], {
+    generation: {
+      ...emptyWorkspaceGenerationPayload(),
+      resourceOperations: [{
+        operation: "reuse",
+        nodeId: "proposal-resource-node",
+        resourceId: "proposal-resource",
+        kind: "research",
+        title: "Proposal research",
+        revisionPolicy: { kind: "exact", resourceRevisionId: "missing-resource-revision" },
+      }],
+    },
+  }));
+
+  assert.throws(
+    () => store.workspace.approveProposal(proposal.id, "generate"),
+    /missing generation dependency Resource Revision/i,
+  );
+  assert.equal(store.workspace.getProposal(proposal.id)?.status, "draft");
+  assert.equal(store.workspace.getWorkspace(project.id)?.activeSnapshotId, graph.snapshot.id);
+  assert.equal(rowCount(store.db, "generation_plans"), 0);
+  store.close();
+});
+
+test("project-scoped Proposal mutations enforce ownership and terminal state", () => {
+  const store = new Store(":memory:", fakeClock());
+  const firstProject = store.createProject({ name: "Proposal owner", mode: "standard" });
+  const secondProject = store.createProject({ name: "Proposal foreign", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(firstProject.id);
+  store.workspace.ensureWorkspaceRecord(secondProject.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(
+    store,
+    firstProject.id,
+    [proposalPageCommand("owned")],
+  ));
+  assert.throws(
+    () => store.workspace.updateProposalForProject(secondProject.id, proposal.id, {
+      expectedProposalRevision: proposal.revision,
+      operations: proposal.operations,
+      layoutOperations: proposal.layoutOperations,
+      generation: proposal.generation,
+      rationale: proposal.rationale,
+      assumptions: proposal.assumptions,
+    }),
+    WorkspaceProposalOwnershipError,
+  );
+  const rejected = store.workspace.rejectProposalForProject(firstProject.id, proposal.id);
+  assert.equal(rejected.status, "rejected");
+  assert.throws(
+    () => store.workspace.approveProposalForProject(firstProject.id, proposal.id, "generate"),
+    WorkspaceProposalStateConflictError,
+  );
+  assert.equal(rowCount(store.db, "generation_plans"), 0);
   store.close();
 });

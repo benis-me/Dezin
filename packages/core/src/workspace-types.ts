@@ -371,6 +371,7 @@ export type WorkspaceLayoutCommand =
 export interface WorkspaceLayoutPatch {
   layoutId?: string;
   graphRevision: number;
+  baseLayoutChecksum: string;
   commands: readonly WorkspaceLayoutCommand[];
 }
 
@@ -399,6 +400,7 @@ export interface WorkspaceLayout {
   layoutId: string;
   objects: Array<WorkspaceLayoutNode | WorkspaceLayoutGroup>;
   viewport: WorkspaceViewport;
+  checksum: string;
 }
 
 export type NewWorkspaceNode =
@@ -436,3 +438,192 @@ export type WorkspaceGraphCommand =
   | { id: string; type: "add-edge"; edge: NewWorkspaceEdge }
   | { id: string; type: "remove-edge"; edgeId: string }
   | { id: string; type: "bind-prototype"; edgeId: string; binding: PrototypeBinding };
+
+export type WorkspaceProposalKind = "workspace-generation" | "component-propagation";
+export type WorkspaceProposalStatus = "draft" | "approved" | "rejected" | "superseded" | "conflicted";
+export type WorkspaceProposalApprovalMode = "structure-only" | "generate";
+
+export type WorkspaceResourceRevisionPolicy =
+  | { kind: "exact"; resourceRevisionId: string }
+  | { kind: "base-snapshot" }
+  | { kind: "generate" };
+
+export interface WorkspaceGenerationResourceOperation {
+  operation: "create" | "revise" | "reuse";
+  nodeId: string;
+  resourceId: string;
+  kind: ResourceKind;
+  title: string;
+  revisionPolicy: WorkspaceResourceRevisionPolicy;
+}
+
+export interface WorkspaceGenerationArtifactPlan {
+  operation: "create" | "revise";
+  nodeId: string;
+  artifactId: string;
+  kind: ArtifactKind;
+  name: string;
+  trackId: string;
+  baseRevisionId: string | null;
+  dependsOnArtifactIds: string[];
+  capabilityIds: string[];
+  responsiveFrameIds: string[];
+}
+
+export type WorkspaceGenerationDependencyPlan =
+  | {
+    kind: "component-instance";
+    ownerArtifactId: string;
+    instanceId: string;
+    componentArtifactId: string;
+    componentRevisionId: string | null;
+    variantKey?: string;
+    stateKey?: string;
+    sourceLocator: DesignNodeLocator;
+    overrides: Record<string, unknown>;
+    status: ComponentInstanceDependencyStatus;
+  }
+  | {
+    kind: "resource";
+    ownerArtifactId: string;
+    resourceId: string;
+  };
+
+export interface WorkspaceGenerationPrototypeIntent {
+  edgeId: string;
+  sourceArtifactId: string;
+  targetArtifactId: string;
+  sourceLocator?: DesignNodeLocator;
+  trigger: PrototypeTrigger;
+  targetState?: string;
+  transition?: PrototypeTransition;
+}
+
+export interface WorkspaceGenerationCapability {
+  id: string;
+  kind: "text" | "image" | "video" | "browser" | "visual-qa";
+  required: boolean;
+}
+
+export interface WorkspaceGenerationPayload {
+  kind: "workspace-generation";
+  resourceOperations: WorkspaceGenerationResourceOperation[];
+  artifactPlans: WorkspaceGenerationArtifactPlan[];
+  dependencyPlans: WorkspaceGenerationDependencyPlan[];
+  prototypeIntents: WorkspaceGenerationPrototypeIntent[];
+  capabilities: WorkspaceGenerationCapability[];
+  responsiveFrames: RenderFrameSpec[];
+  qualityProfile: ArtifactQualityProfile;
+}
+
+export interface ComponentPropagationOverrideResolution {
+  instanceId: string;
+  resolution: "preserve" | "accept-component" | "manual";
+  overrides: Record<string, unknown>;
+}
+
+export interface ComponentPropagationProposalPayload {
+  kind: "component-propagation";
+  impactAnalysisId: string;
+  componentArtifactId: string;
+  fromRevisionId: string;
+  toRevisionId: string;
+  selectedInstanceIds: string[];
+  overrideResolutions: ComponentPropagationOverrideResolution[];
+  requiredQaFrameIds: string[];
+}
+
+export type WorkspaceProposalGeneration = WorkspaceGenerationPayload | ComponentPropagationProposalPayload;
+
+export type WorkspaceProposalReview =
+  | { kind: "none" }
+  | { kind: "approved"; mode: WorkspaceProposalApprovalMode }
+  | { kind: "rejected" }
+  | {
+    kind: "conflict";
+    expectedGraphRevision: number;
+    actualGraphRevision: number;
+    expectedSnapshotId: string;
+    actualSnapshotId: string;
+    expectedLayoutChecksum: string;
+    actualLayoutChecksum: string;
+    graphChanged: boolean;
+    snapshotChanged: boolean;
+    layoutChanged: boolean;
+  };
+
+export interface WorkspaceProposal {
+  id: string;
+  workspaceId: string;
+  revision: number;
+  kind: WorkspaceProposalKind;
+  baseGraphRevision: number;
+  baseSnapshotId: string;
+  baseGraph: WorkspaceGraph;
+  layoutId: string;
+  baseLayoutChecksum: string;
+  baseLayout: WorkspaceLayout;
+  status: WorkspaceProposalStatus;
+  operations: WorkspaceGraphCommand[];
+  layoutOperations: WorkspaceLayoutCommand[];
+  rationale: string;
+  assumptions: string[];
+  generation: WorkspaceProposalGeneration;
+  review: WorkspaceProposalReview;
+  createdByRunId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateWorkspaceProposalInput {
+  projectId: string;
+  kind: WorkspaceProposalKind;
+  baseGraphRevision: number;
+  baseSnapshotId: string;
+  layoutId?: string;
+  baseLayoutChecksum: string;
+  operations: readonly WorkspaceGraphCommand[];
+  layoutOperations?: readonly WorkspaceLayoutCommand[];
+  generation: WorkspaceProposalGeneration;
+  rationale: string;
+  assumptions: readonly string[];
+  createdByRunId?: string | null;
+}
+
+export interface UpdateWorkspaceProposalInput {
+  expectedProposalRevision: number;
+  operations: readonly WorkspaceGraphCommand[];
+  layoutOperations: readonly WorkspaceLayoutCommand[];
+  generation: WorkspaceProposalGeneration;
+  rationale: string;
+  assumptions: readonly string[];
+}
+
+export type GenerationPlanStatus =
+  | "approved"
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "compile-failed"
+  | "requires-new-impact"
+  | "cancelled";
+
+export interface GenerationPlan {
+  id: string;
+  workspaceId: string;
+  proposalId: string;
+  proposalRevision: number;
+  baseSnapshotId: string;
+  status: GenerationPlanStatus;
+  compileError: Record<string, unknown> | null;
+  createdAt: number;
+  finishedAt: number | null;
+}
+
+export interface ApprovedProposalResult {
+  proposal: WorkspaceProposal;
+  graph: WorkspaceGraph;
+  snapshot: WorkspaceSnapshot;
+  plan: GenerationPlan | null;
+}

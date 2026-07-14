@@ -12,6 +12,11 @@ import type {
   ArtifactRevisionResourcePinInput,
   ArtifactKind,
   ArtifactPublicationExpectation,
+  ArtifactQualityProfile,
+  ApprovedProposalResult,
+  ComponentPropagationOverrideResolution,
+  ComponentPropagationProposalPayload,
+  CreateWorkspaceProposalInput,
   CreateArtifactRevisionInput,
   CreateKernelRevisionInput,
   DesignNodeLocator,
@@ -26,13 +31,26 @@ import type {
   SharedDesignKernelRevision,
   WorkspaceEdge,
   WorkspaceGraph,
+  WorkspaceGraphCommand,
   WorkspaceGraphMutationInput,
+  WorkspaceGenerationArtifactPlan,
+  WorkspaceGenerationCapability,
+  WorkspaceGenerationDependencyPlan,
+  WorkspaceGenerationPayload,
+  WorkspaceGenerationPrototypeIntent,
+  WorkspaceGenerationResourceOperation,
+  WorkspaceLayout,
   WorkspaceLayoutCommand,
   WorkspaceLayoutPatch,
   WorkspaceNode,
   WorkspaceSnapshot,
   WorkspaceSnapshotPublicationInput,
   WorkspaceSnapshotProvenance,
+  WorkspaceProposal,
+  WorkspaceProposalGeneration,
+  WorkspaceProposalReview,
+  UpdateWorkspaceProposalInput,
+  GenerationPlan,
 } from "./workspace-types.ts";
 import type { Row } from "./store-codecs.ts";
 import type { ProjectMode } from "./types.ts";
@@ -141,6 +159,9 @@ export interface WorkspaceBundle {
   revisions: ArtifactRevisionRecord[];
   snapshots: WorkspaceSnapshotRecord[];
 }
+
+export interface WorkspaceProposalRecord extends WorkspaceProposal {}
+export interface GenerationPlanRecord extends GenerationPlan {}
 
 export class WorkspaceStoreCodecError extends Error {
   constructor(message: string) {
@@ -991,16 +1012,8 @@ function normalizeLayoutCommand(value: unknown, index: number): WorkspaceLayoutC
   }
 }
 
-export function normalizeWorkspaceLayoutPatch(value: unknown): WorkspaceLayoutPatch & { layoutId: string } {
-  const input = boundaryRecord(value, "workspace layout patch");
-  allowFields(input, ["layoutId", "graphRevision", "commands"], "workspace layout patch");
-  if (typeof input.graphRevision !== "number" || !Number.isSafeInteger(input.graphRevision) || input.graphRevision < 0) {
-    throw new WorkspaceStoreCodecError("layout graphRevision must be a non-negative safe integer");
-  }
-  const commandInputs = boundaryArray(input.commands, "workspace layout commands");
-  if (commandInputs.length === 0) {
-    throw new WorkspaceStoreCodecError("workspace layout patch must contain at least one command");
-  }
+export function normalizeWorkspaceLayoutCommands(value: unknown, label = "workspace layout commands"): WorkspaceLayoutCommand[] {
+  const commandInputs = boundaryArray(value, label);
   const commands = commandInputs.map((command, index) => normalizeLayoutCommand(command, index));
   const addedGroups = new Set<string>();
   for (const command of commands) {
@@ -1010,15 +1023,557 @@ export function normalizeWorkspaceLayoutPatch(value: unknown): WorkspaceLayoutPa
     }
     addedGroups.add(command.groupId);
   }
+  return commands;
+}
+
+export function normalizeWorkspaceLayoutPatch(value: unknown): WorkspaceLayoutPatch & { layoutId: string } {
+  const input = boundaryRecord(value, "workspace layout patch");
+  allowFields(input, ["layoutId", "graphRevision", "baseLayoutChecksum", "commands"], "workspace layout patch");
+  if (typeof input.graphRevision !== "number" || !Number.isSafeInteger(input.graphRevision) || input.graphRevision < 0) {
+    throw new WorkspaceStoreCodecError("layout graphRevision must be a non-negative safe integer");
+  }
+  const commands = normalizeWorkspaceLayoutCommands(input.commands);
+  if (commands.length === 0) {
+    throw new WorkspaceStoreCodecError("workspace layout patch must contain at least one command");
+  }
   return {
     layoutId: input.layoutId === undefined ? "default" : canonicalString(input.layoutId, "layout id"),
     graphRevision: input.graphRevision,
+    baseLayoutChecksum: canonicalString(input.baseLayoutChecksum, "base layout checksum"),
     commands,
   };
 }
 
 export function normalizeWorkspaceLayoutId(value: unknown): string {
   return canonicalString(value, "layout id");
+}
+
+function uniqueCanonicalStrings(value: unknown, label: string): string[] {
+  const result = canonicalStringArray(value, label);
+  if (new Set(result).size !== result.length) {
+    throw new WorkspaceStoreCodecError(`${label} must be unique`);
+  }
+  return result;
+}
+
+function normalizeProposalGraphCommands(value: unknown): WorkspaceGraphCommand[] {
+  const commands = boundaryArray(value, "Workspace Proposal graph operations");
+  return commands.length === 0 ? [] : normalizeWorkspaceGraphCommands(commands);
+}
+
+function normalizeResourceRevisionPolicy(value: unknown, label: string): WorkspaceGenerationResourceOperation["revisionPolicy"] {
+  const policy = boundaryRecord(value, label);
+  const kind = canonicalString(policy.kind, `${label} kind`);
+  if (kind === "exact") {
+    allowFields(policy, ["kind", "resourceRevisionId"], label);
+    return { kind, resourceRevisionId: canonicalString(policy.resourceRevisionId, `${label} Resource Revision id`) };
+  }
+  if (kind === "base-snapshot" || kind === "generate") {
+    allowFields(policy, ["kind"], label);
+    return { kind };
+  }
+  throw new WorkspaceStoreCodecError(`${label} kind is unsupported`);
+}
+
+function normalizeGenerationResourceOperation(value: unknown, index: number): WorkspaceGenerationResourceOperation {
+  const label = `Workspace generation Resource operation at index ${index}`;
+  const input = boundaryRecord(value, label);
+  allowFields(input, ["operation", "nodeId", "resourceId", "kind", "title", "revisionPolicy"], label);
+  if (input.operation !== "create" && input.operation !== "revise" && input.operation !== "reuse") {
+    throw new WorkspaceStoreCodecError(`${label} operation is unsupported`);
+  }
+  if (input.kind !== "research" && input.kind !== "moodboard" && input.kind !== "sharingan-capture"
+    && input.kind !== "file" && input.kind !== "asset" && input.kind !== "effect"
+    && input.kind !== "external-reference") {
+    throw new WorkspaceStoreCodecError(`${label} Resource kind is unsupported`);
+  }
+  return {
+    operation: input.operation,
+    nodeId: canonicalString(input.nodeId, `${label} node id`),
+    resourceId: canonicalString(input.resourceId, `${label} Resource id`),
+    kind: input.kind,
+    title: canonicalString(input.title, `${label} title`),
+    revisionPolicy: normalizeResourceRevisionPolicy(input.revisionPolicy, `${label} revision policy`),
+  };
+}
+
+function normalizeGenerationArtifactPlan(value: unknown, index: number): WorkspaceGenerationArtifactPlan {
+  const label = `Workspace generation Artifact plan at index ${index}`;
+  const input = boundaryRecord(value, label);
+  allowFields(input, [
+    "operation", "nodeId", "artifactId", "kind", "name", "trackId", "baseRevisionId",
+    "dependsOnArtifactIds", "capabilityIds", "responsiveFrameIds",
+  ], label);
+  if (input.operation !== "create" && input.operation !== "revise") {
+    throw new WorkspaceStoreCodecError(`${label} operation is unsupported`);
+  }
+  if (input.kind !== "page" && input.kind !== "component") {
+    throw new WorkspaceStoreCodecError(`${label} Artifact kind is unsupported`);
+  }
+  return {
+    operation: input.operation,
+    nodeId: canonicalString(input.nodeId, `${label} node id`),
+    artifactId: canonicalString(input.artifactId, `${label} Artifact id`),
+    kind: input.kind,
+    name: canonicalString(input.name, `${label} name`),
+    trackId: canonicalString(input.trackId, `${label} Track id`),
+    baseRevisionId: nullableCanonicalString(input.baseRevisionId, `${label} base Revision id`),
+    dependsOnArtifactIds: uniqueCanonicalStrings(input.dependsOnArtifactIds, `${label} dependency Artifact ids`),
+    capabilityIds: uniqueCanonicalStrings(input.capabilityIds, `${label} capability ids`),
+    responsiveFrameIds: uniqueCanonicalStrings(input.responsiveFrameIds, `${label} responsive frame ids`),
+  };
+}
+
+function normalizeGenerationDependencyPlan(value: unknown, index: number): WorkspaceGenerationDependencyPlan {
+  const label = `Workspace generation dependency plan at index ${index}`;
+  const input = boundaryRecord(value, label);
+  const kind = canonicalString(input.kind, `${label} kind`);
+  if (kind === "resource") {
+    allowFields(input, ["kind", "ownerArtifactId", "resourceId"], label);
+    return {
+      kind,
+      ownerArtifactId: canonicalString(input.ownerArtifactId, `${label} owner Artifact id`),
+      resourceId: canonicalString(input.resourceId, `${label} Resource id`),
+    };
+  }
+  if (kind !== "component-instance") {
+    throw new WorkspaceStoreCodecError(`${label} kind is unsupported`);
+  }
+  allowFields(input, [
+    "kind", "ownerArtifactId", "instanceId", "componentArtifactId", "componentRevisionId",
+    "variantKey", "stateKey", "sourceLocator", "overrides", "status",
+  ], label);
+  if (input.status !== "linked" && input.status !== "detached") {
+    throw new WorkspaceStoreCodecError(`${label} status must be linked or detached`);
+  }
+  const variantKey = optionalNullableCanonicalString(input, "variantKey", `${label} variant key`);
+  const stateKey = optionalNullableCanonicalString(input, "stateKey", `${label} state key`);
+  return {
+    kind,
+    ownerArtifactId: canonicalString(input.ownerArtifactId, `${label} owner Artifact id`),
+    instanceId: canonicalString(input.instanceId, `${label} instance id`),
+    componentArtifactId: canonicalString(input.componentArtifactId, `${label} Component Artifact id`),
+    componentRevisionId: nullableCanonicalString(input.componentRevisionId, `${label} Component Revision id`),
+    ...(variantKey == null ? {} : { variantKey }),
+    ...(stateKey == null ? {} : { stateKey }),
+    sourceLocator: normalizeDesignNodeLocatorInput(input.sourceLocator, `${label} source locator`),
+    overrides: canonicalJsonObject(input.overrides, `${label} overrides`),
+    status: input.status,
+  };
+}
+
+function normalizePrototypeTransition(value: unknown, label: string): WorkspaceGenerationPrototypeIntent["transition"] {
+  const transition = boundaryRecord(value, label);
+  allowFields(transition, ["type", "durationMs", "easing"], label);
+  if (transition.type !== "none" && transition.type !== "fade" && transition.type !== "slide") {
+    throw new WorkspaceStoreCodecError(`${label} type is unsupported`);
+  }
+  const durationMs = Object.hasOwn(transition, "durationMs")
+    ? nonNegativeInteger(transition.durationMs, `${label} duration`)
+    : undefined;
+  const easing = Object.hasOwn(transition, "easing")
+    ? canonicalString(transition.easing, `${label} easing`)
+    : undefined;
+  return {
+    type: transition.type,
+    ...(durationMs === undefined ? {} : { durationMs }),
+    ...(easing === undefined ? {} : { easing }),
+  };
+}
+
+function normalizeGenerationPrototypeIntent(value: unknown, index: number): WorkspaceGenerationPrototypeIntent {
+  const label = `Workspace generation prototype intent at index ${index}`;
+  const input = boundaryRecord(value, label);
+  allowFields(input, [
+    "edgeId", "sourceArtifactId", "targetArtifactId", "sourceLocator", "trigger", "targetState", "transition",
+  ], label);
+  if (input.trigger !== "click" && input.trigger !== "submit") {
+    throw new WorkspaceStoreCodecError(`${label} trigger is unsupported`);
+  }
+  const sourceLocator = Object.hasOwn(input, "sourceLocator")
+    ? normalizeDesignNodeLocatorInput(input.sourceLocator, `${label} source locator`)
+    : undefined;
+  const targetState = Object.hasOwn(input, "targetState")
+    ? canonicalString(input.targetState, `${label} target state`)
+    : undefined;
+  const transition = Object.hasOwn(input, "transition")
+    ? normalizePrototypeTransition(input.transition, `${label} transition`)
+    : undefined;
+  return {
+    edgeId: canonicalString(input.edgeId, `${label} edge id`),
+    sourceArtifactId: canonicalString(input.sourceArtifactId, `${label} source Artifact id`),
+    targetArtifactId: canonicalString(input.targetArtifactId, `${label} target Artifact id`),
+    ...(sourceLocator === undefined ? {} : { sourceLocator }),
+    trigger: input.trigger,
+    ...(targetState === undefined ? {} : { targetState }),
+    ...(transition === undefined ? {} : { transition }),
+  };
+}
+
+function normalizeGenerationCapability(value: unknown, index: number): WorkspaceGenerationCapability {
+  const label = `Workspace generation capability at index ${index}`;
+  const input = boundaryRecord(value, label);
+  allowFields(input, ["id", "kind", "required"], label);
+  if (input.kind !== "text" && input.kind !== "image" && input.kind !== "video"
+    && input.kind !== "browser" && input.kind !== "visual-qa") {
+    throw new WorkspaceStoreCodecError(`${label} kind is unsupported`);
+  }
+  if (typeof input.required !== "boolean") throw new WorkspaceStoreCodecError(`${label} required must be boolean`);
+  return { id: canonicalString(input.id, `${label} id`), kind: input.kind, required: input.required };
+}
+
+function uniqueBy<T>(values: readonly T[], key: (value: T) => string, label: string): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    const id = key(value);
+    if (seen.has(id)) throw new WorkspaceStoreCodecError(`duplicate ${label} ${id}`);
+    seen.add(id);
+  }
+}
+
+function normalizeWorkspaceGenerationPayload(value: unknown): WorkspaceGenerationPayload {
+  const label = "Workspace generation payload";
+  const input = boundaryRecord(value, label);
+  allowFields(input, [
+    "kind", "resourceOperations", "artifactPlans", "dependencyPlans", "prototypeIntents",
+    "capabilities", "responsiveFrames", "qualityProfile",
+  ], label);
+  if (input.kind !== "workspace-generation") {
+    throw new WorkspaceStoreCodecError("Workspace generation payload kind must be workspace-generation");
+  }
+  const resourceOperations = boundaryArray(input.resourceOperations, `${label} Resource operations`)
+    .map(normalizeGenerationResourceOperation);
+  const artifactPlans = boundaryArray(input.artifactPlans, `${label} Artifact plans`)
+    .map(normalizeGenerationArtifactPlan);
+  const dependencyPlans = boundaryArray(input.dependencyPlans, `${label} dependency plans`)
+    .map(normalizeGenerationDependencyPlan);
+  const prototypeIntents = boundaryArray(input.prototypeIntents, `${label} prototype intents`)
+    .map(normalizeGenerationPrototypeIntent);
+  const capabilities = boundaryArray(input.capabilities, `${label} capabilities`)
+    .map(normalizeGenerationCapability);
+  uniqueBy(resourceOperations, (operation) => operation.resourceId, "Workspace generation Resource");
+  uniqueBy(artifactPlans, (plan) => plan.artifactId, "Workspace generation Artifact");
+  uniqueBy(prototypeIntents, (intent) => intent.edgeId, "Workspace generation prototype edge");
+  uniqueBy(capabilities, (capability) => capability.id, "Workspace generation capability");
+  const kernelShape = normalizeKernelPayload({
+    tokens: {},
+    typography: {},
+    sharedAssetRevisionIds: [],
+    brief: "",
+    terminology: {},
+    exclusions: [],
+    responsiveFrames: input.responsiveFrames,
+    qualityProfile: input.qualityProfile,
+  }, label);
+  return {
+    kind: input.kind,
+    resourceOperations,
+    artifactPlans,
+    dependencyPlans,
+    prototypeIntents,
+    capabilities,
+    responsiveFrames: kernelShape.responsiveFrames,
+    qualityProfile: kernelShape.qualityProfile,
+  };
+}
+
+function normalizeComponentPropagationPayload(value: unknown): ComponentPropagationProposalPayload {
+  const label = "Component propagation Proposal payload";
+  const input = boundaryRecord(value, label);
+  allowFields(input, [
+    "kind", "impactAnalysisId", "componentArtifactId", "fromRevisionId", "toRevisionId",
+    "selectedInstanceIds", "overrideResolutions", "requiredQaFrameIds",
+  ], label);
+  if (input.kind !== "component-propagation") {
+    throw new WorkspaceStoreCodecError(`${label} kind must be component-propagation`);
+  }
+  const overrideResolutions = boundaryArray(input.overrideResolutions, `${label} override resolutions`)
+    .map<ComponentPropagationOverrideResolution>((value, index) => {
+    const resolutionLabel = `${label} override resolution at index ${index}`;
+    const resolution = boundaryRecord(value, resolutionLabel);
+    allowFields(resolution, ["instanceId", "resolution", "overrides"], resolutionLabel);
+    if (resolution.resolution !== "preserve" && resolution.resolution !== "accept-component"
+      && resolution.resolution !== "manual") {
+      throw new WorkspaceStoreCodecError(`${resolutionLabel} resolution is unsupported`);
+    }
+      return {
+        instanceId: canonicalString(resolution.instanceId, `${resolutionLabel} instance id`),
+        resolution: resolution.resolution,
+        overrides: canonicalJsonObject(resolution.overrides, `${resolutionLabel} overrides`),
+      };
+    });
+  uniqueBy(overrideResolutions, (resolution) => resolution.instanceId, "Component propagation override instance");
+  return {
+    kind: input.kind,
+    impactAnalysisId: canonicalString(input.impactAnalysisId, `${label} Impact Analysis id`),
+    componentArtifactId: canonicalString(input.componentArtifactId, `${label} Component Artifact id`),
+    fromRevisionId: canonicalString(input.fromRevisionId, `${label} from Revision id`),
+    toRevisionId: canonicalString(input.toRevisionId, `${label} to Revision id`),
+    selectedInstanceIds: uniqueCanonicalStrings(input.selectedInstanceIds, `${label} selected instance ids`),
+    overrideResolutions,
+    requiredQaFrameIds: uniqueCanonicalStrings(input.requiredQaFrameIds, `${label} required QA frame ids`),
+  };
+}
+
+export function normalizeWorkspaceProposalGeneration(value: unknown): WorkspaceProposalGeneration {
+  const input = boundaryRecord(value, "Workspace Proposal generation payload");
+  return input.kind === "workspace-generation"
+    ? normalizeWorkspaceGenerationPayload(input)
+    : normalizeComponentPropagationPayload(input);
+}
+
+export function normalizeCreateWorkspaceProposalInput(value: unknown): CreateWorkspaceProposalInput & { layoutId: string; layoutOperations: WorkspaceLayoutCommand[]; createdByRunId: string | null } {
+  const input = boundaryRecord(value, "create Workspace Proposal input");
+  allowFields(input, [
+    "projectId", "kind", "baseGraphRevision", "baseSnapshotId", "layoutId", "baseLayoutChecksum",
+    "operations", "layoutOperations", "generation", "rationale", "assumptions", "createdByRunId",
+  ], "create Workspace Proposal input");
+  if (input.kind !== "workspace-generation" && input.kind !== "component-propagation") {
+    throw new WorkspaceStoreCodecError("Workspace Proposal kind is unsupported");
+  }
+  const generation = normalizeWorkspaceProposalGeneration(input.generation);
+  if (generation.kind !== input.kind) throw new WorkspaceStoreCodecError("Workspace Proposal kind does not match generation payload");
+  const baseGraphRevision = nonNegativeInteger(input.baseGraphRevision, "Workspace Proposal base graph revision");
+  const createdByRunId = Object.hasOwn(input, "createdByRunId")
+    ? nullableCanonicalString(input.createdByRunId, "Workspace Proposal creating Run id")
+    : null;
+  return {
+    projectId: canonicalString(input.projectId, "Workspace Proposal Project id"),
+    kind: input.kind,
+    baseGraphRevision,
+    baseSnapshotId: canonicalString(input.baseSnapshotId, "Workspace Proposal base Snapshot id"),
+    layoutId: input.layoutId === undefined ? "default" : canonicalString(input.layoutId, "Workspace Proposal layout id"),
+    baseLayoutChecksum: canonicalString(input.baseLayoutChecksum, "Workspace Proposal base layout checksum"),
+    operations: normalizeProposalGraphCommands(input.operations),
+    layoutOperations: input.layoutOperations === undefined
+      ? []
+      : normalizeWorkspaceLayoutCommands(input.layoutOperations, "Workspace Proposal layout operations"),
+    generation,
+    rationale: canonicalString(input.rationale, "Workspace Proposal rationale"),
+    assumptions: canonicalStringArray(input.assumptions, "Workspace Proposal assumptions"),
+    createdByRunId,
+  };
+}
+
+export function normalizeUpdateWorkspaceProposalInput(value: unknown): UpdateWorkspaceProposalInput {
+  const input = boundaryRecord(value, "update Workspace Proposal input");
+  allowFields(input, [
+    "expectedProposalRevision", "operations", "layoutOperations", "generation", "rationale", "assumptions",
+  ], "update Workspace Proposal input");
+  return {
+    expectedProposalRevision: positiveInteger(input.expectedProposalRevision, "expected Workspace Proposal revision"),
+    operations: normalizeProposalGraphCommands(input.operations),
+    layoutOperations: normalizeWorkspaceLayoutCommands(input.layoutOperations, "Workspace Proposal layout operations"),
+    generation: normalizeWorkspaceProposalGeneration(input.generation),
+    rationale: canonicalString(input.rationale, "Workspace Proposal rationale"),
+    assumptions: canonicalStringArray(input.assumptions, "Workspace Proposal assumptions"),
+  };
+}
+
+export function normalizeWorkspaceProposalApprovalMode(value: unknown): "structure-only" | "generate" {
+  if (value !== "structure-only" && value !== "generate") {
+    throw new WorkspaceStoreCodecError("Workspace Proposal approval mode must be structure-only or generate");
+  }
+  return value;
+}
+
+export function workspaceLayoutChecksum(layout: Omit<WorkspaceLayout, "checksum">): string {
+  return createHash("sha256").update(`workspace-layout-v1\0${JSON.stringify(layout)}`).digest("hex");
+}
+
+export function asWorkspaceLayoutValue(value: unknown): WorkspaceLayout {
+  const layout = boundaryRecord(value, "Workspace layout");
+  allowFields(layout, ["workspaceId", "layoutId", "objects", "viewport", "checksum"], "Workspace layout");
+  const objects = boundaryArray(layout.objects, "Workspace layout objects").map((value, index) => {
+    const label = `Workspace layout object at index ${index}`;
+    const object = boundaryRecord(value, label);
+    const id = exactStoredString(object.id, `${label} id`);
+    const x = finiteNumber(object.x, `${label} x`);
+    const y = finiteNumber(object.y, `${label} y`);
+    const parentGroupId = object.parentGroupId === null
+      ? null
+      : exactStoredString(object.parentGroupId, `${label} parent group id`);
+    if (object.kind === "node") {
+      allowFields(object, ["id", "kind", "x", "y", "parentGroupId"], label);
+      return { id, kind: "node" as const, x, y, parentGroupId };
+    }
+    if (object.kind !== "group") throw new WorkspaceStoreCodecError(`${label} kind is unsupported`);
+    allowFields(object, [
+      "id", "kind", "x", "y", "width", "height", "parentGroupId", "label", "collapsed",
+    ], label);
+    if (typeof object.collapsed !== "boolean") throw new WorkspaceStoreCodecError(`${label} collapsed must be boolean`);
+    return {
+      id,
+      kind: "group" as const,
+      x,
+      y,
+      width: positiveNumber(object.width, `${label} width`),
+      height: positiveNumber(object.height, `${label} height`),
+      parentGroupId,
+      label: exactStoredString(object.label, `${label} label`),
+      collapsed: object.collapsed,
+    };
+  });
+  const viewportInput = boundaryRecord(layout.viewport, "Workspace layout viewport");
+  allowFields(viewportInput, ["x", "y", "zoom"], "Workspace layout viewport");
+  const withoutChecksum = {
+    workspaceId: exactStoredString(layout.workspaceId, "Workspace layout Workspace id"),
+    layoutId: exactStoredString(layout.layoutId, "Workspace layout id"),
+    objects,
+    viewport: {
+      x: finiteNumber(viewportInput.x, "Workspace layout viewport x"),
+      y: finiteNumber(viewportInput.y, "Workspace layout viewport y"),
+      zoom: positiveNumber(viewportInput.zoom, "Workspace layout viewport zoom"),
+    },
+  };
+  const storedChecksum = exactStoredString(layout.checksum, "Workspace layout checksum");
+  if (workspaceLayoutChecksum(withoutChecksum) !== storedChecksum) {
+    throw new WorkspaceStoreCodecError("Workspace layout checksum does not match its immutable payload");
+  }
+  return { ...withoutChecksum, checksum: storedChecksum };
+}
+
+function asWorkspaceProposalReview(value: unknown): WorkspaceProposalReview {
+  const review = boundaryRecord(value, "Workspace Proposal review");
+  if (Object.keys(review).length === 0) return { kind: "none" };
+  const kind = exactStoredString(review.kind, "Workspace Proposal review kind");
+  if (kind === "none" || kind === "rejected") {
+    allowFields(review, ["kind"], "Workspace Proposal review");
+    return { kind };
+  }
+  if (kind === "approved") {
+    allowFields(review, ["kind", "mode"], "Workspace Proposal review");
+    return { kind, mode: normalizeWorkspaceProposalApprovalMode(review.mode) };
+  }
+  if (kind !== "conflict") throw new WorkspaceStoreCodecError("Workspace Proposal review kind is unsupported");
+  allowFields(review, [
+    "kind", "expectedGraphRevision", "actualGraphRevision", "expectedSnapshotId", "actualSnapshotId",
+    "expectedLayoutChecksum", "actualLayoutChecksum", "graphChanged", "snapshotChanged", "layoutChanged",
+  ], "Workspace Proposal conflict review");
+  if (typeof review.graphChanged !== "boolean" || typeof review.snapshotChanged !== "boolean"
+    || typeof review.layoutChanged !== "boolean") {
+    throw new WorkspaceStoreCodecError("Workspace Proposal conflict flags must be boolean");
+  }
+  return {
+    kind,
+    expectedGraphRevision: nonNegativeInteger(review.expectedGraphRevision, "Workspace Proposal expected graph revision"),
+    actualGraphRevision: nonNegativeInteger(review.actualGraphRevision, "Workspace Proposal actual graph revision"),
+    expectedSnapshotId: exactStoredString(review.expectedSnapshotId, "Workspace Proposal expected Snapshot id"),
+    actualSnapshotId: exactStoredString(review.actualSnapshotId, "Workspace Proposal actual Snapshot id"),
+    expectedLayoutChecksum: exactStoredString(review.expectedLayoutChecksum, "Workspace Proposal expected layout checksum"),
+    actualLayoutChecksum: exactStoredString(review.actualLayoutChecksum, "Workspace Proposal actual layout checksum"),
+    graphChanged: review.graphChanged,
+    snapshotChanged: review.snapshotChanged,
+    layoutChanged: review.layoutChanged,
+  };
+}
+
+export function asWorkspaceProposalValue(value: unknown): WorkspaceProposalRecord {
+  const input = boundaryRecord(value, "Workspace Proposal");
+  allowFields(input, [
+    "id", "workspaceId", "revision", "kind", "baseGraphRevision", "baseSnapshotId", "baseGraph",
+    "layoutId", "baseLayoutChecksum", "baseLayout", "status", "operations", "layoutOperations",
+    "rationale", "assumptions", "generation", "review", "createdByRunId", "createdAt", "updatedAt",
+  ], "Workspace Proposal");
+  if (input.kind !== "workspace-generation" && input.kind !== "component-propagation") {
+    throw new WorkspaceStoreCodecError("Workspace Proposal kind is unsupported");
+  }
+  if (input.status !== "draft" && input.status !== "approved" && input.status !== "rejected"
+    && input.status !== "superseded" && input.status !== "conflicted") {
+    throw new WorkspaceStoreCodecError("Workspace Proposal status is unsupported");
+  }
+  const baseGraph = canonicalJsonValue(input.baseGraph, "Workspace Proposal base graph") as unknown;
+  validateWorkspaceGraph(baseGraph);
+  const baseLayout = asWorkspaceLayoutValue(input.baseLayout);
+  const generation = normalizeWorkspaceProposalGeneration(input.generation);
+  if (generation.kind !== input.kind) throw new WorkspaceStoreCodecError("Workspace Proposal kind does not match generation payload");
+  const proposal: WorkspaceProposalRecord = {
+    id: exactStoredString(input.id, "Workspace Proposal id"),
+    workspaceId: exactStoredString(input.workspaceId, "Workspace Proposal Workspace id"),
+    revision: positiveInteger(input.revision, "Workspace Proposal revision"),
+    kind: input.kind,
+    baseGraphRevision: nonNegativeInteger(input.baseGraphRevision, "Workspace Proposal base graph revision"),
+    baseSnapshotId: exactStoredString(input.baseSnapshotId, "Workspace Proposal base Snapshot id"),
+    baseGraph,
+    layoutId: exactStoredString(input.layoutId, "Workspace Proposal layout id"),
+    baseLayoutChecksum: exactStoredString(input.baseLayoutChecksum, "Workspace Proposal base layout checksum"),
+    baseLayout,
+    status: input.status,
+    operations: normalizeProposalGraphCommands(input.operations),
+    layoutOperations: normalizeWorkspaceLayoutCommands(input.layoutOperations, "Workspace Proposal layout operations"),
+    rationale: exactStoredString(input.rationale, "Workspace Proposal rationale"),
+    assumptions: boundaryArray(input.assumptions, "Workspace Proposal assumptions")
+      .map((assumption) => exactStoredString(assumption, "Workspace Proposal assumption")),
+    generation,
+    review: asWorkspaceProposalReview(input.review),
+    createdByRunId: input.createdByRunId === null
+      ? null
+      : exactStoredString(input.createdByRunId, "Workspace Proposal creating Run id"),
+    createdAt: timestamp(input.createdAt, "Workspace Proposal created_at"),
+    updatedAt: timestamp(input.updatedAt, "Workspace Proposal updated_at"),
+  };
+  if (proposal.baseGraph.workspaceId !== proposal.workspaceId
+    || proposal.baseGraph.revision !== proposal.baseGraphRevision
+    || proposal.baseLayout.workspaceId !== proposal.workspaceId
+    || proposal.baseLayout.layoutId !== proposal.layoutId
+    || proposal.baseLayout.checksum !== proposal.baseLayoutChecksum) {
+    throw new WorkspaceStoreCodecError("Workspace Proposal immutable base state is inconsistent");
+  }
+  return proposal;
+}
+
+export function asWorkspaceProposal(
+  row: Row,
+  baseGraph: WorkspaceGraph,
+  baseLayout: WorkspaceLayout,
+): WorkspaceProposalRecord {
+  return asWorkspaceProposalValue({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    revision: row.revision,
+    kind: row.kind,
+    baseGraphRevision: row.base_graph_revision,
+    baseSnapshotId: row.base_snapshot_id,
+    baseGraph,
+    layoutId: row.layout_id,
+    baseLayoutChecksum: row.base_layout_checksum,
+    baseLayout,
+    status: row.status,
+    operations: parseJson(row.operations_json, "Workspace Proposal operations"),
+    layoutOperations: parseJson(row.layout_operations_json, "Workspace Proposal layout operations"),
+    rationale: row.rationale,
+    assumptions: parseJson(row.assumptions_json, "Workspace Proposal assumptions"),
+    generation: parseJson(row.generation_payload_json, "Workspace Proposal generation payload"),
+    review: parseJson(row.review_json, "Workspace Proposal review"),
+    createdByRunId: row.created_by_run_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+export function asWorkspaceProposalAudit(row: Row): WorkspaceProposalRecord {
+  return asWorkspaceProposalValue(parseJson(row.payload_json, "Workspace Proposal audit payload"));
+}
+
+export function asGenerationPlan(row: Row): GenerationPlanRecord {
+  if (row.status !== "approved" && row.status !== "queued" && row.status !== "running"
+    && row.status !== "succeeded" && row.status !== "failed" && row.status !== "compile-failed"
+    && row.status !== "requires-new-impact" && row.status !== "cancelled") {
+    throw new WorkspaceStoreCodecError("Generation Plan status is unsupported");
+  }
+  return {
+    id: requiredString(row.id, "Generation Plan id"),
+    workspaceId: requiredString(row.workspace_id, "Generation Plan Workspace id"),
+    proposalId: requiredString(row.proposal_id, "Generation Plan Proposal id"),
+    proposalRevision: positiveInteger(row.proposal_revision, "Generation Plan Proposal revision"),
+    baseSnapshotId: requiredString(row.base_snapshot_id, "Generation Plan base Snapshot id"),
+    status: row.status,
+    compileError: row.compile_error_json == null
+      ? null
+      : jsonObject(row.compile_error_json, "Generation Plan compile error"),
+    createdAt: timestamp(row.created_at, "Generation Plan created_at"),
+    finishedAt: row.finished_at == null ? null : timestamp(row.finished_at, "Generation Plan finished_at"),
+  };
 }
 
 function optionalStoredString(value: Record<string, unknown>, field: string, label: string): string | undefined {

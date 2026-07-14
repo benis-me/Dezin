@@ -3,9 +3,12 @@ import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import type { StoreClock } from "./store.ts";
 import type {
+  ApprovedProposalResult,
   ArtifactPublicationExpectation,
+  CreateWorkspaceProposalInput,
   CreateArtifactRevisionInput,
   CreateKernelRevisionInput,
+  GenerationPlan,
   KernelImpactAnalysis,
   KernelPublicationExpectation,
   LegacyWorkspaceFacts,
@@ -21,8 +24,12 @@ import type {
   WorkspaceLayoutCommand,
   WorkspaceLayoutPatch,
   WorkspaceNode,
+  WorkspaceProposal,
+  WorkspaceProposalApprovalMode,
+  WorkspaceProposalReview,
   WorkspaceSnapshotProvenance,
   WorkspaceSnapshotPublicationInput,
+  UpdateWorkspaceProposalInput,
 } from "./workspace-types.ts";
 import {
   applyWorkspaceGraphCommands,
@@ -36,24 +43,32 @@ import {
   asArtifactRevisionDependency,
   asArtifactRevisionResourcePin,
   asArtifactTrack,
+  asGenerationPlan,
   asProjectWorkspace,
   asSharedDesignKernelRevision,
   asWorkspaceArtifact,
   asWorkspaceEdge,
   asWorkspaceGraphRevision,
+  asWorkspaceLayoutValue,
   asWorkspaceNode,
+  asWorkspaceProposal,
+  asWorkspaceProposalAudit,
   asWorkspaceSnapshotBase,
   compareBinary,
   isWellFormedUtf16,
   normalizeArtifactPublicationExpectation,
   normalizeCreateArtifactRevisionInput,
   normalizeCreateKernelRevisionInput,
+  normalizeCreateWorkspaceProposalInput,
   normalizeKernelPublicationExpectation,
   normalizeLegacyWorkspaceSeed,
   normalizeWorkspaceGraphMutationInput,
   normalizeWorkspaceLayoutId,
   normalizeWorkspaceLayoutPatch,
+  normalizeWorkspaceProposalApprovalMode,
   normalizeWorkspaceSnapshotPublicationInput,
+  normalizeUpdateWorkspaceProposalInput,
+  workspaceLayoutChecksum,
   WorkspaceStoreCodecError,
   type ArtifactRevisionDependencyRecord,
   type ArtifactRevisionRecord,
@@ -61,6 +76,7 @@ import {
   type ArtifactTrackRecord,
   type WorkspaceArtifactRecord,
   type WorkspaceBundle,
+  type WorkspaceProposalRecord,
   type WorkspaceSnapshotRecord,
 } from "./workspace-codecs.ts";
 import type { Row } from "./store-codecs.ts";
@@ -95,6 +111,15 @@ function requiredCell(value: unknown, label: string): string {
     throw new Error(`${label} is invalid`);
   }
   return value;
+}
+
+function parseJsonCell(value: unknown, label: string): unknown {
+  if (typeof value !== "string") throw new WorkspaceStoreCodecError(`${label} must be JSON text`);
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new WorkspaceStoreCodecError(`${label} must contain valid JSON`);
+  }
 }
 
 function legacyTimestamp(value: unknown, label: string): number {
@@ -195,6 +220,36 @@ interface SnapshotCreationInput {
   createdByRunId?: string | null;
 }
 
+interface GraphCommandsInTransactionInput {
+  expectedSnapshotId: string;
+  commands: readonly WorkspaceGraphCommand[];
+  reason: string;
+  provenance: WorkspaceSnapshotProvenance;
+}
+
+export interface WorkspaceProposalConflictSummary {
+  graphChanged: boolean;
+  snapshotChanged: boolean;
+  layoutChanged: boolean;
+  expectedGraphRevision: number;
+  actualGraphRevision: number;
+  expectedSnapshotId: string;
+  actualSnapshotId: string;
+  expectedLayoutChecksum: string;
+  actualLayoutChecksum: string;
+}
+
+interface ProposalConflictOutcome {
+  kind: "conflict";
+  proposal: WorkspaceProposal;
+  summary: WorkspaceProposalConflictSummary;
+}
+
+interface ProposalApprovedOutcome {
+  kind: "approved";
+  result: ApprovedProposalResult;
+}
+
 type WorkspaceSnapshotBaseRecord = ReturnType<typeof asWorkspaceSnapshotBase>;
 
 interface WorkspaceReadContext {
@@ -260,6 +315,93 @@ export class LegacyWorkspaceSeedDriftError extends Error {
     super(`legacy Workspace seed changed before publication: ${projectId}`);
     this.name = "LegacyWorkspaceSeedDriftError";
     this.projectId = projectId;
+  }
+}
+
+export class WorkspaceLayoutConflictError extends WorkspaceRevisionConflictError {
+  readonly expectedLayoutChecksum: string;
+  readonly actualLayoutChecksum: string;
+
+  constructor(graphRevision: number, expectedLayoutChecksum: string, actualLayoutChecksum: string) {
+    super(graphRevision, graphRevision);
+    this.name = "WorkspaceLayoutConflictError";
+    this.message = `workspace layout conflict: expected ${expectedLayoutChecksum}, current ${actualLayoutChecksum}`;
+    this.expectedLayoutChecksum = expectedLayoutChecksum;
+    this.actualLayoutChecksum = actualLayoutChecksum;
+  }
+}
+
+export class WorkspaceProposalNotFoundError extends Error {
+  readonly proposalId: string;
+
+  constructor(proposalId: string) {
+    super(`Workspace Proposal not found: ${proposalId}`);
+    this.name = "WorkspaceProposalNotFoundError";
+    this.proposalId = proposalId;
+  }
+}
+
+export class WorkspaceProposalOwnershipError extends Error {
+  readonly proposalId: string;
+  readonly expectedProjectId: string;
+  readonly actualProjectId: string;
+
+  constructor(proposalId: string, expectedProjectId: string, actualProjectId: string) {
+    super(`Workspace Proposal ${proposalId} belongs to another Project`);
+    this.name = "WorkspaceProposalOwnershipError";
+    this.proposalId = proposalId;
+    this.expectedProjectId = expectedProjectId;
+    this.actualProjectId = actualProjectId;
+  }
+}
+
+export class WorkspaceProposalRevisionConflictError extends Error {
+  readonly proposalId: string;
+  readonly expectedProposalRevision: number;
+  readonly actualProposalRevision: number;
+
+  constructor(proposalId: string, expectedProposalRevision: number, actualProposalRevision: number) {
+    super(`Workspace Proposal revision conflict for ${proposalId}: expected ${expectedProposalRevision}, current ${actualProposalRevision}`);
+    this.name = "WorkspaceProposalRevisionConflictError";
+    this.proposalId = proposalId;
+    this.expectedProposalRevision = expectedProposalRevision;
+    this.actualProposalRevision = actualProposalRevision;
+  }
+}
+
+export class WorkspaceProposalStateConflictError extends Error {
+  readonly proposalId: string;
+  readonly status: WorkspaceProposal["status"];
+
+  constructor(proposalId: string, status: WorkspaceProposal["status"]) {
+    super(`Workspace Proposal ${proposalId} is ${status} and is not editable`);
+    this.name = "WorkspaceProposalStateConflictError";
+    this.proposalId = proposalId;
+    this.status = status;
+  }
+}
+
+export class WorkspaceProposalValidationError extends WorkspaceGraphValidationError {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceProposalValidationError";
+  }
+}
+
+export class WorkspaceProposalConflictError extends WorkspaceRevisionConflictError {
+  readonly proposalId: string;
+  readonly proposalRevision: number;
+  readonly summary: WorkspaceProposalConflictSummary;
+
+  constructor(proposal: WorkspaceProposal, summary: WorkspaceProposalConflictSummary) {
+    super(summary.expectedGraphRevision, summary.actualGraphRevision, {
+      expectedSnapshotId: summary.expectedSnapshotId,
+      actualSnapshotId: summary.actualSnapshotId,
+    });
+    this.name = "WorkspaceProposalConflictError";
+    this.proposalId = proposal.id;
+    this.proposalRevision = proposal.revision;
+    this.summary = summary;
   }
 }
 
@@ -609,82 +751,16 @@ export class WorkspaceStore {
       const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
       const replay = this.findExactGraphCommandReplay(workspace.id, input, payloads, batchHash);
       if (replay) return replay;
-
       const current = this.getGraph(projectId);
       if (current.revision !== input.baseGraphRevision) {
         throw new WorkspaceRevisionConflictError(input.baseGraphRevision, current.revision);
       }
-      if (workspace.activeSnapshotId !== input.expectedSnapshotId) {
-        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, current.revision, {
-          expectedSnapshotId: input.expectedSnapshotId,
-          actualSnapshotId: workspace.activeSnapshotId,
-        });
-      }
-
-      const applied = applyWorkspaceGraphCommands(current, input.commands);
-      this.persistGraphDelta(current, applied, input.commands);
-      const next: WorkspaceGraph = {
-        workspaceId: current.workspaceId,
-        revision: applied.revision,
-        nodes: this.listNodes(current.workspaceId),
-        edges: this.listEdges(current.workspaceId),
-      };
-      validateWorkspaceGraph(next);
-      if (!graphsAreSemanticallyEqual(applied, next)) {
-        throw new WorkspaceGraphValidationError("durable workspace graph does not match applied commands");
-      }
-      this.insertImmutableGraphRevision(next);
-      const mappingOverrides = this.snapshotOverridesForGraphDelta(workspace.id, current, next, input.commands);
-      const snapshot = this.createSnapshotInTransaction(workspace.id, {
+      return this.applyGraphCommandsInTransaction(workspace, current, {
         expectedSnapshotId: input.expectedSnapshotId,
-        graphRevision: next.revision,
+        commands: input.commands,
         reason: "graph-command",
         provenance: { kind: "graph-command", commandIds: input.commands.map((command) => command.id) },
-        artifactOverrides: mappingOverrides.artifacts,
-        resourceOverrides: mappingOverrides.resources,
-        artifactRemovals: mappingOverrides.artifactRemovals,
-        resourceRemovals: mappingOverrides.resourceRemovals,
       });
-      const now = this.clock.now();
-      const moved = this.db.prepare(
-        `UPDATE project_workspaces
-         SET graph_revision = ?, active_snapshot_id = ?, updated_at = ?
-         WHERE id = ? AND graph_revision = ? AND active_snapshot_id IS ?`,
-      ).run(next.revision, snapshot.id, now, workspace.id, input.baseGraphRevision, input.expectedSnapshotId);
-      if (Number(moved.changes) !== 1) {
-        const actual = requireWorkspace(this.getWorkspace(projectId), projectId);
-        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, actual.graphRevision, {
-          expectedSnapshotId: input.expectedSnapshotId,
-          actualSnapshotId: actual.activeSnapshotId,
-        });
-      }
-      const insertCommand = this.db.prepare(
-        `INSERT INTO workspace_graph_commands (
-           workspace_id, command_id, base_revision, result_revision, expected_snapshot_id,
-           batch_hash, batch_index, batch_size, result_snapshot_id, payload_json, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
-      for (let index = 0; index < input.commands.length; index += 1) {
-        const command = input.commands[index];
-        const payload = payloads[index];
-        if (!command || payload === undefined) {
-          throw new WorkspaceGraphValidationError(`missing normalized command at index ${index}`);
-        }
-        insertCommand.run(
-          workspace.id,
-          command.id,
-          input.baseGraphRevision,
-          next.revision,
-          input.expectedSnapshotId,
-          batchHash,
-          index,
-          input.commands.length,
-          snapshot.id,
-          payload,
-          now,
-        );
-      }
-      return { graph: next, snapshot };
     });
   }
 
@@ -702,6 +778,19 @@ export class WorkspaceStore {
     const input = normalizeWorkspaceLayoutPatch(unsafeInput);
     return this.transactionImmediate(() => {
       const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+      if (workspace.graphRevision !== input.graphRevision) {
+        throw new WorkspaceRevisionConflictError(input.graphRevision, workspace.graphRevision);
+      }
+      const graph = this.getGraph(projectId);
+      this.validateLayoutGroups(workspace.id, input.layoutId, new Set(graph.nodes.map((node) => node.id)));
+      const currentLayout = this.getLayoutByWorkspaceId(workspace.id, input.layoutId);
+      if (currentLayout.checksum !== input.baseLayoutChecksum) {
+        throw new WorkspaceLayoutConflictError(
+          input.graphRevision,
+          input.baseLayoutChecksum,
+          currentLayout.checksum,
+        );
+      }
       const guarded = this.db.prepare(
         `UPDATE project_workspaces SET updated_at = ?
          WHERE id = ? AND graph_revision = ?`,
@@ -709,10 +798,157 @@ export class WorkspaceStore {
       if (Number(guarded.changes) !== 1) {
         throw new WorkspaceRevisionConflictError(input.graphRevision, workspace.graphRevision);
       }
-      const graph = this.getGraph(projectId);
       this.applyLayoutCommandsInTransaction(workspace.id, graph, input.layoutId, input.commands);
       return this.getLayoutByWorkspaceId(workspace.id, input.layoutId);
     });
+  }
+
+  createProposal(unsafeInput: CreateWorkspaceProposalInput): WorkspaceProposalRecord {
+    const input = normalizeCreateWorkspaceProposalInput(unsafeInput);
+    if (input.kind === "component-propagation") {
+      throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+    }
+    return this.transactionImmediate(() => {
+      const workspace = requireWorkspace(this.getWorkspace(input.projectId), input.projectId);
+      const graph = this.getGraph(input.projectId);
+      if (graph.revision !== input.baseGraphRevision) {
+        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, graph.revision);
+      }
+      if (workspace.activeSnapshotId !== input.baseSnapshotId) {
+        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, graph.revision, {
+          expectedSnapshotId: input.baseSnapshotId,
+          actualSnapshotId: workspace.activeSnapshotId,
+        });
+      }
+      const snapshot = this.requireSnapshot(workspace.id, input.baseSnapshotId);
+      if (snapshot.graphRevision !== graph.revision) {
+        throw new WorkspaceProposalValidationError("Workspace Proposal base Snapshot does not match its base graph");
+      }
+      this.validateRunOwnership(workspace.id, input.createdByRunId, "Workspace Proposal");
+      this.validateLayoutGroups(workspace.id, input.layoutId, new Set(graph.nodes.map((node) => node.id)));
+      const baseLayout = this.getLayoutByWorkspaceId(workspace.id, input.layoutId);
+      if (baseLayout.checksum !== input.baseLayoutChecksum) {
+        throw new WorkspaceLayoutConflictError(graph.revision, input.baseLayoutChecksum, baseLayout.checksum);
+      }
+      const id = this.clock.id();
+      const now = this.clock.now();
+      this.db.prepare(
+        `INSERT INTO workspace_proposals (
+           id, workspace_id, base_graph_revision, base_snapshot_id, revision, kind, status,
+           operations_json, layout_id, base_layout_checksum, base_layout_json,
+           layout_operations_json, rationale, assumptions_json, generation_payload_json,
+           review_json, created_by_run_id, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 1, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        workspace.id,
+        graph.revision,
+        snapshot.id,
+        input.kind,
+        JSON.stringify(input.operations),
+        input.layoutId,
+        input.baseLayoutChecksum,
+        JSON.stringify(baseLayout),
+        JSON.stringify(input.layoutOperations),
+        input.rationale,
+        JSON.stringify(input.assumptions),
+        JSON.stringify(input.generation),
+        JSON.stringify({ kind: "none" }),
+        input.createdByRunId,
+        now,
+        now,
+      );
+      const proposal = this.requireProposalById(id);
+      this.insertProposalAuditInTransaction(proposal);
+      return proposal;
+    });
+  }
+
+  getProposal(proposalId: string): WorkspaceProposalRecord | null {
+    return this.transactionRead(() => {
+      const row = this.proposalRow(proposalId);
+      return row ? this.decodeProposalRow(row) : null;
+    });
+  }
+
+  getProposalForProject(projectId: string, proposalId: string): WorkspaceProposalRecord {
+    return this.transactionRead(() => this.requireProposalForProject(projectId, proposalId));
+  }
+
+  listProposals(projectId: string): WorkspaceProposalRecord[] {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return [];
+      const rows = this.db.prepare(
+        `SELECT proposal.*, workspace.project_id
+         FROM workspace_proposals proposal
+         JOIN project_workspaces workspace ON workspace.id = proposal.workspace_id
+         WHERE proposal.workspace_id = ?
+         ORDER BY proposal.updated_at DESC, proposal.id COLLATE BINARY ASC`,
+      ).all(workspace.id) as Row[];
+      return rows.map((row) => this.decodeProposalRow(row));
+    });
+  }
+
+  getProposalRevision(proposalId: string, revision: number): WorkspaceProposalRecord | null {
+    if (!Number.isSafeInteger(revision) || revision <= 0) {
+      throw new WorkspaceStoreCodecError("Workspace Proposal revision must be a positive safe integer");
+    }
+    return this.transactionRead(() => {
+      const row = this.db.prepare(
+        "SELECT * FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = ?",
+      ).get(proposalId, revision) as Row | undefined;
+      return row ? asWorkspaceProposalAudit(row) : null;
+    });
+  }
+
+  updateProposal(proposalId: string, unsafeInput: UpdateWorkspaceProposalInput): WorkspaceProposalRecord {
+    return this.updateProposalScoped(null, proposalId, unsafeInput);
+  }
+
+  updateProposalForProject(
+    projectId: string,
+    proposalId: string,
+    unsafeInput: UpdateWorkspaceProposalInput,
+  ): WorkspaceProposalRecord {
+    return this.updateProposalScoped(projectId, proposalId, unsafeInput);
+  }
+
+  rejectProposal(proposalId: string): WorkspaceProposalRecord {
+    return this.rejectProposalScoped(null, proposalId);
+  }
+
+  rejectProposalForProject(projectId: string, proposalId: string): WorkspaceProposalRecord {
+    return this.rejectProposalScoped(projectId, proposalId);
+  }
+
+  approveProposal(
+    proposalId: string,
+    unsafeMode: WorkspaceProposalApprovalMode,
+  ): ApprovedProposalResult {
+    return this.approveProposalScoped(null, proposalId, unsafeMode);
+  }
+
+  approveProposalForProject(
+    projectId: string,
+    proposalId: string,
+    unsafeMode: WorkspaceProposalApprovalMode,
+  ): ApprovedProposalResult {
+    return this.approveProposalScoped(projectId, proposalId, unsafeMode);
+  }
+
+  getGenerationPlan(planId: string): GenerationPlan | null {
+    const row = this.db.prepare("SELECT * FROM generation_plans WHERE id = ?").get(planId) as Row | undefined;
+    return row ? asGenerationPlan(row) : null;
+  }
+
+  listGenerationPlans(projectId: string): GenerationPlan[] {
+    const workspace = this.getWorkspace(projectId);
+    if (!workspace) return [];
+    return (this.db.prepare(
+      `SELECT * FROM generation_plans
+       WHERE workspace_id = ? ORDER BY created_at ASC, id COLLATE BINARY ASC`,
+    ).all(workspace.id) as Row[]).map(asGenerationPlan);
   }
 
   getArtifact(artifactId: string): WorkspaceArtifactRecord | null {
@@ -1468,6 +1704,392 @@ export class WorkspaceStore {
     }
   }
 
+  private proposalRow(proposalId: string): Row | null {
+    const row = this.db.prepare(
+      `SELECT proposal.*, workspace.project_id
+       FROM workspace_proposals proposal
+       JOIN project_workspaces workspace ON workspace.id = proposal.workspace_id
+       WHERE proposal.id = ?`,
+    ).get(proposalId) as Row | undefined;
+    return row ?? null;
+  }
+
+  private decodeProposalRow(row: Row): WorkspaceProposalRecord {
+    const workspaceId = requiredCell(row.workspace_id, "Workspace Proposal Workspace id");
+    const baseGraph = this.requireGraphRevision(
+      workspaceId,
+      typeof row.base_graph_revision === "number" ? row.base_graph_revision : Number.NaN,
+    );
+    const baseLayout = asWorkspaceLayoutValue(
+      parseJsonCell(row.base_layout_json, "Workspace Proposal base layout"),
+    );
+    return asWorkspaceProposal(row, baseGraph, baseLayout);
+  }
+
+  private requireProposalById(proposalId: string): WorkspaceProposalRecord {
+    const row = this.proposalRow(proposalId);
+    if (!row) throw new WorkspaceProposalNotFoundError(proposalId);
+    return this.decodeProposalRow(row);
+  }
+
+  private requireProposalForProject(projectId: string, proposalId: string): WorkspaceProposalRecord {
+    const row = this.proposalRow(proposalId);
+    if (!row) throw new WorkspaceProposalNotFoundError(proposalId);
+    const actualProjectId = requiredCell(row.project_id, "Workspace Proposal Project id");
+    if (actualProjectId !== projectId) {
+      throw new WorkspaceProposalOwnershipError(proposalId, projectId, actualProjectId);
+    }
+    return this.decodeProposalRow(row);
+  }
+
+  private requireDraftProposal(projectId: string | null, proposalId: string): WorkspaceProposalRecord {
+    const proposal = projectId === null
+      ? this.requireProposalById(proposalId)
+      : this.requireProposalForProject(projectId, proposalId);
+    if (proposal.status !== "draft") {
+      throw new WorkspaceProposalStateConflictError(proposal.id, proposal.status);
+    }
+    const auditRow = this.db.prepare(
+      "SELECT * FROM workspace_proposal_audit WHERE proposal_id = ? AND revision = ?",
+    ).get(proposal.id, proposal.revision) as Row | undefined;
+    if (!auditRow) {
+      throw new WorkspaceStoreCodecError(
+        `Workspace Proposal ${proposal.id} is missing immutable audit revision ${proposal.revision}`,
+      );
+    }
+    const audited = asWorkspaceProposalAudit(auditRow);
+    if (!isDeepStrictEqual(audited, proposal)) {
+      throw new WorkspaceStoreCodecError(
+        `Workspace Proposal ${proposal.id} mutable payload does not match immutable audit revision ${proposal.revision}`,
+      );
+    }
+    return audited;
+  }
+
+  private insertProposalAuditInTransaction(proposal: WorkspaceProposalRecord): void {
+    if (!this.db.isTransaction) throw new Error("Workspace Proposal audit insertion requires a transaction");
+    this.db.prepare(
+      `INSERT INTO workspace_proposal_audit (proposal_id, revision, payload_json, created_at)
+       VALUES (?, ?, ?, ?)`,
+    ).run(proposal.id, proposal.revision, JSON.stringify(proposal), proposal.updatedAt);
+  }
+
+  private updateProposalScoped(
+    projectId: string | null,
+    proposalId: string,
+    unsafeInput: UpdateWorkspaceProposalInput,
+  ): WorkspaceProposalRecord {
+    const input = normalizeUpdateWorkspaceProposalInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const current = this.requireDraftProposal(projectId, proposalId);
+      if (current.revision !== input.expectedProposalRevision) {
+        throw new WorkspaceProposalRevisionConflictError(
+          current.id,
+          input.expectedProposalRevision,
+          current.revision,
+        );
+      }
+      if (input.generation.kind !== current.kind) {
+        throw new WorkspaceProposalValidationError("Workspace Proposal kind cannot change during an edit");
+      }
+      if (current.kind === "component-propagation") {
+        throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+      }
+      if (current.revision === Number.MAX_SAFE_INTEGER) {
+        throw new WorkspaceProposalValidationError("Workspace Proposal revision is exhausted");
+      }
+      const next: WorkspaceProposalRecord = {
+        ...current,
+        revision: current.revision + 1,
+        operations: [...input.operations],
+        layoutOperations: [...input.layoutOperations],
+        generation: input.generation,
+        rationale: input.rationale,
+        assumptions: [...input.assumptions],
+        review: { kind: "none" },
+        updatedAt: this.clock.now(),
+      };
+      this.insertProposalAuditInTransaction(next);
+      const moved = this.db.prepare(
+        `UPDATE workspace_proposals
+         SET revision = ?, operations_json = ?, layout_operations_json = ?, rationale = ?,
+             assumptions_json = ?, generation_payload_json = ?, review_json = ?, updated_at = ?
+         WHERE id = ? AND revision = ? AND status = 'draft'`,
+      ).run(
+        next.revision,
+        JSON.stringify(next.operations),
+        JSON.stringify(next.layoutOperations),
+        next.rationale,
+        JSON.stringify(next.assumptions),
+        JSON.stringify(next.generation),
+        JSON.stringify(next.review),
+        next.updatedAt,
+        next.id,
+        current.revision,
+      );
+      if (Number(moved.changes) !== 1) {
+        const actual = this.requireProposalById(next.id);
+        if (actual.status !== "draft") throw new WorkspaceProposalStateConflictError(actual.id, actual.status);
+        throw new WorkspaceProposalRevisionConflictError(next.id, current.revision, actual.revision);
+      }
+      return this.requireProposalById(next.id);
+    });
+  }
+
+  private rejectProposalScoped(projectId: string | null, proposalId: string): WorkspaceProposalRecord {
+    return this.transactionImmediate(() => {
+      const proposal = this.requireDraftProposal(projectId, proposalId);
+      return this.markProposalStatusInTransaction(proposal, "rejected", { kind: "rejected" });
+    });
+  }
+
+  private approveProposalScoped(
+    projectId: string | null,
+    proposalId: string,
+    unsafeMode: WorkspaceProposalApprovalMode,
+  ): ApprovedProposalResult {
+    const mode = normalizeWorkspaceProposalApprovalMode(unsafeMode);
+    const outcome = this.transactionImmediate<ProposalApprovedOutcome | ProposalConflictOutcome>(() => {
+      const proposal = this.requireDraftProposal(projectId, proposalId);
+      const workspace = this.requireWorkspaceById(proposal.workspaceId);
+      const graph = this.getGraph(workspace.projectId);
+      const layout = this.getLayoutByWorkspaceId(workspace.id, proposal.layoutId);
+      const summary: WorkspaceProposalConflictSummary = {
+        graphChanged: graph.revision !== proposal.baseGraphRevision,
+        snapshotChanged: workspace.activeSnapshotId !== proposal.baseSnapshotId,
+        layoutChanged: proposal.layoutOperations.length > 0 && layout.checksum !== proposal.baseLayoutChecksum,
+        expectedGraphRevision: proposal.baseGraphRevision,
+        actualGraphRevision: graph.revision,
+        expectedSnapshotId: proposal.baseSnapshotId,
+        actualSnapshotId: workspace.activeSnapshotId,
+        expectedLayoutChecksum: proposal.baseLayoutChecksum,
+        actualLayoutChecksum: layout.checksum,
+      };
+      if (summary.graphChanged || summary.snapshotChanged || summary.layoutChanged) {
+        const review: WorkspaceProposalReview = {
+          kind: "conflict",
+          expectedGraphRevision: summary.expectedGraphRevision,
+          actualGraphRevision: summary.actualGraphRevision,
+          expectedSnapshotId: summary.expectedSnapshotId,
+          actualSnapshotId: summary.actualSnapshotId,
+          expectedLayoutChecksum: summary.expectedLayoutChecksum,
+          actualLayoutChecksum: summary.actualLayoutChecksum,
+          graphChanged: summary.graphChanged,
+          snapshotChanged: summary.snapshotChanged,
+          layoutChanged: summary.layoutChanged,
+        };
+        const conflicted = this.markProposalStatusInTransaction(proposal, "conflicted", review);
+        return { kind: "conflict", proposal: conflicted, summary };
+      }
+      this.validateLayoutGroups(workspace.id, proposal.layoutId, new Set(graph.nodes.map((node) => node.id)));
+      if (proposal.kind === "component-propagation") {
+        throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+      }
+
+      this.validateProposalForApproval(proposal);
+      const planId = mode === "generate" ? this.clock.id() : null;
+      let result: WorkspaceGraphMutationResult;
+      if (proposal.operations.length === 0) {
+        if (proposal.layoutOperations.length > 0) {
+          this.applyLayoutCommandsInTransaction(
+            workspace.id,
+            graph,
+            proposal.layoutId,
+            proposal.layoutOperations,
+          );
+        }
+        result = {
+          graph,
+          snapshot: this.requireSnapshot(workspace.id, proposal.baseSnapshotId),
+        };
+      } else {
+        result = this.applyGraphCommandsInTransaction(workspace, graph, {
+          expectedSnapshotId: proposal.baseSnapshotId,
+          commands: proposal.operations,
+          reason: "proposal-approval",
+          provenance: {
+            kind: "proposal-approval",
+            proposalId: proposal.id,
+            proposalRevision: proposal.revision,
+            ...(planId === null ? {} : { planId }),
+          },
+        });
+        if (proposal.layoutOperations.length > 0) {
+          this.applyLayoutCommandsInTransaction(
+            workspace.id,
+            result.graph,
+            proposal.layoutId,
+            proposal.layoutOperations,
+          );
+        }
+      }
+      const approved = this.markProposalStatusInTransaction(proposal, "approved", { kind: "approved", mode });
+      const plan = planId === null
+        ? null
+        : this.insertGenerationPlanShellInTransaction(planId, approved, result.snapshot.id);
+      return {
+        kind: "approved",
+        result: { proposal: approved, graph: result.graph, snapshot: result.snapshot, plan },
+      };
+    });
+    if (outcome.kind === "conflict") {
+      throw new WorkspaceProposalConflictError(outcome.proposal, outcome.summary);
+    }
+    return outcome.result;
+  }
+
+  private markProposalStatusInTransaction(
+    proposal: WorkspaceProposalRecord,
+    status: WorkspaceProposal["status"],
+    review: WorkspaceProposalReview,
+  ): WorkspaceProposalRecord {
+    const moved = this.db.prepare(
+      `UPDATE workspace_proposals
+       SET status = ?, review_json = ?, updated_at = ?
+       WHERE id = ? AND revision = ? AND status = 'draft'`,
+    ).run(status, JSON.stringify(review), this.clock.now(), proposal.id, proposal.revision);
+    if (Number(moved.changes) !== 1) {
+      const actual = this.requireProposalById(proposal.id);
+      throw new WorkspaceProposalStateConflictError(actual.id, actual.status);
+    }
+    return this.requireProposalById(proposal.id);
+  }
+
+  private insertGenerationPlanShellInTransaction(
+    planId: string,
+    proposal: WorkspaceProposalRecord,
+    baseSnapshotId: string,
+  ): GenerationPlan {
+    if (!this.db.isTransaction) throw new Error("Generation Plan insertion requires a transaction");
+    if (proposal.status !== "approved") {
+      throw new WorkspaceProposalStateConflictError(proposal.id, proposal.status);
+    }
+    const snapshot = this.requireSnapshot(proposal.workspaceId, baseSnapshotId);
+    if (snapshot.workspaceId !== proposal.workspaceId) {
+      throw new WorkspaceProposalValidationError("Generation Plan base Snapshot belongs to another Workspace");
+    }
+    const now = this.clock.now();
+    this.db.prepare(
+      `INSERT INTO generation_plans (
+         id, workspace_id, proposal_id, proposal_revision, base_snapshot_id,
+         status, compile_error_json, created_at, finished_at
+       ) VALUES (?, ?, ?, ?, ?, 'approved', NULL, ?, NULL)`,
+    ).run(planId, proposal.workspaceId, proposal.id, proposal.revision, snapshot.id, now);
+    const plan = this.getGenerationPlan(planId);
+    if (!plan) throw new WorkspaceGraphValidationError(`Generation Plan ${planId} was not inserted`);
+    return plan;
+  }
+
+  private validateProposalForApproval(proposal: WorkspaceProposalRecord): WorkspaceGraph {
+    let graph = proposal.baseGraph;
+    if (proposal.operations.length > 0) {
+      try {
+        graph = applyWorkspaceGraphCommands(proposal.baseGraph, proposal.operations);
+      } catch (error) {
+        if (error instanceof WorkspaceGraphValidationError) {
+          throw new WorkspaceProposalValidationError(error.message);
+        }
+        throw error;
+      }
+    }
+    const names = new Set<string>();
+    for (const node of graph.nodes) {
+      if (names.has(node.name)) throw new WorkspaceProposalValidationError(`duplicate Workspace node name ${node.name}`);
+      names.add(node.name);
+    }
+    if (proposal.generation.kind !== "workspace-generation") {
+      throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
+    }
+    const artifactNodes = new Map(
+      graph.nodes.filter((node) => node.kind === "page" || node.kind === "component")
+        .map((node) => [node.artifactId, node]),
+    );
+    const resourceNodes = new Map(
+      graph.nodes.filter((node) => node.kind === "resource").map((node) => [node.resourceId, node]),
+    );
+    const capabilityIds = new Set(proposal.generation.capabilities.map((capability) => capability.id));
+    const frameIds = new Set(proposal.generation.responsiveFrames.map((frame) => frame.id));
+    for (const plan of proposal.generation.artifactPlans) {
+      const node = artifactNodes.get(plan.artifactId);
+      if (!node || node.kind !== plan.kind || node.id !== plan.nodeId) {
+        throw new WorkspaceProposalValidationError(`missing generation dependency Artifact ${plan.artifactId}`);
+      }
+      for (const dependencyId of plan.dependsOnArtifactIds) {
+        if (!artifactNodes.has(dependencyId)) {
+          throw new WorkspaceProposalValidationError(`missing generation dependency Artifact ${dependencyId}`);
+        }
+      }
+      for (const capabilityId of plan.capabilityIds) {
+        if (!capabilityIds.has(capabilityId)) {
+          throw new WorkspaceProposalValidationError(`missing generation capability ${capabilityId}`);
+        }
+      }
+      for (const frameId of plan.responsiveFrameIds) {
+        if (!frameIds.has(frameId)) {
+          throw new WorkspaceProposalValidationError(`missing generation responsive frame ${frameId}`);
+        }
+      }
+    }
+    for (const operation of proposal.generation.resourceOperations) {
+      const node = resourceNodes.get(operation.resourceId);
+      if (!node || node.id !== operation.nodeId || node.name !== operation.title) {
+        throw new WorkspaceProposalValidationError(`missing generation dependency Resource ${operation.resourceId}`);
+      }
+      if (operation.revisionPolicy.kind === "exact") {
+        const revision = this.db.prepare(
+          `SELECT 1 FROM resource_revisions
+           WHERE id = ? AND resource_id = ? AND workspace_id = ?`,
+        ).get(
+          operation.revisionPolicy.resourceRevisionId,
+          operation.resourceId,
+          proposal.workspaceId,
+        );
+        if (!revision) {
+          throw new WorkspaceProposalValidationError(
+            `missing generation dependency Resource Revision ${operation.revisionPolicy.resourceRevisionId}`,
+          );
+        }
+      } else if (operation.revisionPolicy.kind === "base-snapshot") {
+        const pin = this.db.prepare(
+          `SELECT 1 FROM workspace_snapshot_resources
+           WHERE workspace_id = ? AND snapshot_id = ? AND resource_id = ?`,
+        ).get(proposal.workspaceId, proposal.baseSnapshotId, operation.resourceId);
+        if (!pin) {
+          throw new WorkspaceProposalValidationError(
+            `missing base Snapshot Resource revision for ${operation.resourceId}`,
+          );
+        }
+      }
+    }
+    for (const dependency of proposal.generation.dependencyPlans) {
+      if (!artifactNodes.has(dependency.ownerArtifactId)) {
+        throw new WorkspaceProposalValidationError(`missing generation dependency owner ${dependency.ownerArtifactId}`);
+      }
+      if (dependency.kind === "resource") {
+        if (!resourceNodes.has(dependency.resourceId)) {
+          throw new WorkspaceProposalValidationError(`missing generation dependency Resource ${dependency.resourceId}`);
+        }
+      } else {
+        const component = artifactNodes.get(dependency.componentArtifactId);
+        if (!component || component.kind !== "component") {
+          throw new WorkspaceProposalValidationError(
+            `missing generation dependency Component ${dependency.componentArtifactId}`,
+          );
+        }
+      }
+    }
+    for (const intent of proposal.generation.prototypeIntents) {
+      if (!artifactNodes.has(intent.sourceArtifactId) || !artifactNodes.has(intent.targetArtifactId)) {
+        throw new WorkspaceProposalValidationError(`missing generation dependency for prototype ${intent.edgeId}`);
+      }
+      const edge = graph.edges.find((candidate) => candidate.id === intent.edgeId);
+      if (!edge || edge.kind !== "prototype") {
+        throw new WorkspaceProposalValidationError(`missing generation prototype edge ${intent.edgeId}`);
+      }
+    }
+    return graph;
+  }
+
   private requireWorkspaceById(workspaceId: string): ProjectWorkspace {
     const row = this.db.prepare(
       `SELECT workspace.*, project.mode
@@ -2128,6 +2750,90 @@ export class WorkspaceStore {
         throw error;
       }
     });
+  }
+
+  private applyGraphCommandsInTransaction(
+    workspace: ProjectWorkspace,
+    current: WorkspaceGraph,
+    input: GraphCommandsInTransactionInput,
+  ): WorkspaceGraphMutationResult {
+    if (!this.db.isTransaction) throw new Error("Workspace graph commands require a transaction");
+    if (current.workspaceId !== workspace.id || current.revision !== workspace.graphRevision) {
+      throw new WorkspaceGraphValidationError("Workspace graph transaction base is incoherent");
+    }
+    if (workspace.activeSnapshotId !== input.expectedSnapshotId) {
+      throw new WorkspaceRevisionConflictError(current.revision, current.revision, {
+        expectedSnapshotId: input.expectedSnapshotId,
+        actualSnapshotId: workspace.activeSnapshotId,
+      });
+    }
+
+    const payloads = input.commands.map((command) => JSON.stringify(command));
+    const batchHash = checksum(`workspace-graph-command-batch-v1\0${JSON.stringify(input.commands)}`);
+    const applied = applyWorkspaceGraphCommands(current, input.commands);
+    this.persistGraphDelta(current, applied, input.commands);
+    const next: WorkspaceGraph = {
+      workspaceId: current.workspaceId,
+      revision: applied.revision,
+      nodes: this.listNodes(current.workspaceId),
+      edges: this.listEdges(current.workspaceId),
+    };
+    validateWorkspaceGraph(next);
+    if (!graphsAreSemanticallyEqual(applied, next)) {
+      throw new WorkspaceGraphValidationError("durable workspace graph does not match applied commands");
+    }
+    this.insertImmutableGraphRevision(next);
+    const mappingOverrides = this.snapshotOverridesForGraphDelta(workspace.id, current, next, input.commands);
+    const snapshot = this.createSnapshotInTransaction(workspace.id, {
+      expectedSnapshotId: input.expectedSnapshotId,
+      graphRevision: next.revision,
+      reason: input.reason,
+      provenance: input.provenance,
+      artifactOverrides: mappingOverrides.artifacts,
+      resourceOverrides: mappingOverrides.resources,
+      artifactRemovals: mappingOverrides.artifactRemovals,
+      resourceRemovals: mappingOverrides.resourceRemovals,
+    });
+    const now = this.clock.now();
+    const moved = this.db.prepare(
+      `UPDATE project_workspaces
+       SET graph_revision = ?, active_snapshot_id = ?, updated_at = ?
+       WHERE id = ? AND graph_revision = ? AND active_snapshot_id IS ?`,
+    ).run(next.revision, snapshot.id, now, workspace.id, current.revision, input.expectedSnapshotId);
+    if (Number(moved.changes) !== 1) {
+      const actual = this.requireWorkspaceById(workspace.id);
+      throw new WorkspaceRevisionConflictError(current.revision, actual.graphRevision, {
+        expectedSnapshotId: input.expectedSnapshotId,
+        actualSnapshotId: actual.activeSnapshotId,
+      });
+    }
+    const insertCommand = this.db.prepare(
+      `INSERT INTO workspace_graph_commands (
+         workspace_id, command_id, base_revision, result_revision, expected_snapshot_id,
+         batch_hash, batch_index, batch_size, result_snapshot_id, payload_json, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (let index = 0; index < input.commands.length; index += 1) {
+      const command = input.commands[index];
+      const payload = payloads[index];
+      if (!command || payload === undefined) {
+        throw new WorkspaceGraphValidationError(`missing normalized command at index ${index}`);
+      }
+      insertCommand.run(
+        workspace.id,
+        command.id,
+        current.revision,
+        next.revision,
+        input.expectedSnapshotId,
+        batchHash,
+        index,
+        input.commands.length,
+        snapshot.id,
+        payload,
+        now,
+      );
+    }
+    return { graph: next, snapshot };
   }
 
   private findExactGraphCommandReplay(
@@ -2939,7 +3645,7 @@ export class WorkspaceStore {
     const viewportRow = this.db.prepare(
       "SELECT * FROM workspace_layout_viewports WHERE workspace_id = ? AND layout_id = ?",
     ).get(workspaceId, layoutId) as Row | undefined;
-    return {
+    const layout = {
       workspaceId,
       layoutId,
       objects,
@@ -2951,6 +3657,7 @@ export class WorkspaceStore {
           }
         : { x: 0, y: 0, zoom: 1 },
     };
+    return { ...layout, checksum: workspaceLayoutChecksum(layout) };
   }
 
   private applyLayoutCommandsInTransaction(
