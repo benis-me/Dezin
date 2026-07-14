@@ -54,3 +54,21 @@ test("bundle module policy follows static chunk imports and guards Settings", ()
     /SettingsScreen.*leafer/i,
   );
 });
+
+test("bundle module policy keeps React Flow outside Home and Settings dependency closures", () => {
+  const graph = [
+    { file: "assets/index.js", isEntry: true, imports: ["assets/vendor.js"], modules: ["src/main.tsx"] },
+    { file: "assets/vendor.js", isEntry: false, imports: [], modules: ["node_modules/.pnpm/@xyflow+react/index.js"] },
+    { file: "assets/settings.js", isEntry: false, imports: [], modules: ["src/screens/SettingsScreen.tsx"] },
+  ];
+  assert.throws(() => assertLazyEditorModulesStayLazy(graph), /HomeScreen.*xyflow/i);
+
+  graph[0] = { file: "assets/index.js", isEntry: true, imports: [], modules: ["src/main.tsx"] };
+  graph[2] = {
+    file: "assets/settings.js",
+    isEntry: false,
+    imports: ["assets/vendor.js"],
+    modules: ["src/screens/SettingsScreen.tsx"],
+  };
+  assert.throws(() => assertLazyEditorModulesStayLazy(graph), /SettingsScreen.*xyflow/i);
+});

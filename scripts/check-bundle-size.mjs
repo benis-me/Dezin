@@ -10,8 +10,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const DEFAULT_BUNDLE_BUDGETS = {
   maxInitialMinified: 500 * KIB,
   maxInitialGzip: 180 * KIB,
-  // 2026-07-11 post-route-lazy baseline; the gate allows at most 5% aggregate drift.
-  totalJsGzipBaseline: 786_650,
+  // 2026-07-14 workspace-canvas baseline: prior 786,650 B plus the legitimate
+  // 66,459 B lazy ProjectCanvas chunk. The gate still allows at most 5% drift.
+  totalJsGzipBaseline: 853_109,
 };
 
 async function filesUnder(root) {

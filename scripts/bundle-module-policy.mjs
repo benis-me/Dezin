@@ -1,4 +1,4 @@
-export const FORBIDDEN_EAGER_MODULE = /(?:MoodboardCanvas|WorkspaceScreen|(?:^|[\\/])@?leafer(?:[-+@\\/]|$))/i;
+export const FORBIDDEN_EAGER_MODULE = /(?:MoodboardCanvas|WorkspaceScreen|ProjectCanvas|(?:^|[\\/])@?leafer(?:[-+@\\/]|$)|(?:^|[\\/])@?xyflow(?:[+@\\/]|$))/i;
 
 function dependencyClosure(chunks, roots) {
   const byFile = new Map(chunks.map((chunk) => [chunk.file, chunk]));

@@ -1,10 +1,12 @@
-import type { ComponentType, ExoticComponent } from "react";
+import { lazy, Suspense, type ComponentType, type ExoticComponent } from "react";
 import { Button } from "../components/ui/index.ts";
 import type { WorkspaceArtifact } from "../lib/api.ts";
 import { navigate } from "../router.tsx";
 import { ProjectStudioShell } from "./ProjectStudioShell.tsx";
 import { useProjectStudio } from "./useProjectStudio.ts";
 import { WorkspaceAgentPanel } from "./WorkspaceAgentPanel.tsx";
+
+const ProjectCanvas = lazy(() => import("./canvas/ProjectCanvas.tsx").then((module) => ({ default: module.ProjectCanvas })));
 
 interface LegacyWorkspaceProps {
   projectId: string;
@@ -36,27 +38,11 @@ function RouteLoading({ artifact }: { artifact: boolean }) {
   );
 }
 
-function ProjectCanvasPlaceholder({ projectName, artifactCount }: { projectName: string; artifactCount: number }) {
+function ProjectCanvasLoading() {
   return (
-    <section role="region" aria-label="Project canvas" className="flex h-full min-h-0 min-w-0 flex-col">
-      <header className="app-drag flex h-11 shrink-0 items-center justify-between border-b border-border px-3.5">
-        <div className="flex min-w-0 items-center gap-2">
-          <h1 className="truncate text-xs font-medium tracking-[-0.01em] text-foreground">{projectName}</h1>
-          <span className="rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">Canvas</span>
-        </div>
-        <span className="text-[10px] tabular-nums text-muted-foreground">
-          {artifactCount} {artifactCount === 1 ? "artifact" : "artifacts"}
-        </span>
-      </header>
-      <div className="dz-canvas relative min-h-0 flex-1 overflow-hidden">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,var(--border)_1px,transparent_1px)] bg-[size:24px_24px] opacity-25" aria-hidden />
-        <div className="relative grid h-full place-items-center px-8 text-center">
-          <div className="max-w-xs rounded-lg border border-border bg-card/90 px-4 py-3 shadow-sm backdrop-blur-sm">
-            <p className="text-xs font-medium text-foreground">Workspace graph ready</p>
-            <p className="mt-1 text-[11px] leading-4 text-muted-foreground">Canvas tools and artifact nodes are added in the next workspace stage.</p>
-          </div>
-        </div>
-      </div>
+    <section role="region" aria-label="Project canvas" className="relative grid h-full min-h-0 min-w-0 place-items-center bg-background">
+      <StudioDragRegion />
+      <p role="status" aria-live="polite" className="text-xs text-muted-foreground">Loading project canvas…</p>
     </section>
   );
 }
@@ -144,7 +130,24 @@ export function ProjectStudioScreen({
     : load.workspace.artifacts.find((candidate) => candidate.id === artifactId) ?? null;
   const contextLabel = `${load.workspace.artifacts.length} ${load.workspace.artifacts.length === 1 ? "artifact" : "artifacts"}`;
   const main = artifactId === null
-    ? <ProjectCanvasPlaceholder projectName={load.project.name} artifactCount={load.workspace.artifacts.length} />
+    ? (
+        <Suspense fallback={<ProjectCanvasLoading />}>
+          <ProjectCanvas
+            projectId={projectId}
+            projectName={load.project.name}
+            graph={load.workspace.graph}
+            layout={load.workspace.layout}
+            viewport={studio.viewport}
+            artifactRevisionIds={load.workspace.activeSnapshot.artifactRevisions}
+            selectedNodeIds={studio.selectedGraphObjectIds}
+            onSelectionChange={studio.setSelectedGraphObjectIds}
+            onViewportChange={studio.setViewport}
+            onSaveLayout={studio.saveLayout}
+            onApplyGraphCommands={studio.applyGraphCommands}
+            onOpenArtifact={(nextArtifactId) => navigate(`/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(nextArtifactId)}`)}
+          />
+        </Suspense>
+      )
     : <ArtifactPlaceholder artifactId={artifactId} artifact={artifact} />;
 
   return (

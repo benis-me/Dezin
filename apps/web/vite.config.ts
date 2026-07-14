@@ -130,6 +130,20 @@ export default defineConfig({
   },
   build: {
     manifest: true,
+    rolldownOptions: {
+      output: {
+        // Keep the initial shell below the per-chunk budget without fragmenting it
+        // into a large request fan-out. This seam is stable across the pre-canvas
+        // baseline and the workspace-canvas build.
+        codeSplitting: {
+          groups: [{
+            name: "ui-core",
+            test: /node_modules[\\/](?:react|react-dom|scheduler|@dnd-kit|@preact[\\/]signals-core)[\\/]/,
+            includeDependenciesRecursively: false,
+          }],
+        },
+      },
+    },
   },
   test: {
     environment: "jsdom",
