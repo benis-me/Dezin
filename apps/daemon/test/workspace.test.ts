@@ -50,6 +50,97 @@ function captureGit(root: string): Record<string, string> {
   };
 }
 
+interface ReadyWorkspaceResponse {
+  workspace: { id: string; projectId: string; graphRevision: number };
+  graph: { revision: number; nodes: Array<{ id: string; artifactId?: string }> };
+  activeSnapshot: { id: string };
+  snapshots: Array<{ id: string }>;
+  layout: {
+    layoutId: string;
+    checksum: string;
+    objects: Array<{ id: string }>;
+    viewport: { x: number; y: number; zoom: number };
+  };
+}
+
+function emptyWorkspaceGenerationPayload() {
+  return {
+    kind: "workspace-generation" as const,
+    resourceOperations: [],
+    artifactPlans: [],
+    dependencyPlans: [],
+    prototypeIntents: [],
+    capabilities: [],
+    responsiveFrames: [],
+    qualityProfile: {
+      requiredFrameIds: [],
+      blockingSeverities: [],
+      requireRuntimeChecks: false,
+      requireVisualReview: false,
+    },
+  };
+}
+
+function proposalPageCommand(suffix: string, name = `Page ${suffix}`) {
+  return {
+    id: `proposal-command-${suffix}`,
+    type: "add-node" as const,
+    node: {
+      id: `proposal-node-${suffix}`,
+      kind: "page" as const,
+      name,
+      artifactId: `proposal-artifact-${suffix}`,
+      createIdentity: { initialTrackId: `proposal-track-${suffix}` },
+    },
+  };
+}
+
+function proposalCreateBody(
+  ready: Pick<ReadyWorkspaceResponse, "graph" | "activeSnapshot" | "layout">,
+  suffix: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    kind: "workspace-generation" as const,
+    baseGraphRevision: ready.graph.revision,
+    baseSnapshotId: ready.activeSnapshot.id,
+    layoutId: ready.layout.layoutId,
+    baseLayoutChecksum: ready.layout.checksum,
+    operations: [proposalPageCommand(suffix)],
+    layoutOperations: [],
+    generation: emptyWorkspaceGenerationPayload(),
+    rationale: `Add ${suffix}`,
+    assumptions: [],
+    ...overrides,
+  };
+}
+
+async function readyWorkspace(base: string, projectId: string): Promise<ReadyWorkspaceResponse> {
+  const response = await fetch(`${base}/api/projects/${projectId}/workspace`);
+  assert.equal(response.status, 200);
+  return await response.json() as ReadyWorkspaceResponse;
+}
+
+function workspaceProposalCounts(store: Store, workspaceId?: string) {
+  const scoped = workspaceId === undefined ? "" : " WHERE workspace_id = ?";
+  const args = workspaceId === undefined ? [] : [workspaceId];
+  return {
+    proposals: Number((store.db.prepare(
+      `SELECT COUNT(*) AS count FROM workspace_proposals${scoped}`,
+    ).get(...args) as { count: number }).count),
+    audits: Number((store.db.prepare(
+      workspaceId === undefined
+        ? "SELECT COUNT(*) AS count FROM workspace_proposal_audit"
+        : `SELECT COUNT(*) AS count FROM workspace_proposal_audit audit
+           JOIN workspace_proposals proposal ON proposal.id = audit.proposal_id
+           WHERE proposal.workspace_id = ?`,
+    ).get(...args) as { count: number }).count),
+    plans: Number((store.db.prepare(
+      `SELECT COUNT(*) AS count FROM generation_plans${scoped}`,
+    ).get(...args) as { count: number }).count),
+  };
+}
+
 test("GET workspace lazily exposes a Standard project with its default layout", async () => {
   await withWorkspaceServer(async ({ base, store }) => {
     const project = store.createProject({ name: "HTTP Workspace", mode: "standard" });
@@ -185,14 +276,18 @@ test("malformed graph and layout bodies fail before Standard workspace migration
         path: "layout",
         expectedStatus: 400,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ graphRevision: 0, commands: [] }),
+        body: JSON.stringify({
+          graphRevision: 0,
+          baseLayoutChecksum: "unused-layout-checksum",
+          commands: [],
+        }),
       },
       {
         name: "non-finite-layout-number",
         path: "layout",
         expectedStatus: 400,
         headers: { "content-type": "application/json" },
-        body: '{"graphRevision":0,"commands":[{"type":"set-viewport","viewport":{"x":0,"y":0,"zoom":1e999}}]}',
+        body: '{"graphRevision":0,"baseLayoutChecksum":"unused-layout-checksum","commands":[{"type":"set-viewport","viewport":{"x":0,"y":0,"zoom":1e999}}]}',
       },
       {
         name: "oversized-json-body",
@@ -220,6 +315,606 @@ test("malformed graph and layout bodies fail before Standard workspace migration
   });
 });
 
+test("workspace Proposal HTTP creates, lists, and gets an isolated draft", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Proposal HTTP draft", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    const graphBefore = store.workspace.getGraph(project.id);
+    const layoutBefore = store.workspace.getLayout(project.id);
+    const snapshotsBefore = store.db.prepare(
+      "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+    ).all(ready.workspace.id);
+
+    const createdResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(ready, "http-draft")),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as {
+      id: string;
+      workspaceId: string;
+      revision: number;
+      status: string;
+    };
+    assert.equal(created.workspaceId, ready.workspace.id);
+    assert.equal(created.revision, 1);
+    assert.equal(created.status, "draft");
+
+    const listResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`);
+    assert.equal(listResponse.status, 200);
+    assert.deepEqual(await listResponse.json(), [created]);
+    const getResponse = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${created.id}`,
+    );
+    assert.equal(getResponse.status, 200);
+    assert.deepEqual(await getResponse.json(), created);
+
+    assert.deepEqual(store.workspace.getGraph(project.id), graphBefore);
+    assert.deepEqual(store.workspace.getLayout(project.id), layoutBefore);
+    assert.deepEqual(store.db.prepare(
+      "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+    ).all(ready.workspace.id), snapshotsBefore);
+    assert.deepEqual(workspaceProposalCounts(store, ready.workspace.id), {
+      proposals: 1,
+      audits: 1,
+      plans: 0,
+    });
+  });
+});
+
+test("malformed Proposal bodies fail before Standard workspace migration", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const createEnvelope = {
+      kind: "workspace-generation",
+      baseGraphRevision: 0,
+      baseSnapshotId: "unused-snapshot",
+      layoutId: "default",
+      baseLayoutChecksum: "unused-layout-checksum",
+      operations: [],
+      layoutOperations: [],
+      generation: emptyWorkspaceGenerationPayload(),
+      rationale: "Never persisted",
+      assumptions: [],
+    };
+    const updateEnvelope = {
+      expectedProposalRevision: 1,
+      operations: [],
+      layoutOperations: [],
+      generation: emptyWorkspaceGenerationPayload(),
+      rationale: "Never persisted",
+      assumptions: [],
+    };
+    const cases: Array<{
+      name: string;
+      suffix: string;
+      method: "POST" | "PATCH";
+      headers: Record<string, string>;
+      body: string;
+      expectedStatus: number;
+    }> = [
+      {
+        name: "proposal-invalid-json",
+        suffix: "workspace/proposals",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{",
+        expectedStatus: 400,
+      },
+      {
+        name: "proposal-wrong-content-type",
+        suffix: "workspace/proposals",
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify(createEnvelope),
+        expectedStatus: 415,
+      },
+      {
+        name: "proposal-client-project-ownership",
+        suffix: "workspace/proposals",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...createEnvelope, projectId: "client-project" }),
+        expectedStatus: 400,
+      },
+      {
+        name: "proposal-client-workspace-ownership",
+        suffix: "workspace/proposals",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...createEnvelope, workspaceId: "client-workspace" }),
+        expectedStatus: 400,
+      },
+      {
+        name: "proposal-kind-payload-mismatch",
+        suffix: "workspace/proposals",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...createEnvelope, kind: "component-propagation" }),
+        expectedStatus: 400,
+      },
+      {
+        name: "proposal-update-unknown-field",
+        suffix: "workspace/proposals/missing-proposal",
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...updateEnvelope, unexpected: true }),
+        expectedStatus: 400,
+      },
+      {
+        name: "proposal-invalid-approval-mode",
+        suffix: "workspace/proposals/missing-proposal/approve",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "retry-until-success" }),
+        expectedStatus: 400,
+      },
+      {
+        name: "proposal-approval-unknown-field",
+        suffix: "workspace/proposals/missing-proposal/approve",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "generate", queue: true }),
+        expectedStatus: 400,
+      },
+      {
+        name: "proposal-reject-unknown-field",
+        suffix: "workspace/proposals/missing-proposal/reject",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "not part of the contract" }),
+        expectedStatus: 400,
+      },
+      {
+        name: "proposal-oversized-json",
+        suffix: "workspace/proposals",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: `{"padding":"${"x".repeat(4 * 1024 * 1024)}"}`,
+        expectedStatus: 413,
+      },
+    ];
+
+    for (const fixture of cases) {
+      const project = store.createProject({ name: fixture.name, mode: "standard" });
+      const response = await fetch(`${base}/api/projects/${project.id}/${fixture.suffix}`, {
+        method: fixture.method,
+        headers: fixture.headers,
+        body: fixture.body,
+      });
+      assert.equal(response.status, fixture.expectedStatus, fixture.name);
+      assert.equal(store.workspace.getWorkspace(project.id), null, `${fixture.name} migrated the Project`);
+    }
+    assert.deepEqual(workspaceProposalCounts(store), { proposals: 0, audits: 0, plans: 0 });
+  });
+});
+
+test("workspace Proposal HTTP updates by revision and structure-only approval applies exactly once", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Proposal HTTP approval", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    const graphBefore = store.workspace.getGraph(project.id);
+    const layoutBefore = store.workspace.getLayout(project.id);
+    const createdResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(ready, "replace-me")),
+    });
+    const created = await createdResponse.json() as {
+      id: string;
+      revision: number;
+      generation: ReturnType<typeof emptyWorkspaceGenerationPayload>;
+    };
+    const replacement = proposalPageCommand("approved-http");
+    const updateBody = {
+      expectedProposalRevision: created.revision,
+      operations: [replacement],
+      layoutOperations: [
+        {
+          type: "add-group",
+          groupId: "approved-http-group",
+          label: "Approved HTTP",
+          bounds: { x: 0, y: 0, width: 500, height: 300 },
+        },
+        { type: "set-parent", objectId: replacement.node.id, parentGroupId: "approved-http-group" },
+      ],
+      generation: created.generation,
+      rationale: "Use the complete replacement payload",
+      assumptions: ["HTTP update is revision guarded"],
+    };
+    const updatedResponse = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${created.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(updateBody),
+      },
+    );
+    assert.equal(updatedResponse.status, 200);
+    const updated = await updatedResponse.json() as {
+      revision: number;
+      operations: unknown[];
+      rationale: string;
+      assumptions: string[];
+    };
+    assert.equal(updated.revision, 2);
+    assert.deepEqual(updated.operations, [replacement]);
+    assert.equal(updated.rationale, updateBody.rationale);
+    assert.deepEqual(updated.assumptions, updateBody.assumptions);
+    assert.deepEqual(store.workspace.getGraph(project.id), graphBefore);
+    assert.deepEqual(store.workspace.getLayout(project.id), layoutBefore);
+    assert.equal(workspaceProposalCounts(store, ready.workspace.id).audits, 2);
+
+    const staleUpdate = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${created.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(updateBody),
+      },
+    );
+    assert.equal(staleUpdate.status, 409);
+    assert.deepEqual(await staleUpdate.json(), {
+      error: `Workspace Proposal revision conflict for ${created.id}: expected 1, current 2`,
+      code: "workspace_proposal_revision_conflict",
+      proposalId: created.id,
+      expectedProposalRevision: 1,
+      actualProposalRevision: 2,
+    });
+    assert.equal(workspaceProposalCounts(store, ready.workspace.id).audits, 2);
+
+    const snapshotsBefore = Number((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?",
+    ).get(ready.workspace.id) as { count: number }).count);
+    const approvalResponse = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${created.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "structure-only" }),
+      },
+    );
+    assert.equal(approvalResponse.status, 200);
+    const approval = await approvalResponse.json() as {
+      graph: { revision: number; nodes: Array<{ id: string }> };
+      snapshot: { graphRevision: number };
+      plan: null;
+    };
+    assert.deepEqual(Object.keys(approval).sort(), ["graph", "plan", "snapshot"]);
+    assert.equal(approval.graph.revision, graphBefore.revision + 1);
+    assert.ok(approval.graph.nodes.some((node) => node.id === replacement.node.id));
+    assert.equal(approval.snapshot.graphRevision, approval.graph.revision);
+    assert.equal(approval.plan, null);
+    assert.equal(Number((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?",
+    ).get(ready.workspace.id) as { count: number }).count), snapshotsBefore + 1);
+    assert.equal(store.workspace.getProposalForProject(project.id, created.id).status, "approved");
+    assert.equal(store.workspace.getLayout(project.id).objects.find(
+      (object) => object.id === replacement.node.id,
+    )?.parentGroupId, "approved-http-group");
+
+    const secondApproval = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${created.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "structure-only" }),
+      },
+    );
+    assert.equal(secondApproval.status, 409);
+    assert.equal(
+      (await secondApproval.json() as { code: string }).code,
+      "workspace_proposal_state_conflict",
+    );
+  });
+});
+
+test("workspace Proposal HTTP generate approval returns an unqueued shell and reject changes only Proposal state", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Proposal generate and reject", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    const generatedResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(ready, "generate-shell")),
+    });
+    const generated = await generatedResponse.json() as { id: string; revision: number };
+    const approvalResponse = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${generated.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "generate" }),
+      },
+    );
+    assert.equal(approvalResponse.status, 200);
+    const approval = await approvalResponse.json() as {
+      graph: { revision: number };
+      snapshot: { id: string };
+      plan: {
+        id: string;
+        proposalId: string;
+        proposalRevision: number;
+        baseSnapshotId: string;
+        status: string;
+      };
+    };
+    assert.deepEqual(Object.keys(approval).sort(), ["graph", "plan", "snapshot"]);
+    assert.equal(approval.plan.proposalId, generated.id);
+    assert.equal(approval.plan.proposalRevision, generated.revision);
+    assert.equal(approval.plan.baseSnapshotId, approval.snapshot.id);
+    assert.equal(approval.plan.status, "approved");
+    const planRow = store.db.prepare(
+      `SELECT status, compile_error_json AS compileError, finished_at AS finishedAt
+       FROM generation_plans WHERE id = ?`,
+    ).get(approval.plan.id) as { status: string; compileError: string | null; finishedAt: number | null };
+    assert.equal(planRow.status, "approved");
+    assert.equal(planRow.compileError, null);
+    assert.equal(planRow.finishedAt, null);
+
+    const afterGenerate = await readyWorkspace(base, project.id);
+    const rejectedCreate = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(afterGenerate, "reject-only")),
+    });
+    const rejectDraft = await rejectedCreate.json() as { id: string; status: string };
+    const canonicalBeforeReject = {
+      graph: store.workspace.getGraph(project.id),
+      layout: store.workspace.getLayout(project.id),
+      snapshots: store.db.prepare(
+        "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+      ).all(ready.workspace.id),
+      plans: store.db.prepare(
+        "SELECT id, status FROM generation_plans WHERE workspace_id = ? ORDER BY id",
+      ).all(ready.workspace.id),
+    };
+    const rejectResponse = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${rejectDraft.id}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    assert.equal(rejectResponse.status, 200);
+    assert.equal((await rejectResponse.json() as { status: string }).status, "rejected");
+    assert.deepEqual({
+      graph: store.workspace.getGraph(project.id),
+      layout: store.workspace.getLayout(project.id),
+      snapshots: store.db.prepare(
+        "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+      ).all(ready.workspace.id),
+      plans: store.db.prepare(
+        "SELECT id, status FROM generation_plans WHERE workspace_id = ? ORDER BY id",
+      ).all(ready.workspace.id),
+    }, canonicalBeforeReject);
+
+    const secondReject = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${rejectDraft.id}/reject`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    assert.equal(secondReject.status, 409);
+    assert.equal(
+      (await secondReject.json() as { code: string }).code,
+      "workspace_proposal_state_conflict",
+    );
+  });
+});
+
+test("stale Proposal approval returns complete conflict state without retrying or queuing", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Proposal stale HTTP", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(ready, "stale-http")),
+    });
+    const proposal = await createResponse.json() as { id: string; revision: number };
+    const intervening = store.workspace.applyGraphCommands(project.id, {
+      baseGraphRevision: ready.graph.revision,
+      expectedSnapshotId: ready.activeSnapshot.id,
+      commands: [proposalPageCommand("intervening-user")],
+    });
+    const beforeApproval = {
+      graphRevision: store.workspace.getGraph(project.id).revision,
+      snapshotIds: store.db.prepare(
+        "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+      ).all(ready.workspace.id),
+      counts: workspaceProposalCounts(store, ready.workspace.id),
+    };
+
+    const approvalResponse = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "generate" }),
+      },
+    );
+    assert.equal(approvalResponse.status, 409);
+    const conflict = await approvalResponse.json() as {
+      code: string;
+      expectedGraphRevision: number;
+      actualGraphRevision: number;
+      expectedSnapshotId: string;
+      actualSnapshotId: string;
+      expectedLayoutChecksum: string;
+      actualLayoutChecksum: string;
+      graphChanged: boolean;
+      snapshotChanged: boolean;
+      layoutChanged: boolean;
+      proposal: { id: string; revision: number; status: string; review: { kind: string } };
+      summary: Record<string, unknown>;
+    };
+    assert.equal(conflict.code, "workspace_revision_conflict");
+    assert.equal(conflict.expectedGraphRevision, ready.graph.revision);
+    assert.equal(conflict.actualGraphRevision, intervening.graph.revision);
+    assert.equal(conflict.expectedSnapshotId, ready.activeSnapshot.id);
+    assert.equal(conflict.actualSnapshotId, intervening.snapshot.id);
+    assert.equal(conflict.graphChanged, true);
+    assert.equal(conflict.snapshotChanged, true);
+    assert.equal(typeof conflict.layoutChanged, "boolean");
+    assert.equal(typeof conflict.expectedLayoutChecksum, "string");
+    assert.equal(typeof conflict.actualLayoutChecksum, "string");
+    assert.equal(conflict.proposal.id, proposal.id);
+    assert.equal(conflict.proposal.status, "conflicted");
+    assert.equal(conflict.proposal.review.kind, "conflict");
+    assert.deepEqual(conflict.summary, {
+      graphChanged: conflict.graphChanged,
+      snapshotChanged: conflict.snapshotChanged,
+      layoutChanged: conflict.layoutChanged,
+      expectedGraphRevision: conflict.expectedGraphRevision,
+      actualGraphRevision: conflict.actualGraphRevision,
+      expectedSnapshotId: conflict.expectedSnapshotId,
+      actualSnapshotId: conflict.actualSnapshotId,
+      expectedLayoutChecksum: conflict.expectedLayoutChecksum,
+      actualLayoutChecksum: conflict.actualLayoutChecksum,
+    });
+    const reloaded = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}`,
+    );
+    assert.equal(reloaded.status, 200);
+    assert.deepEqual(await reloaded.json(), conflict.proposal);
+    assert.deepEqual({
+      graphRevision: store.workspace.getGraph(project.id).revision,
+      snapshotIds: store.db.prepare(
+        "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+      ).all(ready.workspace.id),
+      counts: workspaceProposalCounts(store, ready.workspace.id),
+    }, beforeApproval);
+
+    const retry = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "generate" }),
+      },
+    );
+    assert.equal(retry.status, 409);
+    assert.equal((await retry.json() as { code: string }).code, "workspace_proposal_state_conflict");
+
+    const layoutProject = store.createProject({ name: "Proposal stale layout HTTP", mode: "standard" });
+    const layoutReady = await readyWorkspace(base, layoutProject.id);
+    const layoutCreate = await fetch(`${base}/api/projects/${layoutProject.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(layoutReady, "stale-layout-http")),
+    });
+    const layoutProposal = await layoutCreate.json() as { id: string };
+    const layoutMutation = await fetch(`${base}/api/projects/${layoutProject.id}/workspace/layout`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        graphRevision: layoutReady.graph.revision,
+        baseLayoutChecksum: layoutReady.layout.checksum,
+        commands: [{ type: "set-viewport", viewport: { x: 25, y: 50, zoom: 0.8 } }],
+      }),
+    });
+    assert.equal(layoutMutation.status, 200);
+    const changedLayout = await layoutMutation.json() as { checksum: string };
+    const staleLayoutApproval = await fetch(
+      `${base}/api/projects/${layoutProject.id}/workspace/proposals/${layoutProposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "structure-only" }),
+      },
+    );
+    assert.equal(staleLayoutApproval.status, 409);
+    const layoutConflict = await staleLayoutApproval.json() as {
+      code: string;
+      graphChanged: boolean;
+      snapshotChanged: boolean;
+      layoutChanged: boolean;
+      expectedLayoutChecksum: string;
+      actualLayoutChecksum: string;
+    };
+    assert.equal(layoutConflict.code, "workspace_revision_conflict");
+    assert.equal(layoutConflict.graphChanged, false);
+    assert.equal(layoutConflict.snapshotChanged, false);
+    assert.equal(layoutConflict.layoutChanged, true);
+    assert.equal(layoutConflict.expectedLayoutChecksum, layoutReady.layout.checksum);
+    assert.equal(layoutConflict.actualLayoutChecksum, changedLayout.checksum);
+
+    const staleCreateProject = store.createProject({ name: "Proposal create layout CAS", mode: "standard" });
+    const staleCreateReady = await readyWorkspace(base, staleCreateProject.id);
+    const driftLayout = await fetch(`${base}/api/projects/${staleCreateProject.id}/workspace/layout`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        graphRevision: staleCreateReady.graph.revision,
+        baseLayoutChecksum: staleCreateReady.layout.checksum,
+        commands: [{ type: "set-viewport", viewport: { x: -10, y: 5, zoom: 1.2 } }],
+      }),
+    });
+    assert.equal(driftLayout.status, 200);
+    const staleCreate = await fetch(`${base}/api/projects/${staleCreateProject.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(staleCreateReady, "layout-cas")),
+    });
+    assert.equal(staleCreate.status, 409);
+    const staleCreateBody = await staleCreate.json() as { code: string; expectedLayoutChecksum: string };
+    assert.equal(staleCreateBody.code, "workspace_layout_conflict");
+    assert.equal(staleCreateBody.expectedLayoutChecksum, staleCreateReady.layout.checksum);
+  });
+});
+
+test("Proposal semantic approval errors are atomic typed 422 responses", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Proposal semantic HTTP", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(ready, "semantic", {
+        operations: [
+          proposalPageCommand("duplicate-a", "Duplicate page"),
+          proposalPageCommand("duplicate-b", "Duplicate page"),
+        ],
+      })),
+    });
+    assert.equal(createResponse.status, 201);
+    const proposal = await createResponse.json() as { id: string; status: string };
+    const beforeApproval = {
+      graph: store.workspace.getGraph(project.id),
+      layout: store.workspace.getLayout(project.id),
+      snapshots: store.db.prepare(
+        "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+      ).all(ready.workspace.id),
+      counts: workspaceProposalCounts(store, ready.workspace.id),
+    };
+    const approval = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "generate" }),
+      },
+    );
+    assert.equal(approval.status, 422);
+    const body = await approval.json() as { code: string; details: unknown };
+    assert.equal(body.code, "workspace_proposal_validation_error");
+    assert.deepEqual(body.details, {});
+    assert.equal(store.workspace.getProposalForProject(project.id, proposal.id).status, "draft");
+    assert.deepEqual({
+      graph: store.workspace.getGraph(project.id),
+      layout: store.workspace.getLayout(project.id),
+      snapshots: store.db.prepare(
+        "SELECT id FROM workspace_snapshots WHERE workspace_id = ? ORDER BY id",
+      ).all(ready.workspace.id),
+      counts: workspaceProposalCounts(store, ready.workspace.id),
+    }, beforeApproval);
+  });
+});
+
 test("Prototype workspace reads stay typed and every Standard-only route is zero-write", async () => {
   await withWorkspaceServer(async ({ base, store }) => {
     const project = store.createProject({ name: "Prototype HTTP", mode: "prototype" });
@@ -240,6 +935,8 @@ test("Prototype workspace reads stay typed and every Standard-only route is zero
       "artifacts/missing-artifact/revisions/missing-revision",
       "workspace/snapshots",
       "workspace/snapshots/missing-snapshot",
+      "workspace/proposals",
+      "workspace/proposals/missing-proposal",
     ];
     for (const path of readPaths) {
       const response = await fetch(`${base}/api/projects/${project.id}/${path}`);
@@ -278,14 +975,69 @@ test("Prototype workspace reads stay typed and every Standard-only route is zero
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         graphRevision: 0,
+        baseLayoutChecksum: "unused-layout-checksum",
         commands: [{ type: "set-viewport", viewport: { x: 1, y: 2, zoom: 1 } }],
       }),
     });
     assert.equal(layout.status, 409);
+    const proposalMutations = [
+      {
+        path: "workspace/proposals",
+        method: "POST",
+        body: {
+          kind: "workspace-generation",
+          baseGraphRevision: 0,
+          baseSnapshotId: "unused-snapshot",
+          layoutId: "default",
+          baseLayoutChecksum: "unused-layout-checksum",
+          operations: [],
+          layoutOperations: [],
+          generation: emptyWorkspaceGenerationPayload(),
+          rationale: "Unsupported",
+          assumptions: [],
+        },
+      },
+      {
+        path: "workspace/proposals/missing-proposal",
+        method: "PATCH",
+        body: {
+          expectedProposalRevision: 1,
+          operations: [],
+          layoutOperations: [],
+          generation: emptyWorkspaceGenerationPayload(),
+          rationale: "Unsupported",
+          assumptions: [],
+        },
+      },
+      {
+        path: "workspace/proposals/missing-proposal/approve",
+        method: "POST",
+        body: { mode: "structure-only" },
+      },
+      {
+        path: "workspace/proposals/missing-proposal/reject",
+        method: "POST",
+        body: {},
+      },
+    ] as const;
+    for (const mutation of proposalMutations) {
+      const response = await fetch(`${base}/api/projects/${project.id}/${mutation.path}`, {
+        method: mutation.method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(mutation.body),
+      });
+      assert.equal(response.status, 409, mutation.path);
+      assert.equal(
+        (await response.json() as { code: string }).code,
+        "workspace_requires_standard_project",
+        mutation.path,
+      );
+    }
     assert.equal(store.workspace.getWorkspace(project.id), null);
     assert.equal((store.db.prepare(
       "SELECT COUNT(*) AS count FROM workspace_artifacts",
     ).get() as { count: number }).count, 0);
+    assert.deepEqual(workspaceProposalCounts(store), { proposals: 0, audits: 0, plans: 0 });
   });
 });
 
@@ -395,6 +1147,7 @@ test("workspace layout HTTP persistence stays outside semantic history and stale
     const initial = await (await fetch(`${base}/api/projects/${project.id}/workspace`)).json() as {
       graph: { revision: number; nodes: Array<{ id: string }> };
       snapshots: unknown[];
+      layout: { checksum: string };
     };
     const nodeId = initial.graph.nodes[0]!.id;
     const saved = await fetch(`${base}/api/projects/${project.id}/workspace/layout`, {
@@ -402,6 +1155,7 @@ test("workspace layout HTTP persistence stays outside semantic history and stale
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         graphRevision: initial.graph.revision,
+        baseLayoutChecksum: initial.layout.checksum,
         commands: [
           { type: "move", objectId: nodeId, x: 42, y: 84 },
           { type: "set-viewport", viewport: { x: -20, y: 10, zoom: 0.75 } },
@@ -410,6 +1164,7 @@ test("workspace layout HTTP persistence stays outside semantic history and stale
     });
     assert.equal(saved.status, 200);
     const savedLayout = await saved.json() as {
+      checksum: string;
       objects: Array<{ id: string; x: number; y: number }>;
       viewport: { x: number; y: number; zoom: number };
     };
@@ -436,6 +1191,7 @@ test("workspace layout HTTP persistence stays outside semantic history and stale
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         graphRevision: initial.graph.revision - 1,
+        baseLayoutChecksum: savedLayout.checksum,
         commands: [{ type: "set-viewport", viewport: { x: 99, y: 99, zoom: 2 } }],
       }),
     });
@@ -559,12 +1315,125 @@ test("workspace nested HTTP reads enforce Project and parent ownership without f
   });
 });
 
+test("workspace Proposal nested HTTP routes hide foreign ownership and reject foreign semantic references", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const projectA = store.createProject({ name: "Proposal owned A", mode: "standard" });
+    const projectB = store.createProject({ name: "Proposal owned B", mode: "standard" });
+    const readyA = await readyWorkspace(base, projectA.id);
+    const readyB = await readyWorkspace(base, projectB.id);
+    const createA = await fetch(`${base}/api/projects/${projectA.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(readyA, "owned-a")),
+    });
+    const createB = await fetch(`${base}/api/projects/${projectB.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(readyB, "owned-b")),
+    });
+    const proposalA = await createA.json() as {
+      id: string;
+      revision: number;
+      operations: unknown[];
+      layoutOperations: unknown[];
+      generation: unknown;
+      rationale: string;
+      assumptions: string[];
+    };
+    const proposalB = await createB.json() as { id: string; revision: number; status: string };
+    const missingId = "missing-proposal";
+    const expectedNotFound = { error: "proposal not found" };
+
+    const foreignGet = await fetch(
+      `${base}/api/projects/${projectB.id}/workspace/proposals/${proposalA.id}`,
+    );
+    const missingGet = await fetch(
+      `${base}/api/projects/${projectB.id}/workspace/proposals/${missingId}`,
+    );
+    assert.equal(foreignGet.status, 404);
+    assert.equal(missingGet.status, 404);
+    assert.deepEqual(await foreignGet.json(), expectedNotFound);
+    assert.deepEqual(await missingGet.json(), expectedNotFound);
+
+    const updateBody = {
+      expectedProposalRevision: proposalA.revision,
+      operations: proposalA.operations,
+      layoutOperations: proposalA.layoutOperations,
+      generation: proposalA.generation,
+      rationale: proposalA.rationale,
+      assumptions: proposalA.assumptions,
+    };
+    const mutationRequests = [
+      {
+        suffix: "",
+        method: "PATCH",
+        body: updateBody,
+      },
+      {
+        suffix: "/approve",
+        method: "POST",
+        body: { mode: "structure-only" },
+      },
+      {
+        suffix: "/reject",
+        method: "POST",
+        body: {},
+      },
+    ] as const;
+    for (const mutation of mutationRequests) {
+      for (const proposalId of [proposalA.id, missingId]) {
+        const response = await fetch(
+          `${base}/api/projects/${projectB.id}/workspace/proposals/${proposalId}${mutation.suffix}`,
+          {
+            method: mutation.method,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(mutation.body),
+          },
+        );
+        assert.equal(response.status, 404, `${mutation.method} ${mutation.suffix || "proposal"}`);
+        assert.deepEqual(await response.json(), expectedNotFound);
+      }
+    }
+    assert.equal(store.workspace.getProposalForProject(projectA.id, proposalA.id).status, "draft");
+    assert.equal(store.workspace.getProposalForProject(projectB.id, proposalB.id).status, "draft");
+
+    const conversationA = store.createConversation(projectA.id, "Foreign Proposal Run");
+    const runA = store.createRun(projectA.id, conversationA.id);
+    const beforeForeignReference = workspaceProposalCounts(store, readyB.workspace.id);
+    const foreignReference = await fetch(`${base}/api/projects/${projectB.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(readyB, "foreign-run", { createdByRunId: runA.id })),
+    });
+    assert.equal(foreignReference.status, 422);
+    assert.equal(
+      (await foreignReference.json() as { code: string }).code,
+      "workspace_proposal_validation_error",
+    );
+    assert.deepEqual(workspaceProposalCounts(store, readyB.workspace.id), beforeForeignReference);
+
+    const foreignBase = await fetch(`${base}/api/projects/${projectB.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(readyB, "foreign-base", {
+        baseSnapshotId: readyA.activeSnapshot.id,
+      })),
+    });
+    assert.equal(foreignBase.status, 409);
+    const foreignBaseBody = await foreignBase.json() as Record<string, unknown>;
+    assert.equal(foreignBaseBody.code, "workspace_revision_conflict");
+    assert.equal("foreignProjectId" in foreignBaseBody, false);
+    assert.deepEqual(workspaceProposalCounts(store, readyB.workspace.id), beforeForeignReference);
+  });
+});
+
 test("workspace mutations never relabel durable graph or layout corruption as client errors", async () => {
   await withWorkspaceServer(async ({ base, store }) => {
     const layoutProject = store.createProject({ name: "Layout corruption race", mode: "standard" });
     const layoutReady = await (await fetch(`${base}/api/projects/${layoutProject.id}/workspace`)).json() as {
       workspace: { id: string };
       graph: { revision: number };
+      layout: { checksum: string };
     };
     const readViewport = (): { x: number; y: number; zoom: number } | null => {
       const row = store.db.prepare(`
@@ -601,6 +1470,7 @@ test("workspace mutations never relabel durable graph or layout corruption as cl
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         graphRevision: layoutReady.graph.revision,
+        baseLayoutChecksum: layoutReady.layout.checksum,
         commands: [{ type: "set-viewport", viewport: { x: 99, y: 88, zoom: 1.5 } }],
       }),
     });
@@ -651,6 +1521,43 @@ test("workspace mutations never relabel durable graph or layout corruption as cl
     assert.equal((store.db.prepare(`
       SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?
     `).get(graphReady.workspace.id) as { count: number }).count, graphReady.snapshots.length);
+  });
+});
+
+test("Proposal validation-shaped failures never relabel durable corruption as 422", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Proposal corruption race", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    const createResponse = await fetch(`${base}/api/projects/${project.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(ready, "corruption-race")),
+    });
+    const proposal = await createResponse.json() as { id: string };
+    const artifact = store.workspace.getBundleByProjectId(project.id)!.artifacts[0]!;
+    const originalApprove = store.workspace.approveProposalForProject.bind(store.workspace);
+    let injected = false;
+    store.workspace.approveProposalForProject = ((...args: Parameters<typeof originalApprove>) => {
+      if (!injected) {
+        injected = true;
+        store.db.prepare("UPDATE workspace_artifacts SET name = 'Raw Proposal drift' WHERE id = ?")
+          .run(artifact.id);
+      }
+      return originalApprove(...args);
+    }) as typeof store.workspace.approveProposalForProject;
+
+    const response = await fetch(
+      `${base}/api/projects/${project.id}/workspace/proposals/${proposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "structure-only" }),
+      },
+    );
+    assert.equal(response.status, 500);
+    assert.notEqual((await response.json() as { code?: string }).code, "workspace_proposal_validation_error");
+    assert.equal(store.workspace.getProposalForProject(project.id, proposal.id).status, "draft");
+    assert.equal(workspaceProposalCounts(store, ready.workspace.id).plans, 0);
   });
 });
 

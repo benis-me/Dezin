@@ -98,16 +98,22 @@ import {
   type PreviewLeaseManager,
 } from "./preview-lease.ts";
 import {
+  handleApproveProposal,
+  handleCreateProposal,
   handleGetArtifactRevision,
+  handleGetProposal,
   handleGetWorkspace,
   handleGetWorkspaceArtifact,
   handleGetWorkspaceSnapshot,
   handleGraphCommands,
   handleListArtifactRevisions,
   handleListArtifactTracks,
+  handleListProposals,
   handleListWorkspaceArtifacts,
   handleListWorkspaceSnapshots,
   handlePutWorkspaceLayout,
+  handleRejectProposal,
+  handleUpdateProposal,
 } from "./workspace-handler.ts";
 
 export type DevServerLease = Pick<PreviewLease, "url"> & Partial<Omit<PreviewLease, "url">>;
@@ -323,6 +329,36 @@ const routes: Route[] = [
     method: "PUT",
     pattern: "/api/projects/:id/workspace/layout",
     handler: handlePutWorkspaceLayout,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/workspace/proposals",
+    handler: handleListProposals,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/workspace/proposals",
+    handler: handleCreateProposal,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/workspace/proposals/:proposalId",
+    handler: handleGetProposal,
+  },
+  {
+    method: "PATCH",
+    pattern: "/api/projects/:id/workspace/proposals/:proposalId",
+    handler: handleUpdateProposal,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/workspace/proposals/:proposalId/approve",
+    handler: handleApproveProposal,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/workspace/proposals/:proposalId/reject",
+    handler: handleRejectProposal,
   },
   {
     method: "GET",
