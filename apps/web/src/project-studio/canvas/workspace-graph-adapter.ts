@@ -20,7 +20,7 @@ import {
 
 export type SemanticZoomLevel = "overview" | "compact" | "full";
 export type WorkspaceEdgeFilter = "flow" | "relations" | "all";
-export type WorkspaceFlowNodeType = WorkspaceNode["kind"] | "group";
+export type WorkspaceFlowNodeType = WorkspaceNode["kind"] | "group" | "proposal";
 
 export interface WorkspaceFlowNodeData extends Record<string, unknown> {
   objectId: string;

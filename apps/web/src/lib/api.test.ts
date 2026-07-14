@@ -229,7 +229,7 @@ test("workspace APIs encode project and artifact IDs and send typed mutation bod
   const responses = [
     { status: "unsupported", code: "workspace_requires_standard_project", projectId: "p /1", projectMode: "prototype" },
     { graph: { workspaceId: "w1", revision: 2, nodes: [], edges: [] }, snapshot: { id: "s2" } },
-    { workspaceId: "w1", layoutId: "default", objects: [], viewport: { x: 2, y: 3, zoom: 1 } },
+    { workspaceId: "w1", layoutId: "default", objects: [], viewport: { x: 2, y: 3, zoom: 1 }, checksum: "layout-2" },
     { id: "a /1", workspaceId: "w1", kind: "page", name: "Page" },
     [],
     [],
@@ -247,6 +247,7 @@ test("workspace APIs encode project and artifact IDs and send typed mutation bod
   const layoutInput = {
     layoutId: "default",
     graphRevision: 2,
+    baseLayoutChecksum: "layout-1",
     commands: [{ type: "set-viewport" as const, viewport: { x: 2, y: 3, zoom: 1 } }],
   };
 

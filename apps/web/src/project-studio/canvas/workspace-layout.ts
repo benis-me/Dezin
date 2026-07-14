@@ -72,6 +72,7 @@ export function decodeWorkspaceLayout(raw: unknown): WorkspaceLayout {
       y: finiteNumber(viewportRecord.y),
       zoom: Math.max(0.05, finiteNumber(viewportRecord.zoom, 1)),
     },
+    checksum: typeof record.checksum === "string" ? record.checksum : "",
   };
 }
 

@@ -92,7 +92,7 @@ function readyWorkspace(projectId: string): ReadyProjectWorkspacePayload {
     tracks: [],
     revisions: [],
     snapshots: [activeSnapshot],
-    layout: { workspaceId, layoutId: "default", objects: [], viewport: { x: 0, y: 0, zoom: 1 } },
+    layout: { workspaceId, layoutId: "default", objects: [], viewport: { x: 0, y: 0, zoom: 1 }, checksum: "layout-checksum" },
   };
 }
 

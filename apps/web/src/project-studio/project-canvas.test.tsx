@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiProvider } from "../lib/api-context.tsx";
@@ -15,6 +15,7 @@ import {
 import { makeFakeApi } from "../test/fake-api.ts";
 import { ProjectCanvas, isCanvasShortcutTarget } from "./canvas/ProjectCanvas.tsx";
 import { applyWorkspaceLayoutCommands } from "./canvas/workspace-layout.ts";
+import { buildProposalDiff } from "./proposal/proposal-diff.ts";
 import { useProjectStudio } from "./useProjectStudio.ts";
 
 const graph: WorkspaceGraph = {
@@ -43,7 +44,64 @@ const layout: WorkspaceLayout = {
     { id: "page-2", kind: "node", x: 370, y: 70, parentGroupId: "journey" },
   ],
   viewport: { x: 0, y: 0, zoom: 0.8 },
+  checksum: "layout-1",
 };
+
+function installReactFlowMeasurements(): () => void {
+  vi.stubGlobal("DOMMatrixReadOnly", class MockDOMMatrixReadOnly {
+    readonly m22 = 1;
+  });
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function measuredWidth(this: HTMLElement) {
+    return Number.parseFloat(this.style.width) || 960;
+  });
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function measuredHeight(this: HTMLElement) {
+    return Number.parseFloat(this.style.height) || 640;
+  });
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function measuredRect(this: HTMLElement) {
+    const width = this.offsetWidth;
+    const height = this.offsetHeight;
+    return {
+      x: 0,
+      y: 0,
+      top: 0,
+      right: width,
+      bottom: height,
+      left: 0,
+      width,
+      height,
+      toJSON: () => ({}),
+    };
+  });
+  const observers: Array<{ callback: ResizeObserverCallback; targets: Set<Element>; instance: ResizeObserver }> = [];
+  vi.stubGlobal("ResizeObserver", class MockResizeObserver {
+    private readonly targets = new Set<Element>();
+
+    constructor(callback: ResizeObserverCallback) {
+      observers.push({ callback, targets: this.targets, instance: this as ResizeObserver });
+    }
+
+    observe(target: Element) {
+      this.targets.add(target);
+    }
+
+    unobserve(target: Element) {
+      this.targets.delete(target);
+    }
+
+    disconnect() {
+      this.targets.clear();
+    }
+  });
+  return () => {
+    for (const observer of observers) {
+      const entries = [...observer.targets].map((target) => ({
+        target,
+        contentRect: target.getBoundingClientRect(),
+      }) as ResizeObserverEntry);
+      if (entries.length > 0) observer.callback(entries, observer.instance);
+    }
+  };
+}
 
 function CanvasHarness({
   onSaveLayout,
@@ -77,7 +135,10 @@ beforeEach(() => {
   window.history.pushState({}, "", "/projects/project-1/canvas");
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 test("canvas renders immutable-node Outline parity and never mounts iframe content", () => {
   const { container } = render(
@@ -228,6 +289,76 @@ test("full semantic zoom exposes keyboard Page handles and compact zoom removes 
   expect(screen.queryByRole("button", { name: "Connect from Checkout" })).not.toBeInTheDocument();
 });
 
+test("proposal focus does not repeat for the same proposal and nonce after an authoritative overlay recompute", async () => {
+  const measureReactFlow = installReactFlowMeasurements();
+  vi.stubGlobal("matchMedia", () => ({ matches: true }));
+  const proposal = (name: string) => ({
+    id: "proposal-focus",
+    baseGraphRevision: graph.revision,
+    baseSnapshotId: "snapshot-1",
+    baseGraph: graph,
+    baseLayoutChecksum: layout.checksum,
+    baseLayout: layout,
+    operations: [{ id: "rename-checkout", type: "rename-node" as const, nodeId: "page-1", name }],
+    layoutOperations: [],
+  });
+  const current = {
+    graph,
+    activeSnapshotId: "snapshot-1",
+    layoutChecksum: layout.checksum,
+  };
+  const callbacks = {
+    onSelectionChange: vi.fn(),
+    onSaveLayout: vi.fn(async () => layout),
+    onApplyGraphCommands: vi.fn(async () => {}),
+    onOpenArtifact: vi.fn(),
+  };
+  const canvas = (name: string, nonce: number) => (
+    <ProjectCanvas
+      projectId="project-1"
+      projectName="Storefront system"
+      graph={graph}
+      layout={layout}
+      artifactRevisionIds={{}}
+      selectedNodeIds={[]}
+      {...callbacks}
+      proposal={{ id: "proposal-focus" }}
+      proposalDiff={buildProposalDiff(proposal(name), current)}
+      proposalFocus={{ key: "node:page-1", nonce }}
+    />
+  );
+  const rendered = render(
+    <>
+      <button type="button">Inspector field</button>
+      {canvas("Checkout review", 1)}
+    </>,
+  );
+  const overlay = rendered.container.querySelector<HTMLElement>(
+    '.react-flow__node[data-id="proposal:proposal-focus:node:page-1"]',
+  );
+  await act(async () => {
+    measureReactFlow();
+    await Promise.resolve();
+    measureReactFlow();
+  });
+  await waitFor(() => expect(overlay).toHaveFocus());
+
+  const inspectorField = screen.getByRole("button", { name: "Inspector field" });
+  inspectorField.focus();
+  rendered.rerender(
+    <>
+      <button type="button">Inspector field</button>
+      {canvas("Checkout revised", 1)}
+    </>,
+  );
+  await act(async () => {
+    measureReactFlow();
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    measureReactFlow();
+  });
+  expect(inspectorField).toHaveFocus();
+});
+
 test("shortcut target guard uses closest and ignores nested interactive/contenteditable targets", () => {
   const host = document.createElement("div");
   host.innerHTML = `
@@ -355,6 +486,29 @@ describe("Project Studio authoritative persistence", () => {
     expect(saveWorkspaceLayout.mock.calls.map((call) => call[1].graphRevision)).toEqual([1, 2]);
     expect(getWorkspace).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("studio-pointers")).toHaveTextContent("2:snapshot-2:44");
+  });
+
+  test("layout checksum conflict refreshes and replays once with the authoritative checksum", async () => {
+    const refreshedLayout = { ...layout, checksum: "layout-2" };
+    const getWorkspace = vi.fn()
+      .mockResolvedValueOnce(readyWorkspace(1))
+      .mockResolvedValueOnce(readyWorkspace(1, refreshedLayout));
+    const saveWorkspaceLayout = vi.fn()
+      .mockRejectedValueOnce(new ApiError(409, "layout stale", { code: "workspace_layout_conflict" }))
+      .mockResolvedValueOnce({ ...refreshedLayout, viewport: { x: 44, y: 0, zoom: 1 }, checksum: "layout-3" });
+    render(
+      <ApiProvider client={makeFakeApi({ getProject: async () => project(), getWorkspace, saveWorkspaceLayout })}>
+        <StudioMutationProbe />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save layout" }));
+    await waitFor(() => expect(saveWorkspaceLayout).toHaveBeenCalledTimes(2));
+    expect(saveWorkspaceLayout.mock.calls.map((call) => call[1])).toMatchObject([
+      { graphRevision: 1, baseLayoutChecksum: "layout-1" },
+      { graphRevision: 1, baseLayoutChecksum: "layout-2" },
+    ]);
+    expect(getWorkspace).toHaveBeenCalledTimes(2);
   });
 
   test("overlapping layout saves serialize so an older full-layout response cannot clobber a newer one", async () => {

@@ -102,6 +102,7 @@ function readyWorkspace(projectId: string): ProjectWorkspacePayload {
       layoutId: "default",
       objects: [{ id: `node-${projectId}`, kind: "node", x: 0, y: 0, parentGroupId: null }],
       viewport: { x: 0, y: 0, zoom: 1 },
+      checksum: `layout-${projectId}`,
     },
   };
 }
@@ -302,6 +303,9 @@ test("a direct Artifact deep link has an accessible loading state before the Stu
 
 test("Prototype projects retain the legacy Workspace screen without a nested Studio shell", async () => {
   window.history.pushState({}, "", "/projects/prototype/canvas");
+  const listWorkspaceProposals = vi.fn(async () => {
+    throw new Error("Prototype projects must not read Proposals");
+  });
   render(
     <ApiProvider
       client={makeFakeApi({
@@ -312,6 +316,7 @@ test("Prototype projects retain the legacy Workspace screen without a nested Stu
           projectId: "prototype",
           projectMode: "prototype",
         }),
+        listWorkspaceProposals,
       })}
     >
       <App />
@@ -321,6 +326,7 @@ test("Prototype projects retain the legacy Workspace screen without a nested Stu
   expect(await screen.findByText("Preview")).toBeInTheDocument();
   expect(screen.getByLabelText("Conversation")).toBeInTheDocument();
   expect(screen.queryByTestId("project-studio-shell")).not.toBeInTheDocument();
+  expect(listWorkspaceProposals).not.toHaveBeenCalled();
 });
 
 test("the special new-project route stays in the legacy Workspace flow without workspace reads", async () => {

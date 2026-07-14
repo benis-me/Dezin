@@ -3,6 +3,7 @@ import { Button } from "../components/ui/index.ts";
 import type { WorkspaceArtifact } from "../lib/api.ts";
 import { navigate } from "../router.tsx";
 import { ProjectStudioShell } from "./ProjectStudioShell.tsx";
+import { ProposalReviewPanel } from "./proposal/ProposalReviewPanel.tsx";
 import { useProjectStudio } from "./useProjectStudio.ts";
 import { WorkspaceAgentPanel } from "./WorkspaceAgentPanel.tsx";
 
@@ -129,6 +130,12 @@ export function ProjectStudioScreen({
     ? null
     : load.workspace.artifacts.find((candidate) => candidate.id === artifactId) ?? null;
   const contextLabel = `${load.workspace.artifacts.length} ${load.workspace.artifacts.length === 1 ? "artifact" : "artifacts"}`;
+  const reviewableProposal = studio.proposalReview.status === "draft"
+    || studio.proposalReview.status === "saving"
+    || studio.proposalReview.status === "validation-error"
+    || studio.proposalReview.status === "conflicted"
+    ? studio.proposalReview
+    : null;
   const main = artifactId === null
     ? (
         <Suspense fallback={<ProjectCanvasLoading />}>
@@ -145,6 +152,9 @@ export function ProjectStudioScreen({
             onSaveLayout={studio.saveLayout}
             onApplyGraphCommands={studio.applyGraphCommands}
             onOpenArtifact={(nextArtifactId) => navigate(`/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(nextArtifactId)}`)}
+            proposal={reviewableProposal?.proposal ?? null}
+            proposalDiff={reviewableProposal?.diff ?? null}
+            proposalFocus={studio.proposalFocus}
           />
         </Suspense>
       )
@@ -160,7 +170,25 @@ export function ProjectStudioScreen({
         />
       )}
       main={main}
-      inspector={<InspectorPlaceholder selectedCount={studio.selectedGraphObjectIds.length} zoom={studio.viewport.zoom} />}
+      inspector={studio.proposalReview.status === "idle" ? (
+        <InspectorPlaceholder selectedCount={studio.selectedGraphObjectIds.length} zoom={studio.viewport.zoom} />
+      ) : (
+        <ProposalReviewPanel
+          review={studio.proposalReview}
+          focusedChangeKey={studio.focusedProposalChangeKey}
+          onEdit={studio.editProposal}
+          onRenameNode={studio.renameProposalNode}
+          onRevert={studio.revertProposalChange}
+          onFocusItem={(changeKey) => {
+            studio.focusProposalChange(changeKey);
+            if (artifactId !== null) navigate(`/projects/${encodeURIComponent(projectId)}/canvas`);
+          }}
+          onApprove={studio.approveProposal}
+          onReject={studio.rejectProposal}
+          onClose={studio.closeProposalReview}
+        />
+      )}
+      inspectorOpen={studio.proposalReview.status !== "idle"}
     />
   );
 }

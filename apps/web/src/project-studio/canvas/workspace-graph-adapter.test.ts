@@ -56,6 +56,7 @@ const layout: WorkspaceLayout = {
     { id: "resource-1", kind: "node", x: 920, y: 390, parentGroupId: null },
   ],
   viewport: { x: 20, y: 30, zoom: 0.8 },
+  checksum: "layout-1",
 };
 
 test("semantic zoom uses the exact overview, compact, and full boundaries", () => {
