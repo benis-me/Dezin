@@ -2072,9 +2072,16 @@ export class WorkspaceStore {
       const plan = planId === null
         ? null
         : this.insertGenerationPlanShellInTransaction(planId, approved, result.snapshot.id);
+      const approvedLayout = this.getLayoutByWorkspaceId(workspace.id, proposal.layoutId);
       return {
         kind: "approved",
-        result: { proposal: approved, graph: result.graph, snapshot: result.snapshot, plan },
+        result: {
+          proposal: approved,
+          graph: result.graph,
+          snapshot: result.snapshot,
+          layout: approvedLayout,
+          plan,
+        },
       };
     });
     if (outcome.kind === "conflict") {

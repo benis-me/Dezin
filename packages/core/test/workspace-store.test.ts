@@ -6664,7 +6664,11 @@ test("structure-only Proposal approval applies graph and layout in one transacti
   assert.equal(result.plan, null);
   assert.equal(rowCount(store.db, "workspace_snapshots"), snapshotsBefore + 1);
   assert.equal(rowCount(store.db, "generation_plans"), 0);
-  assert.equal(store.workspace.getLayout(project.id).objects.find(({ id }) => id === "proposal-node-approved")?.parentGroupId, "approved-group");
+  const canonicalLayout = store.workspace.getLayout(project.id);
+  assert.deepEqual(result.layout, canonicalLayout);
+  assert.notEqual(result.layout.checksum, proposal.baseLayoutChecksum);
+  assert.equal(result.layout.objects.find(({ id }) => id === "proposal-node-approved")?.parentGroupId, "approved-group");
+  assert.equal(result.layout.objects.find(({ id }) => id === "approved-group")?.kind, "group");
   store.close();
 });
 
@@ -6722,11 +6726,34 @@ test("layout-only generate approval reuses the guarded graph Snapshot without in
   assert.equal(result.graph.revision, 0);
   assert.equal(result.snapshot.id, workspace.activeSnapshotId);
   assert.equal(result.plan?.baseSnapshotId, workspace.activeSnapshotId);
-  assert.notEqual(store.workspace.getLayout(project.id).checksum, baseLayout.checksum);
+  const canonicalLayout = store.workspace.getLayout(project.id);
+  assert.deepEqual(result.layout, canonicalLayout);
+  assert.notEqual(result.layout.checksum, baseLayout.checksum);
+  assert.equal(result.layout.objects.find(({ id }) => id === "layout-only-group")?.kind, "group");
   assert.deepEqual({
     graphRevisions: rowCount(store.db, "workspace_graph_revisions"),
     snapshots: rowCount(store.db, "workspace_snapshots"),
   }, counts);
+  store.close();
+});
+
+test("no-op Proposal approval returns the guarded authoritative layout unchanged", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "No-op layout approval", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const baseLayout = store.workspace.getLayout(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const snapshotsBefore = rowCount(store.db, "workspace_snapshots");
+
+  const result = store.workspace.approveProposal(proposal.id, "structure-only");
+
+  assert.equal(result.graph.revision, proposal.baseGraphRevision);
+  assert.equal(result.snapshot.id, workspace.activeSnapshotId);
+  assert.equal(result.plan, null);
+  assert.deepEqual(result.layout, baseLayout);
+  assert.equal(result.layout.checksum, proposal.baseLayoutChecksum);
+  assert.deepEqual(result.layout.objects, baseLayout.objects);
+  assert.equal(rowCount(store.db, "workspace_snapshots"), snapshotsBefore);
   store.close();
 });
 

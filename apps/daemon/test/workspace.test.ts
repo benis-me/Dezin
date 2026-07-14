@@ -578,9 +578,10 @@ test("workspace Proposal HTTP updates by revision and structure-only approval ap
     const approval = await approvalResponse.json() as {
       graph: { revision: number; nodes: Array<{ id: string }> };
       snapshot: { graphRevision: number };
+      layout: ReadyWorkspaceResponse["layout"];
       plan: null;
     };
-    assert.deepEqual(Object.keys(approval).sort(), ["graph", "plan", "snapshot"]);
+    assert.deepEqual(Object.keys(approval).sort(), ["graph", "layout", "plan", "snapshot"]);
     assert.equal(approval.graph.revision, graphBefore.revision + 1);
     assert.ok(approval.graph.nodes.some((node) => node.id === replacement.node.id));
     assert.equal(approval.snapshot.graphRevision, approval.graph.revision);
@@ -589,7 +590,10 @@ test("workspace Proposal HTTP updates by revision and structure-only approval ap
       "SELECT COUNT(*) AS count FROM workspace_snapshots WHERE workspace_id = ?",
     ).get(ready.workspace.id) as { count: number }).count), snapshotsBefore + 1);
     assert.equal(store.workspace.getProposalForProject(project.id, created.id).status, "approved");
-    assert.equal(store.workspace.getLayout(project.id).objects.find(
+    const authoritativeLayout = store.workspace.getLayout(project.id);
+    assert.deepEqual(approval.layout, authoritativeLayout);
+    assert.notEqual(approval.layout.checksum, layoutBefore.checksum);
+    assert.equal(approval.layout.objects.find(
       (object) => object.id === replacement.node.id,
     )?.parentGroupId, "approved-http-group");
 
@@ -606,6 +610,84 @@ test("workspace Proposal HTTP updates by revision and structure-only approval ap
       (await secondApproval.json() as { code: string }).code,
       "workspace_proposal_state_conflict",
     );
+  });
+});
+
+test("workspace Proposal approval HTTP returns authoritative layout for layout-only and no-op drafts", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const layoutProject = store.createProject({ name: "Proposal layout-only HTTP", mode: "standard" });
+    const layoutReady = await readyWorkspace(base, layoutProject.id);
+    const layoutCreate = await fetch(`${base}/api/projects/${layoutProject.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(layoutReady, "layout-only-result", {
+        operations: [],
+        layoutOperations: [
+          {
+            type: "add-group",
+            groupId: "layout-only-http-group",
+            label: "Layout only HTTP",
+            bounds: { x: 12, y: 24, width: 360, height: 240 },
+          },
+          { type: "set-viewport", viewport: { x: -40, y: 80, zoom: 0.75 } },
+        ],
+      })),
+    });
+    assert.equal(layoutCreate.status, 201);
+    const layoutProposal = await layoutCreate.json() as { id: string };
+    const layoutApprovalResponse = await fetch(
+      `${base}/api/projects/${layoutProject.id}/workspace/proposals/${layoutProposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "structure-only" }),
+      },
+    );
+    assert.equal(layoutApprovalResponse.status, 200);
+    const layoutApproval = await layoutApprovalResponse.json() as {
+      graph: ReadyWorkspaceResponse["graph"];
+      snapshot: ReadyWorkspaceResponse["activeSnapshot"];
+      layout: ReadyWorkspaceResponse["layout"];
+      plan: null;
+    };
+    assert.deepEqual(Object.keys(layoutApproval).sort(), ["graph", "layout", "plan", "snapshot"]);
+    assert.deepEqual(layoutApproval.layout, store.workspace.getLayout(layoutProject.id));
+    assert.notEqual(layoutApproval.layout.checksum, layoutReady.layout.checksum);
+    assert.equal(layoutApproval.layout.objects.find(({ id }) => id === "layout-only-http-group")?.kind, "group");
+    assert.deepEqual(layoutApproval.layout.viewport, { x: -40, y: 80, zoom: 0.75 });
+
+    const noOpProject = store.createProject({ name: "Proposal no-op HTTP", mode: "standard" });
+    const noOpReady = await readyWorkspace(base, noOpProject.id);
+    const guardedLayout = store.workspace.getLayout(noOpProject.id);
+    const noOpCreate = await fetch(`${base}/api/projects/${noOpProject.id}/workspace/proposals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(proposalCreateBody(noOpReady, "no-op-result", {
+        operations: [],
+        layoutOperations: [],
+      })),
+    });
+    assert.equal(noOpCreate.status, 201);
+    const noOpProposal = await noOpCreate.json() as { id: string };
+    const noOpApprovalResponse = await fetch(
+      `${base}/api/projects/${noOpProject.id}/workspace/proposals/${noOpProposal.id}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: "structure-only" }),
+      },
+    );
+    assert.equal(noOpApprovalResponse.status, 200);
+    const noOpApproval = await noOpApprovalResponse.json() as {
+      graph: ReadyWorkspaceResponse["graph"];
+      snapshot: ReadyWorkspaceResponse["activeSnapshot"];
+      layout: ReadyWorkspaceResponse["layout"];
+      plan: null;
+    };
+    assert.deepEqual(Object.keys(noOpApproval).sort(), ["graph", "layout", "plan", "snapshot"]);
+    assert.deepEqual(noOpApproval.layout, guardedLayout);
+    assert.equal(noOpApproval.layout.checksum, noOpReady.layout.checksum);
+    assert.deepEqual(noOpApproval.layout.objects, guardedLayout.objects);
   });
 });
 
@@ -631,6 +713,7 @@ test("workspace Proposal HTTP generate approval returns an unqueued shell and re
     const approval = await approvalResponse.json() as {
       graph: { revision: number };
       snapshot: { id: string };
+      layout: ReadyWorkspaceResponse["layout"];
       plan: {
         id: string;
         proposalId: string;
@@ -639,7 +722,8 @@ test("workspace Proposal HTTP generate approval returns an unqueued shell and re
         status: string;
       };
     };
-    assert.deepEqual(Object.keys(approval).sort(), ["graph", "plan", "snapshot"]);
+    assert.deepEqual(Object.keys(approval).sort(), ["graph", "layout", "plan", "snapshot"]);
+    assert.deepEqual(approval.layout, store.workspace.getLayout(project.id));
     assert.equal(approval.plan.proposalId, generated.id);
     assert.equal(approval.plan.proposalRevision, generated.revision);
     assert.equal(approval.plan.baseSnapshotId, approval.snapshot.id);

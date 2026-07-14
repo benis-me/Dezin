@@ -501,12 +501,12 @@ export async function handleApproveProposal(
   if (!ready) return;
   const proposalId = params.proposalId!;
   try {
-    const { graph, snapshot, plan } = deps.store.workspace.approveProposalForProject(
+    const { graph, snapshot, layout, plan } = deps.store.workspace.approveProposalForProject(
       projectId,
       proposalId,
       mode,
     );
-    sendJson(res, 200, { graph, snapshot, plan });
+    sendJson(res, 200, { graph, snapshot, layout, plan });
   } catch (error) {
     if (!sendProposalError(res, error, {
       revalidateDurableState: () => revalidateProposalDurableState(deps, projectId, proposalId),

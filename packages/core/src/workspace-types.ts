@@ -633,5 +633,6 @@ export interface ApprovedProposalResult {
   proposal: WorkspaceProposal;
   graph: WorkspaceGraph;
   snapshot: WorkspaceSnapshot;
+  layout: WorkspaceLayout;
   plan: GenerationPlan | null;
 }
