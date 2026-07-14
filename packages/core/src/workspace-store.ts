@@ -2362,8 +2362,22 @@ export class WorkspaceStore {
     if (proposal.generation.kind !== "workspace-generation") {
       throw new WorkspaceProposalValidationError("component-propagation Proposals are unavailable until Task 13");
     }
+    const plannedComponentArtifactIds = new Set(
+      proposal.generation.artifactPlans
+        .filter((plan) => plan.kind === "component")
+        .map((plan) => plan.artifactId),
+    );
+    const componentDependencyTargets = new Map<string, Set<string>>();
+    const componentDependencyIndegree = new Map<string, number>();
+    for (const [artifactId, node] of artifactNodes) {
+      if (node.kind === "component") {
+        componentDependencyTargets.set(artifactId, new Set());
+        componentDependencyIndegree.set(artifactId, 0);
+      }
+    }
     for (const dependency of proposal.generation.dependencyPlans) {
-      if (!artifactNodes.has(dependency.ownerArtifactId)) {
+      const owner = artifactNodes.get(dependency.ownerArtifactId);
+      if (!owner) {
         throw new WorkspaceProposalValidationError(`missing generation dependency owner ${dependency.ownerArtifactId}`);
       }
       if (dependency.kind === "resource") {
@@ -2379,7 +2393,13 @@ export class WorkspaceStore {
             `missing generation dependency Component ${dependency.componentArtifactId}`,
           );
         }
-        if (dependency.componentRevisionId !== null) {
+        if (dependency.componentRevisionId === null) {
+          if (!plannedComponentArtifactIds.has(dependency.componentArtifactId)) {
+            throw new WorkspaceProposalValidationError(
+              `generation dependency Component ${dependency.componentArtifactId} has no planned Revision result`,
+            );
+          }
+        } else {
           const revision = this.db.prepare(
             `SELECT revision.id
              FROM artifact_revisions revision
@@ -2403,7 +2423,35 @@ export class WorkspaceStore {
             );
           }
         }
+        if (dependency.status === "linked" && owner.kind === "component") {
+          const targets = componentDependencyTargets.get(dependency.ownerArtifactId)!;
+          if (!targets.has(dependency.componentArtifactId)) {
+            targets.add(dependency.componentArtifactId);
+            componentDependencyIndegree.set(
+              dependency.componentArtifactId,
+              componentDependencyIndegree.get(dependency.componentArtifactId)! + 1,
+            );
+          }
+        }
       }
+    }
+    const acyclicComponentIds = [...componentDependencyIndegree]
+      .filter(([, indegree]) => indegree === 0)
+      .map(([artifactId]) => artifactId);
+    let acyclicComponentCount = 0;
+    for (let index = 0; index < acyclicComponentIds.length; index += 1) {
+      const artifactId = acyclicComponentIds[index]!;
+      acyclicComponentCount += 1;
+      for (const targetArtifactId of componentDependencyTargets.get(artifactId)!) {
+        const indegree = componentDependencyIndegree.get(targetArtifactId)! - 1;
+        componentDependencyIndegree.set(targetArtifactId, indegree);
+        if (indegree === 0) {
+          acyclicComponentIds.push(targetArtifactId);
+        }
+      }
+    }
+    if (acyclicComponentCount !== componentDependencyIndegree.size) {
+      throw new WorkspaceProposalValidationError("generation Component dependency plans cannot form a cycle");
     }
   }
 

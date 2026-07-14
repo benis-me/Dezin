@@ -175,3 +175,55 @@ TYPECHECK: PASS
 git diff --check
 exit 0
 ```
+
+### Secondary Generation Plan identity re-audit
+
+The final narrow SQL probe used `PRAGMA recursive_triggers = OFF` and
+`INSERT OR REPLACE` with a fresh Plan ID but an existing
+`(proposal_id, proposal_revision)` tuple. Before the fix, SQLite deleted the
+original Plan through the secondary unique constraint and inserted the replacement:
+
+```text
+replacementRejected: false
+original: undefined
+replacement: fresh row with the original Proposal/revision and Snapshot pins
+count: 1
+```
+
+`generation_plan_insert_immutable` now treats both the primary ID and the exact
+Proposal/revision tuple as immutable insert identities. The schema refreshes this
+trigger definition on Store open so existing databases do not retain the older
+ID-only predicate.
+
+The final dependency re-audit also closed two Plan-shape gaps. A null Component
+Revision pin now requires a matching Component artifact plan in the same Proposal,
+and linked Component-to-Component dependency plans are checked as a deduplicated
+directed graph before approval. Detached dependencies remain outside that graph,
+while a valid Page-to-Component dependency remains accepted.
+
+Before those checks, one composite RED probe observed all three cases being
+approved with Plans:
+
+```text
+missing target Component plan: { rejected: false, plan: true }
+linked Component A -> B -> A cycle: { rejected: false, plan: true }
+valid planned Page -> Component dependency: { rejected: false, plan: true }
+```
+
+```text
+focused secondary-identity and dependency regressions
+tests 2; pass 2; fail 0
+
+pnpm --filter @dezin/core test
+tests 177; pass 177; fail 0; cancelled 0; skipped 0
+
+pnpm --filter @dezin/core test:coverage
+tests 177; pass 177; fail 0
+all files: lines 92.49%; branches 79.57%; functions 91.97%
+
+pnpm typecheck
+TYPECHECK: PASS
+
+git diff --check
+exit 0
+```

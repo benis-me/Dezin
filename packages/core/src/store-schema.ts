@@ -837,9 +837,17 @@ WHEN EXISTS (
   WHERE proposal.id = OLD.proposal_id
 )
 BEGIN SELECT RAISE(ABORT, 'Workspace Proposal audit history is immutable and cannot be deleted'); END;
-CREATE TRIGGER IF NOT EXISTS generation_plan_insert_immutable
+DROP TRIGGER IF EXISTS generation_plan_insert_immutable;
+CREATE TRIGGER generation_plan_insert_immutable
 BEFORE INSERT ON generation_plans
-WHEN EXISTS (SELECT 1 FROM generation_plans existing WHERE existing.id = NEW.id)
+WHEN EXISTS (
+  SELECT 1 FROM generation_plans existing
+  WHERE existing.id = NEW.id
+    OR (
+      existing.proposal_id = NEW.proposal_id
+      AND existing.proposal_revision = NEW.proposal_revision
+    )
+)
 BEGIN SELECT RAISE(ABORT, 'Generation Plan identity is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS generation_plan_identity_update_immutable
 BEFORE UPDATE OF id, workspace_id, proposal_id, proposal_revision, base_snapshot_id, created_at ON generation_plans

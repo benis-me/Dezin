@@ -6875,6 +6875,44 @@ test("Generation Plan shells are unique per exact Proposal audit revision", () =
   store.close();
 });
 
+test("Generation Plan secondary identity rejects INSERT OR REPLACE with recursive triggers disabled", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Plan secondary identity", mode: "standard" });
+  store.workspace.ensureWorkspaceRecord(project.id);
+  const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, []));
+  const plan = store.workspace.approveProposal(proposal.id, "generate").plan!;
+  const original = store.db.prepare("SELECT * FROM generation_plans WHERE id = ?").get(plan.id);
+  store.db.exec("PRAGMA recursive_triggers = OFF");
+  let replacementRejected = false;
+  try {
+    store.db.prepare(
+      `INSERT OR REPLACE INTO generation_plans (
+         id, workspace_id, proposal_id, proposal_revision, base_snapshot_id,
+         status, compile_error_json, created_at, finished_at
+       ) SELECT 'replacement-plan-secondary-id', workspace_id, proposal_id, proposal_revision,
+                base_snapshot_id, status, compile_error_json, created_at + 1, finished_at
+         FROM generation_plans WHERE id = ?`,
+    ).run(plan.id);
+  } catch {
+    replacementRejected = true;
+  }
+
+  assert.deepEqual({
+    replacementRejected,
+    original: store.db.prepare("SELECT * FROM generation_plans WHERE id = ?").get(plan.id),
+    replacement: store.db.prepare(
+      "SELECT * FROM generation_plans WHERE id = 'replacement-plan-secondary-id'",
+    ).get(),
+    count: rowCount(store.db, "generation_plans"),
+  }, {
+    replacementRejected: true,
+    original,
+    replacement: undefined,
+    count: 1,
+  });
+  store.close();
+});
+
 test("layout CAS rejects a stale checksum and Proposal validation rejects unsupported or inconsistent generation intent", () => {
   const store = new Store(":memory:", fakeClock());
   const project = store.createProject({ name: "Proposal validation", mode: "standard" });
@@ -7545,6 +7583,110 @@ test("component-instance dependency revisions are exact sealed pins to the decla
   }));
   assert.ok(store.workspace.approveProposal(valid.id, "generate").plan);
   store.close();
+});
+
+test("null component-instance pins require planned Component results and linked Component plans stay acyclic", () => {
+  const probe = (kind: "missing-target-plan" | "cycle" | "valid") => {
+    const store = new Store(":memory:", fakeClock());
+    const project = store.createProject({ name: "Planned Component dependencies", mode: "standard" });
+    store.workspace.ensureWorkspaceRecord(project.id);
+    const plannedCommand = (
+      suffix: string,
+      artifactKind: "page" | "component",
+    ): WorkspaceGraphCommand => ({
+      id: `add-planned-${suffix}`,
+      type: "add-node",
+      node: {
+        id: `planned-${suffix}-node`,
+        kind: artifactKind,
+        name: `Planned ${suffix}`,
+        artifactId: `planned-${suffix}`,
+        createIdentity: { initialTrackId: `planned-${suffix}-track` },
+      },
+    });
+    const plannedArtifact = (
+      suffix: string,
+      artifactKind: "page" | "component",
+    ) => ({
+      operation: "create" as const,
+      nodeId: `planned-${suffix}-node`,
+      artifactId: `planned-${suffix}`,
+      kind: artifactKind,
+      name: `Planned ${suffix}`,
+      trackId: `planned-${suffix}-track`,
+      baseRevisionId: null,
+      dependsOnArtifactIds: [],
+      capabilityIds: [],
+      responsiveFrameIds: [],
+    });
+    const operations: WorkspaceGraphCommand[] = kind === "cycle"
+      ? [plannedCommand("component-a", "component"), plannedCommand("component-b", "component")]
+      : [plannedCommand("page-owner", "page"), plannedCommand("component-target", "component")];
+    const artifactPlans = kind === "cycle"
+      ? [plannedArtifact("component-a", "component"), plannedArtifact("component-b", "component")]
+      : [
+        plannedArtifact("page-owner", "page"),
+        ...(kind === "missing-target-plan" ? [] : [plannedArtifact("component-target", "component")]),
+      ];
+    const dependencyPlans = kind === "cycle"
+      ? [
+        {
+          kind: "component-instance" as const,
+          ownerArtifactId: "planned-component-a",
+          instanceId: "planned-instance-a-b",
+          componentArtifactId: "planned-component-b",
+          componentRevisionId: null,
+          sourceLocator: { designNodeId: "component-b-root" },
+          overrides: {},
+          status: "linked" as const,
+        },
+        {
+          kind: "component-instance" as const,
+          ownerArtifactId: "planned-component-b",
+          instanceId: "planned-instance-b-a",
+          componentArtifactId: "planned-component-a",
+          componentRevisionId: null,
+          sourceLocator: { designNodeId: "component-a-root" },
+          overrides: {},
+          status: "linked" as const,
+        },
+      ]
+      : [{
+        kind: "component-instance" as const,
+        ownerArtifactId: "planned-page-owner",
+        instanceId: "planned-page-component-instance",
+        componentArtifactId: "planned-component-target",
+        componentRevisionId: null,
+        sourceLocator: { designNodeId: "component-target-root" },
+        overrides: {},
+        status: "linked" as const,
+      }];
+    const proposal = store.workspace.createProposal(workspaceGenerationProposalInput(store, project.id, operations, {
+      generation: {
+        ...emptyWorkspaceGenerationPayload(),
+        artifactPlans,
+        dependencyPlans,
+      },
+    }));
+    try {
+      const result = store.workspace.approveProposal(proposal.id, "generate");
+      return { rejected: false, plan: result.plan !== null };
+    } catch (error) {
+      return { rejected: error instanceof WorkspaceProposalValidationError, plan: false };
+    } finally {
+      store.close();
+    }
+  };
+
+  assert.deepEqual([
+    probe("missing-target-plan"),
+    probe("cycle"),
+    probe("valid"),
+  ], [
+    { rejected: true, plan: false },
+    { rejected: true, plan: false },
+    { rejected: false, plan: true },
+  ]);
 });
 
 test("prototype intents use the exact Page Artifact endpoints of their final graph edge", () => {
