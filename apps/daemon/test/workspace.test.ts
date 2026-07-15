@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,6 +36,20 @@ async function withWorkspaceServer(
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function listFilesRecursively(root: string): string[] {
+  if (!existsSync(root)) return [];
+  const files: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else files.push(path);
+    }
+  };
+  visit(root);
+  return files.sort();
 }
 
 function captureGit(root: string): Record<string, string> {
@@ -159,6 +173,340 @@ test("GET workspace lazily exposes a Standard project with its default layout", 
     assert.equal(body.graph.revision, 1);
     assert.equal(body.layout.layoutId, "default");
     assert.equal(body.layout.workspaceId, body.workspace.id);
+  });
+});
+
+test("Resource HTTP identity lifecycle stays graph-coherent and Project-owned", async () => {
+  await withWorkspaceServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Resource HTTP", mode: "standard" });
+    const foreign = store.createProject({ name: "Foreign Resource HTTP", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    await readyWorkspace(base, foreign.id);
+
+    const createdResponse = await fetch(`${base}/api/projects/${project.id}/resources`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "file",
+        title: "Product brief",
+        defaultPinPolicy: "follow-head",
+        baseGraphRevision: ready.graph.revision,
+        expectedSnapshotId: ready.activeSnapshot.id,
+      }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as {
+      resource: { id: string; title: string; defaultPinPolicy: string; archivedAt: number | null };
+      node: { id: string; kind: string; resourceId: string; name: string };
+      graph: { revision: number; nodes: Array<{ id: string; name: string }> };
+      snapshot: { id: string };
+    };
+    assert.equal(created.resource.title, "Product brief");
+    assert.equal(created.node.kind, "resource");
+    assert.equal(created.node.resourceId, created.resource.id);
+    assert.equal(created.node.name, "Product brief");
+
+    const list = await fetch(`${base}/api/projects/${project.id}/resources`);
+    assert.equal(list.status, 200);
+    assert.deepEqual(
+      (await list.json() as Array<{ id: string }>).map(({ id }) => id),
+      [created.resource.id],
+    );
+    assert.equal(
+      (await fetch(`${base}/api/projects/${foreign.id}/resources/${created.resource.id}`)).status,
+      404,
+    );
+
+    const scopedConversation = await fetch(`${base}/api/projects/${project.id}/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Brief conversation",
+        scope: { type: "resource", id: created.resource.id },
+      }),
+    });
+    assert.equal(scopedConversation.status, 201);
+    assert.deepEqual(
+      (await scopedConversation.json() as { scope: unknown }).scope,
+      { type: "resource", id: created.resource.id },
+    );
+    const scopedList = await fetch(
+      `${base}/api/projects/${project.id}/conversations?scopeType=resource&scopeId=${created.resource.id}`,
+    );
+    assert.equal(scopedList.status, 200);
+    assert.equal((await scopedList.json() as unknown[]).length, 1);
+    const foreignScope = await fetch(`${base}/api/projects/${foreign.id}/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scope: { type: "resource", id: created.resource.id } }),
+    });
+    assert.equal(foreignScope.status, 404);
+
+    const renamedResponse = await fetch(
+      `${base}/api/projects/${project.id}/resources/${created.resource.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "rename",
+          title: "Approved product brief",
+          baseGraphRevision: created.graph.revision,
+          expectedSnapshotId: created.snapshot.id,
+        }),
+      },
+    );
+    assert.equal(renamedResponse.status, 200);
+    const renamed = await renamedResponse.json() as {
+      resource: { title: string };
+      graph: { revision: number; nodes: Array<{ id: string; name: string }> };
+      snapshot: { id: string };
+    };
+    assert.equal(renamed.resource.title, "Approved product brief");
+    assert.equal(renamed.graph.nodes.find(({ id }) => id === created.node.id)?.name, "Approved product brief");
+
+    const pinResponse = await fetch(`${base}/api/projects/${project.id}/resources/${created.resource.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "set-default-pin-policy",
+        expectedDefaultPinPolicy: "follow-head",
+        defaultPinPolicy: "manual",
+      }),
+    });
+    assert.equal(pinResponse.status, 200);
+    assert.equal((await pinResponse.json() as { resource: { defaultPinPolicy: string } }).resource.defaultPinPolicy, "manual");
+
+    const stalePin = await fetch(`${base}/api/projects/${project.id}/resources/${created.resource.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "set-default-pin-policy",
+        expectedDefaultPinPolicy: "follow-head",
+        defaultPinPolicy: "pin-current",
+      }),
+    });
+    assert.equal(stalePin.status, 409);
+    assert.equal((await stalePin.json() as { code: string }).code, "workspace_pointer_conflict");
+
+    const unconfirmedArchive = await fetch(`${base}/api/projects/${project.id}/resources/${created.resource.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "archive",
+        baseGraphRevision: renamed.graph.revision,
+        expectedSnapshotId: renamed.snapshot.id,
+        consumerImpactConfirmed: false,
+      }),
+    });
+    assert.equal(unconfirmedArchive.status, 400);
+
+    const archivedResponse = await fetch(`${base}/api/projects/${project.id}/resources/${created.resource.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "archive",
+        baseGraphRevision: renamed.graph.revision,
+        expectedSnapshotId: renamed.snapshot.id,
+        consumerImpactConfirmed: true,
+      }),
+    });
+    assert.equal(archivedResponse.status, 200);
+    const archived = await archivedResponse.json() as {
+      resource: { archivedAt: number | null };
+      graph: { nodes: Array<{ id: string }> };
+    };
+    assert.ok(archived.resource.archivedAt !== null);
+    assert.ok(!archived.graph.nodes.some(({ id }) => id === created.node.id));
+    assert.deepEqual(await (await fetch(`${base}/api/projects/${project.id}/resources`)).json(), []);
+
+    const prototype = store.createProject({ name: "Prototype Resource", mode: "prototype" });
+    const unsupported = await fetch(`${base}/api/projects/${prototype.id}/resources`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "file",
+        title: "Unsupported",
+        defaultPinPolicy: "manual",
+        baseGraphRevision: 0,
+        expectedSnapshotId: "snapshot-id",
+      }),
+    });
+    assert.equal(unsupported.status, 409);
+    assert.equal(store.workspace.getWorkspace(prototype.id), null);
+  });
+});
+
+test("Resource Revision HTTP freezes only daemon-owned source bytes before Head and Snapshot publication", async () => {
+  await withWorkspaceServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Resource Revision HTTP", mode: "standard" });
+    const foreign = store.createProject({ name: "Foreign Revision HTTP", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    await readyWorkspace(base, foreign.id);
+    const createdResponse = await fetch(`${base}/api/projects/${project.id}/resources`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "file",
+        title: "Owned brief",
+        defaultPinPolicy: "pin-current",
+        baseGraphRevision: ready.graph.revision,
+        expectedSnapshotId: ready.activeSnapshot.id,
+      }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as {
+      resource: { id: string; headRevisionId: string | null };
+      snapshot: { id: string };
+    };
+    const refsDir = join(dataDir, "projects", project.id, ".refs");
+    mkdirSync(refsDir, { recursive: true });
+    const sourcePath = join(refsDir, "brief.txt");
+    writeFileSync(sourcePath, "immutable brief v1", "utf8");
+
+    const spoofed = await fetch(
+      `${base}/api/projects/${project.id}/resources/${created.resource.id}/revisions`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedHeadRevisionId: null,
+          source: { type: "uploaded-file", uploadedFileId: ".refs/brief.txt" },
+          manifestPath: "/tmp/client-manifest.json",
+          checksum: "f".repeat(64),
+          provenance: { trusted: true },
+        }),
+      },
+    );
+    assert.equal(spoofed.status, 400);
+    assert.equal(store.workspace.listResourceRevisions(project.id, created.resource.id).length, 0);
+
+    const traversal = await fetch(
+      `${base}/api/projects/${project.id}/resources/${created.resource.id}/revisions`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedHeadRevisionId: null,
+          source: { type: "uploaded-file", uploadedFileId: "../../outside.txt" },
+        }),
+      },
+    );
+    assert.equal(traversal.status, 400);
+    assert.equal(store.workspace.listResourceRevisions(project.id, created.resource.id).length, 0);
+
+    const candidateResponse = await fetch(
+      `${base}/api/projects/${project.id}/resources/${created.resource.id}/revisions`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedHeadRevisionId: null,
+          source: { type: "uploaded-file", uploadedFileId: ".refs/brief.txt" },
+        }),
+      },
+    );
+    assert.equal(candidateResponse.status, 201);
+    const candidate = await candidateResponse.json() as {
+      id: string;
+      parentRevisionId: string | null;
+      manifestPath: string;
+      checksum: string;
+      metadata: { payloadChecksum?: string; byteSize?: number; mimeType?: string };
+      provenance: { sourceType?: string; sourceId?: string };
+    };
+    assert.equal(candidate.parentRevisionId, null);
+    assert.match(candidate.manifestPath, /^resource-revisions\/[a-f0-9]{64}\/[a-f0-9]{64}\/manifest\.json$/);
+    assert.match(candidate.checksum, /^[a-f0-9]{64}$/);
+    assert.equal(candidate.metadata.mimeType, "text/plain");
+    assert.equal(candidate.provenance.sourceType, "uploaded-file");
+
+    writeFileSync(sourcePath, "mutable source v2", "utf8");
+    const manifest = JSON.parse(readFileSync(join(dataDir, candidate.manifestPath), "utf8")) as {
+      payload: { file: string };
+    };
+    const payloadPath = join(dataDir, candidate.manifestPath, "..", manifest.payload.file);
+    assert.equal(readFileSync(payloadPath, "utf8"), "immutable brief v1");
+
+    const foreignCandidate = await fetch(
+      `${base}/api/projects/${foreign.id}/resources/${created.resource.id}/revisions`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedHeadRevisionId: null,
+          source: { type: "uploaded-file", uploadedFileId: ".refs/brief.txt" },
+        }),
+      },
+    );
+    assert.equal(foreignCandidate.status, 404);
+
+    const publishedResponse = await fetch(
+      `${base}/api/projects/${project.id}/resources/${created.resource.id}/revisions/${candidate.id}/publish`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedHeadRevisionId: null,
+          expectedSnapshotId: created.snapshot.id,
+          reason: "Publish frozen brief",
+        }),
+      },
+    );
+    assert.equal(publishedResponse.status, 200);
+    const published = await publishedResponse.json() as {
+      id: string;
+      resourceRevisions: Record<string, string>;
+    };
+    assert.equal(published.resourceRevisions[created.resource.id], candidate.id);
+    assert.equal(
+      store.workspace.getResourceForProject(project.id, created.resource.id)?.headRevisionId,
+      candidate.id,
+    );
+  });
+});
+
+test("Resource Revision HTTP removes newly frozen payloads when candidate persistence fails", async () => {
+  await withWorkspaceServer(async ({ base, dataDir, store }) => {
+    const project = store.createProject({ name: "Resource rollback HTTP", mode: "standard" });
+    const ready = await readyWorkspace(base, project.id);
+    const createdResponse = await fetch(`${base}/api/projects/${project.id}/resources`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "file",
+        title: "Rollback brief",
+        defaultPinPolicy: "manual",
+        baseGraphRevision: ready.graph.revision,
+        expectedSnapshotId: ready.activeSnapshot.id,
+      }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as { resource: { id: string } };
+    const refsDir = join(dataDir, "projects", project.id, ".refs");
+    mkdirSync(refsDir, { recursive: true });
+    writeFileSync(join(refsDir, "rollback.txt"), "rollback exact bytes", "utf8");
+
+    const originalCreateCandidate = store.workspace.createResourceRevisionCandidateForProject;
+    store.workspace.createResourceRevisionCandidateForProject = (() => {
+      throw new Error("injected candidate persistence failure");
+    }) as typeof originalCreateCandidate;
+    let response: Response;
+    try {
+      response = await fetch(`${base}/api/projects/${project.id}/resources/${created.resource.id}/revisions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedHeadRevisionId: null,
+          source: { type: "uploaded-file", uploadedFileId: ".refs/rollback.txt" },
+        }),
+      });
+    } finally {
+      store.workspace.createResourceRevisionCandidateForProject = originalCreateCandidate;
+    }
+
+    assert.equal(response.status, 500);
+    assert.deepEqual(store.workspace.listResourceRevisions(project.id, created.resource.id), []);
+    assert.deepEqual(listFilesRecursively(join(dataDir, "resource-revisions")), []);
   });
 });
 

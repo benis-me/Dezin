@@ -2187,6 +2187,37 @@ test("POST /api/runs validation", async () => {
   });
 });
 
+test("POST /api/runs fails closed instead of silently dropping structured Context", async () => {
+  const runner = new FakeRunner({ artifacts: [CLEAN] });
+  await withRunServer(runner, async ({ base, store }) => {
+    const project = store.createProject({ name: "Structured Context", mode: "standard" });
+    const malformed = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "Use context", contextRefs: {} }),
+    });
+    assert.equal(malformed.status, 400);
+
+    const response = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        brief: "Use context",
+        contextRefs: [{ kind: "inline", id: "brief-1", content: "reference" }],
+        selection: [],
+      }),
+    });
+    assert.equal(response.status, 422);
+    assert.deepEqual(await response.json(), {
+      error: "Structured Context requires an immutable Context Pack before this Run can start",
+      code: "context_pack_required",
+    });
+    assert.equal(runner.calls.length, 0);
+    assert.deepEqual(store.listRuns(project.id), []);
+  });
+});
+
 test("POST /api/runs rejects a conversation from another project", async () => {
   await withRunServer(new FakeRunner({ artifacts: [CLEAN] }), async ({ base, store }) => {
     const project = store.createProject({ name: "A" });

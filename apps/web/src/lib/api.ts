@@ -388,6 +388,92 @@ export type WorkspaceResourceKind =
   | "asset"
   | "effect"
   | "external-reference";
+export type ResourcePinPolicy = "follow-head" | "pin-current" | "manual";
+
+export interface Resource {
+  id: string;
+  workspaceId: string;
+  kind: WorkspaceResourceKind;
+  title: string;
+  headRevisionId: string | null;
+  defaultPinPolicy: ResourcePinPolicy;
+  archivedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ResourceRevision {
+  id: string;
+  workspaceId: string;
+  resourceId: string;
+  sequence: number;
+  parentRevisionId: string | null;
+  manifestPath: string;
+  summary: string;
+  metadata: Record<string, unknown>;
+  checksum: string;
+  provenance: Record<string, unknown>;
+  createdByRunId: string | null;
+  createdAt: number;
+}
+
+export interface CreateResourceInput {
+  kind: WorkspaceResourceKind;
+  title: string;
+  defaultPinPolicy: ResourcePinPolicy;
+  baseGraphRevision: number;
+  expectedSnapshotId: string;
+}
+
+export type UpdateResourceInput =
+  | { action: "rename"; title: string; baseGraphRevision: number; expectedSnapshotId: string }
+  | {
+      action: "set-default-pin-policy";
+      expectedDefaultPinPolicy: ResourcePinPolicy;
+      defaultPinPolicy: ResourcePinPolicy;
+    }
+  | {
+      action: "archive";
+      baseGraphRevision: number;
+      expectedSnapshotId: string;
+      consumerImpactConfirmed: true;
+    };
+
+/** Client-safe source identities. The daemon derives bytes, metadata, provenance, and checksums. */
+export type ResourceRevisionOwnedSource =
+  | { type: "moodboard"; moodboardId: string }
+  | { type: "effect"; effectId: string }
+  | { type: "uploaded-file"; uploadedFileId: string }
+  | { type: "asset"; assetId: string }
+  | { type: "external-reference"; url: string };
+
+export interface CreateResourceRevisionInput {
+  expectedHeadRevisionId: string | null;
+  source: ResourceRevisionOwnedSource;
+}
+
+export interface PublishResourceRevisionInput {
+  expectedHeadRevisionId: string | null;
+  expectedSnapshotId: string;
+  reason: string;
+  runId?: string;
+  planId?: string;
+  taskId?: string;
+}
+
+export interface CreateResourceResult {
+  resource: Resource;
+  node: WorkspaceResourceNode;
+  graph: WorkspaceGraph;
+  snapshot: WorkspaceSnapshot;
+}
+export type CreateResourceForProjectResult = CreateResourceResult;
+
+export type UpdateResourceResult =
+  | { action: "rename" | "archive"; resource: Resource; graph: WorkspaceGraph; snapshot: WorkspaceSnapshot }
+  | { action: "set-default-pin-policy"; resource: Resource };
+export type UpdateResourceForProjectResult = UpdateResourceResult;
+
 export type WorkspaceResourceRevisionPolicy =
   | { kind: "exact"; resourceRevisionId: string }
   | { kind: "base-snapshot" }
@@ -677,6 +763,7 @@ export interface Conversation {
   id: string;
   projectId: string;
   title: string;
+  scope: ConversationScope;
   createdAt: number;
   turns?: number;
 }
@@ -871,6 +958,10 @@ export interface RunInput {
   maxRounds?: number;
   moodboardRefs?: Array<{ id: string; name?: string }>;
   effectRefs?: Array<{ id: string; name?: string }>;
+  /** Standard-mode explicit context. The daemon resolves these immutable identities into a Context Pack. */
+  contextRefs?: RunContextRef[];
+  /** Standard-mode target selection. Selection is never serialized into the visible message. */
+  selection?: RunSelectionRef[];
   /** Per-run overrides (fall back to Settings). */
   agentCommand?: string;
   model?: string;
@@ -879,6 +970,111 @@ export interface RunInput {
   /** Explicit Research opt-out: `false` skips the Research phase even when it's enabled in Settings (repair runs use this). */
   research?: boolean;
 }
+
+export type WorkspaceContextResourceKind = WorkspaceResourceKind;
+
+/** Browser-local mirror of the Core Context Pack identity contract. */
+export type ContextItemRefKind = "artifact" | "resource" | "kernel" | "inline";
+
+export type ContextItemRef =
+  | { kind: "resource"; id: string; resourceKind: WorkspaceContextResourceKind; revisionId?: string }
+  | { kind: "artifact"; id: string; revisionId?: string }
+  | { kind: "kernel"; id: string; revisionId?: string }
+  | { kind: "inline"; id: string };
+
+/**
+ * Pre-canonical run context accepted at the web boundary. The daemon snapshots owned sources or
+ * persists bounded inline content before translating these to canonical ContextItemRef identities.
+ */
+export type RunContextRef =
+  | ContextItemRef
+  | {
+      kind: "owned-source";
+      id: string;
+      title: string;
+      resourceKind: Exclude<WorkspaceContextResourceKind, "research" | "sharingan-capture">;
+      source: ResourceRevisionOwnedSource;
+    }
+  | {
+      kind: "inline";
+      id: string;
+      title: string;
+      content: string;
+      trustLevel: "untrusted";
+    };
+
+export type SelectionRef = {
+  kind: "node" | "artifact" | "resource" | "element";
+  id: string;
+  revisionId?: string;
+};
+
+export type RunSelectionRef = SelectionRef & { locator?: Record<string, unknown> };
+
+export type ConversationScope =
+  | { type: "workspace"; id: string }
+  | { type: "artifact"; id: string }
+  | { type: "resource"; id: string };
+
+export type AgentScope = ConversationScope;
+
+export type AgentIntent = "plan" | "generate" | "edit" | "repair" | "analyze-impact";
+
+export interface AgentTurnRequest {
+  scope: AgentScope;
+  intent: AgentIntent;
+  message: string;
+  explicitContext: ContextItemRef[];
+  graphRevision: number;
+  baseRevisionId?: string;
+  selection?: SelectionRef[];
+}
+
+export type ResolvedContextKind = "artifact-revision" | "resource-revision" | "kernel-revision" | "inline";
+export type ContextTrustLevel = "system" | "trusted" | "untrusted";
+
+export interface ResolvedContextItem {
+  ordinal: number;
+  ref: ContextItemRef;
+  resolvedKind: ResolvedContextKind;
+  artifactRevisionId: string | null;
+  resourceRevisionId: string | null;
+  kernelRevisionId: string | null;
+  checksum: string;
+  reason: string;
+  trustLevel: ContextTrustLevel;
+  boundary: Record<string, unknown>;
+  tokenEstimate: number;
+  provenance: Record<string, unknown>;
+  provided: boolean;
+}
+
+export interface ContextOmission {
+  ref: ContextItemRef;
+  reason: string;
+  tokenEstimate: number;
+}
+
+/** Immutable daemon-owned result; it is carried by run orchestration, not a public Task 11 route. */
+export interface ContextPack {
+  id: string;
+  workspaceId: string;
+  graphRevision: number;
+  target: AgentScope;
+  intent: AgentIntent;
+  messageChecksum: string;
+  items: ResolvedContextItem[];
+  omissions: ContextOmission[];
+  tokenEstimate: number;
+  manifestPath: string;
+  hash: string;
+  createdAt: number;
+}
+
+export const RUN_CONTEXT_MAX_ITEMS = 32;
+export const RUN_CONTEXT_MAX_TITLE_CHARS = 256;
+export const RUN_CONTEXT_MAX_INLINE_CHARS = 20_000;
+export const RUN_CONTEXT_MAX_TOTAL_INLINE_CHARS = 64_000;
 
 export interface PromptOptimizeInput {
   prompt: string;
@@ -1122,6 +1318,359 @@ function jsonInit(method: string, body?: unknown): RequestInit {
   };
 }
 
+function codecRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+function codecString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new TypeError(`${label} must be a non-empty string`);
+  return value;
+}
+
+function codecNullableString(value: unknown, label: string): string | null {
+  return value === null ? null : codecString(value, label);
+}
+
+function codecTimestamp(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new TypeError(`${label} must be a finite non-negative number`);
+  return value;
+}
+
+function codecInteger(value: unknown, label: string, minimum = 0): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) {
+    throw new TypeError(`${label} must be a safe integer >= ${minimum}`);
+  }
+  return value;
+}
+
+function codecEnum<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new TypeError(`${label} must be one of ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
+function codecExactRecord(value: unknown, allowedKeys: readonly string[], label: string): Record<string, unknown> {
+  const record = codecRecord(value, label);
+  const allowed = new Set(allowedKeys);
+  const unsupported = Object.keys(record).find((key) => !allowed.has(key));
+  if (unsupported) throw new TypeError(`${label} contains unsupported field ${unsupported}`);
+  return record;
+}
+
+const RESOURCE_KINDS = [
+  "research",
+  "moodboard",
+  "sharingan-capture",
+  "file",
+  "asset",
+  "effect",
+  "external-reference",
+] as const satisfies readonly WorkspaceResourceKind[];
+const RESOURCE_PIN_POLICIES = ["follow-head", "pin-current", "manual"] as const satisfies readonly ResourcePinPolicy[];
+
+export function decodeResource(value: unknown): Resource {
+  const input = codecRecord(value, "Resource");
+  return {
+    id: codecString(input.id, "Resource id"),
+    workspaceId: codecString(input.workspaceId, "Resource workspaceId"),
+    kind: codecEnum(input.kind, RESOURCE_KINDS, "Resource kind"),
+    title: codecString(input.title, "Resource title"),
+    headRevisionId: codecNullableString(input.headRevisionId, "Resource headRevisionId"),
+    defaultPinPolicy: codecEnum(input.defaultPinPolicy, RESOURCE_PIN_POLICIES, "Resource pin policy"),
+    archivedAt: input.archivedAt === null ? null : codecTimestamp(input.archivedAt, "Resource archivedAt"),
+    createdAt: codecTimestamp(input.createdAt, "Resource createdAt"),
+    updatedAt: codecTimestamp(input.updatedAt, "Resource updatedAt"),
+  };
+}
+
+export function decodeResourceRevision(value: unknown): ResourceRevision {
+  const input = codecRecord(value, "Resource Revision");
+  return {
+    id: codecString(input.id, "Resource Revision id"),
+    workspaceId: codecString(input.workspaceId, "Resource Revision workspaceId"),
+    resourceId: codecString(input.resourceId, "Resource Revision resourceId"),
+    sequence: codecInteger(input.sequence, "Resource Revision sequence", 1),
+    parentRevisionId: codecNullableString(input.parentRevisionId, "Resource Revision parentRevisionId"),
+    manifestPath: codecString(input.manifestPath, "Resource Revision manifestPath"),
+    summary: codecString(input.summary, "Resource Revision summary"),
+    metadata: codecRecord(input.metadata, "Resource Revision metadata"),
+    checksum: codecString(input.checksum, "Resource Revision checksum"),
+    provenance: codecRecord(input.provenance, "Resource Revision provenance"),
+    createdByRunId: codecNullableString(input.createdByRunId, "Resource Revision createdByRunId"),
+    createdAt: codecTimestamp(input.createdAt, "Resource Revision createdAt"),
+  };
+}
+
+export function decodeConversationScope(value: unknown): ConversationScope {
+  const input = codecExactRecord(value, ["type", "id"], "Conversation scope");
+  return {
+    type: codecEnum(input.type, ["workspace", "artifact", "resource"] as const, "Conversation scope type"),
+    id: codecString(input.id, "Conversation scope id"),
+  };
+}
+
+export function decodeConversation(value: unknown): Conversation {
+  const input = codecRecord(value, "Conversation");
+  return {
+    id: codecString(input.id, "Conversation id"),
+    projectId: codecString(input.projectId, "Conversation projectId"),
+    title: codecString(input.title, "Conversation title"),
+    scope: decodeConversationScope(input.scope),
+    createdAt: codecTimestamp(input.createdAt, "Conversation createdAt"),
+    ...(input.turns === undefined ? {} : { turns: codecInteger(input.turns, "Conversation turns") }),
+  };
+}
+
+export function decodeContextItemRef(value: unknown): ContextItemRef {
+  const base = codecRecord(value, "Context reference");
+  const kind = codecEnum(base.kind, ["artifact", "resource", "kernel", "inline"] as const, "Context reference kind");
+  if (kind === "resource") {
+    const input = codecExactRecord(base, ["kind", "id", "resourceKind", "revisionId"], "Resource Context reference");
+    return {
+      kind,
+      id: codecString(input.id, "Context reference id"),
+      resourceKind: codecEnum(input.resourceKind, RESOURCE_KINDS, "Context reference resourceKind"),
+      ...(input.revisionId === undefined ? {} : { revisionId: codecString(input.revisionId, "Context reference revisionId") }),
+    };
+  }
+  const input = codecExactRecord(
+    base,
+    kind === "inline" ? ["kind", "id"] : ["kind", "id", "revisionId"],
+    "Context reference",
+  );
+  return kind === "inline"
+    ? { kind, id: codecString(input.id, "Context reference id") }
+    : {
+        kind,
+        id: codecString(input.id, "Context reference id"),
+        ...(input.revisionId === undefined ? {} : { revisionId: codecString(input.revisionId, "Context reference revisionId") }),
+      };
+}
+
+export function decodeSelectionRef(value: unknown): SelectionRef {
+  const input = codecRecord(value, "Selection reference");
+  return {
+    kind: codecEnum(input.kind, ["node", "artifact", "resource", "element"] as const, "Selection reference kind"),
+    id: codecString(input.id, "Selection reference id"),
+    ...(input.revisionId === undefined ? {} : { revisionId: codecString(input.revisionId, "Selection reference revisionId") }),
+  };
+}
+
+function codecBoundedString(value: unknown, label: string, maximum: number): string {
+  const result = codecString(value, label);
+  if (result.length > maximum) throw new TypeError(`${label} exceeds ${maximum} characters`);
+  return result;
+}
+
+export function decodeRunContextRef(value: unknown): RunContextRef {
+  const input = codecRecord(value, "Run context reference");
+  if (input.kind === "owned-source") {
+    const id = codecString(input.id, "Owned-source context id");
+    const title = codecBoundedString(input.title, "Owned-source context title", RUN_CONTEXT_MAX_TITLE_CHARS);
+    const source = encodeOwnedResourceSource(input.source as ResourceRevisionOwnedSource);
+    const resourceKind = codecEnum(
+      input.resourceKind,
+      ["moodboard", "file", "asset", "effect", "external-reference"] as const,
+      "Owned-source context resourceKind",
+    );
+    const expectedKind: typeof resourceKind = source.type === "moodboard"
+      ? "moodboard"
+      : source.type === "effect"
+        ? "effect"
+        : source.type === "asset"
+          ? "asset"
+          : source.type === "external-reference"
+            ? "external-reference"
+            : "file";
+    if (resourceKind !== expectedKind) throw new TypeError("Owned-source context resourceKind does not match its source type");
+    return { kind: "owned-source", id, title, resourceKind, source };
+  }
+  if (input.kind === "inline" && (input.content !== undefined || input.title !== undefined)) {
+    if (input.trustLevel !== "untrusted") throw new TypeError("Inline run context trustLevel must be untrusted");
+    return {
+      kind: "inline",
+      id: codecString(input.id, "Inline run context id"),
+      title: codecBoundedString(input.title, "Inline run context title", RUN_CONTEXT_MAX_TITLE_CHARS),
+      content: codecBoundedString(input.content, "Inline run context content", RUN_CONTEXT_MAX_INLINE_CHARS),
+      trustLevel: "untrusted",
+    };
+  }
+  return decodeContextItemRef(input);
+}
+
+export function decodeRunSelectionRef(value: unknown): RunSelectionRef {
+  const input = codecRecord(value, "Run selection reference");
+  return {
+    ...decodeSelectionRef(input),
+    ...(input.locator === undefined ? {} : { locator: codecRecord(input.locator, "Run selection locator") }),
+  };
+}
+
+export function decodeRunContextRefs(value: unknown): RunContextRef[] {
+  const refs = decodeArray(value, decodeRunContextRef, "Run context references");
+  if (refs.length > RUN_CONTEXT_MAX_ITEMS) throw new TypeError(`Run context references exceed ${RUN_CONTEXT_MAX_ITEMS} items`);
+  const inlineCharacters = refs.reduce(
+    (total, ref) => total + (ref.kind === "inline" && "content" in ref ? ref.content.length : 0),
+    0,
+  );
+  if (inlineCharacters > RUN_CONTEXT_MAX_TOTAL_INLINE_CHARS) {
+    throw new TypeError(`Run inline context exceeds ${RUN_CONTEXT_MAX_TOTAL_INLINE_CHARS} total characters`);
+  }
+  return refs;
+}
+
+export function decodeRunSelectionRefs(value: unknown): RunSelectionRef[] {
+  const refs = decodeArray(value, decodeRunSelectionRef, "Run selection references");
+  if (refs.length > RUN_CONTEXT_MAX_ITEMS) throw new TypeError(`Run selection references exceed ${RUN_CONTEXT_MAX_ITEMS} items`);
+  return refs;
+}
+
+function decodeArray<T>(value: unknown, decode: (item: unknown) => T, label: string): T[] {
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
+  return value.map(decode);
+}
+
+function encodeCreateResourceInput(value: CreateResourceInput): CreateResourceInput {
+  const input = codecExactRecord(value, ["kind", "title", "defaultPinPolicy", "baseGraphRevision", "expectedSnapshotId"], "Create Resource request");
+  return {
+    kind: codecEnum(input.kind, RESOURCE_KINDS, "Create Resource kind"),
+    title: codecString(input.title, "Create Resource title"),
+    defaultPinPolicy: codecEnum(input.defaultPinPolicy, RESOURCE_PIN_POLICIES, "Create Resource pin policy"),
+    baseGraphRevision: codecInteger(input.baseGraphRevision, "Create Resource baseGraphRevision"),
+    expectedSnapshotId: codecString(input.expectedSnapshotId, "Create Resource expectedSnapshotId"),
+  };
+}
+
+function encodeUpdateResourceInput(value: UpdateResourceInput): UpdateResourceInput {
+  const base = codecRecord(value, "Update Resource request");
+  const action = codecEnum(base.action, ["rename", "set-default-pin-policy", "archive"] as const, "Update Resource action");
+  if (action === "rename") {
+    const input = codecExactRecord(base, ["action", "title", "baseGraphRevision", "expectedSnapshotId"], "Rename Resource request");
+    return {
+      action,
+      title: codecString(input.title, "Rename Resource title"),
+      baseGraphRevision: codecInteger(input.baseGraphRevision, "Rename Resource baseGraphRevision"),
+      expectedSnapshotId: codecString(input.expectedSnapshotId, "Rename Resource expectedSnapshotId"),
+    };
+  }
+  if (action === "set-default-pin-policy") {
+    const input = codecExactRecord(base, ["action", "expectedDefaultPinPolicy", "defaultPinPolicy"], "Set Resource pin policy request");
+    return {
+      action,
+      expectedDefaultPinPolicy: codecEnum(input.expectedDefaultPinPolicy, RESOURCE_PIN_POLICIES, "Expected Resource pin policy"),
+      defaultPinPolicy: codecEnum(input.defaultPinPolicy, RESOURCE_PIN_POLICIES, "Resource pin policy"),
+    };
+  }
+  const input = codecExactRecord(base, ["action", "baseGraphRevision", "expectedSnapshotId", "consumerImpactConfirmed"], "Archive Resource request");
+  if (input.consumerImpactConfirmed !== true) throw new TypeError("Archive Resource consumerImpactConfirmed must be true");
+  return {
+    action,
+    baseGraphRevision: codecInteger(input.baseGraphRevision, "Archive Resource baseGraphRevision"),
+    expectedSnapshotId: codecString(input.expectedSnapshotId, "Archive Resource expectedSnapshotId"),
+    consumerImpactConfirmed: true,
+  };
+}
+
+function encodeOwnedResourceSource(value: ResourceRevisionOwnedSource): ResourceRevisionOwnedSource {
+  const base = codecRecord(value, "Resource Revision source");
+  const type = codecEnum(base.type, ["moodboard", "effect", "uploaded-file", "asset", "external-reference"] as const, "Resource Revision source type");
+  switch (type) {
+    case "moodboard": {
+      const input = codecExactRecord(base, ["type", "moodboardId"], "Moodboard Resource source");
+      return { type, moodboardId: codecString(input.moodboardId, "Moodboard Resource source id") };
+    }
+    case "effect": {
+      const input = codecExactRecord(base, ["type", "effectId"], "Effect Resource source");
+      return { type, effectId: codecString(input.effectId, "Effect Resource source id") };
+    }
+    case "uploaded-file": {
+      const input = codecExactRecord(base, ["type", "uploadedFileId"], "Uploaded file Resource source");
+      return { type, uploadedFileId: codecString(input.uploadedFileId, "Uploaded file Resource source id") };
+    }
+    case "asset": {
+      const input = codecExactRecord(base, ["type", "assetId"], "Asset Resource source");
+      return { type, assetId: codecString(input.assetId, "Asset Resource source id") };
+    }
+    case "external-reference": {
+      const input = codecExactRecord(base, ["type", "url"], "External reference Resource source");
+      const url = codecString(input.url, "External reference Resource source URL");
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new TypeError("External reference Resource source URL must be absolute");
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new TypeError("External reference Resource source URL must use http or https");
+      }
+      return { type, url };
+    }
+  }
+}
+
+function encodeCreateResourceRevisionInput(value: CreateResourceRevisionInput): CreateResourceRevisionInput {
+  const input = codecExactRecord(value, ["expectedHeadRevisionId", "source"], "Create Resource Revision request");
+  return {
+    expectedHeadRevisionId: codecNullableString(input.expectedHeadRevisionId, "Create Resource Revision expectedHeadRevisionId"),
+    source: encodeOwnedResourceSource(input.source as ResourceRevisionOwnedSource),
+  };
+}
+
+function encodePublishResourceRevisionInput(value: PublishResourceRevisionInput): PublishResourceRevisionInput {
+  const input = codecExactRecord(
+    value,
+    ["expectedHeadRevisionId", "expectedSnapshotId", "reason", "runId", "planId", "taskId"],
+    "Publish Resource Revision request",
+  );
+  return {
+    expectedHeadRevisionId: codecNullableString(input.expectedHeadRevisionId, "Publish Resource Revision expectedHeadRevisionId"),
+    expectedSnapshotId: codecString(input.expectedSnapshotId, "Publish Resource Revision expectedSnapshotId"),
+    reason: codecString(input.reason, "Publish Resource Revision reason"),
+    ...(input.runId === undefined ? {} : { runId: codecString(input.runId, "Publish Resource Revision runId") }),
+    ...(input.planId === undefined ? {} : { planId: codecString(input.planId, "Publish Resource Revision planId") }),
+    ...(input.taskId === undefined ? {} : { taskId: codecString(input.taskId, "Publish Resource Revision taskId") }),
+  };
+}
+
+function decodeCreateResourceResult(value: unknown): CreateResourceResult {
+  const input = codecRecord(value, "Create Resource response");
+  const node = codecRecord(input.node, "Create Resource node");
+  if (node.kind !== "resource") throw new TypeError("Create Resource node kind must be resource");
+  codecString(node.id, "Create Resource node id");
+  codecString(node.workspaceId, "Create Resource node workspaceId");
+  codecString(node.name, "Create Resource node name");
+  codecString(node.resourceId, "Create Resource node resourceId");
+  return {
+    resource: decodeResource(input.resource),
+    node: node as unknown as WorkspaceResourceNode,
+    graph: codecRecord(input.graph, "Create Resource graph") as unknown as WorkspaceGraph,
+    snapshot: codecRecord(input.snapshot, "Create Resource snapshot") as unknown as WorkspaceSnapshot,
+  };
+}
+
+function decodeUpdateResourceResult(value: unknown): UpdateResourceResult {
+  const input = codecRecord(value, "Update Resource response");
+  const action = codecEnum(input.action, ["rename", "set-default-pin-policy", "archive"] as const, "Update Resource response action");
+  const resource = decodeResource(input.resource);
+  if (action === "set-default-pin-policy") return { action, resource };
+  return {
+    action,
+    resource,
+    graph: codecRecord(input.graph, "Update Resource graph") as unknown as WorkspaceGraph,
+    snapshot: codecRecord(input.snapshot, "Update Resource snapshot") as unknown as WorkspaceSnapshot,
+  };
+}
+
+function encodeRunInput(input: RunInput): RunInput {
+  return {
+    ...input,
+    ...(input.contextRefs === undefined ? {} : { contextRefs: decodeRunContextRefs(input.contextRefs) }),
+    ...(input.selection === undefined ? {} : { selection: decodeRunSelectionRefs(input.selection) }),
+  };
+}
+
 /** Parse one SSE block ("data: {...}" possibly multi-line) into a RunEvent. */
 export function parseSseBlock(block: string): RunEvent | null {
   const dataLines = block
@@ -1290,6 +1839,18 @@ export interface ApiClient {
   rejectWorkspaceProposal(projectId: string, proposalId: string): Promise<WorkspaceProposal>;
   applyWorkspaceGraphCommands(projectId: string, input: GraphCommandRequest): Promise<WorkspaceGraphMutationResult>;
   saveWorkspaceLayout(projectId: string, input: WorkspaceLayoutPatch): Promise<WorkspaceLayout>;
+  listResources(projectId: string): Promise<Resource[]>;
+  createResource(projectId: string, input: CreateResourceInput): Promise<CreateResourceResult>;
+  getResource(projectId: string, resourceId: string): Promise<Resource>;
+  updateResource(projectId: string, resourceId: string, input: UpdateResourceInput): Promise<UpdateResourceResult>;
+  listResourceRevisions(projectId: string, resourceId: string): Promise<ResourceRevision[]>;
+  createResourceRevision(projectId: string, resourceId: string, input: CreateResourceRevisionInput): Promise<ResourceRevision>;
+  publishResourceRevision(
+    projectId: string,
+    resourceId: string,
+    revisionId: string,
+    input: PublishResourceRevisionInput,
+  ): Promise<WorkspaceSnapshot>;
   getArtifact(projectId: string, artifactId: string): Promise<WorkspaceArtifactPayload>;
   listArtifactTracks(projectId: string, artifactId: string): Promise<ArtifactTrack[]>;
   listArtifactRevisions(projectId: string, artifactId: string): Promise<ArtifactRevision[]>;
@@ -1302,8 +1863,8 @@ export interface ApiClient {
   patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean }): Promise<Project>;
   saveCover(id: string, dataUrl: string): Promise<void>;
   deleteProject(id: string): Promise<void>;
-  listConversations(id: string): Promise<Conversation[]>;
-  createConversation(id: string, title?: string): Promise<Conversation>;
+  listConversations(id: string, scope?: ConversationScope): Promise<Conversation[]>;
+  createConversation(id: string, title?: string, scope?: ConversationScope): Promise<Conversation>;
   getConversation(projectId: string, cid: string): Promise<Conversation>;
   renameConversation(projectId: string, cid: string, title: string): Promise<Conversation>;
   deleteConversation(projectId: string, cid: string): Promise<void>;
@@ -1445,6 +2006,10 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     return (await res.json()) as T;
   }
 
+  async function jsonDecoded<T>(path: string, decode: (value: unknown) => T, init?: RequestInit): Promise<T> {
+    return decode(await json<unknown>(path, init));
+  }
+
   async function blob(path: string, init?: RequestInit): Promise<Blob> {
     const res = await f(baseUrl + path, initWithDaemonToken(init));
     if (!res.ok) {
@@ -1488,7 +2053,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
   }
 
   async function* streamRun(input: RunInput, signal?: AbortSignal): AsyncGenerator<RunEvent> {
-    yield* consumeSse(await f(baseUrl + "/api/runs", initWithDaemonToken({ ...jsonInit("POST", input), signal })));
+    yield* consumeSse(await f(baseUrl + "/api/runs", initWithDaemonToken({ ...jsonInit("POST", encodeRunInput(input)), signal })));
   }
 
   async function* reattachRun(runId: string, signal?: AbortSignal, options: { afterSeq?: number } = {}): AsyncGenerator<RunEvent> {
@@ -1539,6 +2104,11 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
   }
 
   const enc = (id: string) => encodeURIComponent(id);
+  const conversationScopeQuery = (scope?: ConversationScope): string => {
+    if (!scope) return "";
+    const normalized = decodeConversationScope(scope);
+    return `?scopeType=${enc(normalized.type)}&scopeId=${enc(normalized.id)}`;
+  };
 
   return {
     scanAgentsStream,
@@ -1583,6 +2153,39 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       json<WorkspaceGraphMutationResult>(`/api/projects/${enc(projectId)}/workspace/graph/commands`, jsonInit("POST", input)),
     saveWorkspaceLayout: (projectId, input) =>
       json<WorkspaceLayout>(`/api/projects/${enc(projectId)}/workspace/layout`, jsonInit("PUT", input)),
+    listResources: (projectId) =>
+      jsonDecoded(`/api/projects/${enc(projectId)}/resources`, (value) => decodeArray(value, decodeResource, "Resources")),
+    createResource: (projectId, input) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources`,
+        decodeCreateResourceResult,
+        jsonInit("POST", encodeCreateResourceInput(input)),
+      ),
+    getResource: (projectId, resourceId) =>
+      jsonDecoded(`/api/projects/${enc(projectId)}/resources/${enc(resourceId)}`, decodeResource),
+    updateResource: (projectId, resourceId, input) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}`,
+        decodeUpdateResourceResult,
+        jsonInit("PATCH", encodeUpdateResourceInput(input)),
+      ),
+    listResourceRevisions: (projectId, resourceId) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/revisions`,
+        (value) => decodeArray(value, decodeResourceRevision, "Resource Revisions"),
+      ),
+    createResourceRevision: (projectId, resourceId, input) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/revisions`,
+        decodeResourceRevision,
+        jsonInit("POST", encodeCreateResourceRevisionInput(input)),
+      ),
+    publishResourceRevision: (projectId, resourceId, revisionId, input) =>
+      jsonDecoded(
+        `/api/projects/${enc(projectId)}/resources/${enc(resourceId)}/revisions/${enc(revisionId)}/publish`,
+        (value) => codecRecord(value, "Publish Resource Revision response") as unknown as WorkspaceSnapshot,
+        jsonInit("POST", encodePublishResourceRevisionInput(input)),
+      ),
     getArtifact: (projectId, artifactId) =>
       json<WorkspaceArtifactPayload>(`/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}`),
     listArtifactTracks: (projectId, artifactId) =>
@@ -1610,13 +2213,24 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     patchProject: (id, patch) => json<Project>(`/api/projects/${enc(id)}`, jsonInit("PATCH", patch)),
     saveCover: (id, dataUrl) => json<{ ok: boolean }>(`/api/projects/${enc(id)}/cover`, jsonInit("POST", { dataUrl })).then(() => {}),
     deleteProject: (id) => json<void>(`/api/projects/${enc(id)}`, { method: "DELETE" }),
-    listConversations: (id) => json<Conversation[]>(`/api/projects/${enc(id)}/conversations`),
-    createConversation: (id, title) =>
-      json<Conversation>(`/api/projects/${enc(id)}/conversations`, jsonInit("POST", { title })),
+    listConversations: (id, scope) =>
+      jsonDecoded(
+        `/api/projects/${enc(id)}/conversations${conversationScopeQuery(scope)}`,
+        (value) => decodeArray(value, decodeConversation, "Conversations"),
+      ),
+    createConversation: (id, title, scope) =>
+      jsonDecoded(
+        `/api/projects/${enc(id)}/conversations`,
+        decodeConversation,
+        jsonInit("POST", {
+          ...(title === undefined ? {} : { title }),
+          ...(scope === undefined ? {} : { scope: decodeConversationScope(scope) }),
+        }),
+      ),
     getConversation: (projectId, cid) =>
-      json<Conversation>(`/api/projects/${enc(projectId)}/conversations/${enc(cid)}`),
+      jsonDecoded(`/api/projects/${enc(projectId)}/conversations/${enc(cid)}`, decodeConversation),
     renameConversation: (projectId, cid, title) =>
-      json<Conversation>(`/api/projects/${enc(projectId)}/conversations/${enc(cid)}`, jsonInit("PATCH", { title })),
+      jsonDecoded(`/api/projects/${enc(projectId)}/conversations/${enc(cid)}`, decodeConversation, jsonInit("PATCH", { title })),
     deleteConversation: (projectId, cid) =>
       json<{ ok: boolean }>(`/api/projects/${enc(projectId)}/conversations/${enc(cid)}`, { method: "DELETE" }).then(() => {}),
     listVariants: (id) => json<Variant[]>(`/api/projects/${enc(id)}/variants`),

@@ -33,6 +33,7 @@ import type {
   UpdateEffectInput,
   ExtensionCredentialRecord,
   ExtensionScope,
+  ConversationScope,
 } from "./types.ts";
 import {
   asArtifact,
@@ -52,6 +53,7 @@ import {
 } from "./store-codecs.ts";
 import { migrateStoreSchema, STORE_SCHEMA } from "./store-schema.ts";
 import { WorkspaceStore } from "./workspace-store.ts";
+import { isWellFormedUtf16 } from "./workspace-codecs.ts";
 
 const DEFAULT_SETTINGS: Settings = {
   agentCommand: "claude",
@@ -92,6 +94,60 @@ export interface StoreClock {
 }
 
 const DEFAULT_CLOCK: StoreClock = { now: () => Date.now(), id: () => randomUUID() };
+
+function strictRecord(value: unknown, label: string, fields: readonly string[]): Record<string, unknown> {
+  let prototype: object | null;
+  let keys: PropertyKey[];
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`${label} must be an object`);
+    }
+    prototype = Object.getPrototypeOf(value);
+    keys = Reflect.ownKeys(value);
+  } catch (error) {
+    if (error instanceof Error && error.message === `${label} must be an object`) throw error;
+    throw new Error(`${label} must be an inspectable plain object`);
+  }
+  if (prototype !== Object.prototype && prototype !== null) throw new Error(`${label} must be a plain object`);
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(fields);
+  const seen = new Set<string>();
+  for (const field of keys) {
+    if (typeof field !== "string" || !allowed.has(field)) {
+      throw new Error(`${label} contains unsupported field ${String(field)}`);
+    }
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(value, field);
+    } catch {
+      throw new Error(`${label} contains an unreadable field ${field}`);
+    }
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      throw new Error(`${label} field ${field} must be an enumerable data property`);
+    }
+    seen.add(field);
+  }
+  for (const field of fields) {
+    if (!seen.has(field)) throw new Error(`${label} is missing field ${field}`);
+  }
+  return record;
+}
+
+export function normalizeConversationScope(value: unknown, projectId: string): ConversationScope {
+  const record = strictRecord(value, "Conversation scope", ["type", "id"]);
+  if (record.type !== "workspace" && record.type !== "artifact" && record.type !== "resource") {
+    throw new Error("Conversation scope type is unsupported");
+  }
+  if (typeof record.id !== "string" || record.id.trim() !== record.id
+    || record.id.length === 0 || record.id.length > 256 || !isWellFormedUtf16(record.id)
+    || /[\u0000-\u001f\u007f]/.test(record.id)) {
+    throw new Error("Conversation scope id is invalid");
+  }
+  if (record.type === "workspace" && record.id !== projectId) {
+    throw new Error("Conversation workspace scope must use its owning Project id");
+  }
+  return { type: record.type, id: record.id };
+}
 
 export class Store {
   readonly db: DatabaseSync;
@@ -588,21 +644,36 @@ export class Store {
   }
 
   // ── conversations ───────────────────────────────────────────────────────────
-  createConversation(projectId: string, title = "Untitled"): Conversation {
+  createConversation(
+    projectId: string,
+    title = "Untitled",
+    unsafeScope: ConversationScope = { type: "workspace", id: projectId },
+  ): Conversation {
+    const scope = normalizeConversationScope(unsafeScope, projectId);
     const id = this.clock.id();
     this.db
-      .prepare(`INSERT INTO conversations (id, project_id, title, created_at) VALUES (?, ?, ?, ?)`)
-      .run(id, projectId, title, this.clock.now());
+      .prepare(
+        `INSERT INTO conversations (id, project_id, title, scope_type, scope_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, projectId, title, scope.type, scope.id, this.clock.now());
     const r = this.db.prepare(`SELECT * FROM conversations WHERE id = ?`).get(id) as Row;
     return asConversation(r);
   }
 
-  createImportedConversation(projectId: string, input: { title: string; createdAt?: number }): Conversation {
+  createImportedConversation(
+    projectId: string,
+    input: { title: string; scope?: ConversationScope; createdAt?: number },
+  ): Conversation {
     const id = this.clock.id();
     const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : this.clock.now();
+    const scope = normalizeConversationScope(input.scope ?? { type: "workspace", id: projectId }, projectId);
     this.db
-      .prepare(`INSERT INTO conversations (id, project_id, title, created_at) VALUES (?, ?, ?, ?)`)
-      .run(id, projectId, input.title, createdAt);
+      .prepare(
+        `INSERT INTO conversations (id, project_id, title, scope_type, scope_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, projectId, input.title, scope.type, scope.id, createdAt);
     const r = this.db.prepare(`SELECT * FROM conversations WHERE id = ?`).get(id) as Row;
     return asConversation(r);
   }
@@ -612,13 +683,17 @@ export class Store {
     return r ? asConversation(r) : null;
   }
 
-  listConversations(projectId: string): Conversation[] {
+  listConversations(projectId: string, unsafeScope?: ConversationScope): Conversation[] {
+    const scope = unsafeScope === undefined ? null : normalizeConversationScope(unsafeScope, projectId);
     const rows = this.db
       .prepare(
         `SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS turns
-         FROM conversations c WHERE c.project_id = ? ORDER BY c.created_at ASC, c.rowid ASC`,
+         FROM conversations c
+         WHERE c.project_id = ?
+           AND (? IS NULL OR (c.scope_type = ? AND c.scope_id = ?))
+         ORDER BY c.created_at ASC, c.rowid ASC`,
       )
-      .all(projectId) as Row[];
+      .all(projectId, scope?.type ?? null, scope?.type ?? null, scope?.id ?? null) as Row[];
     return rows.map((r) => ({ ...asConversation(r), turns: Number(r.turns ?? 0) }));
   }
 
@@ -697,14 +772,32 @@ export class Store {
     variantId?: string,
     userMessageId?: string,
     ownerId?: string,
-    attribution?: { model?: string | null; agentCommand?: string | null; skillId?: string | null },
+    attribution?: {
+      model?: string | null;
+      agentCommand?: string | null;
+      skillId?: string | null;
+      artifactId?: string | null;
+      artifactTrackId?: string | null;
+      planId?: string | null;
+      taskId?: string | null;
+      baseRevisionId?: string | null;
+      contextPackId?: string | null;
+      contextPackHash?: string | null;
+      attempt?: number;
+    },
   ): Run {
     const id = this.clock.id();
     const vid = variantId ?? this.ensureMainVariant(projectId).id;
+    const attempt = attribution?.attempt ?? 1;
+    if (!Number.isSafeInteger(attempt) || attempt < 1) throw new Error("Run attempt must be a positive safe integer");
     this.db
       .prepare(
-        `INSERT INTO runs (id, project_id, conversation_id, variant_id, user_message_id, owner_id, status, created_at, model, agent_command, skill_id)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+        `INSERT INTO runs (
+           id, project_id, conversation_id, variant_id, user_message_id, owner_id,
+           artifact_id, artifact_track_id, plan_id, task_id, base_revision_id,
+           context_pack_id, context_pack_hash, attempt,
+           status, created_at, model, agent_command, skill_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -713,6 +806,14 @@ export class Store {
         vid,
         userMessageId ?? null,
         ownerId ?? null,
+        attribution?.artifactId ?? null,
+        attribution?.artifactTrackId ?? null,
+        attribution?.planId ?? null,
+        attribution?.taskId ?? null,
+        attribution?.baseRevisionId ?? null,
+        attribution?.contextPackId ?? null,
+        attribution?.contextPackHash ?? null,
+        attempt,
         this.clock.now(),
         attribution?.model ?? null,
         attribution?.agentCommand ?? null,
@@ -746,19 +847,31 @@ export class Store {
       model?: string | null;
       agentCommand?: string | null;
       skillId?: string | null;
+      artifactId?: string | null;
+      artifactTrackId?: string | null;
+      planId?: string | null;
+      taskId?: string | null;
+      baseRevisionId?: string | null;
+      contextPackId?: string | null;
+      contextPackHash?: string | null;
+      attempt?: number;
     },
   ): Run {
     const id = this.clock.id();
     const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : this.clock.now();
     const finishedAt = input.finishedAt == null || !Number.isFinite(input.finishedAt) ? null : Number(input.finishedAt);
     const status = input.status ?? "cancelled";
+    const attempt = input.attempt ?? 1;
+    if (!Number.isSafeInteger(attempt) || attempt < 1) throw new Error("Run attempt must be a positive safe integer");
     this.db
       .prepare(
         `INSERT INTO runs (
            id, project_id, conversation_id, variant_id, user_message_id, assistant_message_id, commit_hash,
+           artifact_id, artifact_track_id, plan_id, task_id, base_revision_id,
+           context_pack_id, context_pack_hash, attempt,
            status, repair_rounds, lint_passed, score, final_findings, created_at, finished_at,
            model, agent_command, skill_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -768,6 +881,14 @@ export class Store {
         input.userMessageId ?? null,
         input.assistantMessageId ?? null,
         input.commitHash ?? null,
+        input.artifactId ?? null,
+        input.artifactTrackId ?? null,
+        input.planId ?? null,
+        input.taskId ?? null,
+        input.baseRevisionId ?? null,
+        input.contextPackId ?? null,
+        input.contextPackHash ?? null,
+        attempt,
         status,
         Math.max(0, Math.floor(input.repairRounds ?? 0)),
         input.lintPassed ? 1 : 0,

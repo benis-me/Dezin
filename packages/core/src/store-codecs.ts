@@ -53,10 +53,21 @@ export function asExtensionCredential(r: Row): ExtensionCredentialRecord {
   };
 }
 export function asConversation(r: Row): Conversation {
+  const projectId = r.project_id as string;
+  const scopeType = r.scope_type;
+  const scopeId = r.scope_id;
+  const scope: Conversation["scope"] | null = scopeType == null && scopeId == null
+    ? { type: "workspace" as const, id: projectId }
+    : (scopeType === "workspace" || scopeType === "artifact" || scopeType === "resource")
+        && typeof scopeId === "string" && scopeId.length > 0
+      ? { type: scopeType, id: scopeId }
+      : null;
+  if (scope === null) throw new Error("Conversation scope is invalid");
   return {
     id: r.id as string,
-    projectId: r.project_id as string,
+    projectId,
     title: r.title as string,
+    scope,
     createdAt: Number(r.created_at),
   };
 }
@@ -109,6 +120,8 @@ export function parseRunFeedback(value: unknown): RunFeedback | null {
 }
 
 export function asRun(r: Row): Run {
+  const attempt = Number(r.attempt ?? 1);
+  if (!Number.isSafeInteger(attempt) || attempt < 1) throw new Error("Run attempt is invalid");
   return {
     id: r.id as string,
     projectId: r.project_id as string,
@@ -117,6 +130,14 @@ export function asRun(r: Row): Run {
     assistantMessageId: (r.assistant_message_id as string | null | undefined) ?? null,
     variantId: (r.variant_id as string | null | undefined) ?? null,
     commitHash: (r.commit_hash as string | null | undefined) ?? null,
+    artifactId: (r.artifact_id as string | null | undefined) ?? null,
+    artifactTrackId: (r.artifact_track_id as string | null | undefined) ?? null,
+    planId: (r.plan_id as string | null | undefined) ?? null,
+    taskId: (r.task_id as string | null | undefined) ?? null,
+    baseRevisionId: (r.base_revision_id as string | null | undefined) ?? null,
+    contextPackId: (r.context_pack_id as string | null | undefined) ?? null,
+    contextPackHash: (r.context_pack_hash as string | null | undefined) ?? null,
+    attempt,
     status: r.status as RunStatus,
     repairRounds: Number(r.repair_rounds),
     lintPassed: Number(r.lint_passed) === 1,
@@ -284,4 +305,3 @@ export function asEffect(r: Row): Effect {
     updatedAt: Number(r.updated_at),
   };
 }
-

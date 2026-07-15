@@ -16,6 +16,211 @@ export type PrototypeEdgeStatus = "planned" | "interactive" | "broken";
 export type ArtifactQualityState = "passed" | "needs-attention" | "failed" | "unassessed";
 export type ComponentInstanceDependencyStatus = "linked" | "detached";
 
+export interface Resource {
+  id: string;
+  workspaceId: string;
+  kind: ResourceKind;
+  title: string;
+  headRevisionId: string | null;
+  defaultPinPolicy: ResourcePinPolicy;
+  archivedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ResourceRevision {
+  id: string;
+  workspaceId: string;
+  resourceId: string;
+  sequence: number;
+  /** Head observed when this immutable candidate was created. */
+  parentRevisionId: string | null;
+  manifestPath: string;
+  summary: string;
+  metadata: Record<string, unknown>;
+  checksum: string;
+  provenance: Record<string, unknown>;
+  createdByRunId: string | null;
+  createdAt: number;
+}
+
+export interface CreateResourceForProjectInput {
+  kind: ResourceKind;
+  title: string;
+  defaultPinPolicy: ResourcePinPolicy;
+  baseGraphRevision: number;
+  expectedSnapshotId: string;
+}
+
+export interface CreateResourceForProjectResult {
+  resource: Resource;
+  node: WorkspaceResourceNode;
+  graph: WorkspaceGraph;
+  snapshot: WorkspaceSnapshot;
+}
+
+export type UpdateResourceForProjectInput =
+  | {
+    action: "rename";
+    title: string;
+    baseGraphRevision: number;
+    expectedSnapshotId: string;
+  }
+  | {
+    action: "set-default-pin-policy";
+    expectedDefaultPinPolicy: ResourcePinPolicy;
+    defaultPinPolicy: ResourcePinPolicy;
+  }
+  | {
+    action: "archive";
+    baseGraphRevision: number;
+    expectedSnapshotId: string;
+    consumerImpactConfirmed: true;
+  };
+
+export type UpdateResourceForProjectResult =
+  | {
+    action: "rename" | "archive";
+    resource: Resource;
+    graph: WorkspaceGraph;
+    snapshot: WorkspaceSnapshot;
+  }
+  | {
+    action: "set-default-pin-policy";
+    resource: Resource;
+  };
+
+export interface CreateResourceRevisionCandidateInput {
+  /** Daemon-allocated UUID embedded in the already-frozen manifest. */
+  revisionId: string;
+  parentRevisionId: string | null;
+  manifestPath: string;
+  summary: string;
+  metadata: Record<string, unknown>;
+  checksum: string;
+  provenance: Record<string, unknown>;
+  createdByRunId?: string | null;
+}
+
+export interface ResourcePublicationExpectation {
+  expectedHeadRevisionId: string | null;
+  expectedSnapshotId: string;
+  reason: string;
+  runId?: string;
+  planId?: string;
+  taskId?: string;
+}
+
+/** Context Pack targets use normalized Workspace/Artifact/Resource IDs, not legacy Project IDs. */
+export type ContextPackTarget =
+  | { type: "workspace"; id: string }
+  | { type: "artifact"; id: string }
+  | { type: "resource"; id: string };
+
+/** Resolver-facing compatibility alias for the same normalized target contract. */
+export type AgentScope = ContextPackTarget;
+
+export type AgentIntent = "plan" | "generate" | "edit" | "repair" | "analyze-impact";
+
+export type ContextItemRefKind = "artifact" | "resource" | "kernel" | "inline";
+
+export type ContextItemRef =
+  | { kind: "resource"; id: string; resourceKind: ResourceKind; revisionId?: string }
+  | { kind: "artifact"; id: string; revisionId?: string }
+  | { kind: "kernel"; id: string; revisionId?: string }
+  | { kind: "inline"; id: string };
+
+export type ResolvedContextKind = "artifact-revision" | "resource-revision" | "kernel-revision" | "inline";
+export type ContextTrustLevel = "system" | "trusted" | "untrusted";
+
+export interface ResolvedContextItem {
+  ordinal: number;
+  ref: ContextItemRef;
+  resolvedKind: ResolvedContextKind;
+  artifactRevisionId: string | null;
+  resourceRevisionId: string | null;
+  kernelRevisionId: string | null;
+  checksum: string;
+  reason: string;
+  trustLevel: ContextTrustLevel;
+  boundary: Record<string, unknown>;
+  tokenEstimate: number;
+  provenance: Record<string, unknown>;
+  provided: boolean;
+}
+
+export interface ContextOmission {
+  ref: ContextItemRef;
+  reason: string;
+  tokenEstimate: number;
+}
+
+export interface ContextPack {
+  id: string;
+  workspaceId: string;
+  graphRevision: number;
+  target: ContextPackTarget;
+  intent: AgentIntent;
+  messageChecksum: string;
+  items: ResolvedContextItem[];
+  omissions: ContextOmission[];
+  tokenEstimate: number;
+  manifestPath: string;
+  hash: string;
+  createdAt: number;
+}
+
+export interface PersistContextPackItemInput {
+  ref: ContextItemRef;
+  resolvedKind: ResolvedContextKind;
+  artifactRevisionId?: string | null;
+  resourceRevisionId?: string | null;
+  kernelRevisionId?: string | null;
+  checksum: string;
+  reason: string;
+  trustLevel: ContextTrustLevel;
+  boundary: Record<string, unknown>;
+  tokenEstimate: number;
+  provenance: Record<string, unknown>;
+  provided: boolean;
+}
+
+export interface PersistContextPackInput {
+  id: string;
+  workspaceId: string;
+  graphRevision: number;
+  target: ContextPackTarget;
+  intent: AgentIntent;
+  messageChecksum: string;
+  items: PersistContextPackItemInput[];
+  omissions: ContextOmission[];
+  tokenEstimate: number;
+  manifestPath: string;
+  hash: string;
+}
+
+export type ContextPackUsageKind = "observed-read" | "agent-declared-used";
+
+export interface RecordContextPackItemUsageInput {
+  contextPackId: string;
+  workspaceId: string;
+  ordinal: number;
+  usageKind: ContextPackUsageKind;
+  runId?: string | null;
+  evidence: Record<string, unknown>;
+}
+
+export interface ContextPackItemUsage {
+  contextPackId: string;
+  workspaceId: string;
+  ordinal: number;
+  sequence: number;
+  usageKind: ContextPackUsageKind;
+  runId: string | null;
+  evidence: Record<string, unknown>;
+  recordedAt: number;
+}
+
 export interface RenderFrameSpec {
   id: string;
   name: string;

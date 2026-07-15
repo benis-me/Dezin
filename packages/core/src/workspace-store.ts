@@ -4,7 +4,18 @@ import { isDeepStrictEqual } from "node:util";
 import type { StoreClock } from "./store.ts";
 import type {
   ApprovedProposalResult,
+  AgentScope,
+  AgentIntent,
   ArtifactPublicationExpectation,
+  ContextItemRef,
+  ContextOmission,
+  ContextPack,
+  ContextPackItemUsage,
+  ContextPackTarget,
+  ContextTrustLevel,
+  CreateResourceForProjectInput,
+  CreateResourceForProjectResult,
+  CreateResourceRevisionCandidateInput,
   CreateWorkspaceProposalInput,
   CreateArtifactRevisionInput,
   CreateKernelRevisionInput,
@@ -15,6 +26,16 @@ import type {
   LegacyWorkspaceSeed,
   NewWorkspaceNode,
   ProjectWorkspace,
+  PersistContextPackInput,
+  PersistContextPackItemInput,
+  RecordContextPackItemUsageInput,
+  ResolvedContextItem,
+  ResolvedContextKind,
+  Resource,
+  ResourceKind,
+  ResourcePinPolicy,
+  ResourcePublicationExpectation,
+  ResourceRevision,
   SharedDesignKernelRevision,
   WorkspaceArtifactNode,
   WorkspaceGraph,
@@ -32,6 +53,8 @@ import type {
   WorkspaceSnapshotProvenance,
   WorkspaceSnapshotPublicationInput,
   UpdateWorkspaceProposalInput,
+  UpdateResourceForProjectInput,
+  UpdateResourceForProjectResult,
 } from "./workspace-types.ts";
 import {
   applyWorkspaceGraphCommands,
@@ -104,6 +127,507 @@ function checksum(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+export function artifactRevisionContextChecksum(input: {
+  revision: ArtifactRevisionRecord;
+  dependencies: readonly ArtifactRevisionDependencyRecord[];
+  resourcePins: readonly ArtifactRevisionResourcePinRecord[];
+}): string {
+  return checksum(canonicalJsonText({
+    revision: input.revision,
+    dependencies: [...input.dependencies].sort((left, right) => compareBinary(left.instanceId, right.instanceId)),
+    resourcePins: [...input.resourcePins].sort((left, right) => compareBinary(left.resourceId, right.resourceId)),
+  }, "Artifact Revision Context checksum input"));
+}
+
+function boundaryObject(
+  value: unknown,
+  label: string,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): Record<string, unknown> {
+  let prototype: object | null;
+  let keys: Array<string | symbol>;
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new WorkspaceStoreCodecError(`${label} must be an object`);
+    }
+    prototype = Object.getPrototypeOf(value);
+    keys = Reflect.ownKeys(value);
+  } catch (error) {
+    if (error instanceof WorkspaceStoreCodecError) throw error;
+    throw new WorkspaceStoreCodecError(`${label} must be an inspectable plain object`);
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new WorkspaceStoreCodecError(`${label} must be a plain object`);
+  }
+  const allowed = new Set([...required, ...optional]);
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    if (typeof key !== "string" || !allowed.has(key)) {
+      throw new WorkspaceStoreCodecError(`${label} contains unsupported field ${String(key)}`);
+    }
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(value, key);
+    } catch {
+      throw new WorkspaceStoreCodecError(`${label} contains an unreadable field ${key}`);
+    }
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      throw new WorkspaceStoreCodecError(`${label} field ${key} must be an enumerable data property`);
+    }
+  }
+  for (const field of required) {
+    if (!Object.hasOwn(record, field)) throw new WorkspaceStoreCodecError(`${label} is missing field ${field}`);
+  }
+  return record;
+}
+
+function boundaryString(value: unknown, label: string, maxLength = 1_024): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength || !isWellFormedUtf16(value)) {
+    throw new WorkspaceStoreCodecError(`${label} is invalid`);
+  }
+  return value;
+}
+
+function boundaryId(value: unknown, label: string): string {
+  const result = boundaryString(value, label, 256);
+  if (result.trim() !== result || /[\u0000-\u001f\u007f]/.test(result)) {
+    throw new WorkspaceStoreCodecError(`${label} is invalid`);
+  }
+  return result;
+}
+
+function boundaryText(value: unknown, label: string, maxLength: number): string {
+  const result = boundaryString(value, label, maxLength).trim();
+  if (result.length === 0) throw new WorkspaceStoreCodecError(`${label} is invalid`);
+  return result;
+}
+
+function boundarySafeInteger(value: unknown, label: string, minimum = 0): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) {
+    throw new WorkspaceStoreCodecError(`${label} must be a safe integer >= ${minimum}`);
+  }
+  return value;
+}
+
+function boundaryChecksum(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must be a lowercase SHA-256 digest`);
+  }
+  return value;
+}
+
+function boundaryRelativePath(value: unknown, label: string): string {
+  const result = boundaryString(value, label, 1_024);
+  const segments = result.split("/");
+  if (result.trim() !== result
+    || result.startsWith("/")
+    || result.includes("\\")
+    || /[\u0000-\u001f\u007f<>:"|?*]/.test(result)
+    || segments.some((segment) => segment.length === 0 || segment === "." || segment === ".."
+      || /[ .]$/.test(segment)
+      || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment))) {
+    throw new WorkspaceStoreCodecError(`${label} must be a canonical relative path`);
+  }
+  return result;
+}
+
+interface JsonBoundaryState {
+  readonly ancestors: WeakSet<object>;
+  nodes: number;
+  textUnits: number;
+}
+
+function boundaryJsonArray(value: object, label: string): unknown[] {
+  let prototype: object | null;
+  let keys: PropertyKey[];
+  let lengthDescriptor: PropertyDescriptor | undefined;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    keys = Reflect.ownKeys(value);
+    lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  } catch {
+    throw new WorkspaceStoreCodecError(`${label} must be an inspectable array`);
+  }
+  if (prototype !== Array.prototype) throw new WorkspaceStoreCodecError(`${label} must use the standard array prototype`);
+  if (!lengthDescriptor || !("value" in lengthDescriptor)
+    || typeof lengthDescriptor.value !== "number" || !Number.isSafeInteger(lengthDescriptor.value)
+    || lengthDescriptor.value < 0 || lengthDescriptor.value > 10_000) {
+    throw new WorkspaceStoreCodecError(`${label} exceeds the JSON array budget`);
+  }
+  const length = lengthDescriptor.value;
+  for (const key of keys) {
+    if (typeof key !== "string") throw new WorkspaceStoreCodecError(`${label} cannot contain symbol fields`);
+    if (key === "length") continue;
+    const index = Number(key);
+    if (!Number.isInteger(index) || index < 0 || index >= length || String(index) !== key) {
+      throw new WorkspaceStoreCodecError(`${label} contains unsupported field ${key}`);
+    }
+  }
+  const result = new Array<unknown>(length);
+  for (let index = 0; index < length; index += 1) {
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    } catch {
+      throw new WorkspaceStoreCodecError(`${label} contains an unreadable item`);
+    }
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      throw new WorkspaceStoreCodecError(`${label} must contain dense enumerable data items`);
+    }
+    result[index] = descriptor.value;
+  }
+  return result;
+}
+
+function boundaryJsonValue(value: unknown, label: string, state: JsonBoundaryState, depth = 0): unknown {
+  state.nodes += 1;
+  if (state.nodes > 20_000 || depth > 64) throw new WorkspaceStoreCodecError(`${label} exceeds the JSON budget`);
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    state.textUnits += value.length;
+    if (!isWellFormedUtf16(value) || value.length > 1_000_000 || state.textUnits > 4_000_000) {
+      throw new WorkspaceStoreCodecError(`${label} contains invalid or oversized text`);
+    }
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new WorkspaceStoreCodecError(`${label} contains a non-finite number`);
+    return value;
+  }
+  if (typeof value !== "object" || value === null) throw new WorkspaceStoreCodecError(`${label} must contain JSON values`);
+  if (state.ancestors.has(value)) throw new WorkspaceStoreCodecError(`${label} contains a cycle`);
+  state.ancestors.add(value);
+  try {
+    let isArray: boolean;
+    try {
+      isArray = Array.isArray(value);
+    } catch {
+      throw new WorkspaceStoreCodecError(`${label} must be inspectable JSON`);
+    }
+    if (isArray) {
+      const values = boundaryJsonArray(value, label);
+      const result = new Array<unknown>(values.length);
+      for (let index = 0; index < values.length; index += 1) {
+        result[index] = boundaryJsonValue(values[index], `${label}[${index}]`, state, depth + 1);
+      }
+      return result;
+    }
+    let objectKeys: PropertyKey[];
+    try {
+      objectKeys = Reflect.ownKeys(value);
+    } catch {
+      throw new WorkspaceStoreCodecError(`${label} must be inspectable JSON`);
+    }
+    const record = boundaryObject(
+      value,
+      label,
+      [],
+      objectKeys.filter((key): key is string => typeof key === "string"),
+    );
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort(compareBinary)) {
+      state.textUnits += key.length;
+      if (!isWellFormedUtf16(key) || state.textUnits > 4_000_000) {
+        throw new WorkspaceStoreCodecError(`${label} contains invalid or oversized keys`);
+      }
+      Object.defineProperty(result, key, {
+        value: boundaryJsonValue(record[key], `${label}.${key}`, state, depth + 1),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return result;
+  } finally {
+    state.ancestors.delete(value);
+  }
+}
+
+function boundaryJsonObject(value: unknown, label: string): Record<string, unknown> {
+  const result = boundaryJsonValue(value, label, { ancestors: new WeakSet<object>(), nodes: 0, textUnits: 0 });
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    throw new WorkspaceStoreCodecError(`${label} must be a JSON object`);
+  }
+  return result as Record<string, unknown>;
+}
+
+function canonicalJsonText(value: unknown, label: string): string {
+  return JSON.stringify(boundaryJsonValue(value, label, { ancestors: new WeakSet<object>(), nodes: 0, textUnits: 0 }));
+}
+
+function resourceKind(value: unknown, label: string): ResourceKind {
+  if (value === "research" || value === "moodboard" || value === "sharingan-capture"
+    || value === "file" || value === "asset" || value === "effect" || value === "external-reference") {
+    return value;
+  }
+  throw new WorkspaceStoreCodecError(`${label} is unsupported`);
+}
+
+function resourcePinPolicy(value: unknown, label: string): ResourcePinPolicy {
+  if (value === "follow-head" || value === "pin-current" || value === "manual") return value;
+  throw new WorkspaceStoreCodecError(`${label} is unsupported`);
+}
+
+export function normalizeCreateResourceForProjectInput(value: unknown): CreateResourceForProjectInput {
+  const input = boundaryObject(value, "Create Resource input", [
+    "kind", "title", "defaultPinPolicy", "baseGraphRevision", "expectedSnapshotId",
+  ]);
+  return {
+    kind: resourceKind(input.kind, "Resource kind"),
+    title: boundaryText(input.title, "Resource title", 500),
+    defaultPinPolicy: resourcePinPolicy(input.defaultPinPolicy, "Resource default pin policy"),
+    baseGraphRevision: boundarySafeInteger(input.baseGraphRevision, "Resource base graph revision"),
+    expectedSnapshotId: boundaryId(input.expectedSnapshotId, "Resource expected Snapshot id"),
+  };
+}
+
+export function normalizeUpdateResourceForProjectInput(value: unknown): UpdateResourceForProjectInput {
+  const envelope = boundaryObject(value, "Update Resource input", ["action"], [
+    "title", "baseGraphRevision", "expectedSnapshotId", "expectedDefaultPinPolicy",
+    "defaultPinPolicy", "consumerImpactConfirmed",
+  ]);
+  if (envelope.action === "rename") {
+    const input = boundaryObject(value, "Rename Resource input", [
+      "action", "title", "baseGraphRevision", "expectedSnapshotId",
+    ]);
+    return {
+      action: "rename",
+      title: boundaryText(input.title, "Resource title", 500),
+      baseGraphRevision: boundarySafeInteger(input.baseGraphRevision, "Resource base graph revision"),
+      expectedSnapshotId: boundaryId(input.expectedSnapshotId, "Resource expected Snapshot id"),
+    };
+  }
+  if (envelope.action === "set-default-pin-policy") {
+    const input = boundaryObject(value, "Resource pin policy input", [
+      "action", "expectedDefaultPinPolicy", "defaultPinPolicy",
+    ]);
+    return {
+      action: "set-default-pin-policy",
+      expectedDefaultPinPolicy: resourcePinPolicy(input.expectedDefaultPinPolicy, "expected Resource pin policy"),
+      defaultPinPolicy: resourcePinPolicy(input.defaultPinPolicy, "Resource pin policy"),
+    };
+  }
+  if (envelope.action === "archive") {
+    const input = boundaryObject(value, "Archive Resource input", [
+      "action", "baseGraphRevision", "expectedSnapshotId", "consumerImpactConfirmed",
+    ]);
+    if (input.consumerImpactConfirmed !== true) {
+      throw new WorkspaceStoreCodecError("Resource archive requires consumer impact confirmation");
+    }
+    return {
+      action: "archive",
+      baseGraphRevision: boundarySafeInteger(input.baseGraphRevision, "Resource base graph revision"),
+      expectedSnapshotId: boundaryId(input.expectedSnapshotId, "Resource expected Snapshot id"),
+      consumerImpactConfirmed: true,
+    };
+  }
+  throw new WorkspaceStoreCodecError("Resource update action is unsupported");
+}
+
+export function normalizeCreateResourceRevisionCandidateInput(
+  value: unknown,
+): CreateResourceRevisionCandidateInput {
+  const input = boundaryObject(value, "Resource Revision candidate", [
+    "revisionId", "parentRevisionId", "manifestPath", "summary", "metadata", "checksum", "provenance",
+  ], ["createdByRunId"]);
+  return {
+    revisionId: boundaryId(input.revisionId, "Resource Revision id"),
+    parentRevisionId: input.parentRevisionId === null
+      ? null
+      : boundaryId(input.parentRevisionId, "Resource Revision parent id"),
+    manifestPath: boundaryRelativePath(input.manifestPath, "Resource Revision manifest path"),
+    summary: boundaryText(input.summary, "Resource Revision summary", 32_000),
+    metadata: boundaryJsonObject(input.metadata, "Resource Revision metadata"),
+    checksum: boundaryChecksum(input.checksum, "Resource Revision checksum"),
+    provenance: boundaryJsonObject(input.provenance, "Resource Revision provenance"),
+    createdByRunId: input.createdByRunId == null
+      ? null
+      : boundaryId(input.createdByRunId, "Resource Revision creating Run id"),
+  };
+}
+
+export function normalizeResourcePublicationExpectation(value: unknown): ResourcePublicationExpectation {
+  const input = boundaryObject(value, "Resource publication expectation", [
+    "expectedHeadRevisionId", "expectedSnapshotId", "reason",
+  ], ["runId", "planId", "taskId"]);
+  return {
+    expectedHeadRevisionId: input.expectedHeadRevisionId === null
+      ? null
+      : boundaryId(input.expectedHeadRevisionId, "expected Resource Head Revision id"),
+    expectedSnapshotId: boundaryId(input.expectedSnapshotId, "expected Resource Snapshot id"),
+    reason: boundaryText(input.reason, "Resource publication reason", 2_000),
+    ...(input.runId === undefined ? {} : { runId: boundaryId(input.runId, "Resource publication Run id") }),
+    ...(input.planId === undefined ? {} : { planId: boundaryId(input.planId, "Resource publication Plan id") }),
+    ...(input.taskId === undefined ? {} : { taskId: boundaryId(input.taskId, "Resource publication Task id") }),
+  };
+}
+
+export function normalizeContextPackTarget(value: unknown): ContextPackTarget {
+  const input = boundaryObject(value, "Context Pack target", ["type", "id"]);
+  if (input.type !== "workspace" && input.type !== "artifact" && input.type !== "resource") {
+    throw new WorkspaceStoreCodecError("Context Pack target type is unsupported");
+  }
+  return { type: input.type, id: boundaryId(input.id, "Context Pack target id") };
+}
+
+export function normalizeAgentScope(value: unknown): AgentScope {
+  return normalizeContextPackTarget(value);
+}
+
+function normalizeContextItemRef(value: unknown, label: string): ContextItemRef {
+  const envelope = boundaryObject(value, label, ["kind", "id"], ["resourceKind", "revisionId"]);
+  if (envelope.kind === "resource") {
+    const input = boundaryObject(value, label, ["kind", "id", "resourceKind"], ["revisionId"]);
+    return {
+      kind: "resource",
+      id: boundaryId(input.id, `${label} id`),
+      resourceKind: resourceKind(input.resourceKind, `${label} Resource kind`),
+      ...(input.revisionId === undefined
+        ? {}
+        : { revisionId: boundaryId(input.revisionId, `${label} Revision id`) }),
+    };
+  }
+  if (envelope.kind === "artifact" || envelope.kind === "kernel") {
+    const input = boundaryObject(value, label, ["kind", "id"], ["revisionId"]);
+    return {
+      kind: envelope.kind,
+      id: boundaryId(input.id, `${label} id`),
+      ...(input.revisionId === undefined
+        ? {}
+        : { revisionId: boundaryId(input.revisionId, `${label} Revision id`) }),
+    };
+  }
+  if (envelope.kind === "inline") {
+    const input = boundaryObject(value, label, ["kind", "id"]);
+    return { kind: "inline", id: boundaryId(input.id, `${label} id`) };
+  }
+  throw new WorkspaceStoreCodecError(`${label} kind is unsupported`);
+}
+
+function agentIntent(value: unknown, label: string): AgentIntent {
+  if (value === "plan" || value === "generate" || value === "edit"
+    || value === "repair" || value === "analyze-impact") return value;
+  throw new WorkspaceStoreCodecError(`${label} is unsupported`);
+}
+
+function normalizeContextOmission(value: unknown, index: number): ContextOmission {
+  const input = boundaryObject(value, `Context omission ${index}`, ["ref", "reason", "tokenEstimate"]);
+  return {
+    ref: normalizeContextItemRef(input.ref, `Context omission ${index} ref`),
+    reason: boundaryText(input.reason, `Context omission ${index} reason`, 2_000),
+    tokenEstimate: boundarySafeInteger(input.tokenEstimate, `Context omission ${index} token estimate`),
+  };
+}
+
+function resolvedContextKind(value: unknown, label: string): ResolvedContextKind {
+  if (value === "artifact-revision" || value === "resource-revision" || value === "kernel-revision" || value === "inline") {
+    return value;
+  }
+  throw new WorkspaceStoreCodecError(`${label} is unsupported`);
+}
+
+function contextTrustLevel(value: unknown, label: string): ContextTrustLevel {
+  if (value === "system" || value === "trusted" || value === "untrusted") return value;
+  throw new WorkspaceStoreCodecError(`${label} is unsupported`);
+}
+
+function normalizePersistContextPackItem(value: unknown, index: number): PersistContextPackItemInput {
+  const label = `Context Pack item ${index}`;
+  const input = boundaryObject(value, label, [
+    "ref", "resolvedKind", "checksum", "reason", "trustLevel", "boundary",
+    "tokenEstimate", "provenance", "provided",
+  ], ["artifactRevisionId", "resourceRevisionId", "kernelRevisionId"]);
+  if (typeof input.provided !== "boolean") throw new WorkspaceStoreCodecError(`${label} provided must be boolean`);
+  const nullableId = (field: string): string | null => input[field] == null
+    ? null
+    : boundaryId(input[field], `${label} ${field}`);
+  const resolvedKind = resolvedContextKind(input.resolvedKind, `${label} resolved kind`);
+  const artifactRevisionId = nullableId("artifactRevisionId");
+  const resourceRevisionId = nullableId("resourceRevisionId");
+  const kernelRevisionId = nullableId("kernelRevisionId");
+  const ownershipIsCoherent = (resolvedKind === "artifact-revision"
+      && artifactRevisionId !== null && resourceRevisionId === null && kernelRevisionId === null)
+    || (resolvedKind === "resource-revision"
+      && artifactRevisionId === null && resourceRevisionId !== null && kernelRevisionId === null)
+    || (resolvedKind === "kernel-revision"
+      && artifactRevisionId === null && resourceRevisionId === null && kernelRevisionId !== null)
+    || (resolvedKind === "inline"
+      && artifactRevisionId === null && resourceRevisionId === null && kernelRevisionId === null);
+  if (!ownershipIsCoherent) throw new WorkspaceStoreCodecError(`${label} exact Revision pin is incoherent`);
+  return {
+    ref: normalizeContextItemRef(input.ref, `${label} ref`),
+    resolvedKind,
+    artifactRevisionId,
+    resourceRevisionId,
+    kernelRevisionId,
+    checksum: boundaryChecksum(input.checksum, `${label} checksum`),
+    reason: boundaryText(input.reason, `${label} reason`, 2_000),
+    trustLevel: contextTrustLevel(input.trustLevel, `${label} trust level`),
+    boundary: boundaryJsonObject(input.boundary, `${label} boundary`),
+    tokenEstimate: boundarySafeInteger(input.tokenEstimate, `${label} token estimate`),
+    provenance: boundaryJsonObject(input.provenance, `${label} provenance`),
+    provided: input.provided,
+  };
+}
+
+export function normalizePersistContextPackInput(value: unknown): PersistContextPackInput {
+  const input = boundaryObject(value, "Context Pack", [
+    "id", "workspaceId", "graphRevision", "target", "items", "omissions",
+    "intent", "messageChecksum", "tokenEstimate", "manifestPath", "hash",
+  ]);
+  if (!Array.isArray(input.items) || input.items.length > 2_048) {
+    throw new WorkspaceStoreCodecError("Context Pack items must be a bounded array");
+  }
+  if (!Array.isArray(input.omissions) || input.omissions.length > 2_048) {
+    throw new WorkspaceStoreCodecError("Context Pack omissions must be a bounded array");
+  }
+  const items = input.items.map(normalizePersistContextPackItem);
+  const tokenEstimate = boundarySafeInteger(input.tokenEstimate, "Context Pack token estimate");
+  let resolvedTokenEstimate = 0;
+  for (const item of items) {
+    if (item.tokenEstimate > Number.MAX_SAFE_INTEGER - resolvedTokenEstimate) {
+      throw new WorkspaceStoreCodecError("Context Pack item token estimate total exceeds the safe integer range");
+    }
+    resolvedTokenEstimate += item.tokenEstimate;
+  }
+  if (resolvedTokenEstimate !== tokenEstimate) {
+    throw new WorkspaceStoreCodecError("Context Pack token estimate must equal the resolved item total");
+  }
+  return {
+    id: boundaryId(input.id, "Context Pack id"),
+    workspaceId: boundaryId(input.workspaceId, "Context Pack Workspace id"),
+    graphRevision: boundarySafeInteger(input.graphRevision, "Context Pack graph revision"),
+    target: normalizeContextPackTarget(input.target),
+    intent: agentIntent(input.intent, "Context Pack intent"),
+    messageChecksum: boundaryChecksum(input.messageChecksum, "Context Pack message checksum"),
+    items,
+    omissions: input.omissions.map(normalizeContextOmission),
+    tokenEstimate,
+    manifestPath: boundaryRelativePath(input.manifestPath, "Context Pack manifest path"),
+    hash: boundaryChecksum(input.hash, "Context Pack hash"),
+  };
+}
+
+export function normalizeRecordContextPackItemUsageInput(
+  value: unknown,
+): RecordContextPackItemUsageInput {
+  const input = boundaryObject(value, "Context Pack usage", [
+    "contextPackId", "workspaceId", "ordinal", "usageKind", "evidence",
+  ], ["runId"]);
+  if (input.usageKind !== "observed-read" && input.usageKind !== "agent-declared-used") {
+    throw new WorkspaceStoreCodecError("Context Pack usage kind is unsupported");
+  }
+  return {
+    contextPackId: boundaryId(input.contextPackId, "Context Pack usage pack id"),
+    workspaceId: boundaryId(input.workspaceId, "Context Pack usage Workspace id"),
+    ordinal: boundarySafeInteger(input.ordinal, "Context Pack usage ordinal"),
+    usageKind: input.usageKind,
+    runId: input.runId == null ? null : boundaryId(input.runId, "Context Pack usage Run id"),
+    evidence: boundaryJsonObject(input.evidence, "Context Pack usage evidence"),
+  };
+}
+
 function requireWorkspace(workspace: ProjectWorkspace | null, projectId: string): ProjectWorkspace {
   if (!workspace) throw new Error(`workspace not found for project: ${projectId}`);
   return workspace;
@@ -159,6 +683,186 @@ function asOwnedArtifactRevision(row: Row): ArtifactRevisionRecord {
     );
   }
   return revision;
+}
+
+function storedTimestamp(value: unknown, label: string): number {
+  return boundarySafeInteger(value, label);
+}
+
+function storedJsonObject(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "string") throw new WorkspaceStoreCodecError(`${label} must be JSON text`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    throw new WorkspaceStoreCodecError(`${label} must contain valid JSON`);
+  }
+  const normalized = boundaryJsonObject(parsed, label);
+  if (JSON.stringify(normalized) !== value) throw new WorkspaceStoreCodecError(`${label} must be canonical JSON`);
+  return normalized;
+}
+
+function storedJsonArray(value: unknown, label: string): unknown[] {
+  if (typeof value !== "string") throw new WorkspaceStoreCodecError(`${label} must be JSON text`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    throw new WorkspaceStoreCodecError(`${label} must contain valid JSON`);
+  }
+  const normalized = boundaryJsonValue(parsed, label, { ancestors: new WeakSet<object>(), nodes: 0, textUnits: 0 });
+  if (!Array.isArray(normalized)) throw new WorkspaceStoreCodecError(`${label} must be a JSON array`);
+  if (JSON.stringify(normalized) !== value) throw new WorkspaceStoreCodecError(`${label} must be canonical JSON`);
+  return normalized;
+}
+
+function asResource(row: Row): Resource {
+  const title = boundaryText(row.title, "Resource title", 500);
+  if (title !== row.title) throw new WorkspaceStoreCodecError("Resource title must be canonical");
+  if (row.archived_at !== null && row.archived_at !== undefined) {
+    storedTimestamp(row.archived_at, "Resource archived_at");
+  }
+  return {
+    id: boundaryId(row.id, "Resource id"),
+    workspaceId: boundaryId(row.workspace_id, "Resource Workspace id"),
+    kind: resourceKind(row.kind, "Resource kind"),
+    title,
+    headRevisionId: row.head_revision_id == null
+      ? null
+      : boundaryId(row.head_revision_id, "Resource Head Revision id"),
+    defaultPinPolicy: resourcePinPolicy(row.default_pin_policy, "Resource default pin policy"),
+    archivedAt: row.archived_at == null ? null : Number(row.archived_at),
+    createdAt: storedTimestamp(row.created_at, "Resource created_at"),
+    updatedAt: storedTimestamp(row.updated_at, "Resource updated_at"),
+  };
+}
+
+function asResourceRevision(row: Row): ResourceRevision {
+  const sequence = boundarySafeInteger(row.sequence, "Resource Revision sequence", 1);
+  const summary = boundaryText(row.summary, "Resource Revision summary", 32_000);
+  if (summary !== row.summary) throw new WorkspaceStoreCodecError("Resource Revision summary must be canonical");
+  return {
+    id: boundaryId(row.id, "Resource Revision id"),
+    workspaceId: boundaryId(row.workspace_id, "Resource Revision Workspace id"),
+    resourceId: boundaryId(row.resource_id, "Resource Revision Resource id"),
+    sequence,
+    parentRevisionId: row.parent_revision_id == null
+      ? null
+      : boundaryId(row.parent_revision_id, "Resource Revision parent id"),
+    manifestPath: boundaryRelativePath(row.manifest_path, "Resource Revision manifest path"),
+    summary,
+    metadata: storedJsonObject(row.metadata_json, "Resource Revision metadata"),
+    checksum: boundaryChecksum(row.checksum, "Resource Revision checksum"),
+    provenance: storedJsonObject(row.provenance_json, "Resource Revision provenance"),
+    createdByRunId: row.created_by_run_id == null
+      ? null
+      : boundaryId(row.created_by_run_id, "Resource Revision creating Run id"),
+    createdAt: storedTimestamp(row.created_at, "Resource Revision created_at"),
+  };
+}
+
+function asResolvedContextItem(row: Row): ResolvedContextItem {
+  const ref = normalizeContextItemRef(
+    storedJsonObject(row.ref_json, "Context Pack item ref"),
+    "Context Pack item ref",
+  );
+  const resolvedKind = resolvedContextKind(row.resolved_kind, "Context Pack item resolved kind");
+  if (row.provided !== 0 && row.provided !== 1) {
+    throw new WorkspaceStoreCodecError("Context Pack item provided flag is invalid");
+  }
+  return {
+    ordinal: boundarySafeInteger(row.ordinal, "Context Pack item ordinal"),
+    ref,
+    resolvedKind,
+    artifactRevisionId: row.artifact_revision_id == null
+      ? null
+      : boundaryId(row.artifact_revision_id, "Context Pack Artifact Revision id"),
+    resourceRevisionId: row.resource_revision_id == null
+      ? null
+      : boundaryId(row.resource_revision_id, "Context Pack Resource Revision id"),
+    kernelRevisionId: row.kernel_revision_id == null
+      ? null
+      : boundaryId(row.kernel_revision_id, "Context Pack Kernel Revision id"),
+    checksum: boundaryChecksum(row.checksum, "Context Pack item checksum"),
+    reason: boundaryText(row.reason, "Context Pack item reason", 2_000),
+    trustLevel: contextTrustLevel(row.trust_level, "Context Pack item trust level"),
+    boundary: storedJsonObject(row.boundary_json, "Context Pack item boundary"),
+    tokenEstimate: boundarySafeInteger(row.token_estimate, "Context Pack item token estimate"),
+    provenance: storedJsonObject(row.provenance_json, "Context Pack item provenance"),
+    provided: row.provided === 1,
+  };
+}
+
+function asContextOmissions(value: unknown): ContextOmission[] {
+  return storedJsonArray(value, "Context Pack omissions").map(normalizeContextOmission);
+}
+
+function asContextPack(row: Row, itemRows: Row[]): ContextPack {
+  if (row.sealed !== 1) throw new WorkspaceStoreCodecError("Context Pack is not sealed");
+  const target = normalizeContextPackTarget({ type: row.scope_type, id: row.scope_id });
+  const items = itemRows.map(asResolvedContextItem);
+  for (let ordinal = 0; ordinal < items.length; ordinal += 1) {
+    if (items[ordinal]?.ordinal !== ordinal) {
+      throw new WorkspaceStoreCodecError("Context Pack item ordinals must be contiguous");
+    }
+  }
+  const tokenEstimate = boundarySafeInteger(row.token_estimate, "Context Pack token estimate");
+  let resolvedTokenEstimate = 0;
+  for (const item of items) {
+    if (item.tokenEstimate > Number.MAX_SAFE_INTEGER - resolvedTokenEstimate) {
+      throw new WorkspaceStoreCodecError("Context Pack item token estimate total exceeds the safe integer range");
+    }
+    resolvedTokenEstimate += item.tokenEstimate;
+  }
+  if (resolvedTokenEstimate !== tokenEstimate) {
+    throw new WorkspaceStoreCodecError("Context Pack token estimate does not match its resolved items");
+  }
+  return {
+    id: boundaryId(row.id, "Context Pack id"),
+    workspaceId: boundaryId(row.workspace_id, "Context Pack Workspace id"),
+    graphRevision: boundarySafeInteger(row.graph_revision, "Context Pack graph revision"),
+    target,
+    intent: agentIntent(row.intent, "Context Pack intent"),
+    messageChecksum: boundaryChecksum(row.message_checksum, "Context Pack message checksum"),
+    items,
+    omissions: asContextOmissions(row.omissions_json),
+    tokenEstimate,
+    manifestPath: boundaryRelativePath(row.manifest_path, "Context Pack manifest path"),
+    hash: boundaryChecksum(row.hash, "Context Pack hash"),
+    createdAt: storedTimestamp(row.created_at, "Context Pack created_at"),
+  };
+}
+
+function contextPackMatchesPersistInput(pack: ContextPack, input: PersistContextPackInput): boolean {
+  return pack.id === input.id
+    && pack.workspaceId === input.workspaceId
+    && pack.graphRevision === input.graphRevision
+    && pack.intent === input.intent
+    && pack.messageChecksum === input.messageChecksum
+    && pack.tokenEstimate === input.tokenEstimate
+    && pack.manifestPath === input.manifestPath
+    && pack.hash === input.hash
+    && isDeepStrictEqual(pack.target, input.target)
+    && isDeepStrictEqual(pack.omissions, input.omissions)
+    && isDeepStrictEqual(
+      pack.items.map(({ ordinal: _ordinal, ...item }) => item),
+      input.items,
+    );
+}
+
+function asContextPackItemUsage(row: Row): ContextPackItemUsage {
+  return {
+    contextPackId: boundaryId(row.context_pack_id, "Context Pack usage pack id"),
+    workspaceId: boundaryId(row.workspace_id, "Context Pack usage Workspace id"),
+    ordinal: boundarySafeInteger(row.ordinal, "Context Pack usage ordinal"),
+    sequence: boundarySafeInteger(row.sequence, "Context Pack usage sequence", 1),
+    usageKind: row.usage_kind === "observed-read" || row.usage_kind === "agent-declared-used"
+      ? row.usage_kind
+      : (() => { throw new WorkspaceStoreCodecError("Context Pack usage kind is invalid"); })(),
+    runId: row.run_id == null ? null : boundaryId(row.run_id, "Context Pack usage Run id"),
+    evidence: storedJsonObject(row.evidence_json, "Context Pack usage evidence"),
+    recordedAt: storedTimestamp(row.recorded_at, "Context Pack usage recorded_at"),
+  };
 }
 
 function safePathSegment(value: string): string {
@@ -259,6 +963,9 @@ interface WorkspaceReadContext {
   artifactRevisions: Map<string, ArtifactRevisionRecord>;
   validatedArtifactRevisionIds: Set<string>;
   visitingArtifactRevisionIds: Set<string>;
+  resourceRevisions: Map<string, ResourceRevision>;
+  validatedResourceRevisionIds: Set<string>;
+  visitingResourceRevisionIds: Set<string>;
   kernelRevisions: Map<string, SharedDesignKernelRevision>;
   validatedKernelRevisionIds: Set<string>;
   visitingKernelRevisionIds: Set<string>;
@@ -274,6 +981,9 @@ function createWorkspaceReadContext(): WorkspaceReadContext {
     artifactRevisions: new Map(),
     validatedArtifactRevisionIds: new Set(),
     visitingArtifactRevisionIds: new Set(),
+    resourceRevisions: new Map(),
+    validatedResourceRevisionIds: new Set(),
+    visitingResourceRevisionIds: new Set(),
     kernelRevisions: new Map(),
     validatedKernelRevisionIds: new Set(),
     visitingKernelRevisionIds: new Set(),
@@ -285,7 +995,12 @@ function createWorkspaceReadContext(): WorkspaceReadContext {
   };
 }
 
-export type WorkspacePointerKind = "artifact-head" | "kernel-head" | "active-snapshot";
+export type WorkspacePointerKind =
+  | "artifact-head"
+  | "resource-head"
+  | "resource-pin-policy"
+  | "kernel-head"
+  | "active-snapshot";
 
 export class WorkspacePointerConflictError extends Error {
   readonly pointer: WorkspacePointerKind;
@@ -308,6 +1023,30 @@ export class WorkspacePointerConflictError extends Error {
     this.ownerId = input.ownerId;
     this.expectedId = input.expectedId;
     this.actualId = input.actualId;
+  }
+}
+
+export class WorkspaceResourceNotFoundError extends Error {
+  readonly resourceId: string;
+
+  constructor(resourceId: string) {
+    super(`Resource not found: ${resourceId}`);
+    this.name = "WorkspaceResourceNotFoundError";
+    this.resourceId = resourceId;
+  }
+}
+
+export class WorkspaceResourceOwnershipError extends Error {
+  readonly resourceId: string;
+  readonly expectedProjectId: string;
+  readonly actualProjectId: string;
+
+  constructor(resourceId: string, expectedProjectId: string, actualProjectId: string) {
+    super(`Resource ${resourceId} belongs to another Project`);
+    this.name = "WorkspaceResourceOwnershipError";
+    this.resourceId = resourceId;
+    this.expectedProjectId = expectedProjectId;
+    this.actualProjectId = actualProjectId;
   }
 }
 
@@ -746,6 +1485,553 @@ export class WorkspaceStore {
     return this.requireGraphRevision(workspace.id, revision);
   }
 
+  listResources(projectId: string, options: { includeArchived?: boolean } = {}): Resource[] {
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return [];
+      const rows = this.db.prepare(
+        `SELECT * FROM resources
+         WHERE workspace_id = ? ${options.includeArchived ? "" : "AND archived_at IS NULL"}
+         ORDER BY created_at ASC, id COLLATE BINARY ASC`,
+      ).all(workspace.id) as Row[];
+      return rows.map(asResource);
+    });
+  }
+
+  getResourceForProject(projectId: string, resourceId: string): Resource | null {
+    return this.transactionRead(() => {
+      const row = this.db.prepare(
+        `SELECT resource.*, workspace.project_id
+         FROM resources resource
+         JOIN project_workspaces workspace ON workspace.id = resource.workspace_id
+         WHERE resource.id = ?`,
+      ).get(resourceId) as Row | undefined;
+      if (!row) return null;
+      const actualProjectId = requiredCell(row.project_id, "Resource owning Project id");
+      if (actualProjectId !== projectId) {
+        throw new WorkspaceResourceOwnershipError(resourceId, projectId, actualProjectId);
+      }
+      return asResource(row);
+    });
+  }
+
+  createResourceForProject(
+    projectId: string,
+    unsafeInput: CreateResourceForProjectInput,
+  ): CreateResourceForProjectResult {
+    const input = normalizeCreateResourceForProjectInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+      const current = this.getGraph(projectId);
+      if (current.revision !== input.baseGraphRevision) {
+        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, current.revision);
+      }
+      const resourceId = this.clock.id();
+      const nodeId = this.clock.id();
+      const commandId = this.clock.id();
+      const normalized = normalizeWorkspaceGraphMutationInput({
+        baseGraphRevision: input.baseGraphRevision,
+        expectedSnapshotId: input.expectedSnapshotId,
+        commands: [{
+          id: commandId,
+          type: "add-node",
+          node: {
+            id: nodeId,
+            kind: "resource",
+            name: input.title,
+            resourceId,
+            createIdentity: {
+              resourceKind: input.kind,
+              defaultPinPolicy: input.defaultPinPolicy,
+            },
+          },
+        }],
+      });
+      const result = this.applyGraphCommandsInTransaction(workspace, current, {
+        expectedSnapshotId: normalized.expectedSnapshotId,
+        commands: normalized.commands,
+        reason: "resource-created",
+        provenance: { kind: "graph-command", commandIds: [commandId] },
+      });
+      const resource = this.getResourceForProject(projectId, resourceId);
+      const node = result.graph.nodes.find(
+        (candidate): candidate is WorkspaceResourceNode => candidate.kind === "resource" && candidate.id === nodeId,
+      );
+      if (!resource || !node) throw new WorkspaceGraphValidationError("created Resource graph identity is not resolvable");
+      return { resource, node, graph: result.graph, snapshot: result.snapshot };
+    });
+  }
+
+  updateResourceForProject(
+    projectId: string,
+    resourceId: string,
+    unsafeInput: Extract<UpdateResourceForProjectInput, { action: "rename" }>,
+  ): { action: "rename"; resource: Resource; graph: WorkspaceGraph; snapshot: WorkspaceSnapshotRecord };
+  updateResourceForProject(
+    projectId: string,
+    resourceId: string,
+    unsafeInput: Extract<UpdateResourceForProjectInput, { action: "archive" }>,
+  ): { action: "archive"; resource: Resource; graph: WorkspaceGraph; snapshot: WorkspaceSnapshotRecord };
+  updateResourceForProject(
+    projectId: string,
+    resourceId: string,
+    unsafeInput: Extract<UpdateResourceForProjectInput, { action: "set-default-pin-policy" }>,
+  ): { action: "set-default-pin-policy"; resource: Resource };
+  updateResourceForProject(
+    projectId: string,
+    resourceId: string,
+    unsafeInput: UpdateResourceForProjectInput,
+  ): UpdateResourceForProjectResult {
+    const input = normalizeUpdateResourceForProjectInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+      const resource = this.requireResourceForProject(projectId, resourceId);
+      if (resource.archivedAt !== null) throw new WorkspaceGraphValidationError(`Resource ${resourceId} is archived`);
+      if (input.action === "set-default-pin-policy") {
+        this.guardPointer({
+          pointer: "resource-pin-policy",
+          workspaceId: workspace.id,
+          ownerId: resource.id,
+          expectedId: input.expectedDefaultPinPolicy,
+          actualId: resource.defaultPinPolicy,
+        });
+        const updated = this.db.prepare(
+          `UPDATE resources SET default_pin_policy = ?, updated_at = ?
+           WHERE id = ? AND workspace_id = ? AND default_pin_policy = ? AND archived_at IS NULL`,
+        ).run(input.defaultPinPolicy, this.clock.now(), resource.id, workspace.id, input.expectedDefaultPinPolicy);
+        if (Number(updated.changes) !== 1) {
+          const actual = this.requireResourceForProject(projectId, resourceId);
+          throw new WorkspacePointerConflictError({
+            pointer: "resource-pin-policy",
+            workspaceId: workspace.id,
+            ownerId: resource.id,
+            expectedId: input.expectedDefaultPinPolicy,
+            actualId: actual.defaultPinPolicy,
+          });
+        }
+        return {
+          action: "set-default-pin-policy",
+          resource: this.requireResourceForProject(projectId, resourceId),
+        };
+      }
+
+      const current = this.getGraph(projectId);
+      if (current.revision !== input.baseGraphRevision) {
+        throw new WorkspaceRevisionConflictError(input.baseGraphRevision, current.revision);
+      }
+      const node = current.nodes.find(
+        (candidate): candidate is WorkspaceResourceNode => (
+          candidate.kind === "resource" && candidate.resourceId === resourceId
+        ),
+      );
+      if (!node) throw new WorkspaceGraphValidationError(`Resource ${resourceId} has no active graph node`);
+      const commandId = this.clock.id();
+      const command: WorkspaceGraphCommand = input.action === "rename"
+        ? { id: commandId, type: "rename-node", nodeId: node.id, name: input.title }
+        : { id: commandId, type: "archive-node", nodeId: node.id };
+      const normalized = normalizeWorkspaceGraphMutationInput({
+        baseGraphRevision: input.baseGraphRevision,
+        expectedSnapshotId: input.expectedSnapshotId,
+        commands: [command],
+      });
+      const result = this.applyGraphCommandsInTransaction(workspace, current, {
+        expectedSnapshotId: normalized.expectedSnapshotId,
+        commands: normalized.commands,
+        reason: input.action === "rename" ? "resource-renamed" : "resource-archived",
+        provenance: { kind: "graph-command", commandIds: [commandId] },
+      });
+      return {
+        action: input.action,
+        resource: this.requireResourceForProject(projectId, resourceId),
+        graph: result.graph,
+        snapshot: result.snapshot,
+      };
+    });
+  }
+
+  getResourceRevisionForProject(
+    projectId: string,
+    resourceId: string,
+    revisionId: string,
+  ): ResourceRevision | null {
+    return this.transactionRead(() => {
+      this.requireResourceForProject(projectId, resourceId);
+      const row = this.db.prepare(
+        "SELECT * FROM resource_revisions WHERE id = ?",
+      ).get(revisionId) as Row | undefined;
+      if (!row) return null;
+      const revision = asResourceRevision(row);
+      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+      if (revision.workspaceId !== workspace.id || revision.resourceId !== resourceId) {
+        throw new WorkspaceResourceOwnershipError(resourceId, projectId, this.projectIdForWorkspace(revision.workspaceId));
+      }
+      this.validateResourceRevisionLineage(revision);
+      return revision;
+    });
+  }
+
+  listResourceRevisions(projectId: string, resourceId: string): ResourceRevision[] {
+    return this.transactionRead(() => {
+      const resource = this.requireResourceForProject(projectId, resourceId);
+      const rows = this.db.prepare(
+        `SELECT * FROM resource_revisions
+         WHERE workspace_id = ? AND resource_id = ?
+         ORDER BY sequence ASC, id COLLATE BINARY ASC`,
+      ).all(resource.workspaceId, resourceId) as Row[];
+      const revisions = rows.map(asResourceRevision);
+      for (const revision of revisions) this.validateResourceRevisionLineage(revision);
+      return revisions;
+    });
+  }
+
+  createResourceRevisionCandidateForProject(
+    projectId: string,
+    resourceId: string,
+    unsafeInput: CreateResourceRevisionCandidateInput,
+  ): ResourceRevision {
+    const input = normalizeCreateResourceRevisionCandidateInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const resource = this.requireResourceForProject(projectId, resourceId);
+      if (resource.archivedAt !== null) throw new WorkspaceGraphValidationError(`Resource ${resource.id} is archived`);
+      this.guardPointer({
+        pointer: "resource-head",
+        workspaceId: resource.workspaceId,
+        ownerId: resource.id,
+        expectedId: input.parentRevisionId,
+        actualId: resource.headRevisionId,
+      });
+      if (this.db.prepare("SELECT 1 FROM resource_revisions WHERE id = ?").get(input.revisionId)) {
+        throw new WorkspaceGraphValidationError(`Resource Revision identity collision: ${input.revisionId}`);
+      }
+      this.validateRunOwnership(resource.workspaceId, input.createdByRunId ?? null, "Resource Revision");
+      const sequence = this.nextSafeSequence(
+        "resource_revisions",
+        "resource_id",
+        resource.id,
+        "Resource Revision",
+      );
+      this.db.prepare(
+        `INSERT INTO resource_revisions (
+           id, workspace_id, resource_id, sequence, parent_revision_id, manifest_path, summary,
+           metadata_json, checksum, provenance_json, created_by_run_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        input.revisionId,
+        resource.workspaceId,
+        resource.id,
+        sequence,
+        input.parentRevisionId,
+        input.manifestPath,
+        input.summary,
+        canonicalJsonText(input.metadata, "Resource Revision metadata"),
+        input.checksum,
+        canonicalJsonText(input.provenance, "Resource Revision provenance"),
+        input.createdByRunId ?? null,
+        this.clock.now(),
+      );
+      return this.requireResourceRevision(input.revisionId);
+    });
+  }
+
+  publishResourceRevisionForProject(
+    projectId: string,
+    resourceId: string,
+    revisionId: string,
+    unsafeExpected: ResourcePublicationExpectation,
+  ): WorkspaceSnapshotRecord {
+    const expected = normalizeResourcePublicationExpectation(unsafeExpected);
+    return this.transactionImmediate(() => {
+      const resource = this.requireResourceForProject(projectId, resourceId);
+      if (resource.archivedAt !== null) throw new WorkspaceGraphValidationError(`Resource ${resource.id} is archived`);
+      const revision = this.requireResourceRevision(revisionId);
+      if (revision.workspaceId !== resource.workspaceId || revision.resourceId !== resource.id) {
+        throw new WorkspaceGraphValidationError("Resource Revision belongs to another Resource or Workspace");
+      }
+      this.guardPointer({
+        pointer: "resource-head",
+        workspaceId: resource.workspaceId,
+        ownerId: resource.id,
+        expectedId: expected.expectedHeadRevisionId,
+        actualId: resource.headRevisionId,
+      });
+      if (revision.parentRevisionId !== expected.expectedHeadRevisionId) {
+        throw new WorkspaceGraphValidationError("Resource Revision parent does not match the expected Head");
+      }
+      if (expected.runId !== undefined && expected.runId !== revision.createdByRunId) {
+        throw new WorkspaceGraphValidationError("Resource publication Run does not match candidate provenance");
+      }
+      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+      this.guardPointer({
+        pointer: "active-snapshot",
+        workspaceId: workspace.id,
+        ownerId: workspace.id,
+        expectedId: expected.expectedSnapshotId,
+        actualId: workspace.activeSnapshotId,
+      });
+      const parent = this.requireSnapshot(workspace.id, expected.expectedSnapshotId);
+      const parentPin = parent.resourceRevisions[resource.id] ?? null;
+      if (parentPin !== expected.expectedHeadRevisionId) {
+        throw new WorkspaceGraphValidationError("Resource Head and base Snapshot pin are incoherent");
+      }
+      const graphNode = parent.graph.nodes.find(
+        (node) => node.kind === "resource" && node.resourceId === resource.id,
+      );
+      if (!graphNode) throw new WorkspaceGraphValidationError("Resource publication requires an active graph node");
+      const movedHead = this.db.prepare(
+        `UPDATE resources SET head_revision_id = ?, updated_at = ?
+         WHERE id = ? AND workspace_id = ? AND head_revision_id IS ? AND archived_at IS NULL`,
+      ).run(revision.id, this.clock.now(), resource.id, workspace.id, expected.expectedHeadRevisionId);
+      if (Number(movedHead.changes) !== 1) {
+        const actual = this.requireResourceForProject(projectId, resourceId);
+        throw new WorkspacePointerConflictError({
+          pointer: "resource-head",
+          workspaceId: workspace.id,
+          ownerId: resource.id,
+          expectedId: expected.expectedHeadRevisionId,
+          actualId: actual.headRevisionId,
+        });
+      }
+      const provenance: Extract<WorkspaceSnapshotProvenance, { kind: "resource-publication" }> = {
+        kind: "resource-publication",
+        resourceRevisionId: revision.id,
+        ...(revision.createdByRunId === null ? {} : { runId: revision.createdByRunId }),
+        ...(expected.planId === undefined ? {} : { planId: expected.planId }),
+        ...(expected.taskId === undefined ? {} : { taskId: expected.taskId }),
+      };
+      const snapshot = this.createSnapshotInTransaction(workspace.id, {
+        expectedSnapshotId: expected.expectedSnapshotId,
+        graphRevision: workspace.graphRevision,
+        reason: expected.reason,
+        provenance,
+        resourceOverrides: [{ resourceId: resource.id, revisionId: revision.id }],
+        createdByRunId: revision.createdByRunId,
+      });
+      const movedSnapshot = this.db.prepare(
+        `UPDATE project_workspaces SET active_snapshot_id = ?, updated_at = ?
+         WHERE id = ? AND active_snapshot_id = ? AND graph_revision = ? AND active_kernel_revision_id = ?`,
+      ).run(
+        snapshot.id,
+        this.clock.now(),
+        workspace.id,
+        expected.expectedSnapshotId,
+        workspace.graphRevision,
+        workspace.activeKernelRevisionId,
+      );
+      if (Number(movedSnapshot.changes) !== 1) {
+        const actual = this.requireWorkspaceById(workspace.id);
+        throw new WorkspacePointerConflictError({
+          pointer: "active-snapshot",
+          workspaceId: workspace.id,
+          ownerId: workspace.id,
+          expectedId: expected.expectedSnapshotId,
+          actualId: actual.activeSnapshotId,
+        });
+      }
+      return snapshot;
+    });
+  }
+
+  persistContextPack(unsafeInput: PersistContextPackInput): ContextPack {
+    const input = normalizePersistContextPackInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      this.requireWorkspaceById(input.workspaceId);
+      this.requireGraphRevision(input.workspaceId, input.graphRevision);
+      const existing = this.findContextPackByHash(input.workspaceId, input.hash);
+      if (existing) {
+        if (contextPackMatchesPersistInput(existing, input)) return existing;
+        throw new WorkspaceGraphValidationError("Context Pack hash collision has different immutable content");
+      }
+      this.validateContextPackTargetOwnership(input.workspaceId, input.target);
+      const now = this.clock.now();
+      this.db.prepare(
+        `INSERT INTO context_packs (
+           id, workspace_id, scope_type, scope_id, graph_revision, intent,
+           message_checksum, manifest_path, token_estimate, omissions_json,
+           hash, created_at, sealed
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      ).run(
+        input.id,
+        input.workspaceId,
+        input.target.type,
+        input.target.id,
+        input.graphRevision,
+        input.intent,
+        input.messageChecksum,
+        input.manifestPath,
+        input.tokenEstimate,
+        canonicalJsonText(input.omissions, "Context Pack omissions"),
+        input.hash,
+        now,
+      );
+      const insert = this.db.prepare(
+        `INSERT INTO context_pack_items (
+           context_pack_id, workspace_id, ordinal, ref_json, resolved_kind,
+           artifact_revision_id, resource_revision_id, kernel_revision_id,
+           checksum, reason, trust_level, boundary_json, token_estimate,
+           provenance_json, provided
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (let ordinal = 0; ordinal < input.items.length; ordinal += 1) {
+        const item = input.items[ordinal]!;
+        this.validateContextPackItemIdentity(input.workspaceId, item);
+        insert.run(
+          input.id,
+          input.workspaceId,
+          ordinal,
+          canonicalJsonText(item.ref, `Context Pack item ${ordinal} ref`),
+          item.resolvedKind,
+          item.artifactRevisionId ?? null,
+          item.resourceRevisionId ?? null,
+          item.kernelRevisionId ?? null,
+          item.checksum,
+          item.reason,
+          item.trustLevel,
+          canonicalJsonText(item.boundary, `Context Pack item ${ordinal} boundary`),
+          item.tokenEstimate,
+          canonicalJsonText(item.provenance, `Context Pack item ${ordinal} provenance`),
+          item.provided ? 1 : 0,
+        );
+      }
+      const sealed = this.db.prepare(
+        "UPDATE context_packs SET sealed = 1 WHERE id = ? AND workspace_id = ? AND sealed = 0",
+      ).run(input.id, input.workspaceId);
+      if (Number(sealed.changes) !== 1) throw new WorkspaceGraphValidationError(`Context Pack ${input.id} could not be sealed`);
+      const result = this.getContextPack(input.workspaceId, input.id);
+      if (!result) throw new WorkspaceGraphValidationError(`Context Pack ${input.id} is not resolvable`);
+      return result;
+    });
+  }
+
+  getContextPack(workspaceId: string, contextPackId: string): ContextPack | null {
+    return this.transactionRead(() => {
+      const row = this.db.prepare(
+        "SELECT * FROM context_packs WHERE id = ? AND workspace_id = ?",
+      ).get(contextPackId, workspaceId) as Row | undefined;
+      if (!row) return null;
+      const items = this.db.prepare(
+        `SELECT * FROM context_pack_items
+         WHERE context_pack_id = ? AND workspace_id = ? ORDER BY ordinal ASC`,
+      ).all(contextPackId, workspaceId) as Row[];
+      const pack = asContextPack(row, items);
+      this.validateContextPackTargetOwnership(pack.workspaceId, pack.target, true);
+      for (const item of pack.items) this.validateContextPackItemIdentity(pack.workspaceId, item);
+      return pack;
+    });
+  }
+
+  findContextPackByHash(workspaceId: string, hash: string): ContextPack | null {
+    const normalizedWorkspaceId = boundaryId(workspaceId, "Context Pack Workspace id");
+    const normalizedHash = boundaryChecksum(hash, "Context Pack hash");
+    return this.transactionRead(() => {
+      const row = this.db.prepare(
+        "SELECT id FROM context_packs WHERE workspace_id = ? AND hash = ? AND sealed = 1",
+      ).get(normalizedWorkspaceId, normalizedHash) as { id: string } | undefined;
+      return row ? this.getContextPack(normalizedWorkspaceId, row.id) : null;
+    });
+  }
+
+  recordContextPackItemUsage(unsafeInput: RecordContextPackItemUsageInput): ContextPackItemUsage {
+    const input = normalizeRecordContextPackItemUsageInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const pack = this.getContextPack(input.workspaceId, input.contextPackId);
+      if (!pack) throw new WorkspaceGraphValidationError(`Context Pack ${input.contextPackId} was not found`);
+      const item = pack.items.find(({ ordinal }) => ordinal === input.ordinal);
+      if (!item) {
+        throw new WorkspaceGraphValidationError(`Context Pack item ${input.ordinal} was not found`);
+      }
+      if (!item.provided) {
+        throw new WorkspaceGraphValidationError(`Context Pack item ${input.ordinal} was not provided to the Agent`);
+      }
+      this.validateRunOwnership(input.workspaceId, input.runId ?? null, "Context Pack usage");
+      this.validateRunContextPackBinding(
+        input.workspaceId,
+        input.contextPackId,
+        input.runId ?? null,
+        "Context Pack usage",
+      );
+      const rows = this.db.prepare(
+        `SELECT CAST(sequence AS TEXT) AS sequence_text, typeof(sequence) AS sequence_type
+         FROM context_pack_item_usage
+         WHERE context_pack_id = ? AND ordinal = ?`,
+      ).all(input.contextPackId, input.ordinal) as Array<{ sequence_text: unknown; sequence_type: unknown }>;
+      let maximum = 0n;
+      for (const row of rows) {
+        if (row.sequence_type !== "integer" || typeof row.sequence_text !== "string" || !/^[1-9][0-9]*$/.test(row.sequence_text)) {
+          throw new WorkspaceGraphValidationError("Context Pack usage sequence is corrupt");
+        }
+        const sequence = BigInt(row.sequence_text);
+        if (sequence > BigInt(Number.MAX_SAFE_INTEGER)) {
+          throw new WorkspaceGraphValidationError("Context Pack usage sequence exceeds the safe integer range");
+        }
+        if (sequence > maximum) maximum = sequence;
+      }
+      if (maximum >= BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new WorkspaceGraphValidationError("Context Pack usage sequence is exhausted");
+      }
+      const sequence = Number(maximum + 1n);
+      this.db.prepare(
+        `INSERT INTO context_pack_item_usage (
+           context_pack_id, workspace_id, ordinal, sequence, usage_kind, run_id, evidence_json, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        input.contextPackId,
+        input.workspaceId,
+        input.ordinal,
+        sequence,
+        input.usageKind,
+        input.runId ?? null,
+        canonicalJsonText(input.evidence, "Context Pack usage evidence"),
+        this.clock.now(),
+      );
+      const row = this.db.prepare(
+        `SELECT * FROM context_pack_item_usage
+         WHERE context_pack_id = ? AND ordinal = ? AND sequence = ?`,
+      ).get(input.contextPackId, input.ordinal, sequence) as Row;
+      return asContextPackItemUsage(row);
+    });
+  }
+
+  listContextPackItemUsage(
+    workspaceId: string,
+    contextPackId: string,
+    ordinal?: number,
+  ): ContextPackItemUsage[] {
+    const normalizedWorkspaceId = boundaryId(workspaceId, "Context Pack usage Workspace id");
+    const normalizedContextPackId = boundaryId(contextPackId, "Context Pack usage pack id");
+    const normalizedOrdinal = ordinal === undefined
+      ? undefined
+      : boundarySafeInteger(ordinal, "Context Pack usage ordinal");
+    return this.transactionRead(() => {
+      const pack = this.getContextPack(normalizedWorkspaceId, normalizedContextPackId);
+      if (!pack) return [];
+      const rows = normalizedOrdinal === undefined
+        ? this.db.prepare(
+            `SELECT * FROM context_pack_item_usage
+             WHERE workspace_id = ? AND context_pack_id = ?
+             ORDER BY ordinal ASC, sequence ASC`,
+          ).all(normalizedWorkspaceId, normalizedContextPackId)
+        : this.db.prepare(
+            `SELECT * FROM context_pack_item_usage
+             WHERE workspace_id = ? AND context_pack_id = ? AND ordinal = ?
+             ORDER BY sequence ASC`,
+          ).all(normalizedWorkspaceId, normalizedContextPackId, normalizedOrdinal);
+      const usage = (rows as Row[]).map(asContextPackItemUsage);
+      const expectedSequenceByOrdinal = new Map<number, number>();
+      for (const entry of usage) {
+        const item = pack.items[entry.ordinal];
+        if (!item || !item.provided) {
+          throw new WorkspaceStoreCodecError("Context Pack usage references an item that was not provided");
+        }
+        const expectedSequence = (expectedSequenceByOrdinal.get(entry.ordinal) ?? 0) + 1;
+        if (entry.sequence !== expectedSequence) {
+          throw new WorkspaceStoreCodecError("Context Pack usage sequence is not contiguous");
+        }
+        expectedSequenceByOrdinal.set(entry.ordinal, expectedSequence);
+      }
+      return usage;
+    });
+  }
+
   applyGraphCommands(projectId: string, unsafeInput: WorkspaceGraphMutationInput): WorkspaceGraphMutationResult {
     const input = normalizeWorkspaceGraphMutationInput(unsafeInput);
     const payloads = input.commands.map((command) => JSON.stringify(command));
@@ -1019,6 +2305,15 @@ export class WorkspaceStore {
       if (revision === null) return null;
       this.validateArtifactRevisionLineage(revision);
       return revision;
+    });
+  }
+
+  getArtifactRevisionContextChecksum(revisionId: string): string | null {
+    return this.transactionRead(() => {
+      const revision = this.loadArtifactRevision(revisionId);
+      if (revision === null) return null;
+      this.validateArtifactRevisionLineage(revision);
+      return this.computeArtifactRevisionContextChecksum(revision);
     });
   }
 
@@ -2594,6 +3889,87 @@ export class WorkspaceStore {
     return asProjectWorkspace(row);
   }
 
+  private projectIdForWorkspace(workspaceId: string): string {
+    const row = this.db.prepare("SELECT project_id FROM project_workspaces WHERE id = ?")
+      .get(workspaceId) as { project_id: unknown } | undefined;
+    return row ? requiredCell(row.project_id, "Workspace Project id") : "unknown";
+  }
+
+  private requireResourceForProject(projectId: string, resourceId: string): Resource {
+    const row = this.db.prepare(
+      `SELECT resource.*, workspace.project_id
+       FROM resources resource
+       JOIN project_workspaces workspace ON workspace.id = resource.workspace_id
+       WHERE resource.id = ?`,
+    ).get(resourceId) as Row | undefined;
+    if (!row) throw new WorkspaceResourceNotFoundError(resourceId);
+    const actualProjectId = requiredCell(row.project_id, "Resource owning Project id");
+    if (actualProjectId !== projectId) {
+      throw new WorkspaceResourceOwnershipError(resourceId, projectId, actualProjectId);
+    }
+    return asResource(row);
+  }
+
+  private loadResourceRevision(revisionId: string): ResourceRevision | null {
+    const context = this.readContext();
+    const cached = context.resourceRevisions.get(revisionId);
+    if (cached !== undefined) return cached;
+    const row = this.db.prepare("SELECT * FROM resource_revisions WHERE id = ?")
+      .get(revisionId) as Row | undefined;
+    if (!row) return null;
+    const revision = asResourceRevision(row);
+    context.resourceRevisions.set(revision.id, revision);
+    return revision;
+  }
+
+  private requireResourceRevision(revisionId: string): ResourceRevision {
+    const revision = this.loadResourceRevision(revisionId);
+    if (!revision) throw new Error(`Resource Revision not found: ${revisionId}`);
+    this.validateResourceRevisionLineage(revision);
+    return revision;
+  }
+
+  private validateResourceRevisionLineage(revision: ResourceRevision): void {
+    const context = this.readContext();
+    if (context.validatedResourceRevisionIds.has(revision.id)) return;
+    const path: ResourceRevision[] = [];
+    let child = revision;
+    try {
+      while (!context.validatedResourceRevisionIds.has(child.id)) {
+        if (context.visitingResourceRevisionIds.has(child.id)) {
+          throw new WorkspaceGraphValidationError(`Resource Revision ${revision.id} parent lineage contains a cycle`);
+        }
+        context.visitingResourceRevisionIds.add(child.id);
+        path.push(child);
+        const resource = this.db.prepare(
+          "SELECT 1 FROM resources WHERE id = ? AND workspace_id = ?",
+        ).get(child.resourceId, child.workspaceId);
+        if (!resource) {
+          throw new WorkspaceGraphValidationError(`Resource Revision ${revision.id} owner is not resolvable`);
+        }
+        this.validateRunOwnership(child.workspaceId, child.createdByRunId, "Resource Revision");
+        if (child.parentRevisionId === null) break;
+        const parent = this.loadResourceRevision(child.parentRevisionId);
+        if (!parent) {
+          throw new WorkspaceGraphValidationError(`Resource Revision ${revision.id} parent is not resolvable`);
+        }
+        if (parent.workspaceId !== child.workspaceId
+          || parent.resourceId !== child.resourceId
+          || parent.sequence >= child.sequence) {
+          throw new WorkspaceGraphValidationError(
+            `Resource Revision ${revision.id} parent must be an earlier Revision of the same Resource`,
+          );
+        }
+        child = parent;
+      }
+      for (let index = path.length - 1; index >= 0; index -= 1) {
+        context.validatedResourceRevisionIds.add(path[index]!.id);
+      }
+    } finally {
+      for (const traversed of path) context.visitingResourceRevisionIds.delete(traversed.id);
+    }
+  }
+
   private requireArtifact(artifactId: string): WorkspaceArtifactRecord {
     const artifact = this.getArtifact(artifactId);
     if (!artifact) throw new Error(`Artifact not found: ${artifactId}`);
@@ -2621,6 +3997,22 @@ export class WorkspaceStore {
     const revision = asOwnedArtifactRevision(row);
     context.artifactRevisions.set(revision.id, revision);
     return revision;
+  }
+
+  private computeArtifactRevisionContextChecksum(revision: ArtifactRevisionRecord): string {
+    const dependencyRows = this.db.prepare(
+      `SELECT * FROM artifact_revision_dependencies
+       WHERE revision_id = ? ORDER BY instance_id ASC`,
+    ).all(revision.id) as Row[];
+    const dependencies = dependencyRows.map(asArtifactRevisionDependency);
+    this.validateArtifactDependencyRecords(revision, dependencies);
+    const resourceRows = this.db.prepare(
+      `SELECT * FROM artifact_revision_resources
+       WHERE revision_id = ? ORDER BY resource_id ASC`,
+    ).all(revision.id) as Row[];
+    const resourcePins = resourceRows.map(asArtifactRevisionResourcePin);
+    this.validateArtifactResourcePinRecords(revision, resourcePins);
+    return artifactRevisionContextChecksum({ revision, dependencies, resourcePins });
   }
 
   private requireArtifactRevision(revisionId: string): ArtifactRevisionRecord {
@@ -2883,8 +4275,8 @@ export class WorkspaceStore {
   }
 
   private nextSafeSequence(
-    table: "artifact_revisions" | "shared_design_kernel_revisions" | "workspace_snapshots",
-    ownerColumn: "track_id" | "workspace_id",
+    table: "artifact_revisions" | "resource_revisions" | "shared_design_kernel_revisions" | "workspace_snapshots",
+    ownerColumn: "track_id" | "resource_id" | "workspace_id",
     ownerId: string,
     label: string,
   ): number {
@@ -2920,6 +4312,132 @@ export class WorkspaceStore {
        WHERE workspace.id = ? AND run.id = ?`,
     ).get(workspaceId, runId);
     if (!row) throw new WorkspaceGraphValidationError(`${label} Run belongs to another Project or does not exist`);
+  }
+
+  private validateRunContextPackBinding(
+    workspaceId: string,
+    contextPackId: string,
+    runId: string | null,
+    label: string,
+  ): void {
+    if (runId === null) return;
+    const row = this.db.prepare(
+      `SELECT 1
+       FROM runs run
+       JOIN context_packs pack
+         ON pack.id = ? AND pack.workspace_id = ?
+       WHERE run.id = ?
+         AND run.context_pack_id = pack.id
+         AND run.context_pack_hash = pack.hash`,
+    ).get(contextPackId, workspaceId, runId);
+    if (!row) throw new WorkspaceGraphValidationError(`${label} Run is not bound to the exact Context Pack`);
+  }
+
+  private validateContextPackTargetOwnership(
+    workspaceId: string,
+    target: AgentScope,
+    allowArchived = false,
+  ): void {
+    if (target.type === "workspace") {
+      if (target.id !== workspaceId) {
+        throw new WorkspaceGraphValidationError("Context Pack target belongs to another Workspace");
+      }
+      return;
+    }
+    const table = target.type === "artifact" ? "workspace_artifacts" : "resources";
+    const row = this.db.prepare(
+      `SELECT archived_at FROM ${table} WHERE id = ? AND workspace_id = ?`,
+    ).get(target.id, workspaceId) as { archived_at: number | null } | undefined;
+    if (!row) throw new WorkspaceGraphValidationError("Context Pack target belongs to another Workspace");
+    if (!allowArchived && row.archived_at !== null) {
+      throw new WorkspaceGraphValidationError("Context Pack target is archived");
+    }
+  }
+
+  private validateContextPackItemIdentity(
+    workspaceId: string,
+    item: PersistContextPackItemInput,
+  ): void {
+    const exactRevisionId = item.resolvedKind === "artifact-revision"
+      ? item.artifactRevisionId ?? null
+      : item.resolvedKind === "resource-revision"
+        ? item.resourceRevisionId ?? null
+        : item.resolvedKind === "kernel-revision"
+          ? item.kernelRevisionId ?? null
+          : null;
+    const refRevisionId = "revisionId" in item.ref ? item.ref.revisionId : undefined;
+    if (item.resolvedKind !== "inline" && refRevisionId !== exactRevisionId) {
+      throw new WorkspaceGraphValidationError("Context Pack ref Revision does not match its exact resolved pin");
+    }
+    if (item.resolvedKind === "inline" && item.ref.kind !== "inline") {
+      throw new WorkspaceGraphValidationError("Context Pack inline item ref is invalid");
+    }
+    if (item.resolvedKind === "artifact-revision") {
+      if (!item.artifactRevisionId) throw new WorkspaceGraphValidationError("Context Pack Artifact Revision pin is missing");
+      const row = this.db.prepare(
+        `SELECT revision.artifact_id
+         FROM artifact_revisions revision
+         WHERE revision.id = ? AND revision.workspace_id = ? AND revision.sealed = 1
+           AND EXISTS (
+             SELECT 1 FROM workspace_snapshot_artifacts mapping
+             JOIN workspace_snapshots snapshot
+               ON snapshot.id = mapping.snapshot_id AND snapshot.workspace_id = mapping.workspace_id
+             WHERE mapping.revision_id = revision.id
+               AND mapping.workspace_id = revision.workspace_id
+               AND snapshot.sealed = 1
+           )`,
+      ).get(item.artifactRevisionId, workspaceId) as { artifact_id: string } | undefined;
+      const revision = row ? this.loadArtifactRevision(item.artifactRevisionId) : null;
+      if (!row || !revision || item.checksum !== this.computeArtifactRevisionContextChecksum(revision)
+        || item.ref.kind !== "artifact" || item.ref.id !== row.artifact_id) {
+        throw new WorkspaceGraphValidationError("Context Pack Artifact Revision ownership is invalid");
+      }
+      return;
+    }
+    if (item.resolvedKind === "resource-revision") {
+      if (!item.resourceRevisionId) throw new WorkspaceGraphValidationError("Context Pack Resource Revision pin is missing");
+      const row = this.db.prepare(
+        `SELECT revision.resource_id, revision.checksum, resource.kind
+         FROM resource_revisions revision
+         JOIN resources resource
+           ON resource.id = revision.resource_id AND resource.workspace_id = revision.workspace_id
+         WHERE revision.id = ? AND revision.workspace_id = ?
+           AND EXISTS (
+             SELECT 1 FROM workspace_snapshot_resources mapping
+             JOIN workspace_snapshots snapshot
+               ON snapshot.id = mapping.snapshot_id AND snapshot.workspace_id = mapping.workspace_id
+             WHERE mapping.revision_id = revision.id
+               AND mapping.workspace_id = revision.workspace_id
+               AND snapshot.sealed = 1
+           )`,
+      ).get(item.resourceRevisionId, workspaceId) as {
+        resource_id: string;
+        checksum: string;
+        kind: string;
+      } | undefined;
+      if (!row || item.checksum !== row.checksum || item.ref.kind !== "resource"
+        || item.ref.id !== row.resource_id || item.ref.resourceKind !== row.kind) {
+        throw new WorkspaceGraphValidationError("Context Pack Resource Revision ownership is invalid");
+      }
+      return;
+    }
+    if (item.resolvedKind === "kernel-revision") {
+      if (!item.kernelRevisionId) throw new WorkspaceGraphValidationError("Context Pack Kernel Revision pin is missing");
+      const row = this.db.prepare(
+        `SELECT revision.id, revision.checksum
+         FROM shared_design_kernel_revisions revision
+         WHERE revision.id = ? AND revision.workspace_id = ?
+           AND EXISTS (
+             SELECT 1 FROM workspace_snapshots snapshot
+             WHERE snapshot.kernel_revision_id = revision.id
+               AND snapshot.workspace_id = revision.workspace_id
+               AND snapshot.sealed = 1
+           )`,
+      ).get(item.kernelRevisionId, workspaceId) as { id: string; checksum: string } | undefined;
+      if (!row || item.checksum !== row.checksum || item.ref.kind !== "kernel" || item.ref.id !== row.id) {
+        throw new WorkspaceGraphValidationError("Context Pack Kernel Revision ownership is invalid");
+      }
+    }
   }
 
   private validateArtifactRevisionPins(
@@ -3847,9 +5365,12 @@ export class WorkspaceStore {
       if (!resource) {
         throw new WorkspaceGraphValidationError(`Workspace Snapshot Resource ${resourceId} is not resolvable`);
       }
-      if (resource.head_revision_id !== null && !resources.has(resourceId)) {
+      const mappedRevisionId = resources.get(resourceId) ?? null;
+      if (resource.head_revision_id !== mappedRevisionId) {
         throw new WorkspaceGraphValidationError(
-          `Workspace Snapshot Resource ${resourceId} with a Head requires an explicit Snapshot pin`,
+          resource.head_revision_id === null
+            ? `Workspace Snapshot Resource ${resourceId} cannot pin a Revision while its Head is null`
+            : `Workspace Snapshot Resource ${resourceId} with a Head requires an explicit Snapshot pin matching its exact current Head`,
         );
       }
     }
@@ -3893,6 +5414,7 @@ export class WorkspaceStore {
         context.visitingSnapshotRecordIds.add(cursor.id);
         pending.push(cursor);
         const needsParentRecord = cursor.provenance.kind === "artifact-publication"
+          || cursor.provenance.kind === "resource-publication"
           || cursor.provenance.kind === "kernel-publication";
         if (!needsParentRecord || cursor.parentSnapshotId === null) break;
         const parent = this.loadSnapshotBase(cursor.parentSnapshotId);
@@ -3977,6 +5499,41 @@ export class WorkspaceStore {
         || record.createdByRunId !== revision.producedByRunId) {
         throw new WorkspaceGraphValidationError(
           `Artifact publication Snapshot ${record.id} audit provenance does not match immutable history`,
+        );
+      }
+    }
+    if (record.provenance.kind === "resource-publication") {
+      if (record.parentSnapshotId === null) {
+        throw new WorkspaceGraphValidationError(
+          `Resource publication Snapshot ${record.id} must be a direct successor`,
+        );
+      }
+      const revision = this.requireResourceRevision(record.provenance.resourceRevisionId);
+      const parent = context.snapshotRecords.get(record.parentSnapshotId);
+      if (!parent) {
+        throw new WorkspaceGraphValidationError(
+          `Resource publication Snapshot ${record.id} parent audit record is not resolvable`,
+        );
+      }
+      const expectedResourceRevisions = {
+        ...parent.resourceRevisions,
+        [revision.resourceId]: revision.id,
+      };
+      const sortedEntries = (value: Record<string, unknown>): Array<[string, unknown]> => (
+        Object.entries(value).sort(([left], [right]) => compareBinary(left, right))
+      );
+      const provenanceRunId = record.provenance.runId ?? null;
+      if (revision.workspaceId !== workspaceId
+        || (parent.resourceRevisions[revision.resourceId] ?? null) !== revision.parentRevisionId
+        || !isDeepStrictEqual(sortedEntries(record.resourceRevisions), sortedEntries(expectedResourceRevisions))
+        || !isDeepStrictEqual(sortedEntries(record.artifactTracks), sortedEntries(parent.artifactTracks))
+        || !isDeepStrictEqual(sortedEntries(record.artifactRevisions), sortedEntries(parent.artifactRevisions))
+        || record.graphRevision !== parent.graphRevision
+        || record.kernelRevisionId !== parent.kernelRevisionId
+        || provenanceRunId !== revision.createdByRunId
+        || record.createdByRunId !== revision.createdByRunId) {
+        throw new WorkspaceGraphValidationError(
+          `Resource publication Snapshot ${record.id} audit provenance does not match immutable history`,
         );
       }
     }

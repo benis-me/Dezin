@@ -29,6 +29,16 @@ export interface ExtensionCredentialRecord extends ExtensionCredential {
  */
 export type ProjectMode = "prototype" | "standard";
 
+/**
+ * Conversation ownership stays additive to the legacy Project foreign key.
+ * Workspace scopes use the stable Project id so legacy conversations can be
+ * backfilled before a normalized Workspace is lazily created.
+ */
+export type ConversationScope =
+  | { type: "workspace"; id: string }
+  | { type: "artifact"; id: string }
+  | { type: "resource"; id: string };
+
 export interface Project {
   id: string;
   name: string;
@@ -52,6 +62,7 @@ export interface Conversation {
   id: string;
   projectId: string;
   title: string;
+  scope: ConversationScope;
   createdAt: number;
   /** Number of user turns (populated by listConversations). */
   turns?: number;
@@ -120,6 +131,15 @@ export interface Run {
   variantId: string | null;
   /** Git commit that represents this Standard-mode run's filesystem snapshot. */
   commitHash: string | null;
+  /** Exact normalized Workspace target and orchestration lineage, when present. */
+  artifactId: string | null;
+  artifactTrackId: string | null;
+  planId: string | null;
+  taskId: string | null;
+  baseRevisionId: string | null;
+  contextPackId: string | null;
+  contextPackHash: string | null;
+  attempt: number;
   status: RunStatus;
   /** Number of lint→repair rounds that ran for this generation. */
   repairRounds: number;

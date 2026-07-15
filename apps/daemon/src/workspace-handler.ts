@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   LegacyWorkspaceSeedDriftError,
@@ -5,6 +6,8 @@ import {
   WorkspaceGraphValidationError,
   WorkspaceLayoutConflictError,
   WorkspacePointerConflictError,
+  WorkspaceResourceNotFoundError,
+  WorkspaceResourceOwnershipError,
   WorkspaceProposalConflictError,
   WorkspaceProposalNotFoundError,
   WorkspaceProposalOwnershipError,
@@ -14,11 +17,18 @@ import {
   WorkspaceRevisionConflictError,
   WorkspaceStoreCodecError,
   normalizeCreateWorkspaceProposalInput,
+  normalizeCreateResourceForProjectInput,
+  normalizeResourcePublicationExpectation,
+  normalizeUpdateResourceForProjectInput,
   normalizeUpdateWorkspaceProposalInput,
   normalizeWorkspaceGraphMutationInput,
   normalizeWorkspaceLayoutPatch,
   normalizeWorkspaceProposalApprovalMode,
   type CreateWorkspaceProposalInput,
+  type CreateResourceForProjectInput,
+  type Resource,
+  type ResourcePublicationExpectation,
+  type UpdateResourceForProjectInput,
   type UpdateWorkspaceProposalInput,
   type WorkspaceGraphMutationInput,
   type WorkspaceLayoutPatch,
@@ -27,6 +37,13 @@ import {
 } from "../../../packages/core/src/index.ts";
 import type { AppDeps } from "./app.ts";
 import { HttpError, readJsonBody, sendJson } from "./http-util.ts";
+import {
+  ResourceRevisionSourceInputError,
+  normalizeCreateResourceRevisionRequest,
+  snapshotOwnedResourceRevisionSource,
+} from "./resource-revision-source.ts";
+import { ContextIntegrityError } from "./context/context-types.ts";
+import { removeSealedResourceRevisionPayload } from "./context/adapters/file.ts";
 import {
   ensureStandardProjectWorkspace,
   type EnsureStandardProjectWorkspaceResult,
@@ -176,6 +193,41 @@ async function parseApproveProposalBody(req: IncomingMessage): Promise<Workspace
 async function parseRejectProposalBody(req: IncomingMessage): Promise<void> {
   const body = requestRecord(await readJsonBody(req), "Proposal rejection body");
   rejectUnexpectedRequestFields(body, [], "Proposal rejection body");
+}
+
+async function parseCreateResourceBody(req: IncomingMessage): Promise<CreateResourceForProjectInput> {
+  try {
+    return normalizeCreateResourceForProjectInput(await readJsonBody(req));
+  } catch (error) {
+    return invalidRequest(error);
+  }
+}
+
+async function parseCreateResourceRevisionBody(
+  req: IncomingMessage,
+): Promise<ReturnType<typeof normalizeCreateResourceRevisionRequest>> {
+  try {
+    return normalizeCreateResourceRevisionRequest(await readJsonBody(req));
+  } catch (error) {
+    if (error instanceof ResourceRevisionSourceInputError) throw new HttpError(400, error.message);
+    throw error;
+  }
+}
+
+async function parseUpdateResourceBody(req: IncomingMessage): Promise<UpdateResourceForProjectInput> {
+  try {
+    return normalizeUpdateResourceForProjectInput(await readJsonBody(req));
+  } catch (error) {
+    return invalidRequest(error);
+  }
+}
+
+async function parsePublishResourceBody(req: IncomingMessage): Promise<ResourcePublicationExpectation> {
+  try {
+    return normalizeResourcePublicationExpectation(await readJsonBody(req));
+  } catch (error) {
+    return invalidRequest(error);
+  }
 }
 
 function proposalNotFound(error: unknown): never {
@@ -343,6 +395,44 @@ function sendMutationError(
     return true;
   }
   return false;
+}
+
+function resourceNotFound(error: unknown): never {
+  if (error instanceof WorkspaceResourceNotFoundError || error instanceof WorkspaceResourceOwnershipError) {
+    throw new HttpError(404, "resource not found");
+  }
+  throw error;
+}
+
+function requireOwnedResource(deps: AppDeps, projectId: string, resourceId: string): Resource {
+  try {
+    const resource = deps.store.workspace.getResourceForProject(projectId, resourceId);
+    if (!resource) throw new WorkspaceResourceNotFoundError(resourceId);
+    return resource;
+  } catch (error) {
+    resourceNotFound(error);
+  }
+}
+
+function sendResourceMutationError(
+  res: ServerResponse,
+  error: unknown,
+  deps: AppDeps,
+  projectId: string,
+  resourceId?: string,
+  revisionId?: string,
+): boolean {
+  if (error instanceof WorkspaceResourceNotFoundError || error instanceof WorkspaceResourceOwnershipError) {
+    sendJson(res, 404, { error: "resource not found" });
+    return true;
+  }
+  return sendMutationError(res, error, () => {
+    deps.store.workspace.getGraph(projectId);
+    if (!resourceId) return;
+    const resource = deps.store.workspace.getResourceForProject(projectId, resourceId);
+    if (!resource) throw new WorkspaceResourceNotFoundError(resourceId);
+    if (revisionId) deps.store.workspace.getResourceRevisionForProject(projectId, resourceId, revisionId);
+  });
 }
 
 function requireArtifact(ready: ReadyWorkspace, artifactId: string): ReadyWorkspace["artifacts"][number] {
@@ -534,6 +624,205 @@ export async function handleRejectProposal(
       revalidateDurableState: () => revalidateProposalDurableState(deps, projectId, proposalId),
       loadProposal: () => deps.store.workspace.getProposalForProject(projectId, proposalId),
     })) throw error;
+  }
+}
+
+export async function handleListResources(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+): Promise<void> {
+  const projectId = params.id!;
+  const ready = await requireReadyWorkspace(res, deps, projectId);
+  if (!ready) return;
+  sendJson(res, 200, deps.store.workspace.listResources(projectId));
+}
+
+export async function handleCreateResource(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+): Promise<void> {
+  const projectId = params.id!;
+  requireProject(deps, projectId);
+  const input = await parseCreateResourceBody(req);
+  const ready = await requireReadyWorkspace(res, deps, projectId);
+  if (!ready) return;
+  try {
+    sendJson(res, 201, deps.store.workspace.createResourceForProject(projectId, input));
+  } catch (error) {
+    if (!sendResourceMutationError(res, error, deps, projectId)) throw error;
+  }
+}
+
+export async function handleGetResource(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+): Promise<void> {
+  const projectId = params.id!;
+  const ready = await requireReadyWorkspace(res, deps, projectId);
+  if (!ready) return;
+  try {
+    const resource = deps.store.workspace.getResourceForProject(projectId, params.resourceId!);
+    if (!resource) throw new WorkspaceResourceNotFoundError(params.resourceId!);
+    sendJson(res, 200, resource);
+  } catch (error) {
+    resourceNotFound(error);
+  }
+}
+
+export async function handleUpdateResource(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+): Promise<void> {
+  const projectId = params.id!;
+  requireProject(deps, projectId);
+  const input = await parseUpdateResourceBody(req);
+  const ready = await requireReadyWorkspace(res, deps, projectId);
+  if (!ready) return;
+  try {
+    const result = input.action === "rename"
+      ? deps.store.workspace.updateResourceForProject(projectId, params.resourceId!, input)
+      : input.action === "archive"
+        ? deps.store.workspace.updateResourceForProject(projectId, params.resourceId!, input)
+        : deps.store.workspace.updateResourceForProject(projectId, params.resourceId!, input);
+    sendJson(res, 200, result);
+  } catch (error) {
+    if (!sendResourceMutationError(res, error, deps, projectId, params.resourceId!)) throw error;
+  }
+}
+
+export async function handleListResourceRevisions(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+): Promise<void> {
+  const projectId = params.id!;
+  const ready = await requireReadyWorkspace(res, deps, projectId);
+  if (!ready) return;
+  try {
+    sendJson(res, 200, deps.store.workspace.listResourceRevisions(projectId, params.resourceId!));
+  } catch (error) {
+    resourceNotFound(error);
+  }
+}
+
+export async function handleCreateResourceRevision(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+): Promise<void> {
+  const projectId = params.id!;
+  const resourceId = params.resourceId!;
+  requireProject(deps, projectId);
+  const input = await parseCreateResourceRevisionBody(req);
+  const ready = await requireReadyWorkspace(res, deps, projectId);
+  if (!ready) return;
+
+  const resource = requireOwnedResource(deps, projectId, resourceId);
+  if (resource.archivedAt !== null) {
+    return sendJson(res, 409, { error: "archived Resources cannot accept new Revisions", code: "resource_archived" });
+  }
+  if (resource.headRevisionId !== input.expectedHeadRevisionId) {
+    return sendJson(res, 409, {
+      error: "Resource Head changed before its source could be snapshotted",
+      code: "workspace_pointer_conflict",
+      pointer: "resource-head",
+      ownerId: resource.id,
+      expectedId: input.expectedHeadRevisionId,
+      actualId: resource.headRevisionId,
+    });
+  }
+
+  let frozen;
+  try {
+    frozen = await snapshotOwnedResourceRevisionSource({
+      store: deps.store,
+      dataDir: deps.dataDir,
+      projectId,
+      workspaceId: ready.workspace.id,
+      resource,
+      revisionId: randomUUID(),
+      snapshotRoot: deps.dataDir,
+      source: input.source,
+      createdAt: Date.now(),
+      fetchExternal: deps.resourceExternalFetch,
+    });
+  } catch (error) {
+    if (error instanceof ResourceRevisionSourceInputError) throw new HttpError(400, error.message);
+    if (error instanceof ContextIntegrityError || error instanceof TypeError) {
+      return sendJson(res, 422, { error: error.message, code: "resource_source_validation_error" });
+    }
+    throw error;
+  }
+
+  try {
+    const revision = deps.store.workspace.createResourceRevisionCandidateForProject(projectId, resource.id, {
+      revisionId: frozen.snapshot.id,
+      parentRevisionId: input.expectedHeadRevisionId,
+      manifestPath: frozen.snapshot.manifestPath,
+      summary: frozen.summary,
+      metadata: { ...frozen.metadata },
+      checksum: frozen.snapshot.checksum,
+      provenance: { ...frozen.provenance },
+    });
+    sendJson(res, 201, revision);
+  } catch (error) {
+    let rollbackError: unknown;
+    try {
+      await removeSealedResourceRevisionPayload(deps.dataDir, frozen.snapshot);
+    } catch (cleanupError) {
+      rollbackError = cleanupError;
+    }
+    if (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        "Resource Revision candidate failed and its newly frozen payload could not be rolled back",
+      );
+    }
+    if (!sendResourceMutationError(res, error, deps, projectId, resource.id)) throw error;
+  }
+}
+
+export async function handlePublishResourceRevision(
+  req: IncomingMessage,
+  res: ServerResponse,
+  params: Record<string, string>,
+  deps: AppDeps,
+): Promise<void> {
+  const projectId = params.id!;
+  requireProject(deps, projectId);
+  const expected = await parsePublishResourceBody(req);
+  const ready = await requireReadyWorkspace(res, deps, projectId);
+  if (!ready) return;
+  try {
+    sendJson(
+      res,
+      200,
+      deps.store.workspace.publishResourceRevisionForProject(
+        projectId,
+        params.resourceId!,
+        params.revisionId!,
+        expected,
+      ),
+    );
+  } catch (error) {
+    if (!sendResourceMutationError(
+      res,
+      error,
+      deps,
+      projectId,
+      params.resourceId!,
+      params.revisionId!,
+    )) throw error;
   }
 }
 

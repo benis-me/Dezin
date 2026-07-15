@@ -772,7 +772,129 @@ test("sending a brief streams events into the chat and shows the preview + expor
   expect(full).toHaveAttribute("href", "/api/projects/p1/export?scope=full");
 });
 
-test("project agent composer cards serialize context at send time", async () => {
+test("Standard composer sends contextRefs and selection separately from the visible message", async () => {
+  const user = userEvent.setup();
+  const streamRun = vi.fn((_input: {
+    brief: string;
+    contextRefs?: unknown[];
+    selection?: unknown[];
+    moodboardRefs?: Array<{ id: string; name?: string }>;
+  }) =>
+    (async function* (): AsyncGenerator<RunEvent> {
+      yield { type: "run-start", runId: "r-structured-context", conversationId: "c1" };
+      yield { type: "run-done", runId: "r-structured-context", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+    })(),
+  );
+  const fake = makeFakeApi({
+    getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+    listMoodboards: async () => [
+      { id: "mood-1", name: "Warm references", createdAt: 1, updatedAt: 2, archivedAt: null, coverAssetId: null, coverUrl: null },
+    ],
+    streamRun: streamRun as never,
+  });
+
+  render(
+    <ApiProvider client={fake}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Artifact preview");
+  dispatchPreviewMessage({
+    type: "selected",
+    selector: ".hero-title",
+    tag: "h1",
+    text: "Old title",
+    rect: { x: 10, y: 20, w: 200, h: 80 },
+  });
+  fireEvent.change(await screen.findByPlaceholderText(/Describe the change to this element/), { target: { value: "Make this sharper" } });
+  fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+  const addMenu = await screen.findByRole("button", { name: "Add files and context" });
+  addMenu.focus();
+  fireEvent.pointerDown(addMenu, { button: 0, ctrlKey: false });
+  fireEvent.keyDown(addMenu, { key: "Enter" });
+  await user.click(await screen.findByText("Reference a moodboard"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Warm references" }));
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Use the selected references" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  await waitFor(() => expect(streamRun).toHaveBeenCalled());
+  const request = streamRun.mock.calls[0]![0];
+  expect(request).toEqual(expect.objectContaining({
+    brief: "Use the selected references",
+    contextRefs: [{
+      kind: "owned-source",
+      id: "moodboard:mood-1",
+      title: "Warm references",
+      resourceKind: "moodboard",
+      source: { type: "moodboard", moodboardId: "mood-1" },
+    }],
+    selection: [expect.objectContaining({
+      kind: "element",
+      id: ".hero-title",
+      locator: expect.objectContaining({
+        selector: ".hero-title",
+        tag: "h1",
+        text: "Old title",
+        note: "Make this sharper",
+        rect: { x: 10, y: 20, w: 200, h: 80 },
+      }),
+    })],
+    moodboardRefs: [{ id: "mood-1", name: "Warm references" }],
+  }));
+  expect(request.brief).not.toContain("Scoped edit");
+  expect(request.brief).not.toContain("Warm references");
+  expect(request.brief).not.toContain("Make this sharper");
+  expect(screen.getByText("Use the selected references")).toBeInTheDocument();
+  expect(screen.queryByRole("list", { name: "Attached context" })).toBeNull();
+});
+
+test("Standard composer blocks unsupported project cards without clearing the message or context", async () => {
+  const user = userEvent.setup();
+  const streamRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {});
+  const referencedProject = {
+    id: "p2",
+    name: "Reference project",
+    skillId: null,
+    designSystemId: "modern-minimal",
+    mode: "prototype" as const,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+        listProjects: async () => [referencedProject],
+        getFileText: async () => "<main>Reference</main>",
+        uploadRef: async () => ({ name: "reference-project.html", path: ".refs/reference-project.html" }),
+        streamRun,
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  const addMenu = await screen.findByRole("button", { name: "Add files and context" });
+  addMenu.focus();
+  fireEvent.pointerDown(addMenu, { button: 0, ctrlKey: false });
+  fireEvent.keyDown(addMenu, { key: "Enter" });
+  await user.click(await screen.findByText("Reference a project"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Reference project" }));
+  expect(await screen.findByLabelText("Remove Reference project")).toBeInTheDocument();
+
+  const message = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+  fireEvent.change(message, { target: { value: "Use the reference safely" } });
+  fireEvent.click(screen.getByLabelText("Send"));
+
+  expect(streamRun).not.toHaveBeenCalled();
+  expect(message.value).toBe("Use the reference safely");
+  expect(screen.getByLabelText("Remove Reference project")).toBeInTheDocument();
+});
+
+test("legacy Prototype composer cards serialize context at send time", async () => {
   const streamRun = vi.fn((_input: { brief: string; moodboardRefs?: Array<{ id: string; name?: string }> }) =>
     (async function* (): AsyncGenerator<RunEvent> {
       yield { type: "run-start", runId: "r-context", conversationId: "c1" };
@@ -1929,6 +2051,43 @@ test("queued moodboard references are preserved for the next project run", async
       brief: expect.stringContaining("Use queued visual direction"),
       moodboardRefs: [{ id: "mood-1", name: "Warm references" }],
     }),
+  );
+});
+
+test("persisted Standard queue keeps bounded contextRefs and full selection locators", async () => {
+  const contextRefs = [{
+    kind: "inline",
+    id: "text:brief",
+    title: "Imported brief",
+    content: "Keep the pricing hierarchy.",
+    trustLevel: "untrusted",
+  }];
+  const selection = [{
+    kind: "element",
+    id: ".pricing-card",
+    locator: { selector: ".pricing-card", tag: "article", text: "Pro", note: "Emphasize this card" },
+  }];
+  localStorage.setItem("dezin.workspace.queue.p1", JSON.stringify([{ text: "Apply the queued edit", contextRefs, selection }]));
+  const streamRun = vi.fn(async function* (): AsyncGenerator<RunEvent> {
+    yield { type: "run-start", runId: "r-queued-context", conversationId: "c1" };
+    yield { type: "run-done", runId: "r-queued-context", passed: true, rounds: 0, previewUrl: "/projects/p1/preview/", findings: [] };
+  });
+
+  render(
+    <ApiProvider
+      client={makeFakeApi({
+        getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+        streamRun,
+      })}
+    >
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(streamRun).toHaveBeenCalled());
+  expect(streamRun).toHaveBeenCalledWith(
+    expect.objectContaining({ brief: "Apply the queued edit", contextRefs, selection }),
+    expect.anything(),
   );
 });
 

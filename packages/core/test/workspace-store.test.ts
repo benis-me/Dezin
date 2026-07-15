@@ -56,6 +56,9 @@ const REQUIRED_WORKSPACE_TABLES = [
   "workspace_proposals",
   "workspace_proposal_audit",
   "generation_plans",
+  "context_packs",
+  "context_pack_items",
+  "context_pack_item_usage",
 ] as const;
 
 function fakeClock(): StoreClock {
@@ -8166,5 +8169,764 @@ test("project-scoped Proposal mutations enforce ownership and terminal state", (
     WorkspaceProposalStateConflictError,
   );
   assert.equal(rowCount(store.db, "generation_plans"), 0);
+  store.close();
+});
+
+test("legacy conversations backfill a workspace scope without requiring a normalized Workspace", () => {
+  const file = createLegacyStoreFile();
+  const store = new Store(file, fakeClock());
+
+  assert.deepEqual(store.getConversation("legacy-conversation"), {
+    id: "legacy-conversation",
+    projectId: "legacy-project",
+    title: "Chat",
+    scope: { type: "workspace", id: "legacy-project" },
+    createdAt: 12,
+  });
+  assert.deepEqual(store.getRun("legacy-run"), {
+    id: "legacy-run",
+    projectId: "legacy-project",
+    conversationId: "legacy-conversation",
+    userMessageId: null,
+    assistantMessageId: null,
+    variantId: null,
+    commitHash: null,
+    artifactId: null,
+    artifactTrackId: null,
+    planId: null,
+    taskId: null,
+    baseRevisionId: null,
+    contextPackId: null,
+    contextPackHash: null,
+    attempt: 1,
+    status: "succeeded",
+    repairRounds: 2,
+    lintPassed: true,
+    score: null,
+    findings: [],
+    model: null,
+    agentCommand: null,
+    skillId: null,
+    feedback: null,
+    createdAt: 13,
+    finishedAt: 14,
+  });
+  assert.equal(store.workspace.getWorkspace("legacy-project"), null);
+  store.close();
+});
+
+test("Conversation scopes are exhaustive, owned, and independently listable", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Scoped conversations", mode: "standard" });
+  const foreignProject = store.createProject({ name: "Foreign conversations", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const foreignWorkspace = store.workspace.ensureWorkspaceRecord(foreignProject.id);
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind: "moodboard",
+    title: "Direction board",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+  });
+  const foreign = store.workspace.createResourceForProject(foreignProject.id, {
+    kind: "research",
+    title: "Foreign research",
+    defaultPinPolicy: "follow-head",
+    baseGraphRevision: 0,
+    expectedSnapshotId: foreignWorkspace.activeSnapshotId,
+  });
+
+  const workspaceConversation = store.createConversation(project.id, "Workspace", {
+    type: "workspace",
+    id: project.id,
+  });
+  const resourceConversation = store.createConversation(project.id, "Resource", {
+    type: "resource",
+    id: created.resource.id,
+  });
+  assert.deepEqual(workspaceConversation.scope, { type: "workspace", id: project.id });
+  assert.deepEqual(resourceConversation.scope, { type: "resource", id: created.resource.id });
+  assert.deepEqual(
+    store.listConversations(project.id, { type: "resource", id: created.resource.id }).map(({ id }) => id),
+    [resourceConversation.id],
+  );
+  assert.throws(
+    () => store.createConversation(project.id, "Foreign", { type: "resource", id: foreign.resource.id }),
+    /scope|ownership|another Project/i,
+  );
+  let scopeGetterRead = false;
+  const accessorScope = Object.defineProperties({}, {
+    type: {
+      enumerable: true,
+      get() {
+        scopeGetterRead = true;
+        return "resource";
+      },
+    },
+    id: { enumerable: true, value: created.resource.id },
+  });
+  assert.throws(
+    () => store.createConversation(project.id, "Accessor", accessorScope as never),
+    /enumerable data property/i,
+  );
+  assert.equal(scopeGetterRead, false);
+  store.close();
+});
+
+test("Resource candidates publish through Head and Snapshot CAS while cloning every Resource pin", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Resource publication", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const first = store.workspace.createResourceForProject(project.id, {
+    kind: "moodboard",
+    title: "Moodboard",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+  });
+  const second = store.workspace.createResourceForProject(project.id, {
+    kind: "effect",
+    title: "Effect",
+    defaultPinPolicy: "manual",
+    baseGraphRevision: first.graph.revision,
+    expectedSnapshotId: first.snapshot.id,
+  });
+  const firstV1 = store.workspace.createResourceRevisionCandidateForProject(project.id, first.resource.id, {
+    revisionId: "moodboard-v1",
+    parentRevisionId: null,
+    manifestPath: "resource-revisions/moodboard-v1/manifest.json",
+    summary: "First direction",
+    metadata: { sourceId: "moodboard-1" },
+    checksum: "1".repeat(64),
+    provenance: { adapter: "moodboard" },
+  });
+  const secondV1 = store.workspace.createResourceRevisionCandidateForProject(project.id, second.resource.id, {
+    revisionId: "effect-v1",
+    parentRevisionId: null,
+    manifestPath: "resource-revisions/effect-v1/manifest.json",
+    summary: "Frozen effect",
+    metadata: { sourceId: "effect-1" },
+    checksum: "2".repeat(64),
+    provenance: { adapter: "effect" },
+  });
+  const firstPublished = store.workspace.publishResourceRevisionForProject(
+    project.id,
+    first.resource.id,
+    firstV1.id,
+    {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: second.snapshot.id,
+      reason: "publish moodboard",
+    },
+  );
+  const secondPublished = store.workspace.publishResourceRevisionForProject(
+    project.id,
+    second.resource.id,
+    secondV1.id,
+    {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: firstPublished.id,
+      reason: "publish effect",
+    },
+  );
+  assert.deepEqual(secondPublished.resourceRevisions, {
+    [first.resource.id]: firstV1.id,
+    [second.resource.id]: secondV1.id,
+  });
+
+  const stale = store.workspace.createResourceRevisionCandidateForProject(project.id, first.resource.id, {
+    revisionId: "moodboard-v2",
+    parentRevisionId: firstV1.id,
+    manifestPath: "resource-revisions/moodboard-v2/manifest.json",
+    summary: "Second direction",
+    metadata: {},
+    checksum: "3".repeat(64),
+    provenance: { adapter: "moodboard" },
+  });
+  assert.throws(
+    () => store.workspace.publishResourceRevisionForProject(project.id, first.resource.id, stale.id, {
+      expectedHeadRevisionId: null,
+      expectedSnapshotId: secondPublished.id,
+      reason: "stale head",
+    }),
+    WorkspacePointerConflictError,
+  );
+  assert.throws(
+    () => store.workspace.publishResourceRevisionForProject(project.id, first.resource.id, stale.id, {
+      expectedHeadRevisionId: firstV1.id,
+      expectedSnapshotId: firstPublished.id,
+      reason: "stale snapshot",
+    }),
+    WorkspacePointerConflictError,
+  );
+  assert.equal(store.workspace.getResourceForProject(project.id, first.resource.id)?.headRevisionId, firstV1.id);
+
+  const latest = store.workspace.publishResourceRevisionForProject(project.id, first.resource.id, stale.id, {
+    expectedHeadRevisionId: firstV1.id,
+    expectedSnapshotId: secondPublished.id,
+    reason: "publish second moodboard",
+  });
+  assert.deepEqual(latest.resourceRevisions, {
+    [first.resource.id]: stale.id,
+    [second.resource.id]: secondV1.id,
+  });
+  assert.equal(store.workspace.getResourceRevisionForProject(project.id, first.resource.id, stale.id)?.parentRevisionId, firstV1.id);
+  assert.deepEqual(
+    store.workspace.listResourceRevisions(project.id, first.resource.id).map(({ id }) => id),
+    [firstV1.id, stale.id],
+  );
+
+  const branchA = store.workspace.createResourceRevisionCandidateForProject(project.id, first.resource.id, {
+    revisionId: "moodboard-v3-a",
+    parentRevisionId: stale.id,
+    manifestPath: "resource-revisions/moodboard-v3-a/manifest.json",
+    summary: "Branch A",
+    metadata: {},
+    checksum: "7".repeat(64),
+    provenance: { adapter: "moodboard" },
+  });
+  const branchB = store.workspace.createResourceRevisionCandidateForProject(project.id, first.resource.id, {
+    revisionId: "moodboard-v3-b",
+    parentRevisionId: stale.id,
+    manifestPath: "resource-revisions/moodboard-v3-b/manifest.json",
+    summary: "Branch B",
+    metadata: {},
+    checksum: "8".repeat(64),
+    provenance: { adapter: "moodboard" },
+  });
+  const branchAPublished = store.workspace.publishResourceRevisionForProject(
+    project.id,
+    first.resource.id,
+    branchA.id,
+    {
+      expectedHeadRevisionId: stale.id,
+      expectedSnapshotId: latest.id,
+      reason: "publish branch A",
+    },
+  );
+  assert.throws(
+    () => store.workspace.publishResourceRevisionForProject(project.id, first.resource.id, branchB.id, {
+      expectedHeadRevisionId: branchA.id,
+      expectedSnapshotId: branchAPublished.id,
+      reason: "launder stale branch B",
+    }),
+    /parent does not match the expected Head/i,
+  );
+  store.close();
+});
+
+test("Resource PATCH keeps graph identity coherent and requires explicit archive impact confirmation", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Resource lifecycle", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind: "file",
+    title: "Brief",
+    defaultPinPolicy: "follow-head",
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+  });
+  const renamed = store.workspace.updateResourceForProject(project.id, created.resource.id, {
+    action: "rename",
+    title: "Approved brief",
+    baseGraphRevision: created.graph.revision,
+    expectedSnapshotId: created.snapshot.id,
+  });
+  assert.equal(renamed.resource.title, "Approved brief");
+  assert.equal(renamed.graph.nodes.find(({ id }) => id === created.node.id)?.name, "Approved brief");
+  const pinUpdated = store.workspace.updateResourceForProject(project.id, created.resource.id, {
+    action: "set-default-pin-policy",
+    expectedDefaultPinPolicy: "follow-head",
+    defaultPinPolicy: "manual",
+  });
+  assert.equal(pinUpdated.resource.defaultPinPolicy, "manual");
+  assert.throws(
+    () => store.workspace.updateResourceForProject(project.id, created.resource.id, {
+      action: "archive",
+      baseGraphRevision: renamed.graph.revision,
+      expectedSnapshotId: renamed.snapshot.id,
+      consumerImpactConfirmed: false,
+    } as never),
+    /consumer impact confirmation/i,
+  );
+  const archived = store.workspace.updateResourceForProject(project.id, created.resource.id, {
+    action: "archive",
+    baseGraphRevision: renamed.graph.revision,
+    expectedSnapshotId: renamed.snapshot.id,
+    consumerImpactConfirmed: true,
+  });
+  assert.ok(archived.resource.archivedAt !== null);
+  assert.ok(!archived.graph.nodes.some(({ id }) => id === created.node.id));
+  assert.deepEqual(store.workspace.listResources(project.id), []);
+  store.close();
+});
+
+test("Context Packs seal immutable same-Workspace pins and usage evidence is append-only", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Context pack", mode: "standard" });
+  const foreignProject = store.createProject({ name: "Foreign context", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const foreignWorkspace = store.workspace.ensureWorkspaceRecord(foreignProject.id);
+  const created = store.workspace.createResourceForProject(project.id, {
+    kind: "asset",
+    title: "Hero image",
+    defaultPinPolicy: "pin-current",
+    baseGraphRevision: 0,
+    expectedSnapshotId: workspace.activeSnapshotId,
+  });
+  const revision = store.workspace.createResourceRevisionCandidateForProject(project.id, created.resource.id, {
+    revisionId: "hero-v1",
+    parentRevisionId: null,
+    manifestPath: "resource-revisions/hero/manifest.json",
+    summary: "Hero",
+    metadata: { mimeType: "image/png" },
+    checksum: "4".repeat(64),
+    provenance: { source: "upload" },
+  });
+  const published = store.workspace.publishResourceRevisionForProject(project.id, created.resource.id, revision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: created.snapshot.id,
+    reason: "publish hero",
+  });
+  const pack = store.workspace.persistContextPack({
+    id: "context-pack-1",
+    workspaceId: workspace.id,
+    graphRevision: published.graphRevision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "generate",
+    messageChecksum: "7".repeat(64),
+    manifestPath: "context-packs/context-pack-1.json",
+    tokenEstimate: 100,
+    omissions: [{ ref: { kind: "inline", id: "history-old" }, reason: "budget", tokenEstimate: 20 }],
+    hash: "5".repeat(64),
+    items: [{
+      ref: {
+        kind: "resource",
+        id: created.resource.id,
+        resourceKind: created.resource.kind,
+        revisionId: revision.id,
+      },
+      resolvedKind: "resource-revision",
+      resourceRevisionId: revision.id,
+      checksum: revision.checksum,
+      reason: "explicit",
+      trustLevel: "untrusted",
+      boundary: { kind: "full", capabilities: [] },
+      tokenEstimate: 100,
+      provenance: { adapter: "asset" },
+      provided: true,
+    }],
+  });
+  assert.equal(pack.items[0]?.resourceRevisionId, revision.id);
+  assert.equal(pack.items[0]?.ref.kind === "resource" ? pack.items[0].ref.resourceKind : null, "asset");
+  assert.equal(pack.intent, "generate");
+  assert.equal(pack.messageChecksum, "7".repeat(64));
+  assert.deepEqual(store.workspace.getContextPack(workspace.id, pack.id), pack);
+  assert.deepEqual(store.workspace.findContextPackByHash(workspace.id, pack.hash), pack);
+  assert.equal(store.workspace.findContextPackByHash(foreignWorkspace.id, pack.hash), null);
+  assert.deepEqual(store.workspace.persistContextPack({
+    id: pack.id,
+    workspaceId: pack.workspaceId,
+    graphRevision: pack.graphRevision,
+    target: pack.target,
+    intent: pack.intent,
+    messageChecksum: pack.messageChecksum,
+    items: pack.items.map(({ ordinal: _ordinal, ...item }) => item),
+    omissions: pack.omissions,
+    tokenEstimate: pack.tokenEstimate,
+    manifestPath: pack.manifestPath,
+    hash: pack.hash,
+  }), pack);
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "duplicate-context-pack-hash",
+    workspaceId: workspace.id,
+    graphRevision: published.graphRevision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "plan",
+    messageChecksum: "d".repeat(64),
+    manifestPath: "context-packs/duplicate.json",
+    tokenEstimate: 0,
+    omissions: [],
+    hash: pack.hash,
+    items: [],
+  }), /unique|hash/i);
+  assert.throws(() => store.db.prepare(
+    `INSERT OR REPLACE INTO context_packs (
+       id, workspace_id, scope_type, scope_id, graph_revision, intent,
+       message_checksum, manifest_path, token_estimate, omissions_json,
+       hash, created_at, sealed
+     ) VALUES (?, ?, 'workspace', ?, ?, 'plan', ?, ?, 0, '[]', ?, ?, 0)`,
+  ).run(
+    "replacement-context-pack-hash",
+    workspace.id,
+    workspace.id,
+    published.graphRevision,
+    "3".repeat(64),
+    "context-packs/replacement.json",
+    pack.hash,
+    1,
+  ), /immutable|hash/i);
+  assert.deepEqual(store.workspace.findContextPackByHash(workspace.id, pack.hash), pack);
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "wrong-resource-kind-pack",
+    workspaceId: workspace.id,
+    graphRevision: published.graphRevision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "generate",
+    messageChecksum: "e".repeat(64),
+    manifestPath: "context-packs/wrong-resource-kind.json",
+    tokenEstimate: 100,
+    omissions: [],
+    hash: "f".repeat(64),
+    items: [{
+      ref: { kind: "resource", id: created.resource.id, resourceKind: "file", revisionId: revision.id },
+      resolvedKind: "resource-revision",
+      resourceRevisionId: revision.id,
+      checksum: revision.checksum,
+      reason: "explicit",
+      trustLevel: "untrusted",
+      boundary: {},
+      tokenEstimate: 100,
+      provenance: {},
+      provided: true,
+    }],
+  }), /Resource Revision ownership|kind/i);
+  assert.throws(
+    () => store.db.prepare("UPDATE context_packs SET hash = hash WHERE id = ?").run(pack.id),
+    /immutable/i,
+  );
+  assert.throws(
+    () => store.db.prepare("UPDATE context_packs SET intent = intent WHERE id = ?").run(pack.id),
+    /immutable/i,
+  );
+  assert.throws(
+    () => store.db.prepare("UPDATE context_pack_items SET reason = reason WHERE context_pack_id = ?").run(pack.id),
+    /immutable/i,
+  );
+
+  const conversation = store.createConversation(project.id, "Pack run");
+  const run = store.createRun(project.id, conversation.id, undefined, undefined, undefined, {
+    contextPackId: pack.id,
+    contextPackHash: pack.hash,
+  });
+  const otherPack = store.workspace.persistContextPack({
+    id: "other-context-pack",
+    workspaceId: workspace.id,
+    graphRevision: published.graphRevision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "plan",
+    messageChecksum: "a".repeat(64),
+    manifestPath: "context-packs/other-context-pack.json",
+    tokenEstimate: 0,
+    omissions: [],
+    hash: "b".repeat(64),
+    items: [],
+  });
+  const otherConversation = store.createConversation(project.id, "Other pack run");
+  const otherRun = store.createRun(project.id, otherConversation.id, undefined, undefined, undefined, {
+    contextPackId: otherPack.id,
+    contextPackHash: otherPack.hash,
+  });
+  assert.throws(() => store.workspace.recordContextPackItemUsage({
+    contextPackId: pack.id,
+    workspaceId: workspace.id,
+    ordinal: 0,
+    usageKind: "observed-read",
+    runId: otherRun.id,
+    evidence: { fixture: "wrong-pack" },
+  }), /not bound to the exact Context Pack/i);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO context_pack_item_usage (
+       context_pack_id, workspace_id, ordinal, sequence, usage_kind, run_id, evidence_json, recorded_at
+     ) VALUES (?, ?, 0, 1, 'observed-read', ?, '{}', 1)`,
+  ).run(pack.id, workspace.id, otherRun.id), /not bound to the exact Context Pack/i);
+  assert.throws(
+    () => store.db.prepare(
+      "UPDATE runs SET context_pack_id = ?, context_pack_hash = ? WHERE id = ?",
+    ).run(otherPack.id, otherPack.hash, run.id),
+    /Context Pack binding is immutable/i,
+  );
+  assert.throws(
+    () => store.db.prepare(
+      "UPDATE runs SET context_pack_id = NULL, context_pack_hash = NULL WHERE id = ?",
+    ).run(run.id),
+    /Context Pack binding is immutable/i,
+  );
+  assert.throws(
+    () => store.db.prepare(
+      `INSERT OR REPLACE INTO runs (
+         id, project_id, conversation_id, context_pack_id, context_pack_hash, status, created_at
+       ) VALUES (?, ?, ?, ?, ?, 'running', ?)`,
+    ).run(
+      run.id,
+      project.id,
+      conversation.id,
+      otherPack.id,
+      otherPack.hash,
+      run.createdAt,
+    ),
+    /Context Pack binding is immutable/i,
+  );
+  assert.equal(store.getRun(run.id)?.contextPackId, pack.id);
+  assert.equal(store.getRun(run.id)?.contextPackHash, pack.hash);
+  const firstUsage = store.workspace.recordContextPackItemUsage({
+    contextPackId: pack.id,
+    workspaceId: workspace.id,
+    ordinal: 0,
+    usageKind: "observed-read",
+    runId: run.id,
+    evidence: { tool: "read_resource" },
+  });
+  const secondUsage = store.workspace.recordContextPackItemUsage({
+    contextPackId: pack.id,
+    workspaceId: workspace.id,
+    ordinal: 0,
+    usageKind: "agent-declared-used",
+    runId: run.id,
+    evidence: { reason: "visual reference" },
+  });
+  assert.equal(firstUsage.sequence, 1);
+  assert.equal(secondUsage.sequence, 2);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO context_pack_item_usage (
+       context_pack_id, workspace_id, ordinal, sequence, usage_kind, run_id, evidence_json, recorded_at
+     ) VALUES (?, ?, 0, 4, 'observed-read', NULL, '{}', 1)`,
+  ).run(pack.id, workspace.id), /contiguous|append-only/i);
+  let evidenceGetterRead = false;
+  const accessorEvidence = new Array<unknown>(1);
+  Object.defineProperty(accessorEvidence, "0", {
+    enumerable: true,
+    get() {
+      evidenceGetterRead = true;
+      return "secret";
+    },
+  });
+  assert.throws(() => store.workspace.recordContextPackItemUsage({
+    contextPackId: pack.id,
+    workspaceId: workspace.id,
+    ordinal: 0,
+    usageKind: "observed-read",
+    evidence: { trace: accessorEvidence },
+  }), /dense enumerable data items/i);
+  assert.equal(evidenceGetterRead, false);
+  assert.throws(
+    () => store.db.prepare("UPDATE context_pack_item_usage SET evidence_json = evidence_json WHERE context_pack_id = ?").run(pack.id),
+    /append-only|immutable/i,
+  );
+
+  const foreignConversation = store.createConversation(foreignProject.id, "Foreign run");
+  const foreignRun = store.createRun(foreignProject.id, foreignConversation.id);
+  assert.throws(
+    () => store.workspace.recordContextPackItemUsage({
+      contextPackId: pack.id,
+      workspaceId: workspace.id,
+      ordinal: 0,
+      usageKind: "observed-read",
+      runId: foreignRun.id,
+      evidence: {},
+    }),
+    /Run belongs to another Project|ownership/i,
+  );
+
+  const unprovided = store.workspace.persistContextPack({
+    id: "unprovided-context-pack",
+    workspaceId: workspace.id,
+    graphRevision: published.graphRevision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "analyze-impact",
+    messageChecksum: "0".repeat(64),
+    manifestPath: "context-packs/unprovided.json",
+    tokenEstimate: 1,
+    omissions: [],
+    hash: "3".repeat(64),
+    items: [{
+      ref: {
+        kind: "resource",
+        id: created.resource.id,
+        resourceKind: created.resource.kind,
+        revisionId: revision.id,
+      },
+      resolvedKind: "resource-revision",
+      resourceRevisionId: revision.id,
+      checksum: revision.checksum,
+      reason: "omitted after resolution",
+      trustLevel: "untrusted",
+      boundary: {},
+      tokenEstimate: 1,
+      provenance: {},
+      provided: false,
+    }],
+  });
+  assert.throws(() => store.workspace.recordContextPackItemUsage({
+    contextPackId: unprovided.id,
+    workspaceId: workspace.id,
+    ordinal: 0,
+    usageKind: "observed-read",
+    evidence: {},
+  }), /not provided/i);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO context_pack_item_usage (
+       context_pack_id, workspace_id, ordinal, sequence, usage_kind, run_id, evidence_json, recorded_at
+     ) VALUES (?, ?, 0, 1, 'observed-read', NULL, '{}', 1)`,
+  ).run(unprovided.id, workspace.id), /sealed provided item/i);
+
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "foreign-context-pack",
+    workspaceId: foreignWorkspace.id,
+    graphRevision: 0,
+    target: { type: "workspace", id: foreignWorkspace.id },
+    intent: "generate",
+    messageChecksum: "8".repeat(64),
+    manifestPath: "context-packs/foreign.json",
+    tokenEstimate: 1,
+    omissions: [],
+    hash: "6".repeat(64),
+    items: [{
+      ref: {
+        kind: "resource",
+        id: created.resource.id,
+        resourceKind: created.resource.kind,
+        revisionId: revision.id,
+      },
+      resolvedKind: "resource-revision",
+      resourceRevisionId: revision.id,
+      checksum: revision.checksum,
+      reason: "explicit",
+      trustLevel: "untrusted",
+      boundary: {},
+      tokenEstimate: 1,
+      provenance: {},
+      provided: true,
+    }],
+  }), /constraint|another Workspace|ownership/i);
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "cross-workspace-target-pack",
+    workspaceId: foreignWorkspace.id,
+    graphRevision: 0,
+    target: { type: "resource", id: created.resource.id },
+    intent: "analyze-impact",
+    messageChecksum: "9".repeat(64),
+    manifestPath: "context-packs/cross-workspace-target.json",
+    tokenEstimate: 0,
+    omissions: [],
+    hash: "a".repeat(64),
+    items: [],
+  }), /target belongs to another Workspace|ownership/i);
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "wrong-workspace-target-pack",
+    workspaceId: workspace.id,
+    graphRevision: published.graphRevision,
+    target: { type: "workspace", id: foreignWorkspace.id },
+    intent: "plan",
+    messageChecksum: "b".repeat(64),
+    manifestPath: "context-packs/wrong-workspace-target.json",
+    tokenEstimate: 0,
+    omissions: [],
+    hash: "c".repeat(64),
+    items: [],
+  }), /target belongs to another Workspace|ownership/i);
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "nonportable-manifest-pack",
+    workspaceId: workspace.id,
+    graphRevision: published.graphRevision,
+    target: { type: "workspace", id: workspace.id },
+    intent: "plan",
+    messageChecksum: "6".repeat(64),
+    manifestPath: "C:/context-packs/manifest.json",
+    tokenEstimate: 0,
+    omissions: [],
+    hash: "7".repeat(64),
+    items: [],
+  }), /canonical relative path/i);
+  assert.throws(() => store.db.prepare(
+    `INSERT INTO context_packs (
+       id, workspace_id, scope_type, scope_id, graph_revision, intent,
+       message_checksum, manifest_path, token_estimate, omissions_json,
+       hash, created_at, sealed
+     ) VALUES (?, ?, 'workspace', ?, ?, 'generate', ?, ?, 0, '[]', ?, ?, 0)`,
+  ).run(
+    "raw-project-id-target-pack",
+    workspace.id,
+    project.id,
+    published.graphRevision,
+    "1".repeat(64),
+    "context-packs/raw-project-id-target.json",
+    "2".repeat(64),
+    1,
+  ), /target belongs to another Workspace/i);
+  store.close();
+});
+
+test("Context Pack Artifact pins bind the exact immutable Revision checksum", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Artifact context checksum", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const graph = addRevisionTestArtifacts(store, project.id, workspace.activeSnapshotId);
+  const revision = store.workspace.createArtifactRevision(standardArtifactRevisionInput({
+    artifactId: "revision-page",
+    trackId: "revision-page-track",
+    parentRevisionId: null,
+    kernelRevisionId: workspace.activeKernelRevisionId,
+    tree: "context-artifact-v1",
+  }));
+  const snapshot = store.workspace.publishArtifactRevision(revision.id, {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: graph.snapshot.id,
+  });
+
+  const exactChecksum = store.workspace.getArtifactRevisionContextChecksum(revision.id);
+  assert.ok(exactChecksum);
+  const exactPack = store.workspace.persistContextPack({
+    id: "artifact-exact-checksum-pack",
+    workspaceId: workspace.id,
+    graphRevision: snapshot.graphRevision,
+    target: { type: "artifact", id: "revision-page" },
+    intent: "edit",
+    messageChecksum: "1".repeat(64),
+    manifestPath: "context-packs/artifact-exact-checksum-pack.json",
+    tokenEstimate: 1,
+    omissions: [],
+    hash: "2".repeat(64),
+    items: [{
+      ref: { kind: "artifact", id: "revision-page", revisionId: revision.id },
+      resolvedKind: "artifact-revision",
+      artifactRevisionId: revision.id,
+      checksum: exactChecksum,
+      reason: "target",
+      trustLevel: "trusted",
+      boundary: {},
+      tokenEstimate: 1,
+      provenance: {},
+      provided: true,
+    }],
+  });
+  assert.equal(exactPack.items[0]?.checksum, exactChecksum);
+  assert.deepEqual(store.workspace.getContextPack(workspace.id, exactPack.id), exactPack);
+
+  assert.throws(() => store.workspace.persistContextPack({
+    id: "artifact-wrong-checksum-pack",
+    workspaceId: workspace.id,
+    graphRevision: snapshot.graphRevision,
+    target: { type: "artifact", id: "revision-page" },
+    intent: "edit",
+    messageChecksum: "3".repeat(64),
+    manifestPath: "context-packs/artifact-wrong-checksum-pack.json",
+    tokenEstimate: 1,
+    omissions: [],
+    hash: "4".repeat(64),
+    items: [{
+      ref: { kind: "artifact", id: "revision-page", revisionId: revision.id },
+      resolvedKind: "artifact-revision",
+      artifactRevisionId: revision.id,
+      checksum: "0".repeat(64),
+      reason: "target",
+      trustLevel: "trusted",
+      boundary: {},
+      tokenEstimate: 1,
+      provenance: {},
+      provided: true,
+    }],
+  }), /Artifact Revision ownership is invalid/i);
+  assert.equal(store.workspace.getContextPack(workspace.id, "artifact-wrong-checksum-pack"), null);
   store.close();
 });

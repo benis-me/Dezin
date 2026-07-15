@@ -5,11 +5,15 @@ import {
   AgentComposerContextCards,
   moveContextItem,
   removeContextItem,
+  serializeLegacyPrototypeComposerContext,
+  serializeStructuredComposerContext,
   upsertContextItems,
   type AgentComposerContextItem,
 } from "./AgentComposerContext.tsx";
 
-const baseItems: AgentComposerContextItem[] = [
+type TestPreviewTarget = { selector: string; note?: string };
+
+const baseItems: AgentComposerContextItem<TestPreviewTarget>[] = [
   {
     id: "file:.refs/cloud.png",
     type: "file",
@@ -33,6 +37,121 @@ test("context item helpers dedupe, remove, and reorder by id", () => {
   ]);
   expect(removeContextItem(baseItems, "moodboard:m1")).toEqual([baseItems[0], baseItems[2]]);
   expect(moveContextItem(baseItems, "text-context:fig", "file:.refs/cloud.png")).toEqual([baseItems[2], baseItems[0], baseItems[1]]);
+});
+
+test("structured composer context keeps references and selection out of the visible message", () => {
+  const items: AgentComposerContextItem<{ selector: string; note?: string }>[] = [
+    ...baseItems,
+    { id: "effect:grain", type: "effect", title: "Grain", effectId: "grain", name: "Grain" },
+    {
+      id: "preview:.hero-title",
+      type: "preview-target",
+      title: ".hero-title",
+      selector: ".hero-title",
+      note: "Make it sharper",
+      target: { selector: ".hero-title", note: "Make it sharper" },
+    },
+    {
+      id: "canvas:hero",
+      type: "canvas-node",
+      title: "Hero",
+      nodeId: "hero",
+      nodeType: "section",
+      body: "A trusted server resolver owns the node body.",
+    },
+  ];
+
+  expect(serializeStructuredComposerContext(items, (item) => ({
+    kind: "element",
+    id: item.selector,
+    locator: item.target,
+  }))).toEqual({
+    contextRefs: [
+      {
+        kind: "owned-source",
+        id: "file:.refs/cloud.png",
+        title: "cloud.png",
+        resourceKind: "file",
+        source: { type: "uploaded-file", uploadedFileId: ".refs/cloud.png" },
+      },
+      {
+        kind: "owned-source",
+        id: "moodboard:m1",
+        title: "Warm references",
+        resourceKind: "moodboard",
+        source: { type: "moodboard", moodboardId: "m1" },
+      },
+      { kind: "inline", id: "text-context:fig", title: "Figma import", content: "Buttons and cards", trustLevel: "untrusted" },
+      {
+        kind: "owned-source",
+        id: "effect:grain",
+        title: "Grain",
+        resourceKind: "effect",
+        source: { type: "effect", effectId: "grain" },
+      },
+      {
+        kind: "inline",
+        id: "canvas:hero",
+        title: "Hero",
+        content: "A trusted server resolver owns the node body.",
+        trustLevel: "untrusted",
+      },
+    ],
+    selection: [
+      { kind: "element", id: ".hero-title", locator: { selector: ".hero-title", note: "Make it sharper" } },
+      { kind: "node", id: "hero", locator: { nodeType: "section" } },
+    ],
+  });
+});
+
+test("structured composer context blocks unsupported and oversized inline cards", () => {
+  expect(() =>
+    serializeStructuredComposerContext(
+      [{ id: "path:/tmp/reference", type: "local-path", title: "Local folder", path: "/tmp/reference" }],
+      () => ({ kind: "element", id: "unused" }),
+    ),
+  ).toThrow(/cannot safely resolve/);
+
+  expect(() =>
+    serializeStructuredComposerContext(
+      [{ id: "text:large", type: "text-context", title: "Large import", body: "x".repeat(20_001) }],
+      () => ({ kind: "element", id: "unused" }),
+    ),
+  ).toThrow(/exceeds 20000 characters/);
+
+  expect(() =>
+    serializeStructuredComposerContext(
+      [{
+        id: "preview:.hero",
+        type: "preview-target",
+        title: ".hero",
+        selector: ".hero",
+        target: { selector: ".hero" },
+      }],
+      (item) => ({ kind: "element", id: item.selector }),
+    ),
+  ).toThrow(/full stable locator/);
+});
+
+test("legacy Prototype serialization remains an explicit compatibility path", () => {
+  const preview = {
+    id: "preview:.hero-title",
+    type: "preview-target" as const,
+    title: ".hero-title",
+    selector: ".hero-title",
+    note: "Make it sharper",
+    target: { selector: ".hero-title" },
+  };
+
+  expect(
+    serializeLegacyPrototypeComposerContext("Refine the hero", [...baseItems, preview], (target) =>
+      `selector: \`${target.selector}\``,
+    ),
+  ).toEqual({
+    brief: expect.stringMatching(/Refine the hero[\s\S]*Scoped edit[\s\S]*selector: `\.hero-title`[\s\S]*Reference files[\s\S]*Figma import[\s\S]*Moodboard references/),
+    moodboardRefs: [{ id: "m1", name: "Warm references" }],
+    effectRefs: [],
+  });
 });
 
 test("AgentComposerContextCards renders typed cards, removes, and reorders without native file drag", async () => {

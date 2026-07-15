@@ -67,3 +67,51 @@ test("404s for unknown project/conversation or a mismatched pair", async () => {
     assert.equal((await fetch(`${base}/api/projects/${b.id}/conversations/${convA.id}`)).status, 404);
   });
 });
+
+test("conversation routes preserve an exact workspace scope and reject unsafe scope bodies", async () => {
+  await withServer(async ({ base, store }) => {
+    const project = store.createProject({ name: "Scoped" });
+    const create = await fetch(`${base}/api/projects/${project.id}/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Workspace chat",
+        scope: { type: "workspace", id: project.id },
+      }),
+    });
+    assert.equal(create.status, 201);
+    const conversation = await create.json() as {
+      id: string;
+      scope: { type: string; id: string };
+    };
+    assert.deepEqual(conversation.scope, { type: "workspace", id: project.id });
+
+    const filtered = await fetch(
+      `${base}/api/projects/${project.id}/conversations?scopeType=workspace&scopeId=${project.id}`,
+    );
+    assert.equal(filtered.status, 200);
+    assert.deepEqual(
+      (await filtered.json() as Array<{ id: string }>).map(({ id }) => id),
+      [conversation.id],
+    );
+
+    const mismatchedWorkspace = await fetch(`${base}/api/projects/${project.id}/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scope: { type: "workspace", id: "another-project" } }),
+    });
+    assert.equal(mismatchedWorkspace.status, 400);
+
+    const unknownField = await fetch(`${base}/api/projects/${project.id}/conversations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Nope", scope: { type: "workspace", id: project.id }, projectId: project.id }),
+    });
+    assert.equal(unknownField.status, 400);
+
+    const incompleteFilter = await fetch(
+      `${base}/api/projects/${project.id}/conversations?scopeType=workspace`,
+    );
+    assert.equal(incompleteFilter.status, 400);
+  });
+});

@@ -227,6 +227,8 @@ interface RunBody {
   variantId?: string;
   moodboardRefs?: unknown;
   effectRefs?: unknown;
+  contextRefs?: unknown;
+  selection?: unknown;
   /** Opt-in: run the pre-design Research phase (writes research/) before building. */
   research?: boolean;
   /** Chosen direction slug — skips the direction gate; the build uses this direction. */
@@ -541,6 +543,19 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   const imageApiKey = imageRuntime.apiKey || settings.imageApiKey;
   const project = store.getProject(body.projectId);
   if (!project) return sendError(res, 404, "project not found");
+  if (body.contextRefs !== undefined && !Array.isArray(body.contextRefs)) {
+    return sendError(res, 400, "contextRefs must be an array");
+  }
+  if (body.selection !== undefined && !Array.isArray(body.selection)) {
+    return sendError(res, 400, "selection must be an array");
+  }
+  if ((Array.isArray(body.contextRefs) && body.contextRefs.length > 0)
+    || (Array.isArray(body.selection) && body.selection.length > 0)) {
+    return sendJson(res, 422, {
+      error: "Structured Context requires an immutable Context Pack before this Run can start",
+      code: "context_pack_required",
+    });
+  }
   // Persistent false-positive suppression — drop findings the user has dismissed on prior runs.
   const qualityIgnores = store.listQualityIgnores(project.id);
   const suppress = (findings: QualityFinding[]): QualityFinding[] => applyIgnores(findings, qualityIgnores) as QualityFinding[];
@@ -556,6 +571,12 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   let conversation = body.conversationId ? store.getConversation(body.conversationId) : null;
   if (body.conversationId && !conversation) return sendError(res, 404, "conversation not found");
   if (conversation && conversation.projectId !== project.id) return sendError(res, 400, "conversation does not belong to project");
+  if (conversation && conversation.scope.type !== "workspace") {
+    return sendJson(res, 422, {
+      error: "Artifact- and Resource-scoped conversations require an immutable Context Pack before this Run can start",
+      code: "context_pack_required",
+    });
+  }
 
   const mainVariant = store.ensureMainVariant(project.id);
   const targetVariantId = body.variantId ?? store.getActiveVariantId(project.id) ?? mainVariant.id;

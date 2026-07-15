@@ -33,6 +33,9 @@ import { AttachMenu } from "../components/AttachMenu.tsx";
 import {
   AgentComposerContextCards,
   removeContextItem,
+  serializeLegacyPrototypeComposerContext,
+  serializeStructuredComposerContext,
+  UnsupportedComposerContextError,
   upsertContextItems,
   type AgentComposerContextItem,
 } from "../components/AgentComposerContext.tsx";
@@ -86,7 +89,8 @@ import { navigate } from "../router.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
-import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Moodboard, PreviewLeaseInfo, Project, ProjectFile, ProjectMode, QualityFinding, ResearchDetail, RunEvent, RunSummary, Settings as AppSettings, SetupPhase, VersionPreview } from "../lib/api.ts";
+import { decodeRunContextRefs, decodeRunSelectionRefs } from "../lib/api.ts";
+import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Moodboard, PreviewLeaseInfo, Project, ProjectFile, ProjectMode, QualityFinding, ResearchDetail, RunContextRef, RunEvent, RunSelectionRef, RunSummary, Settings as AppSettings, SetupPhase, VersionPreview } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
 import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
@@ -115,7 +119,13 @@ const DEVICE_WIDTH: Record<Device, string> = { desktop: "100%", tablet: "768px",
 type RunReference = { id: string; name?: string };
 type MoodboardRunRef = RunReference;
 type EffectRunRef = RunReference;
-type QueuedPrompt = { text: string; moodboardRefs?: MoodboardRunRef[]; effectRefs?: EffectRunRef[] };
+type QueuedPrompt = {
+  text: string;
+  moodboardRefs?: MoodboardRunRef[];
+  effectRefs?: EffectRunRef[];
+  contextRefs?: RunContextRef[];
+  selection?: RunSelectionRef[];
+};
 type PreviewBusyState = { title: string; detail?: string };
 type OwnedPreviewLease = PreviewLeaseInfo;
 type DisplayVersionPreview = VersionPreview & { displayUrl: string };
@@ -174,6 +184,24 @@ function parseRunRefs(value: unknown): RunReference[] {
     .filter((ref): ref is RunReference => ref !== null);
 }
 
+function parseQueuedContextRefs(value: unknown): RunContextRef[] | null {
+  if (value === undefined) return [];
+  try {
+    return decodeRunContextRefs(value);
+  } catch {
+    return null;
+  }
+}
+
+function parseQueuedSelection(value: unknown): RunSelectionRef[] | null {
+  if (value === undefined) return [];
+  try {
+    return decodeRunSelectionRefs(value);
+  } catch {
+    return null;
+  }
+}
+
 function readQueue(projectId: string): QueuedPrompt[] {
   if (projectId === "new") return [];
   try {
@@ -191,10 +219,15 @@ function readQueue(projectId: string): QueuedPrompt[] {
         if (!text) return null;
         const moodboardRefs = parseRunRefs(record.moodboardRefs);
         const effectRefs = parseRunRefs(record.effectRefs);
+        const contextRefs = parseQueuedContextRefs(record.contextRefs);
+        const selection = parseQueuedSelection(record.selection);
+        if (contextRefs === null || selection === null) return null;
         return {
           text,
           ...(moodboardRefs.length ? { moodboardRefs } : {}),
           ...(effectRefs.length ? { effectRefs } : {}),
+          ...(contextRefs.length ? { contextRefs } : {}),
+          ...(selection.length ? { selection } : {}),
         };
       })
       .filter((item): item is QueuedPrompt => item !== null);
@@ -284,18 +317,6 @@ ${gapInstruction}
 6. Design the next test round: which variables to keep fixed, which variables to change, and how to judge whether the improvement is real.
 
 The goal is not only to fix this project. Use it as a Dezin generation-quality sample and extract reusable product improvements.`;
-}
-
-function moodboardReferenceLine(refs: MoodboardRunRef[]): string {
-  if (!refs.length) return "";
-  const names = refs.map((ref) => `${ref.name?.trim() || "Untitled moodboard"} (${ref.id})`).join(", ");
-  return `\n\nMoodboard references (available to the Agent at run time): ${names}`;
-}
-
-function effectReferenceLine(refs: EffectRunRef[]): string {
-  if (!refs.length) return "";
-  const names = refs.map((ref) => `${ref.name?.trim() || "Untitled effect"} (${ref.id})`).join(", ");
-  return `\n\nEffect references (available to the Agent at run time): ${names}`;
 }
 
 function writeQueue(projectId: string, queue: QueuedPrompt[]): void {
@@ -3019,7 +3040,9 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           activeRunConvRef.current = cid;
           setActive(cid);
           setConversations((c) =>
-            c.some((x) => x.id === cid) ? c : [...c, { id: cid, projectId: id, title: "Untitled", createdAt: Date.now() }],
+            c.some((x) => x.id === cid)
+              ? c
+              : [...c, { id: cid, projectId: id, title: "Untitled", scope: { type: "workspace", id }, createdAt: Date.now() }],
           );
         }
         // Keep the previous run's findings/score visible until THIS run's first quality result
@@ -3438,7 +3461,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     refs: MoodboardRunRef[] = [],
     effectRefs: EffectRunRef[] = [],
     directionSlug?: string,
-    opts?: { research?: boolean },
+    opts?: { research?: boolean; contextRefs?: RunContextRef[]; selection?: RunSelectionRef[] },
   ): Promise<void> => {
     const text = brief.trim();
     if (!text || runningRef.current) return;
@@ -3475,6 +3498,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           model: modelOverride || runModel || undefined,
           moodboardRefs: refs.length ? refs : undefined,
           effectRefs: effectRefs.length ? effectRefs : undefined,
+          contextRefs: opts?.contextRefs?.length ? opts.contextRefs : undefined,
+          selection: opts?.selection?.length ? opts.selection : undefined,
           directionSlug,
           research: opts?.research,
         },
@@ -3533,6 +3558,17 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     // Fan-out forks each variation into its own git worktree and runs into it; the daemon only
     // supports targeted variant runs in Standard mode, so this is Standard-only.
     if (!isExisting || !text || runningRef.current || projectMode !== "standard") return;
+    let structuredContext: ReturnType<typeof serializeStructuredComposerContext<MarkupTarget>>;
+    try {
+      structuredContext = serializeStructuredComposerContext(contextItems, (item) => ({
+        kind: "element",
+        id: item.selector,
+        locator: { ...item.target },
+      }));
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "This context cannot be used in Standard mode.", { variant: "error" });
+      return;
+    }
     runningRef.current = true;
     terminalEventRef.current = false;
     activeRunIdRef.current = null;
@@ -3552,13 +3588,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       }
 
       // Fork all N variations from the SAME current state (not chained), so each is a distinct
-      // take on the identical starting point. When elements are marked up, scope the edit to them.
-      const scopedBrief =
-        selectedTargets.length > 0
-          ? `${text}\n\nScoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n${selectedTargets
-              .map(formatMarkupTarget)
-              .join("\n")}`
-          : text;
+      // take on the identical starting point. Standard context remains structured on every fork.
       const fanout = await api.fanoutVariants(projectId, count);
       const nextVariants = fanout.variants;
       const created = new Set(fanout.created);
@@ -3571,9 +3601,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             projectId,
             conversationId: convId!,
             variantId: variant.id,
-            brief: composeVariationBrief(scopedBrief, index, targets.length),
+            brief: composeVariationBrief(text, index, targets.length),
             agentCommand: runAgent || undefined,
             model: runModel || undefined,
+            moodboardRefs: selectedMoodboardRefs.length ? selectedMoodboardRefs : undefined,
+            effectRefs: selectedEffectRefs.length ? selectedEffectRefs : undefined,
+            contextRefs: structuredContext.contextRefs.length ? structuredContext.contextRefs : undefined,
+            selection: structuredContext.selection.length ? structuredContext.selection : undefined,
           });
           for await (const ev of stream) {
             if (ev.type === "run-error") throw new Error(typeof ev.message === "string" ? ev.message : "variant run failed");
@@ -3627,7 +3661,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (loading || runningRef.current || queueRef.current.length === 0) return;
     const [next, ...rest] = queueRef.current;
     updateQueue(rest);
-    if (next?.text.trim()) void runBrief(next.text, undefined, undefined, next.moodboardRefs ?? [], next.effectRefs ?? []);
+    if (next?.text.trim()) {
+      void runBrief(next.text, undefined, undefined, next.moodboardRefs ?? [], next.effectRefs ?? [], undefined, {
+        contextRefs: next.contextRefs,
+        selection: next.selection,
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, running, queue, updateQueue]);
 
@@ -4151,32 +4190,41 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   };
 
   const send = () => {
-    const scoped = selectedTargets.length > 0;
-    const fileReferencePaths = contextItems.flatMap((item) => {
-      if (item.type === "file") return [item.path];
-      if (item.type === "project" && item.referencePath) return [item.referencePath];
-      return [];
-    });
-    const localPathItems = contextItems.filter((item): item is Extract<WorkspaceContextItem, { type: "local-path" }> => item.type === "local-path");
-    const textContextItems = contextItems.filter((item): item is Extract<WorkspaceContextItem, { type: "text-context" }> => item.type === "text-context");
-    const fileRefs = fileReferencePaths.length
-      ? `\n\nReference files (read them from disk): ${fileReferencePaths.join(", ")}`
-      : "";
-    const localPathRefs = localPathItems.length
-      ? `\n\nReference local paths: ${localPathItems.map((item) => item.path).join(", ")}`
-      : "";
-    const textContextRefs = textContextItems.length
-      ? `\n\n${textContextItems.map((item) => `${item.title}:\n${item.body}`).join("\n\n")}`
-      : "";
-    const boardRefs = moodboardReferenceLine(selectedMoodboardRefs);
-    const effectRefs = effectReferenceLine(selectedEffectRefs);
-    const targets = scoped
-      ? `\n\nScoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n${selectedTargets
-          .map(formatMarkupTarget)
-          .join("\n")}`
-      : "";
-    const base = input.trim() || (scoped ? "Refine the marked element(s) per the notes." : "");
-    const text = base + targets + fileRefs + localPathRefs + textContextRefs + boardRefs + effectRefs;
+    let text: string;
+    let contextRefs: RunContextRef[] | undefined;
+    let selection: RunSelectionRef[] | undefined;
+    let moodboardRefs: MoodboardRunRef[] = selectedMoodboardRefs;
+    let effectRefs: EffectRunRef[] = selectedEffectRefs;
+    if (projectMode === "standard") {
+      try {
+        const structured = serializeStructuredComposerContext(contextItems, (item) => ({
+          kind: "element",
+          id: item.selector,
+          locator: { ...item.target },
+        }));
+        contextRefs = structured.contextRefs.length ? structured.contextRefs : undefined;
+        selection = structured.selection.length ? structured.selection : undefined;
+      } catch (error) {
+        const message = error instanceof UnsupportedComposerContextError
+          ? `${error.message}. Remove it or import it as an owned Resource first.`
+          : error instanceof Error
+            ? error.message
+            : "This context cannot be used in Standard mode.";
+        toast(message, { variant: "error" });
+        return;
+      }
+      text = input.trim()
+        || (selection?.length
+          ? "Refine the marked element(s) per the notes."
+          : contextRefs?.length
+            ? "Use the attached context for this request."
+            : "");
+    } else {
+      const legacy = serializeLegacyPrototypeComposerContext(input, contextItems, formatMarkupTarget);
+      text = legacy.brief;
+      moodboardRefs = legacy.moodboardRefs;
+      effectRefs = legacy.effectRefs;
+    }
     if (!text.trim()) return;
     setInput("");
     setContextItems([]);
@@ -4186,11 +4234,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         ...q,
         {
           text,
-          ...(selectedMoodboardRefs.length ? { moodboardRefs: selectedMoodboardRefs } : {}),
-          ...(selectedEffectRefs.length ? { effectRefs: selectedEffectRefs } : {}),
+          ...(moodboardRefs.length ? { moodboardRefs } : {}),
+          ...(effectRefs.length ? { effectRefs } : {}),
+          ...(contextRefs?.length ? { contextRefs } : {}),
+          ...(selection?.length ? { selection } : {}),
         },
       ]);
-    else void runBrief(text, undefined, undefined, selectedMoodboardRefs, selectedEffectRefs);
+    else {
+      void runBrief(text, undefined, undefined, moodboardRefs, effectRefs, undefined, { contextRefs, selection });
+    }
   };
 
   const updateQueuedPrompt = (index: number, value: string): void => {
@@ -4302,6 +4354,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
             subtitle: ref.path,
             name: ref.name,
             path: ref.path,
+            uploadedFileId: ref.path,
             previewUrl: file.type.startsWith("image/") ? api.refUrl(projectId, ref.path) : undefined,
             mimeType: file.type || undefined,
             size: file.size,

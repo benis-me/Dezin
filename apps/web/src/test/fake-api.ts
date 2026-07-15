@@ -1,16 +1,35 @@
-import type { ApiClient } from "../lib/api.ts";
+import type { ApiClient, Conversation, ConversationScope } from "../lib/api.ts";
 
 const FAKE_BRIDGE_NONCE = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
 
 /** Build a fake ApiClient for tests; override only the methods a test needs. */
-export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
+type FakeConversation = Omit<Conversation, "scope"> & { scope?: ConversationScope };
+type FakeApiOverrides = Omit<Partial<ApiClient>, "listConversations" | "createConversation" | "getConversation" | "renameConversation"> & {
+  listConversations?: (id: string, scope?: ConversationScope) => Promise<FakeConversation[]>;
+  createConversation?: (id: string, title?: string, scope?: ConversationScope) => Promise<FakeConversation>;
+  getConversation?: (projectId: string, conversationId: string) => Promise<FakeConversation>;
+  renameConversation?: (projectId: string, conversationId: string, title: string) => Promise<FakeConversation>;
+};
+
+function normalizeFakeConversation(conversation: FakeConversation): Conversation {
+  return { ...conversation, scope: conversation.scope ?? { type: "workspace", id: conversation.projectId } };
+}
+
+export function makeFakeApi(over: FakeApiOverrides = {}): ApiClient {
+  const {
+    listConversations: listConversationsOverride,
+    createConversation: createConversationOverride,
+    getConversation: getConversationOverride,
+    renameConversation: renameConversationOverride,
+    ...apiOverrides
+  } = over;
   const notImpl = () => {
     throw new Error("not implemented in fake");
   };
   return {
     listProjects: async () => [],
     createProject: notImpl as ApiClient["createProject"],
-    generateProjectTitle: async (id: string) => (over.getProject ? over.getProject(id) : notImpl()),
+    generateProjectTitle: async (id: string) => (apiOverrides.getProject ? apiOverrides.getProject(id) : notImpl()),
     getSetup: async () => ({ phase: "ready" as const }),
     getDevServerUrl: async (id: string) => ({
       leaseId: `lease-${id}`,
@@ -87,6 +106,13 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     rejectWorkspaceProposal: notImpl as ApiClient["rejectWorkspaceProposal"],
     applyWorkspaceGraphCommands: notImpl as ApiClient["applyWorkspaceGraphCommands"],
     saveWorkspaceLayout: notImpl as ApiClient["saveWorkspaceLayout"],
+    listResources: async () => [],
+    createResource: notImpl as ApiClient["createResource"],
+    getResource: notImpl as ApiClient["getResource"],
+    updateResource: notImpl as ApiClient["updateResource"],
+    listResourceRevisions: async () => [],
+    createResourceRevision: notImpl as ApiClient["createResourceRevision"],
+    publishResourceRevision: notImpl as ApiClient["publishResourceRevision"],
     getArtifact: notImpl as ApiClient["getArtifact"],
     listArtifactTracks: async () => [],
     listArtifactRevisions: async () => [],
@@ -100,10 +126,24 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     patchProject: notImpl as ApiClient["patchProject"],
     saveCover: async () => {},
     deleteProject: notImpl as ApiClient["deleteProject"],
-    listConversations: async () => [],
-    createConversation: notImpl as ApiClient["createConversation"],
-    getConversation: notImpl as ApiClient["getConversation"],
-    renameConversation: notImpl as ApiClient["renameConversation"],
+    listConversations: async (id, scope) =>
+      (await (listConversationsOverride
+        ? scope === undefined
+          ? listConversationsOverride(id)
+          : listConversationsOverride(id, scope)
+        : Promise.resolve([]))).map(normalizeFakeConversation),
+    createConversation: async (id, title, scope) =>
+      normalizeFakeConversation(createConversationOverride
+        ? await (scope !== undefined
+          ? createConversationOverride(id, title, scope)
+          : title !== undefined
+            ? createConversationOverride(id, title)
+            : createConversationOverride(id))
+        : notImpl()),
+    getConversation: async (projectId, conversationId) =>
+      normalizeFakeConversation(getConversationOverride ? await getConversationOverride(projectId, conversationId) : notImpl()),
+    renameConversation: async (projectId, conversationId, title) =>
+      normalizeFakeConversation(renameConversationOverride ? await renameConversationOverride(projectId, conversationId, title) : notImpl()),
     deleteConversation: async () => {},
     listVariants: async () => [],
     createVariant: async () => [],
@@ -162,7 +202,7 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     listAgents: async () => [],
     rescanAgents: async () => [],
     async *scanAgentsStream() {
-      yield { type: "done" as const, agents: await (over.rescanAgents ?? (async () => []))() };
+      yield { type: "done" as const, agents: await (apiOverrides.rescanAgents ?? (async () => []))() };
     },
     getHealth: async () => ({ ok: true, version: "0.0.0" }),
     optimizePrompt: async (input) => ({ prompt: input.prompt }),
@@ -237,6 +277,6 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     // eslint-disable-next-line require-yield
     streamSharinganEvents: async function* () {},
     sharinganShotUrl: (id: string, relPath: string) => `/shot/${id}/${relPath}`,
-    ...over,
+    ...apiOverrides,
   };
 }

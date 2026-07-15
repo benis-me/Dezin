@@ -169,6 +169,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
+  scope_type TEXT CHECK(scope_type IN ('workspace','artifact','resource')),
+  scope_id TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -186,6 +188,14 @@ CREATE TABLE IF NOT EXISTS runs (
   user_message_id TEXT,
   assistant_message_id TEXT,
   commit_hash TEXT,
+  artifact_id TEXT,
+  artifact_track_id TEXT,
+  plan_id TEXT,
+  task_id TEXT,
+  base_revision_id TEXT,
+  context_pack_id TEXT,
+  context_pack_hash TEXT,
+  attempt INTEGER NOT NULL DEFAULT 1 CHECK(attempt > 0),
   owner_id TEXT,
   status TEXT NOT NULL,
   repair_rounds INTEGER NOT NULL DEFAULT 0,
@@ -486,6 +496,7 @@ CREATE TABLE IF NOT EXISTS resource_revisions (
   workspace_id TEXT NOT NULL,
   resource_id TEXT NOT NULL,
   sequence INTEGER NOT NULL,
+  parent_revision_id TEXT,
   manifest_path TEXT NOT NULL,
   summary TEXT NOT NULL,
   metadata_json TEXT NOT NULL,
@@ -495,6 +506,8 @@ CREATE TABLE IF NOT EXISTS resource_revisions (
   created_at INTEGER NOT NULL,
   FOREIGN KEY(resource_id, workspace_id)
     REFERENCES resources(id, workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY(parent_revision_id, resource_id, workspace_id)
+    REFERENCES resource_revisions(id, resource_id, workspace_id),
   UNIQUE(id, resource_id, workspace_id),
   UNIQUE(id, workspace_id),
   UNIQUE(resource_id, sequence)
@@ -639,6 +652,71 @@ CREATE TABLE IF NOT EXISTS workspace_snapshot_resources (
     REFERENCES resource_revisions(id, resource_id, workspace_id) ON DELETE CASCADE,
   PRIMARY KEY(snapshot_id, resource_id)
 );
+CREATE TABLE IF NOT EXISTS context_packs (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
+  scope_type TEXT NOT NULL CHECK(scope_type IN ('workspace','artifact','resource')),
+  scope_id TEXT NOT NULL,
+  graph_revision INTEGER NOT NULL,
+  intent TEXT NOT NULL CHECK(intent IN ('plan','generate','edit','repair','analyze-impact')),
+  message_checksum TEXT NOT NULL,
+  manifest_path TEXT NOT NULL,
+  token_estimate INTEGER NOT NULL CHECK(token_estimate >= 0),
+  omissions_json TEXT NOT NULL,
+  hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  sealed INTEGER NOT NULL DEFAULT 0 CHECK(sealed IN (0, 1)),
+  UNIQUE(id, workspace_id),
+  UNIQUE(workspace_id, hash),
+  FOREIGN KEY(workspace_id, graph_revision)
+    REFERENCES workspace_graph_revisions(workspace_id, revision)
+);
+CREATE TABLE IF NOT EXISTS context_pack_items (
+  context_pack_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+  ref_json TEXT NOT NULL,
+  resolved_kind TEXT NOT NULL CHECK(resolved_kind IN ('artifact-revision','resource-revision','kernel-revision','inline')),
+  artifact_revision_id TEXT,
+  resource_revision_id TEXT,
+  kernel_revision_id TEXT,
+  checksum TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  trust_level TEXT NOT NULL CHECK(trust_level IN ('system','trusted','untrusted')),
+  boundary_json TEXT NOT NULL,
+  token_estimate INTEGER NOT NULL CHECK(token_estimate >= 0),
+  provenance_json TEXT NOT NULL,
+  provided INTEGER NOT NULL CHECK(provided IN (0, 1)),
+  FOREIGN KEY(context_pack_id, workspace_id)
+    REFERENCES context_packs(id, workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY(artifact_revision_id, workspace_id)
+    REFERENCES artifact_revisions(id, workspace_id),
+  FOREIGN KEY(resource_revision_id, workspace_id)
+    REFERENCES resource_revisions(id, workspace_id),
+  FOREIGN KEY(kernel_revision_id, workspace_id)
+    REFERENCES shared_design_kernel_revisions(id, workspace_id),
+  CHECK(
+    (resolved_kind = 'artifact-revision' AND artifact_revision_id IS NOT NULL AND resource_revision_id IS NULL AND kernel_revision_id IS NULL) OR
+    (resolved_kind = 'resource-revision' AND artifact_revision_id IS NULL AND resource_revision_id IS NOT NULL AND kernel_revision_id IS NULL) OR
+    (resolved_kind = 'kernel-revision' AND artifact_revision_id IS NULL AND resource_revision_id IS NULL AND kernel_revision_id IS NOT NULL) OR
+    (resolved_kind = 'inline' AND artifact_revision_id IS NULL AND resource_revision_id IS NULL AND kernel_revision_id IS NULL)
+  ),
+  PRIMARY KEY(context_pack_id, ordinal),
+  UNIQUE(context_pack_id, ordinal, workspace_id)
+);
+CREATE TABLE IF NOT EXISTS context_pack_item_usage (
+  context_pack_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence > 0),
+  usage_kind TEXT NOT NULL CHECK(usage_kind IN ('observed-read','agent-declared-used')),
+  run_id TEXT REFERENCES runs(id),
+  evidence_json TEXT NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  FOREIGN KEY(context_pack_id, ordinal, workspace_id)
+    REFERENCES context_pack_items(context_pack_id, ordinal, workspace_id) ON DELETE CASCADE,
+  PRIMARY KEY(context_pack_id, ordinal, sequence)
+);
 CREATE TABLE IF NOT EXISTS workspace_proposals (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES project_workspaces(id) ON DELETE CASCADE,
@@ -734,6 +812,12 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_resources_owner
   ON workspace_snapshot_resources(resource_id, workspace_id);
 CREATE INDEX IF NOT EXISTS idx_snapshot_resources_revision
   ON workspace_snapshot_resources(revision_id, resource_id, workspace_id);
+CREATE INDEX IF NOT EXISTS idx_context_packs_workspace
+  ON context_packs(workspace_id, created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_context_pack_items_resource
+  ON context_pack_items(resource_revision_id, workspace_id);
+CREATE INDEX IF NOT EXISTS idx_context_pack_usage_run
+  ON context_pack_item_usage(run_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_proposals_workspace
   ON workspace_proposals(workspace_id, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_generation_plans_workspace
@@ -1459,6 +1543,141 @@ WHEN EXISTS (
 )
 BEGIN SELECT RAISE(ABORT, 'Workspace Node identity is immutable and cannot be replaced'); END;
 
+CREATE TRIGGER IF NOT EXISTS context_pack_insert_immutable
+BEFORE INSERT ON context_packs
+WHEN EXISTS (
+  SELECT 1 FROM context_packs existing
+  WHERE existing.id = NEW.id
+     OR (existing.workspace_id = NEW.workspace_id AND existing.hash = NEW.hash)
+)
+BEGIN SELECT RAISE(ABORT, 'Context Pack identity and Workspace hash are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_scope_insert_ownership
+BEFORE INSERT ON context_packs
+WHEN NOT (
+  (NEW.scope_type = 'workspace' AND NEW.scope_id = NEW.workspace_id)
+  OR (NEW.scope_type = 'artifact' AND EXISTS (
+    SELECT 1 FROM workspace_artifacts artifact
+    WHERE artifact.id = NEW.scope_id
+      AND artifact.workspace_id = NEW.workspace_id
+      AND artifact.archived_at IS NULL
+  ))
+  OR (NEW.scope_type = 'resource' AND EXISTS (
+    SELECT 1 FROM resources resource
+    WHERE resource.id = NEW.scope_id
+      AND resource.workspace_id = NEW.workspace_id
+      AND resource.archived_at IS NULL
+  ))
+)
+BEGIN SELECT RAISE(ABORT, 'Context Pack target belongs to another Workspace or is archived'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_update_immutable
+BEFORE UPDATE OF
+  id, workspace_id, scope_type, scope_id, graph_revision, manifest_path,
+  token_estimate, omissions_json, hash, created_at
+ON context_packs
+BEGIN SELECT RAISE(ABORT, 'Context Packs are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_seal_transition_guard
+BEFORE UPDATE OF sealed ON context_packs
+WHEN OLD.sealed <> 0 OR NEW.sealed <> 1
+BEGIN SELECT RAISE(ABORT, 'Context Pack seal is immutable after construction'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_delete_immutable
+BEFORE DELETE ON context_packs
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Context Packs are immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS context_pack_item_insert_guard
+BEFORE INSERT ON context_pack_items
+WHEN NOT EXISTS (
+  SELECT 1 FROM context_packs pack
+  WHERE pack.id = NEW.context_pack_id
+    AND pack.workspace_id = NEW.workspace_id
+    AND pack.sealed = 0
+) OR EXISTS (
+  SELECT 1 FROM context_pack_items existing
+  WHERE existing.context_pack_id = NEW.context_pack_id
+    AND existing.ordinal = NEW.ordinal
+)
+BEGIN SELECT RAISE(ABORT, 'Context Pack is sealed; items are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_item_published_pin_guard
+BEFORE INSERT ON context_pack_items
+WHEN (
+  NEW.resolved_kind = 'artifact-revision' AND NOT EXISTS (
+    SELECT 1 FROM workspace_snapshot_artifacts mapping
+    JOIN workspace_snapshots snapshot
+      ON snapshot.id = mapping.snapshot_id AND snapshot.workspace_id = mapping.workspace_id
+    WHERE mapping.revision_id = NEW.artifact_revision_id
+      AND mapping.workspace_id = NEW.workspace_id AND snapshot.sealed = 1
+  )
+) OR (
+  NEW.resolved_kind = 'resource-revision' AND NOT EXISTS (
+    SELECT 1 FROM workspace_snapshot_resources mapping
+    JOIN workspace_snapshots snapshot
+      ON snapshot.id = mapping.snapshot_id AND snapshot.workspace_id = mapping.workspace_id
+    WHERE mapping.revision_id = NEW.resource_revision_id
+      AND mapping.workspace_id = NEW.workspace_id AND snapshot.sealed = 1
+  )
+) OR (
+  NEW.resolved_kind = 'kernel-revision' AND NOT EXISTS (
+    SELECT 1 FROM workspace_snapshots snapshot
+    WHERE snapshot.kernel_revision_id = NEW.kernel_revision_id
+      AND snapshot.workspace_id = NEW.workspace_id AND snapshot.sealed = 1
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Context Pack item Revision ownership violation: pin must be published in the same Workspace'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_item_update_immutable
+BEFORE UPDATE ON context_pack_items
+BEGIN SELECT RAISE(ABORT, 'Context Pack items are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_item_delete_immutable
+BEFORE DELETE ON context_pack_items
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Context Pack items are immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS context_pack_usage_insert_guard
+BEFORE INSERT ON context_pack_item_usage
+WHEN NOT EXISTS (
+  SELECT 1 FROM context_pack_items item
+  JOIN context_packs pack
+    ON pack.id = item.context_pack_id AND pack.workspace_id = item.workspace_id
+  WHERE item.context_pack_id = NEW.context_pack_id
+    AND item.workspace_id = NEW.workspace_id
+    AND item.ordinal = NEW.ordinal
+    AND item.provided = 1
+    AND pack.sealed = 1
+) OR EXISTS (
+  SELECT 1 FROM context_pack_item_usage existing
+  WHERE existing.context_pack_id = NEW.context_pack_id
+    AND existing.ordinal = NEW.ordinal
+    AND existing.sequence = NEW.sequence
+) OR typeof(NEW.sequence) <> 'integer'
+  OR NEW.sequence < 1
+  OR NEW.sequence > 9007199254740991
+  OR NEW.sequence <> COALESCE((
+    SELECT MAX(existing.sequence) + 1
+    FROM context_pack_item_usage existing
+    WHERE existing.context_pack_id = NEW.context_pack_id
+      AND existing.ordinal = NEW.ordinal
+  ), 1)
+BEGIN SELECT RAISE(ABORT, 'Context Pack usage evidence is append-only, contiguous, and requires a sealed provided item'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_usage_run_ownership
+BEFORE INSERT ON context_pack_item_usage
+WHEN NEW.run_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM runs run
+  JOIN context_packs pack
+    ON pack.id = NEW.context_pack_id AND pack.workspace_id = NEW.workspace_id
+  JOIN project_workspaces workspace
+    ON workspace.id = pack.workspace_id AND workspace.project_id = run.project_id
+  WHERE run.id = NEW.run_id
+    AND run.context_pack_id = pack.id
+    AND run.context_pack_hash = pack.hash
+)
+BEGIN SELECT RAISE(ABORT, 'Context Pack usage Run is not bound to the exact Context Pack'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_usage_update_immutable
+BEFORE UPDATE ON context_pack_item_usage
+BEGIN SELECT RAISE(ABORT, 'Context Pack usage evidence is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS context_pack_usage_delete_immutable
+BEFORE DELETE ON context_pack_item_usage
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Context Pack usage evidence is append-only'); END;
+
 CREATE TRIGGER IF NOT EXISTS project_workspace_identity_update_immutable
 BEFORE UPDATE OF id, project_id ON project_workspaces
 WHEN NEW.id IS NOT OLD.id OR NEW.project_id IS NOT OLD.project_id
@@ -1636,6 +1855,188 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_artifacts_one_legacy_wrapper
   ON workspace_artifacts(workspace_id) WHERE legacy_wrapped = 1;
 `;
 
+const TASK11_CONTEXT_TRIGGER_UPGRADE_SCHEMA = `
+DROP TRIGGER IF EXISTS resource_revision_parent_insert_guard;
+DROP TRIGGER IF EXISTS conversation_scope_insert_ownership;
+DROP TRIGGER IF EXISTS conversation_scope_legacy_backfill;
+DROP TRIGGER IF EXISTS conversation_scope_update_immutable;
+DROP TRIGGER IF EXISTS conversation_scope_update_ownership;
+DROP TRIGGER IF EXISTS context_pack_scope_insert_ownership;
+DROP TRIGGER IF EXISTS context_pack_insert_immutable;
+DROP TRIGGER IF EXISTS context_pack_update_immutable;
+DROP TRIGGER IF EXISTS context_pack_usage_insert_guard;
+DROP TRIGGER IF EXISTS context_pack_usage_run_ownership;
+DROP TRIGGER IF EXISTS run_context_pack_insert_immutable;
+DROP TRIGGER IF EXISTS run_context_pack_insert_ownership;
+DROP TRIGGER IF EXISTS run_context_pack_update_ownership;
+
+CREATE TRIGGER resource_revision_parent_insert_guard
+BEFORE INSERT ON resource_revisions
+WHEN NEW.parent_revision_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM resource_revisions parent
+  WHERE parent.id = NEW.parent_revision_id
+    AND parent.resource_id = NEW.resource_id
+    AND parent.workspace_id = NEW.workspace_id
+    AND parent.sequence < NEW.sequence
+)
+BEGIN SELECT RAISE(ABORT, 'Resource Revision parent ownership or order violation'); END;
+
+CREATE TRIGGER conversation_scope_insert_ownership
+BEFORE INSERT ON conversations
+WHEN NEW.scope_type IS NOT NULL AND (
+  NEW.scope_id IS NULL OR NOT (
+    (NEW.scope_type = 'workspace' AND NEW.scope_id = NEW.project_id)
+    OR (NEW.scope_type = 'artifact' AND EXISTS (
+      SELECT 1 FROM project_workspaces workspace
+      JOIN workspace_artifacts artifact ON artifact.workspace_id = workspace.id
+      WHERE workspace.project_id = NEW.project_id AND artifact.id = NEW.scope_id
+    ))
+    OR (NEW.scope_type = 'resource' AND EXISTS (
+      SELECT 1 FROM project_workspaces workspace
+      JOIN resources resource ON resource.workspace_id = workspace.id
+      WHERE workspace.project_id = NEW.project_id AND resource.id = NEW.scope_id
+    ))
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Conversation scope belongs to another Project'); END;
+CREATE TRIGGER conversation_scope_legacy_backfill
+AFTER INSERT ON conversations
+WHEN NEW.scope_type IS NULL OR NEW.scope_id IS NULL
+BEGIN
+  UPDATE conversations
+  SET scope_type = 'workspace', scope_id = NEW.project_id
+  WHERE id = NEW.id AND (scope_type IS NULL OR scope_id IS NULL);
+END;
+CREATE TRIGGER conversation_scope_update_immutable
+BEFORE UPDATE OF project_id, scope_type, scope_id ON conversations
+WHEN OLD.scope_type IS NOT NULL AND OLD.scope_id IS NOT NULL AND (
+  NEW.project_id IS NOT OLD.project_id
+  OR NEW.scope_type IS NOT OLD.scope_type
+  OR NEW.scope_id IS NOT OLD.scope_id
+)
+BEGIN SELECT RAISE(ABORT, 'Conversation scope is immutable'); END;
+CREATE TRIGGER conversation_scope_update_ownership
+BEFORE UPDATE OF project_id, scope_type, scope_id ON conversations
+WHEN NEW.scope_type IS NULL OR NEW.scope_id IS NULL OR NOT (
+  (NEW.scope_type = 'workspace' AND NEW.scope_id = NEW.project_id)
+  OR (NEW.scope_type = 'artifact' AND EXISTS (
+    SELECT 1 FROM project_workspaces workspace
+    JOIN workspace_artifacts artifact ON artifact.workspace_id = workspace.id
+    WHERE workspace.project_id = NEW.project_id AND artifact.id = NEW.scope_id
+  ))
+  OR (NEW.scope_type = 'resource' AND EXISTS (
+    SELECT 1 FROM project_workspaces workspace
+    JOIN resources resource ON resource.workspace_id = workspace.id
+    WHERE workspace.project_id = NEW.project_id AND resource.id = NEW.scope_id
+  ))
+)
+BEGIN SELECT RAISE(ABORT, 'Conversation scope belongs to another Project'); END;
+
+CREATE TRIGGER context_pack_insert_immutable
+BEFORE INSERT ON context_packs
+WHEN EXISTS (
+  SELECT 1 FROM context_packs existing
+  WHERE existing.id = NEW.id
+     OR (existing.workspace_id = NEW.workspace_id AND existing.hash = NEW.hash)
+)
+BEGIN SELECT RAISE(ABORT, 'Context Pack identity and Workspace hash are immutable'); END;
+CREATE TRIGGER context_pack_scope_insert_ownership
+BEFORE INSERT ON context_packs
+WHEN NOT (
+  (NEW.scope_type = 'workspace' AND NEW.scope_id = NEW.workspace_id)
+  OR (NEW.scope_type = 'artifact' AND EXISTS (
+    SELECT 1 FROM workspace_artifacts artifact
+    WHERE artifact.id = NEW.scope_id
+      AND artifact.workspace_id = NEW.workspace_id
+      AND artifact.archived_at IS NULL
+  ))
+  OR (NEW.scope_type = 'resource' AND EXISTS (
+    SELECT 1 FROM resources resource
+    WHERE resource.id = NEW.scope_id
+      AND resource.workspace_id = NEW.workspace_id
+      AND resource.archived_at IS NULL
+  ))
+)
+BEGIN SELECT RAISE(ABORT, 'Context Pack target belongs to another Workspace or is archived'); END;
+CREATE TRIGGER context_pack_update_immutable
+BEFORE UPDATE OF
+  id, workspace_id, scope_type, scope_id, graph_revision, intent, message_checksum,
+  manifest_path, token_estimate, omissions_json, hash, created_at
+ON context_packs
+BEGIN SELECT RAISE(ABORT, 'Context Packs are immutable'); END;
+
+CREATE TRIGGER context_pack_usage_insert_guard
+BEFORE INSERT ON context_pack_item_usage
+WHEN NOT EXISTS (
+  SELECT 1 FROM context_pack_items item
+  JOIN context_packs pack
+    ON pack.id = item.context_pack_id AND pack.workspace_id = item.workspace_id
+  WHERE item.context_pack_id = NEW.context_pack_id
+    AND item.workspace_id = NEW.workspace_id
+    AND item.ordinal = NEW.ordinal
+    AND item.provided = 1
+    AND pack.sealed = 1
+) OR EXISTS (
+  SELECT 1 FROM context_pack_item_usage existing
+  WHERE existing.context_pack_id = NEW.context_pack_id
+    AND existing.ordinal = NEW.ordinal
+    AND existing.sequence = NEW.sequence
+) OR typeof(NEW.sequence) <> 'integer'
+  OR NEW.sequence < 1
+  OR NEW.sequence > 9007199254740991
+  OR NEW.sequence <> COALESCE((
+    SELECT MAX(existing.sequence) + 1
+    FROM context_pack_item_usage existing
+    WHERE existing.context_pack_id = NEW.context_pack_id
+      AND existing.ordinal = NEW.ordinal
+  ), 1)
+BEGIN SELECT RAISE(ABORT, 'Context Pack usage evidence is append-only, contiguous, and requires a sealed provided item'); END;
+
+CREATE TRIGGER context_pack_usage_run_ownership
+BEFORE INSERT ON context_pack_item_usage
+WHEN NEW.run_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM runs run
+  JOIN context_packs pack
+    ON pack.id = NEW.context_pack_id AND pack.workspace_id = NEW.workspace_id
+  JOIN project_workspaces workspace
+    ON workspace.id = pack.workspace_id AND workspace.project_id = run.project_id
+  WHERE run.id = NEW.run_id
+    AND run.context_pack_id = pack.id
+    AND run.context_pack_hash = pack.hash
+)
+BEGIN SELECT RAISE(ABORT, 'Context Pack usage Run is not bound to the exact Context Pack'); END;
+
+CREATE TRIGGER run_context_pack_insert_ownership
+BEFORE INSERT ON runs
+WHEN (NEW.context_pack_id IS NULL) <> (NEW.context_pack_hash IS NULL)
+  OR (NEW.context_pack_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM context_packs pack
+    JOIN project_workspaces workspace ON workspace.id = pack.workspace_id
+    WHERE pack.id = NEW.context_pack_id
+      AND pack.hash = NEW.context_pack_hash
+      AND workspace.project_id = NEW.project_id
+      AND pack.sealed = 1
+  ))
+BEGIN SELECT RAISE(ABORT, 'Run Context Pack ownership or hash violation'); END;
+CREATE TRIGGER run_context_pack_insert_immutable
+BEFORE INSERT ON runs
+WHEN EXISTS (
+  SELECT 1 FROM runs existing
+  WHERE existing.id = NEW.id AND (
+    NEW.project_id IS NOT existing.project_id
+    OR NEW.context_pack_id IS NOT existing.context_pack_id
+    OR NEW.context_pack_hash IS NOT existing.context_pack_hash
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Run Context Pack binding is immutable'); END;
+CREATE TRIGGER run_context_pack_update_ownership
+BEFORE UPDATE OF project_id, context_pack_id, context_pack_hash ON runs
+WHEN NEW.project_id IS NOT OLD.project_id
+  OR NEW.context_pack_id IS NOT OLD.context_pack_id
+  OR NEW.context_pack_hash IS NOT OLD.context_pack_hash
+BEGIN SELECT RAISE(ABORT, 'Run Context Pack binding is immutable'); END;
+`;
+
 /** Additive migrations for databases created before a column existed. */
 export function migrateStoreSchema(db: DatabaseSync): void {
   const ensureColumn = (table: string, column: string, decl: string): boolean => {
@@ -1682,11 +2083,41 @@ export function migrateStoreSchema(db: DatabaseSync): void {
   ensureColumn("runs", "user_message_id", "user_message_id TEXT");
   ensureColumn("runs", "assistant_message_id", "assistant_message_id TEXT");
   ensureColumn("runs", "commit_hash", "commit_hash TEXT");
+  ensureColumn("runs", "artifact_id", "artifact_id TEXT");
+  ensureColumn("runs", "artifact_track_id", "artifact_track_id TEXT");
+  ensureColumn("runs", "plan_id", "plan_id TEXT");
+  ensureColumn("runs", "task_id", "task_id TEXT");
+  ensureColumn("runs", "base_revision_id", "base_revision_id TEXT");
+  ensureColumn("runs", "context_pack_id", "context_pack_id TEXT");
+  ensureColumn("runs", "context_pack_hash", "context_pack_hash TEXT");
+  ensureColumn("runs", "attempt", "attempt INTEGER NOT NULL DEFAULT 1 CHECK(attempt > 0)");
   ensureColumn("runs", "model", "model TEXT");
   ensureColumn("runs", "agent_command", "agent_command TEXT");
   ensureColumn("runs", "skill_id", "skill_id TEXT");
   ensureColumn("runs", "feedback", "feedback TEXT");
   ensureColumn("runs", "owner_id", "owner_id TEXT");
+  ensureColumn(
+    "conversations",
+    "scope_type",
+    "scope_type TEXT CHECK(scope_type IN ('workspace','artifact','resource'))",
+  );
+  ensureColumn("conversations", "scope_id", "scope_id TEXT");
+  ensureColumn("resource_revisions", "parent_revision_id", "parent_revision_id TEXT");
+  ensureColumn(
+    "context_packs",
+    "intent",
+    "intent TEXT NOT NULL DEFAULT 'generate' CHECK(intent IN ('plan','generate','edit','repair','analyze-impact'))",
+  );
+  ensureColumn(
+    "context_packs",
+    "message_checksum",
+    `message_checksum TEXT NOT NULL DEFAULT '${"0".repeat(64)}'`,
+  );
+  db.prepare(
+    `UPDATE conversations
+     SET scope_type = 'workspace', scope_id = project_id
+     WHERE scope_type IS NULL OR scope_id IS NULL`,
+  ).run();
   ensureColumn(
     "artifact_revisions",
     "sealed",
@@ -1702,8 +2133,10 @@ export function migrateStoreSchema(db: DatabaseSync): void {
     "legacy_wrapped",
     "legacy_wrapped INTEGER NOT NULL DEFAULT 0 CHECK(legacy_wrapped IN (0, 1))",
   );
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packs_workspace_hash ON context_packs(workspace_id, hash)");
   db.exec(TASK4_OWNERSHIP_TRIGGER_UPGRADE_SCHEMA);
   db.exec(TASK5_LEGACY_WRAPPER_TRIGGER_UPGRADE_SCHEMA);
+  db.exec(TASK11_CONTEXT_TRIGGER_UPGRADE_SCHEMA);
   db.exec(`CREATE TABLE IF NOT EXISTS moodboard_conversations (
     id TEXT PRIMARY KEY,
     board_id TEXT NOT NULL REFERENCES moodboards(id) ON DELETE CASCADE,

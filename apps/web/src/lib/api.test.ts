@@ -1,5 +1,13 @@
 import { test, expect, vi } from "vitest";
-import { createApiClient, ApiError, parseSseBlock, type FetchLike } from "./api.ts";
+import {
+  createApiClient,
+  ApiError,
+  decodeContextItemRef,
+  decodeResource,
+  decodeResourceRevision,
+  parseSseBlock,
+  type FetchLike,
+} from "./api.ts";
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -37,6 +45,39 @@ test("createProject posts JSON and returns the project", async () => {
     "http://d/api/projects",
     expect.objectContaining({ method: "POST" }),
   );
+});
+
+test("Conversation APIs preserve strict scopes in responses, list queries, and create bodies", async () => {
+  const conversation = {
+    id: "conversation-1",
+    projectId: "project /1",
+    title: "Artifact chat",
+    scope: { type: "artifact", id: "artifact /1" },
+    createdAt: 1,
+    turns: 2,
+  } as const;
+  const responses = [[conversation], conversation];
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(responses.shift()));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+
+  await expect(api.listConversations("project /1", conversation.scope)).resolves.toEqual([conversation]);
+  await expect(api.createConversation("project /1", "Artifact chat", conversation.scope)).resolves.toEqual(conversation);
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    1,
+    "http://d/api/projects/project%20%2F1/conversations?scopeType=artifact&scopeId=artifact%20%2F1",
+    undefined,
+  );
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    2,
+    "http://d/api/projects/project%20%2F1/conversations",
+    expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ title: "Artifact chat", scope: conversation.scope }),
+    }),
+  );
+
+  const invalidFetch = vi.fn<FetchLike>(async () => jsonResponse([{ ...conversation, scope: { type: "branch", id: "artifact /1" } }]));
+  await expect(createApiClient({ fetchImpl: invalidFetch }).listConversations("p1")).rejects.toThrow(/scope type/);
 });
 
 test("createApiClient sends the daemon token header on JSON requests", async () => {
@@ -278,6 +319,157 @@ test("workspace APIs encode project and artifact IDs and send typed mutation bod
   expect(fetchImpl).toHaveBeenNthCalledWith(7, "http://d/api/projects/p%20%2F1/artifacts/a%20%2F1/revisions/r%20%2F1", undefined);
   expect(fetchImpl).toHaveBeenNthCalledWith(8, "http://d/api/projects/p%20%2F1/workspace/snapshots", undefined);
   expect(fetchImpl).toHaveBeenNthCalledWith(9, "http://d/api/projects/p%20%2F1/workspace/snapshots/s%20%2F1", undefined);
+});
+
+test("Resource codecs validate every discriminant and immutable response field", () => {
+  const resource = {
+    id: "resource-1",
+    workspaceId: "workspace-1",
+    kind: "moodboard",
+    title: "Warm references",
+    headRevisionId: null,
+    defaultPinPolicy: "follow-head",
+    archivedAt: null,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const revision = {
+    id: "resource-revision-1",
+    workspaceId: "workspace-1",
+    resourceId: "resource-1",
+    sequence: 1,
+    parentRevisionId: null,
+    manifestPath: "resources/resource-1/revisions/resource-revision-1/manifest.json",
+    summary: "Frozen moodboard",
+    metadata: { sourceId: "moodboard-1" },
+    checksum: "a".repeat(64),
+    provenance: { source: "moodboard" },
+    createdByRunId: null,
+    createdAt: 3,
+  };
+
+  expect(decodeResource(resource)).toEqual(resource);
+  expect(decodeResourceRevision(revision)).toEqual(revision);
+  expect(() => decodeResource({ ...resource, kind: "plugin" })).toThrow(/Resource kind/);
+  expect(() => decodeResource({ ...resource, defaultPinPolicy: "sometimes" })).toThrow(/pin policy/);
+  expect(() => decodeResourceRevision({ ...revision, sequence: 0 })).toThrow(/sequence/);
+  expect(() => decodeResourceRevision({ ...revision, metadata: [] })).toThrow(/metadata/);
+});
+
+test("canonical Context refs preserve Resource kind and reject pre-canonical identities", () => {
+  expect(decodeContextItemRef({
+    kind: "resource",
+    id: "resource-1",
+    resourceKind: "moodboard",
+    revisionId: "revision-1",
+  })).toEqual({
+    kind: "resource",
+    id: "resource-1",
+    resourceKind: "moodboard",
+    revisionId: "revision-1",
+  });
+  expect(() => decodeContextItemRef({ kind: "resource", id: "resource-1" })).toThrow(/resourceKind/);
+  expect(() => decodeContextItemRef({ kind: "workspace-node", id: "node-1" })).toThrow(/kind/);
+  expect(() => decodeContextItemRef({ kind: "inline", id: "inline-1", content: "not canonical" })).toThrow(/unsupported field/);
+});
+
+test("Resource client covers the seven approved routes with owned-source and CAS request bodies", async () => {
+  const resource = {
+    id: "resource /1",
+    workspaceId: "workspace-1",
+    kind: "file",
+    title: "Hero image",
+    headRevisionId: null,
+    defaultPinPolicy: "follow-head",
+    archivedAt: null,
+    createdAt: 1,
+    updatedAt: 1,
+  } as const;
+  const revision = {
+    id: "revision /1",
+    workspaceId: "workspace-1",
+    resourceId: "resource /1",
+    sequence: 1,
+    parentRevisionId: null,
+    manifestPath: "resources/resource-1/revisions/revision-1/manifest.json",
+    summary: "Frozen upload",
+    metadata: {},
+    checksum: "b".repeat(64),
+    provenance: { source: "uploaded-file" },
+    createdByRunId: null,
+    createdAt: 2,
+  };
+  const graph = { workspaceId: "workspace-1", revision: 2, nodes: [], edges: [] };
+  const snapshot = { id: "snapshot-2", workspaceId: "workspace-1" };
+  const responses = [
+    [resource],
+    { resource, node: { id: "node-1", workspaceId: "workspace-1", name: "Hero image", kind: "resource", resourceId: "resource /1" }, graph, snapshot },
+    resource,
+    { action: "set-default-pin-policy", resource: { ...resource, defaultPinPolicy: "pin-current" } },
+    [revision],
+    revision,
+    snapshot,
+  ];
+  const fetchImpl = vi.fn<FetchLike>(async () => jsonResponse(responses.shift()));
+  const api = createApiClient({ baseUrl: "http://d", fetchImpl });
+  const createInput = {
+    kind: "file" as const,
+    title: "Hero image",
+    defaultPinPolicy: "follow-head" as const,
+    baseGraphRevision: 1,
+    expectedSnapshotId: "snapshot-1",
+  };
+  const updateInput = {
+    action: "set-default-pin-policy" as const,
+    expectedDefaultPinPolicy: "follow-head" as const,
+    defaultPinPolicy: "pin-current" as const,
+  };
+  const revisionInput = {
+    expectedHeadRevisionId: null,
+    source: { type: "uploaded-file" as const, uploadedFileId: "upload-1" },
+  };
+  const publishInput = {
+    expectedHeadRevisionId: null,
+    expectedSnapshotId: "snapshot-1",
+    reason: "Publish uploaded hero image",
+  };
+
+  await api.listResources("project /1");
+  await api.createResource("project /1", createInput);
+  await api.getResource("project /1", "resource /1");
+  await api.updateResource("project /1", "resource /1", updateInput);
+  await api.listResourceRevisions("project /1", "resource /1");
+  await api.createResourceRevision("project /1", "resource /1", revisionInput);
+  await api.publishResourceRevision("project /1", "resource /1", "revision /1", publishInput);
+
+  const base = "http://d/api/projects/project%20%2F1/resources";
+  expect(fetchImpl).toHaveBeenNthCalledWith(1, base, undefined);
+  expect(fetchImpl).toHaveBeenNthCalledWith(2, base, expect.objectContaining({ method: "POST", body: JSON.stringify(createInput) }));
+  expect(fetchImpl).toHaveBeenNthCalledWith(3, `${base}/resource%20%2F1`, undefined);
+  expect(fetchImpl).toHaveBeenNthCalledWith(4, `${base}/resource%20%2F1`, expect.objectContaining({ method: "PATCH", body: JSON.stringify(updateInput) }));
+  expect(fetchImpl).toHaveBeenNthCalledWith(5, `${base}/resource%20%2F1/revisions`, undefined);
+  expect(fetchImpl).toHaveBeenNthCalledWith(6, `${base}/resource%20%2F1/revisions`, expect.objectContaining({ method: "POST", body: JSON.stringify(revisionInput) }));
+  expect(fetchImpl).toHaveBeenNthCalledWith(
+    7,
+    `${base}/resource%20%2F1/revisions/revision%20%2F1/publish`,
+    expect.objectContaining({ method: "POST", body: JSON.stringify(publishInput) }),
+  );
+});
+
+test("Resource Revision requests reject client-authored storage and integrity fields before fetch", () => {
+  const fetchImpl = vi.fn<FetchLike>();
+  const api = createApiClient({ fetchImpl });
+
+  expect(() =>
+    api.createResourceRevision("p1", "resource-1", {
+      expectedHeadRevisionId: null,
+      source: { type: "uploaded-file", uploadedFileId: "upload-1" },
+      manifestPath: "/tmp/client-manifest.json",
+      checksum: "client-authored",
+      provenance: { trusted: true },
+    } as never),
+  ).toThrow(/unsupported field manifestPath/);
+  expect(fetchImpl).not.toHaveBeenCalled();
 });
 
 test("forkMessage POSTs the message fork endpoint", async () => {

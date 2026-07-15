@@ -3,6 +3,13 @@ import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { useSortable } from "@dnd-kit/react/sortable";
 import { FileText, FolderOpen, GripVertical, Image as ImageIcon, Images, Layers, MousePointerClick, Paperclip, Sparkles, X } from "lucide-react";
 import { cn } from "../lib/utils.ts";
+import {
+  RUN_CONTEXT_MAX_ITEMS,
+  decodeRunContextRefs,
+  decodeRunSelectionRefs,
+  type RunContextRef,
+  type RunSelectionRef,
+} from "../lib/api.ts";
 
 export type AgentComposerContextItem<PreviewTarget = unknown> =
   | {
@@ -12,6 +19,8 @@ export type AgentComposerContextItem<PreviewTarget = unknown> =
       subtitle?: string;
       name: string;
       path: string;
+      /** Daemon-owned upload identity; legacy upload endpoints currently return the stored path as this identity. */
+      uploadedFileId?: string;
       previewUrl?: string;
       mimeType?: string;
       size?: number;
@@ -23,6 +32,158 @@ export type AgentComposerContextItem<PreviewTarget = unknown> =
   | { id: string; type: "preview-target"; title: string; subtitle?: string; selector: string; note?: string; target: PreviewTarget }
   | { id: string; type: "canvas-node"; title: string; subtitle?: string; nodeId: string; nodeType: string; body: string }
   | { id: string; type: "text-context"; title: string; subtitle?: string; body: string };
+
+export interface StructuredComposerContext {
+  contextRefs: RunContextRef[];
+  selection: RunSelectionRef[];
+}
+
+export class UnsupportedComposerContextError extends Error {
+  readonly itemIds: string[];
+
+  constructor(items: readonly AgentComposerContextItem[]) {
+    super(`Standard context cannot safely resolve: ${items.map((item) => item.title).join(", ")}`);
+    this.name = "UnsupportedComposerContextError";
+    this.itemIds = items.map((item) => item.id);
+  }
+}
+
+/**
+ * Convert UI cards to bounded, structured Standard context. The daemon snapshots owned identities
+ * and persists untrusted inline content; none of it is copied into the visible user message.
+ */
+export function serializeStructuredComposerContext<PreviewTarget>(
+  items: readonly AgentComposerContextItem<PreviewTarget>[],
+  previewSelection: (
+    item: Extract<AgentComposerContextItem<PreviewTarget>, { type: "preview-target" }>,
+  ) => RunSelectionRef,
+): StructuredComposerContext {
+  if (items.length > RUN_CONTEXT_MAX_ITEMS) {
+    throw new TypeError(`Standard context exceeds ${RUN_CONTEXT_MAX_ITEMS} items`);
+  }
+  const unsupported = items.filter((item) => item.type === "local-path" || item.type === "project");
+  if (unsupported.length) throw new UnsupportedComposerContextError(unsupported);
+  const contextRefs: RunContextRef[] = [];
+  const selection: RunSelectionRef[] = [];
+  for (const item of items) {
+    switch (item.type) {
+      case "moodboard":
+        contextRefs.push({
+          kind: "owned-source",
+          id: item.id,
+          title: item.title,
+          resourceKind: "moodboard",
+          source: { type: "moodboard", moodboardId: item.moodboardId },
+        });
+        break;
+      case "effect":
+        contextRefs.push({
+          kind: "owned-source",
+          id: item.id,
+          title: item.title,
+          resourceKind: "effect",
+          source: { type: "effect", effectId: item.effectId },
+        });
+        break;
+      case "preview-target": {
+        const resolvedSelection = previewSelection(item);
+        if (!resolvedSelection.locator) throw new TypeError("Preview selection must include its full stable locator");
+        selection.push(resolvedSelection);
+        break;
+      }
+      case "canvas-node":
+        contextRefs.push({ kind: "inline", id: item.id, title: item.title, content: item.body, trustLevel: "untrusted" });
+        selection.push({ kind: "node", id: item.nodeId, locator: { nodeType: item.nodeType } });
+        break;
+      case "file":
+        contextRefs.push({
+          kind: "owned-source",
+          id: item.id,
+          title: item.title,
+          resourceKind: "file",
+          source: { type: "uploaded-file", uploadedFileId: item.uploadedFileId ?? item.path },
+        });
+        break;
+      case "text-context":
+        contextRefs.push({ kind: "inline", id: item.id, title: item.title, content: item.body, trustLevel: "untrusted" });
+        break;
+      case "local-path":
+      case "project":
+        throw new UnsupportedComposerContextError([item]);
+    }
+  }
+  return {
+    contextRefs: decodeRunContextRefs(contextRefs),
+    selection: decodeRunSelectionRefs(selection),
+  };
+}
+
+export interface LegacyPrototypeComposerSerialization {
+  brief: string;
+  moodboardRefs: Array<{ id: string; name?: string }>;
+  effectRefs: Array<{ id: string; name?: string }>;
+}
+
+/**
+ * Compatibility bridge for legacy Prototype runs, whose daemon contract still consumes one
+ * flattened brief. Standard runs must use serializeStructuredComposerContext instead.
+ */
+export function serializeLegacyPrototypeComposerContext<PreviewTarget>(
+  message: string,
+  items: readonly AgentComposerContextItem<PreviewTarget>[],
+  formatPreviewTarget: (target: PreviewTarget) => string,
+): LegacyPrototypeComposerSerialization {
+  const moodboardRefs = items
+    .filter((item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "moodboard" }> => item.type === "moodboard")
+    .map((item) => ({ id: item.moodboardId, name: item.name }));
+  const effectRefs = items
+    .filter((item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "effect" }> => item.type === "effect")
+    .map((item) => ({ id: item.effectId, name: item.name }));
+  const previewTargets = items.filter(
+    (item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "preview-target" }> => item.type === "preview-target",
+  );
+  const fileReferencePaths = items.flatMap((item) => {
+    if (item.type === "file") return [item.path];
+    if (item.type === "project" && item.referencePath) return [item.referencePath];
+    return [];
+  });
+  const localPathItems = items.filter(
+    (item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "local-path" }> => item.type === "local-path",
+  );
+  const textContextItems = items.filter(
+    (item): item is Extract<AgentComposerContextItem<PreviewTarget>, { type: "text-context" }> => item.type === "text-context",
+  );
+  const base = message.trim() || (previewTargets.length ? "Refine the marked element(s) per the notes." : "");
+  const targets = previewTargets.length
+    ? `\n\nScoped edit — change ONLY the element(s) below and keep the rest of the design byte-for-byte unchanged:\n${previewTargets
+        .map((item) => formatPreviewTarget(item.target))
+        .join("\n")}`
+    : "";
+  const fileRefs = fileReferencePaths.length
+    ? `\n\nReference files (read them from disk): ${fileReferencePaths.join(", ")}`
+    : "";
+  const localPathRefs = localPathItems.length
+    ? `\n\nReference local paths: ${localPathItems.map((item) => item.path).join(", ")}`
+    : "";
+  const textContextRefs = textContextItems.length
+    ? `\n\n${textContextItems.map((item) => `${item.title}:\n${item.body}`).join("\n\n")}`
+    : "";
+  const boardRefs = moodboardRefs.length
+    ? `\n\nMoodboard references (available to the Agent at run time): ${moodboardRefs
+        .map((ref) => `${ref.name?.trim() || "Untitled moodboard"} (${ref.id})`)
+        .join(", ")}`
+    : "";
+  const renderedEffectRefs = effectRefs.length
+    ? `\n\nEffect references (available to the Agent at run time): ${effectRefs
+        .map((ref) => `${ref.name?.trim() || "Untitled effect"} (${ref.id})`)
+        .join(", ")}`
+    : "";
+  return {
+    brief: base + targets + fileRefs + localPathRefs + textContextRefs + boardRefs + renderedEffectRefs,
+    moodboardRefs,
+    effectRefs,
+  };
+}
 
 export function upsertContextItems<T extends AgentComposerContextItem>(items: T[], incoming: T[]): T[] {
   const next = [...items];

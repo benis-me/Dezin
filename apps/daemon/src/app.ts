@@ -10,7 +10,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Store } from "../../../packages/core/src/index.ts";
-import type { CreateProjectInput, ExtensionScope, Project, Settings } from "../../../packages/core/src/index.ts";
+import type { ConversationScope, CreateProjectInput, ExtensionScope, Project, Settings } from "../../../packages/core/src/index.ts";
 import type { AgentRunner } from "../../../packages/agent/src/index.ts";
 import type { DesignRegistry } from "../../../packages/design/src/index.ts";
 import { HttpError, sendJson, sendError, send, readJsonBody, readRawBody, matchPath, isHttpError } from "./http-util.ts";
@@ -110,9 +110,12 @@ import {
 } from "./preview-lease.ts";
 import {
   handleApproveProposal,
+  handleCreateResource,
+  handleCreateResourceRevision,
   handleCreateProposal,
   handleGetArtifactRevision,
   handleGetProposal,
+  handleGetResource,
   handleGetWorkspace,
   handleGetWorkspaceArtifact,
   handleGetWorkspaceSnapshot,
@@ -120,11 +123,15 @@ import {
   handleListArtifactRevisions,
   handleListArtifactTracks,
   handleListProposals,
+  handleListResourceRevisions,
+  handleListResources,
   handleListWorkspaceArtifacts,
   handleListWorkspaceSnapshots,
   handlePutWorkspaceLayout,
+  handlePublishResourceRevision,
   handleRejectProposal,
   handleUpdateProposal,
+  handleUpdateResource,
 } from "./workspace-handler.ts";
 import {
   handleAcquirePreviewTargetLease,
@@ -134,6 +141,8 @@ import {
   handleArtifactMutation,
   handleArtifactThumbnail,
 } from "./artifact-editor-handler.ts";
+import { ensureStandardProjectWorkspace } from "./workspace-migration.ts";
+import type { SafeBoundedExternalFetcher } from "./resource-revision-source.ts";
 
 export type DevServerLease = Pick<PreviewLease, "url"> & Partial<Omit<PreviewLease, "url">>;
 
@@ -216,6 +225,8 @@ export interface AppDeps {
   extensionPairing?: ExtensionPairingService;
   /** Image analyzer hook; tests can avoid launching a real agent. */
   imageAnalyzer?: typeof analyzeImage;
+  /** Trusted DNS-pinned, redirect-revalidated, byte-bounded external Resource fetch boundary. */
+  resourceExternalFetch?: SafeBoundedExternalFetcher;
   /** Unique owner id for this daemon process; persisted on newly-created runs. */
   daemonOwnerId?: string;
   /** Daemon-owned scoped runtime lifecycle; createApp supplies the production instance by default. */
@@ -241,6 +252,64 @@ interface Route {
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
+}
+
+function exactRequestRecord(
+  value: unknown,
+  label: string,
+  allowedFields: readonly string[],
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new HttpError(400, `${label} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(allowedFields);
+  const unexpected = Object.keys(record).find((field) => !allowed.has(field));
+  if (unexpected) throw new HttpError(400, `${label} contains unexpected field: ${unexpected}`);
+  return record;
+}
+
+function parseConversationScope(value: unknown, projectId: string): ConversationScope {
+  const input = exactRequestRecord(value, "Conversation scope", ["type", "id"]);
+  if (input.type !== "workspace" && input.type !== "artifact" && input.type !== "resource") {
+    throw new HttpError(400, "Conversation scope type is unsupported");
+  }
+  if (typeof input.id !== "string" || input.id.trim() !== input.id || input.id.length === 0) {
+    throw new HttpError(400, "Conversation scope id is invalid");
+  }
+  if (input.type === "workspace" && input.id !== projectId) {
+    throw new HttpError(400, "Conversation workspace scope must use its owning Project id");
+  }
+  return { type: input.type, id: input.id };
+}
+
+function conversationScopeFromQuery(req: IncomingMessage, projectId: string): ConversationScope | undefined {
+  const query = new URL(req.url ?? "/", "http://127.0.0.1").searchParams;
+  const unexpected = [...query.keys()].find((field) => field !== "scopeType" && field !== "scopeId");
+  if (unexpected) throw new HttpError(400, `Conversation list contains unexpected query: ${unexpected}`);
+  const scopeTypes = query.getAll("scopeType");
+  const scopeIds = query.getAll("scopeId");
+  if (scopeTypes.length === 0 && scopeIds.length === 0) return undefined;
+  if (scopeTypes.length !== 1 || scopeIds.length !== 1) {
+    throw new HttpError(400, "Conversation list requires one scopeType and one scopeId");
+  }
+  return parseConversationScope({ type: scopeTypes[0], id: scopeIds[0] }, projectId);
+}
+
+async function requireConversationScopeOwnership(
+  deps: AppDeps,
+  projectId: string,
+  scope: ConversationScope,
+): Promise<void> {
+  if (scope.type === "workspace") return;
+  const workspace = await ensureStandardProjectWorkspace(deps, projectId);
+  if (workspace.status === "unsupported") {
+    throw new HttpError(409, "Artifact and Resource conversations require a Standard project");
+  }
+  const owned = scope.type === "artifact"
+    ? workspace.artifacts.some((artifact) => artifact.id === scope.id && artifact.workspaceId === workspace.workspace.id)
+    : deps.store.workspace.listResources(projectId, { includeArchived: true }).some((resource) => resource.id === scope.id);
+  if (!owned) throw new HttpError(404, `${scope.type} scope not found`);
 }
 
 function isHttpUrl(v: unknown): v is string {
@@ -424,6 +493,41 @@ const routes: Route[] = [
     method: "POST",
     pattern: "/api/projects/:id/workspace/proposals/:proposalId/reject",
     handler: handleRejectProposal,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/resources",
+    handler: handleListResources,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/resources",
+    handler: handleCreateResource,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/resources/:resourceId",
+    handler: handleGetResource,
+  },
+  {
+    method: "PATCH",
+    pattern: "/api/projects/:id/resources/:resourceId",
+    handler: handleUpdateResource,
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/resources/:resourceId/revisions",
+    handler: handleListResourceRevisions,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/resources/:resourceId/revisions",
+    handler: handleCreateResourceRevision,
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/resources/:resourceId/revisions/:revisionId/publish",
+    handler: handlePublishResourceRevision,
   },
   {
     method: "GET",
@@ -1016,18 +1120,30 @@ const routes: Route[] = [
   {
     method: "GET",
     pattern: "/api/projects/:id/conversations",
-    handler: (_req, res, { id }, { store }) => {
-      if (!store.getProject(id!)) return sendError(res, 404, "project not found");
-      sendJson(res, 200, store.listConversations(id!));
+    handler: async (req, res, { id }, deps) => {
+      if (!deps.store.getProject(id!)) return sendError(res, 404, "project not found");
+      const scope = conversationScopeFromQuery(req, id!);
+      if (scope) await requireConversationScopeOwnership(deps, id!, scope);
+      sendJson(res, 200, deps.store.listConversations(id!, scope));
     },
   },
   {
     method: "POST",
     pattern: "/api/projects/:id/conversations",
-    handler: async (req, res, { id }, { store }) => {
-      if (!store.getProject(id!)) return sendError(res, 404, "project not found");
-      const body = (await readJsonBody(req)) as { title?: string };
-      sendJson(res, 201, store.createConversation(id!, body.title?.trim() || "Untitled"));
+    handler: async (req, res, { id }, deps) => {
+      if (!deps.store.getProject(id!)) return sendError(res, 404, "project not found");
+      const body = exactRequestRecord(await readJsonBody(req), "Create Conversation request", ["title", "scope"]);
+      const title = body.title === undefined
+        ? "Untitled"
+        : typeof body.title === "string" && body.title.trim().length > 0 && body.title.trim().length <= 500
+          ? body.title.trim()
+          : null;
+      if (title === null) return sendError(res, 400, "Conversation title must contain 1-500 characters");
+      const scope = body.scope === undefined
+        ? { type: "workspace" as const, id: id! }
+        : parseConversationScope(body.scope, id!);
+      await requireConversationScopeOwnership(deps, id!, scope);
+      sendJson(res, 201, deps.store.createConversation(id!, title, scope));
     },
   },
   {
