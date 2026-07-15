@@ -879,6 +879,21 @@ export type GenerationTaskExecutionMode = "full" | "publication-only";
 export type GenerationTaskRetryContextPolicy = "same-context" | "latest-context";
 export type GenerationTaskCapacityClass = "agent" | "render-qa" | "image";
 export type GenerationTaskClaimKind = "capacity" | "writer";
+export type GenerationTaskCapacityClaimKey =
+  | "capacity:agent:1"
+  | "capacity:agent:2"
+  | "capacity:agent:3"
+  | "capacity:render-qa:1"
+  | "capacity:render-qa:2"
+  | "capacity:image:1"
+  | "capacity:image:2";
+export type GenerationTaskWriterClaimKey =
+  | `writer:artifact:${string}:${string}`
+  | `writer:resource:${string}:${string}`
+  | `writer:checkpoint:${string}`
+  | `writer:kernel:${string}`
+  | `writer:source:${string}`;
+export type GenerationTaskClaimKey = GenerationTaskCapacityClaimKey | GenerationTaskWriterClaimKey;
 
 export type GenerationTaskFailureClass =
   | "context"
@@ -1055,6 +1070,19 @@ export interface GenerationTaskAttemptLease {
   leaseToken: string;
 }
 
+export interface TryClaimGenerationTaskAttemptInput {
+  taskId: string;
+  attempt: number;
+  ownerId: string;
+  now: number;
+  leaseMs: number;
+}
+
+export interface HeartbeatGenerationTaskAttemptInput extends GenerationTaskAttemptLease {
+  now: number;
+  leaseMs: number;
+}
+
 export interface GenerationTaskAttempt extends GenerationTaskAttemptInput {
   status: GenerationTaskAttemptStatus;
   blockedReason: string | null;
@@ -1074,10 +1102,24 @@ export interface GenerationTaskAttempt extends GenerationTaskAttemptInput {
 }
 
 export interface GenerationTaskClaim extends GenerationTaskAttemptLease {
-  claimKey: string;
+  planId: string;
+  claimKey: GenerationTaskClaimKey;
   claimKind: GenerationTaskClaimKind;
   leaseExpiresAt: number;
   createdAt: number;
+}
+
+export interface GenerationTaskExecutionLease extends GenerationTaskAttemptLease {
+  planId: string;
+  leaseExpiresAt: number;
+  heartbeatAt: number;
+  claims: GenerationTaskClaim[];
+}
+
+export interface GenerationTaskAttemptClaim {
+  attempt: GenerationTaskAttempt;
+  lease: GenerationTaskAttemptLease;
+  claims: GenerationTaskClaim[];
 }
 
 export type GenerationPlanEventType =

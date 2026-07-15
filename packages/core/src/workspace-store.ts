@@ -29,10 +29,15 @@ import type {
   GenerationTaskAttemptDependencyOutputInput,
   GenerationTaskAttemptInput,
   GenerationTaskAttemptResourcePinInput,
+  GenerationTaskAttemptClaim,
+  GenerationTaskClaim,
   GenerationTaskDependency,
+  GenerationTaskExecutionLease,
   GenerationTaskExecutionMode,
   GenerationTaskMaterializationObservation,
   GenerationTaskMaterializationFailure,
+  GenerationTaskAttemptLease,
+  HeartbeatGenerationTaskAttemptInput,
   KernelImpactAnalysis,
   KernelPublicationExpectation,
   LegacyWorkspaceFacts,
@@ -71,6 +76,7 @@ import type {
   UpdateWorkspaceProposalInput,
   UpdateResourceForProjectInput,
   UpdateResourceForProjectResult,
+  TryClaimGenerationTaskAttemptInput,
 } from "./workspace-types.ts";
 import {
   assertAcyclicTaskGraph,
@@ -128,13 +134,17 @@ import {
 } from "./workspace-codecs.ts";
 import {
   asGenerationTaskAttempt,
+  asGenerationTaskClaim,
   asGenerationPlanEvent,
   asGenerationTask,
   asGenerationTaskMaterializationFailure,
   normalizeGenerationTaskAttemptInput,
+  normalizeGenerationTaskAttemptLease,
+  normalizeHeartbeatGenerationTaskAttemptInput,
   normalizeGenerationTaskIntent,
   normalizeRecordGenerationTaskMaterializationFailureInput,
   normalizeListGenerationPlanEventsInput,
+  normalizeTryClaimGenerationTaskAttemptInput,
   type Row,
 } from "./store-codecs.ts";
 
@@ -154,8 +164,18 @@ const DEFAULT_KERNEL_PAYLOAD = {
   },
 } as const;
 
+const GENERATION_TASK_CAPACITY_LIMITS = {
+  agent: 3,
+  "render-qa": 2,
+  image: 2,
+} as const;
+
 function checksum(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function generationClaimKeyId(value: string): string {
+  return Buffer.from(value, "utf8").toString("hex");
 }
 
 export function artifactRevisionContextChecksum(input: {
@@ -1231,6 +1251,18 @@ export class GenerationTaskMaterializationConflictError extends Error {
     super(`Generation Task ${taskId} materialization conflict: ${message}`);
     this.name = "GenerationTaskMaterializationConflictError";
     this.taskId = taskId;
+  }
+}
+
+export class GenerationTaskLeaseFenceError extends Error {
+  readonly taskId: string;
+  readonly attempt: number;
+
+  constructor(taskId: string, attempt: number, message: string) {
+    super(`Generation Task ${taskId}/${attempt} lease fence rejected: ${message}`);
+    this.name = "GenerationTaskLeaseFenceError";
+    this.taskId = taskId;
+    this.attempt = attempt;
   }
 }
 
@@ -2605,6 +2637,315 @@ export class WorkspaceStore {
         .filter((task) => this.generationTaskCanMaterialize(task, taskById, now))
         .slice(0, 100)
         .map((task) => task.id);
+    });
+  }
+
+  listReadyGenerationTaskAttempts(limitValue = 100): GenerationTaskAttempt[] {
+    const limit = boundarySafeInteger(limitValue, "ready Generation Task Attempt limit", 1);
+    if (limit > 1_000) {
+      throw new WorkspaceStoreCodecError("ready Generation Task Attempt limit must not exceed 1000");
+    }
+    return this.transactionRead(() => {
+      const rows = this.db.prepare(
+        `SELECT task.id AS task_id, task.current_attempt AS attempt
+         FROM generation_tasks task
+         JOIN generation_plans plan
+           ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+         JOIN generation_task_attempts attempt
+           ON attempt.task_id = task.id
+          AND attempt.plan_id = task.plan_id
+          AND attempt.workspace_id = task.workspace_id
+          AND attempt.attempt = task.current_attempt
+         WHERE task.status = 'queued'
+           AND attempt.status = 'queued'
+           AND attempt.materialization_sealed = 1
+           AND plan.construction_sealed = 1
+           AND plan.status IN ('queued','running')
+           AND NOT EXISTS (
+             SELECT 1 FROM generation_task_dependencies dependency
+             JOIN generation_tasks predecessor
+               ON predecessor.id = dependency.dependency_task_id
+              AND predecessor.plan_id = dependency.plan_id
+              AND predecessor.workspace_id = dependency.workspace_id
+             WHERE dependency.task_id = task.id
+               AND dependency.plan_id = task.plan_id
+               AND predecessor.status <> 'succeeded'
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM generation_task_claims claim
+             WHERE claim.task_id = task.id AND claim.attempt = task.current_attempt
+           )
+         ORDER BY plan.created_at ASC, plan.id COLLATE BINARY ASC,
+                  task.ordinal ASC, task.id COLLATE BINARY ASC
+         LIMIT ?`,
+      ).all(limit) as Array<{ task_id: string; attempt: number }>;
+      return rows.map((row) => {
+        const taskId = requiredCell(row.task_id, "ready Generation Task id");
+        const attemptNumber = boundarySafeInteger(row.attempt, "ready Generation Task Attempt number", 1);
+        const attempt = this.readGenerationTaskAttemptInTransaction(taskId, attemptNumber);
+        if (attempt === null || attempt.status !== "queued" || attempt.lease !== null) {
+          throw new WorkspaceStoreCodecError(
+            `ready Generation Task ${taskId}/${attemptNumber} is not an unclaimed queued Attempt`,
+          );
+        }
+        this.assertGenerationTaskMaterializedEventInTransaction(attempt);
+        return attempt;
+      });
+    });
+  }
+
+  tryClaimGenerationTaskAttempt(
+    unsafeInput: TryClaimGenerationTaskAttemptInput,
+  ): GenerationTaskAttemptClaim | null {
+    const input = normalizeTryClaimGenerationTaskAttemptInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const ownership = this.db.prepare(
+        `SELECT task.plan_id, workspace.project_id
+         FROM generation_tasks task
+         JOIN project_workspaces workspace ON workspace.id = task.workspace_id
+         WHERE task.id = ?`,
+      ).get(input.taskId) as { plan_id: string; project_id: string } | undefined;
+      if (!ownership) throw new GenerationTaskNotFoundError(input.taskId);
+      const planId = requiredCell(ownership.plan_id, "claim Generation Task Plan id");
+      const projectId = requiredCell(ownership.project_id, "claim Generation Task Project id");
+      const detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      const task = detail.tasks.find((candidate) => candidate.id === input.taskId);
+      if (!task || task.currentAttempt !== input.attempt || task.status !== "queued"
+        || (detail.plan.status !== "queued" && detail.plan.status !== "running")
+        || task.dependencyIds.some((dependencyId) => (
+          detail.tasks.find((candidate) => candidate.id === dependencyId)?.status !== "succeeded"
+        ))) {
+        return null;
+      }
+      const attempt = this.readGenerationTaskAttemptInTransaction(task.id, input.attempt);
+      if (attempt === null || attempt.status !== "queued" || attempt.lease !== null) return null;
+      if (input.now < attempt.createdAt) {
+        throw new WorkspaceStoreCodecError("Generation Task claim time precedes its immutable Attempt");
+      }
+      this.assertGenerationTaskMaterializedEventInTransaction(attempt);
+
+      const capacityClaimKeys: string[] = [];
+      const reservedClaimKeys = new Set<string>();
+      for (const capacityClass of task.resourceLimits.capacityClasses) {
+        let selected: string | null = null;
+        for (let slot = 1; slot <= GENERATION_TASK_CAPACITY_LIMITS[capacityClass]; slot += 1) {
+          const claimKey = `capacity:${capacityClass}:${slot}`;
+          if (!reservedClaimKeys.has(claimKey)
+            && !this.db.prepare("SELECT 1 FROM generation_task_claims WHERE claim_key = ?").get(claimKey)) {
+            selected = claimKey;
+            break;
+          }
+        }
+        if (selected === null) return null;
+        capacityClaimKeys.push(selected);
+        reservedClaimKeys.add(selected);
+      }
+      const writerClaimKeys = this.generationTaskWriterClaimKeys(task);
+      if (writerClaimKeys.some((claimKey) => (
+        this.db.prepare("SELECT 1 FROM generation_task_claims WHERE claim_key = ?").get(claimKey)
+      ))) {
+        return null;
+      }
+      const now = input.now;
+      if (now > Number.MAX_SAFE_INTEGER - input.leaseMs) {
+        throw new WorkspaceStoreCodecError("Generation Task claim lease expiry is exhausted");
+      }
+      const leaseExpiresAt = now + input.leaseMs;
+      const leaseToken = checksum([
+        "dezin-generation-task-lease-v1",
+        task.id,
+        String(input.attempt),
+        input.ownerId,
+        this.clock.id(),
+        String(now),
+      ].join("\0"));
+      const claimKeys = [...capacityClaimKeys, ...writerClaimKeys].sort(compareBinary);
+      if (claimKeys.length === 0) {
+        throw new WorkspaceStoreCodecError(`Generation Task ${task.id} has no durable execution claims`);
+      }
+      const insertClaim = this.db.prepare(
+        `INSERT INTO generation_task_claims (
+           claim_key, claim_kind, task_id, plan_id, attempt, workspace_id,
+           owner_id, lease_token, lease_expires_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const claimKey of claimKeys) {
+        insertClaim.run(
+          claimKey,
+          claimKey.startsWith("capacity:") ? "capacity" : "writer",
+          task.id,
+          task.planId,
+          input.attempt,
+          task.workspaceId,
+          input.ownerId,
+          leaseToken,
+          leaseExpiresAt,
+          now,
+        );
+      }
+      const claimedAttempt = this.db.prepare(
+        `UPDATE generation_task_attempts
+         SET status = 'running', owner_id = ?, lease_token = ?, lease_expires_at = ?,
+             heartbeat_at = ?, started_at = ?
+         WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+           AND status = 'queued' AND owner_id IS NULL AND lease_token IS NULL
+           AND lease_expires_at IS NULL AND heartbeat_at IS NULL AND started_at IS NULL`,
+      ).run(
+        input.ownerId,
+        leaseToken,
+        leaseExpiresAt,
+        now,
+        now,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        input.attempt,
+      );
+      if (Number(claimedAttempt.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Generation Task claim lost its queued Attempt fence");
+      }
+      const claimedTask = this.db.prepare(
+        `UPDATE generation_tasks SET status = 'running'
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?
+           AND current_attempt = ? AND status = 'queued'`,
+      ).run(task.id, task.planId, task.workspaceId, input.attempt);
+      if (Number(claimedTask.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Generation Task claim lost its queued Task fence");
+      }
+      if (detail.plan.status === "queued") {
+        const runningPlan = this.db.prepare(
+          `UPDATE generation_plans SET status = 'running'
+           WHERE id = ? AND workspace_id = ? AND status = 'queued'`,
+        ).run(task.planId, task.workspaceId);
+        if (Number(runningPlan.changes) !== 1) {
+          throw new WorkspaceStoreCodecError("Generation Task claim lost its queued Plan fence");
+        }
+      }
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: "task-running",
+        payload: {
+          attempt: input.attempt,
+          ownerId: input.ownerId,
+          leaseExpiresAt,
+          capacityClaimKeys,
+          writerClaimKeys,
+        },
+      });
+      const runningTask = this.readGenerationTaskForExecutionInTransaction(task.id);
+      if (!runningTask) {
+        throw new WorkspaceStoreCodecError("Generation Task disappeared after its claim transition");
+      }
+      return this.readGenerationTaskAttemptClaimInTransaction(runningTask, input.attempt);
+    });
+  }
+
+  heartbeatGenerationTaskAttempt(
+    unsafeLease: GenerationTaskAttemptLease,
+    now: number,
+    leaseMs: number,
+  ): GenerationTaskAttemptClaim;
+  heartbeatGenerationTaskAttempt(
+    unsafeInput: HeartbeatGenerationTaskAttemptInput,
+  ): GenerationTaskAttemptClaim;
+  heartbeatGenerationTaskAttempt(
+    unsafeInputOrLease: HeartbeatGenerationTaskAttemptInput | GenerationTaskAttemptLease,
+    nowValue?: number,
+    leaseMsValue?: number,
+  ): GenerationTaskAttemptClaim {
+    const unsafeInput = nowValue === undefined && leaseMsValue === undefined
+      ? unsafeInputOrLease
+      : { ...unsafeInputOrLease, now: nowValue, leaseMs: leaseMsValue };
+    const input = normalizeHeartbeatGenerationTaskAttemptInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const task = this.readGenerationTaskForExecutionInTransaction(input.taskId);
+      if (!task || task.workspaceId !== input.workspaceId || task.currentAttempt !== input.attempt) {
+        throw new GenerationTaskLeaseFenceError(input.taskId, input.attempt, "Task identity is stale");
+      }
+      const attempt = this.readGenerationTaskAttemptInTransaction(input.taskId, input.attempt);
+      const now = input.now;
+      if (!attempt || !attempt.lease
+        || attempt.lease.ownerId !== input.ownerId
+        || attempt.lease.leaseToken !== input.leaseToken
+        || attempt.leaseExpiresAt === null
+        || attempt.leaseExpiresAt <= now
+        || (attempt.status !== "running" && attempt.status !== "candidate-ready"
+          && attempt.status !== "cancel-requested")) {
+        throw new GenerationTaskLeaseFenceError(input.taskId, input.attempt, "Attempt lease is stale or expired");
+      }
+      const live = this.readGenerationTaskExecutionLeaseInTransaction(task, input.attempt);
+      if (live.ownerId !== input.ownerId || live.leaseToken !== input.leaseToken
+        || live.claims.some((claim) => claim.leaseExpiresAt <= now)) {
+        throw new GenerationTaskLeaseFenceError(input.taskId, input.attempt, "Claim lease is stale or expired");
+      }
+      if (now < live.heartbeatAt) {
+        throw new GenerationTaskLeaseFenceError(input.taskId, input.attempt, "Heartbeat time moved backwards");
+      }
+      if (now === live.heartbeatAt) {
+        return this.readGenerationTaskAttemptClaimInTransaction(task, input.attempt);
+      }
+      if (now > Number.MAX_SAFE_INTEGER - input.leaseMs) {
+        throw new WorkspaceStoreCodecError("Generation Task heartbeat lease expiry is exhausted");
+      }
+      const leaseExpiresAt = now + input.leaseMs;
+      if (leaseExpiresAt <= live.leaseExpiresAt) {
+        return this.readGenerationTaskAttemptClaimInTransaction(task, input.attempt);
+      }
+      const renewedClaims = this.db.prepare(
+        `UPDATE generation_task_claims SET lease_expires_at = ?
+         WHERE task_id = ? AND attempt = ? AND workspace_id = ?
+           AND owner_id = ? AND lease_token = ? AND lease_expires_at = ?`,
+      ).run(
+        leaseExpiresAt,
+        input.taskId,
+        input.attempt,
+        input.workspaceId,
+        input.ownerId,
+        input.leaseToken,
+        live.leaseExpiresAt,
+      );
+      if (Number(renewedClaims.changes) !== live.claims.length) {
+        throw new WorkspaceStoreCodecError("Generation Task heartbeat lost part of its claim fence");
+      }
+      const renewedAttempt = this.db.prepare(
+        `UPDATE generation_task_attempts
+         SET lease_expires_at = ?, heartbeat_at = ?
+         WHERE task_id = ? AND attempt = ? AND workspace_id = ?
+           AND owner_id = ? AND lease_token = ? AND lease_expires_at = ?`,
+      ).run(
+        leaseExpiresAt,
+        now,
+        input.taskId,
+        input.attempt,
+        input.workspaceId,
+        input.ownerId,
+        input.leaseToken,
+        live.leaseExpiresAt,
+      );
+      if (Number(renewedAttempt.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Generation Task heartbeat lost its Attempt fence");
+      }
+      return this.readGenerationTaskAttemptClaimInTransaction(task, input.attempt);
+    });
+  }
+
+  releaseGenerationTaskAttemptClaims(unsafeLease: GenerationTaskAttemptLease): boolean {
+    const lease = normalizeGenerationTaskAttemptLease(unsafeLease);
+    return this.transactionImmediate(() => {
+      const liveAttempt = this.db.prepare(
+        `SELECT 1 FROM generation_task_attempts
+         WHERE task_id = ? AND attempt = ? AND workspace_id = ?
+           AND owner_id = ? AND lease_token = ?`,
+      ).get(lease.taskId, lease.attempt, lease.workspaceId, lease.ownerId, lease.leaseToken);
+      if (liveAttempt) return false;
+      const deleted = this.db.prepare(
+        `DELETE FROM generation_task_claims
+         WHERE task_id = ? AND attempt = ? AND workspace_id = ?
+           AND owner_id = ? AND lease_token = ?`,
+      ).run(lease.taskId, lease.attempt, lease.workspaceId, lease.ownerId, lease.leaseToken);
+      return Number(deleted.changes) > 0;
     });
   }
 
@@ -4458,6 +4799,144 @@ export class WorkspaceStore {
       && isDeepStrictEqual(attempt.componentPins, input.componentPins)
       && attempt.retryContextPolicy === input.retryContextPolicy
       && attempt.executionMode === input.executionMode;
+  }
+
+  private readGenerationTaskForExecutionInTransaction(taskId: string): GenerationTask | null {
+    const row = this.db.prepare(
+      "SELECT * FROM generation_tasks WHERE id = ?",
+    ).get(taskId) as Row | undefined;
+    if (!row) return null;
+    const dependencyRows = this.db.prepare(
+      `SELECT * FROM generation_task_dependencies
+       WHERE task_id = ? AND plan_id = ? AND workspace_id = ?
+       ORDER BY ordinal ASC`,
+    ).all(
+      taskId,
+      requiredCell(row.plan_id, "Generation Task execution Plan id"),
+      requiredCell(row.workspace_id, "Generation Task execution Workspace id"),
+    ) as Row[];
+    return asGenerationTask(row, dependencyRows);
+  }
+
+  private generationTaskWriterClaimKeys(task: GenerationTask): string[] {
+    const workspaceKey = generationClaimKeyId(task.workspaceId);
+    if (task.target.type === "artifact") {
+      return [`writer:artifact:${workspaceKey}:${generationClaimKeyId(task.target.id)}`];
+    }
+    if (task.target.type === "resource") {
+      return [`writer:resource:${workspaceKey}:${generationClaimKeyId(task.target.id)}`];
+    }
+    if (task.kind === "checkpoint") {
+      return [`writer:checkpoint:${workspaceKey}`];
+    }
+    return [];
+  }
+
+  private readGenerationTaskExecutionLeaseInTransaction(
+    task: GenerationTask,
+    attemptNumber: number,
+  ): GenerationTaskExecutionLease {
+    const attempt = this.readGenerationTaskAttemptInTransaction(task.id, attemptNumber);
+    if (!attempt || !attempt.lease || attempt.leaseExpiresAt === null || attempt.heartbeatAt === null
+      || (attempt.status !== "running" && attempt.status !== "candidate-ready"
+        && attempt.status !== "cancel-requested")) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attemptNumber} does not have a coherent live Attempt lease`,
+      );
+    }
+    if (task.currentAttempt !== attemptNumber
+      || (task.status !== "running" && task.status !== "candidate-ready"
+        && task.status !== "cancel-requested")) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attemptNumber} current state does not match its live Attempt lease`,
+      );
+    }
+    const claimRows = this.db.prepare(
+      `SELECT * FROM generation_task_claims
+       WHERE task_id = ? AND attempt = ?
+       ORDER BY claim_key COLLATE BINARY ASC`,
+    ).all(task.id, attemptNumber) as Row[];
+    const claims = claimRows.map(asGenerationTaskClaim);
+    const expectedWriterClaimKeys = this.generationTaskWriterClaimKeys(task).sort(compareBinary);
+    const capacityClaims = new Map<string, GenerationTaskClaim>();
+    const writerClaimKeys: string[] = [];
+    let sharedCreatedAt: number | null = null;
+    for (let index = 0; index < claims.length; index += 1) {
+      const claim = claims[index]!;
+      if (index > 0 && compareBinary(claims[index - 1]!.claimKey, claim.claimKey) >= 0) {
+        throw new WorkspaceStoreCodecError("Generation Task claims are not in unique canonical binary order");
+      }
+      if (claim.taskId !== task.id || claim.planId !== task.planId
+        || claim.workspaceId !== task.workspaceId || claim.attempt !== attemptNumber
+        || claim.ownerId !== attempt.lease.ownerId
+        || claim.leaseToken !== attempt.lease.leaseToken
+        || claim.leaseExpiresAt !== attempt.leaseExpiresAt) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attemptNumber} claim set does not match its Attempt fence`,
+        );
+      }
+      if (sharedCreatedAt === null) sharedCreatedAt = claim.createdAt;
+      if (claim.createdAt !== sharedCreatedAt || claim.leaseExpiresAt <= claim.createdAt) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attemptNumber} claims do not share one positive lease interval`,
+        );
+      }
+      if (claim.claimKind === "capacity") {
+        const match = /^capacity:(agent|render-qa|image):([1-3])$/.exec(claim.claimKey);
+        if (!match) {
+          throw new WorkspaceStoreCodecError("Generation Task capacity Claim key is not canonical");
+        }
+        const capacityClass = match[1]!;
+        if (capacityClaims.has(capacityClass)) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${attemptNumber} holds duplicate ${capacityClass} capacity`,
+          );
+        }
+        capacityClaims.set(capacityClass, claim);
+      } else {
+        writerClaimKeys.push(claim.claimKey);
+      }
+    }
+    const expectedCapacityClasses = [...task.resourceLimits.capacityClasses].sort(compareBinary);
+    const actualCapacityClasses = [...capacityClaims.keys()].sort(compareBinary);
+    if (!isDeepStrictEqual(actualCapacityClasses, expectedCapacityClasses)
+      || !isDeepStrictEqual(writerClaimKeys, expectedWriterClaimKeys)
+      || claims.length !== expectedCapacityClasses.length + expectedWriterClaimKeys.length) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attemptNumber} does not hold its exact required claim set`,
+      );
+    }
+    return {
+      ...attempt.lease,
+      planId: task.planId,
+      leaseExpiresAt: attempt.leaseExpiresAt,
+      heartbeatAt: attempt.heartbeatAt,
+      claims,
+    };
+  }
+
+  private readGenerationTaskAttemptClaimInTransaction(
+    task: GenerationTask,
+    attemptNumber: number,
+  ): GenerationTaskAttemptClaim {
+    const executionLease = this.readGenerationTaskExecutionLeaseInTransaction(task, attemptNumber);
+    const attempt = this.readGenerationTaskAttemptInTransaction(task.id, attemptNumber);
+    if (!attempt || !attempt.lease) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attemptNumber} live Attempt disappeared while reading its claim`,
+      );
+    }
+    return {
+      attempt,
+      lease: {
+        taskId: executionLease.taskId,
+        workspaceId: executionLease.workspaceId,
+        attempt: executionLease.attempt,
+        ownerId: executionLease.ownerId,
+        leaseToken: executionLease.leaseToken,
+      },
+      claims: executionLease.claims,
+    };
   }
 
   private readGenerationTaskAttemptInTransaction(

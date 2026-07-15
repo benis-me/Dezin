@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  asGenerationTaskClaim,
   asGenerationTaskAttempt,
   asGenerationTask,
   asGenerationPlanEvent,
@@ -9,9 +10,29 @@ import {
   generationTaskIntentHash,
   normalizeGenerationTaskAttemptInput,
   normalizeGenerationTaskAttemptLease,
+  normalizeHeartbeatGenerationTaskAttemptInput,
   normalizeGenerationTaskIntent,
   normalizeListGenerationPlanEventsInput,
+  normalizeTryClaimGenerationTaskAttemptInput,
 } from "../src/index.ts";
+
+const claimKeyId = (value: string): string => Buffer.from(value, "utf8").toString("hex");
+
+function taskClaimRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    claim_key: "capacity:agent:1",
+    claim_kind: "capacity",
+    task_id: "task-page-home",
+    plan_id: "plan-1",
+    attempt: 2,
+    workspace_id: "workspace-1",
+    owner_id: "scheduler-1",
+    lease_token: "opaque-token-2",
+    lease_expires_at: 130_000,
+    created_at: 100_000,
+    ...overrides,
+  };
+}
 
 function attemptInput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -251,6 +272,134 @@ test("Generation Task Attempt lease fences require the exact immutable tuple", (
     attempt: lease.attempt,
     ownerId: lease.ownerId,
   }), /lease token/);
+});
+
+test("Generation Task claim and heartbeat inputs normalize a positive bounded lease window", () => {
+  assert.deepEqual(normalizeTryClaimGenerationTaskAttemptInput({
+    taskId: " task-page-home ",
+    attempt: 2,
+    ownerId: " scheduler-1 ",
+    now: 100_000,
+    leaseMs: 300_000,
+  }), {
+    taskId: "task-page-home",
+    attempt: 2,
+    ownerId: "scheduler-1",
+    now: 100_000,
+    leaseMs: 300_000,
+  });
+
+  const heartbeat = normalizeHeartbeatGenerationTaskAttemptInput({
+    taskId: "task-page-home",
+    workspaceId: "workspace-1",
+    attempt: 2,
+    ownerId: "scheduler-1",
+    leaseToken: "opaque-token-2",
+    now: 105_000,
+    leaseMs: 30_000,
+  });
+  assert.deepEqual(heartbeat, {
+    taskId: "task-page-home",
+    workspaceId: "workspace-1",
+    attempt: 2,
+    ownerId: "scheduler-1",
+    leaseToken: "opaque-token-2",
+    now: 105_000,
+    leaseMs: 30_000,
+  });
+
+  for (const leaseMs of [0, -1, 1.5, 300_001, Number.MAX_SAFE_INTEGER]) {
+    assert.throws(() => normalizeTryClaimGenerationTaskAttemptInput({
+      taskId: "task-page-home",
+      attempt: 2,
+      ownerId: "scheduler-1",
+      now: 100_000,
+      leaseMs,
+    }), /lease ms/);
+  }
+  assert.throws(() => normalizeHeartbeatGenerationTaskAttemptInput({
+    ...heartbeat,
+    now: Number.MAX_SAFE_INTEGER,
+  }), /lease expiry/);
+  assert.throws(() => normalizeTryClaimGenerationTaskAttemptInput({
+    taskId: "task-page-home",
+    attempt: 2,
+    ownerId: "scheduler-1",
+    now: -1,
+    leaseMs: 30_000,
+  }), /time/);
+  assert.throws(() => normalizeTryClaimGenerationTaskAttemptInput({
+    taskId: "task-page-home",
+    attempt: 2,
+    ownerId: "scheduler-1",
+    now: 100_000,
+    leaseMs: 30_000,
+    limits: { agent: 99 },
+  }), /unsupported field limits/);
+});
+
+test("Generation Task Claim row codec accepts only canonical fixed capacity and collision-free writer keys", () => {
+  const capacityKeys = [
+    "capacity:agent:1",
+    "capacity:agent:2",
+    "capacity:agent:3",
+    "capacity:render-qa:1",
+    "capacity:render-qa:2",
+    "capacity:image:1",
+    "capacity:image:2",
+  ];
+  for (const claimKey of capacityKeys) {
+    assert.equal(asGenerationTaskClaim(taskClaimRow({ claim_key: claimKey })).claimKey, claimKey);
+  }
+
+  const workspaceId = claimKeyId("workspace-1");
+  const writerKeys = [
+    `writer:artifact:${workspaceId}:${claimKeyId("artifact-home")}`,
+    `writer:resource:${workspaceId}:${claimKeyId("resource-copy")}`,
+    `writer:checkpoint:${workspaceId}`,
+    `writer:kernel:${workspaceId}`,
+    `writer:source:${claimKeyId("project-1/source")}`,
+  ];
+  for (const claimKey of writerKeys) {
+    const claim = asGenerationTaskClaim(taskClaimRow({ claim_key: claimKey, claim_kind: "writer" }));
+    assert.equal(claim.claimKey, claimKey);
+    assert.equal(claim.claimKind, "writer");
+  }
+
+  const invalidRows = [
+    { claim_key: "capacity:agent:4" },
+    { claim_key: "capacity:agent:01" },
+    { claim_key: "capacity:renderQa:1" },
+    { claim_key: `writer:artifact:${workspaceId}:artifact-home`, claim_kind: "writer" },
+    { claim_key: `writer:artifact:${workspaceId}`, claim_kind: "writer" },
+    { claim_key: `writer:artifact:${workspaceId}:${claimKeyId("artifact-home")}:00`, claim_kind: "writer" },
+    { claim_key: `writer:resource:${workspaceId}:ABCDEF`, claim_kind: "writer" },
+    { claim_key: `writer:checkpoint:${workspaceId}:00`, claim_kind: "writer" },
+    { claim_key: "writer:kernel:0", claim_kind: "writer" },
+    { claim_key: "writer:source:ff", claim_kind: "writer" },
+    { claim_key: `writer:unknown:${workspaceId}`, claim_kind: "writer" },
+    { claim_key: "writer:", claim_kind: "writer" },
+    { claim_key: "capacity:agent:1", claim_kind: "writer" },
+    { claim_key: `writer:checkpoint:${workspaceId}`, claim_kind: "capacity" },
+  ];
+  for (const overrides of invalidRows) {
+    assert.throws(() => asGenerationTaskClaim(taskClaimRow(overrides)), /Claim key|claim key|capacity Claim|writer Claim/);
+  }
+});
+
+test("Generation Task Claim row codec fails closed on non-positive TTL and non-canonical fence columns", () => {
+  const canonical = asGenerationTaskClaim(taskClaimRow());
+  assert.equal(canonical.leaseExpiresAt, 130_000);
+  assert.equal(canonical.createdAt, 100_000);
+
+  assert.throws(() => asGenerationTaskClaim(taskClaimRow({ lease_expires_at: 100_000 })), /positive|expires/);
+  assert.throws(() => asGenerationTaskClaim(taskClaimRow({ lease_expires_at: 99_999 })), /positive|expires/);
+  assert.throws(() => asGenerationTaskClaim(taskClaimRow({ owner_id: " scheduler-1 " })), /canonical/);
+  assert.throws(() => asGenerationTaskClaim(taskClaimRow({ task_id: "task-page-home " })), /canonical/);
+  assert.throws(() => asGenerationTaskClaim(taskClaimRow({ workspace_id: " workspace-1" })), /canonical/);
+  assert.throws(() => asGenerationTaskClaim(taskClaimRow({ lease_token: "opaque-token-2 " })), /canonical/);
+  assert.throws(() => asGenerationTaskClaim(taskClaimRow({ plan_id: " plan-1" })), /canonical/);
+  assert.throws(() => asGenerationTaskClaim(taskClaimRow({ unexpected: true })), /unsupported field unexpected/);
 });
 
 test("Generation Task Attempt input canonicalizes exact dependency outputs, Resource pins, and Component pins", () => {

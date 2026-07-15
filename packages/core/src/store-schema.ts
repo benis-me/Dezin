@@ -290,7 +290,8 @@ CREATE TABLE IF NOT EXISTS generation_task_claims (
   lease_expires_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   FOREIGN KEY(task_id, attempt, plan_id, workspace_id)
-    REFERENCES generation_task_attempts(task_id, attempt, plan_id, workspace_id) ON DELETE CASCADE
+    REFERENCES generation_task_attempts(task_id, attempt, plan_id, workspace_id) ON DELETE CASCADE,
+  CHECK(lease_expires_at > created_at)
 );
 CREATE TABLE IF NOT EXISTS generation_plan_events (
   plan_id TEXT NOT NULL,
@@ -375,7 +376,13 @@ DROP TRIGGER IF EXISTS generation_materialization_failure_delete_history_guard;
 DROP TRIGGER IF EXISTS generation_plan_event_insert_guard;
 DROP TRIGGER IF EXISTS generation_plan_event_update_immutable;
 DROP TRIGGER IF EXISTS generation_plan_event_delete_history_guard;
+DROP TRIGGER IF EXISTS generation_task_claim_insert_guard;
 DROP TRIGGER IF EXISTS generation_task_claim_identity_update_immutable;
+DROP TRIGGER IF EXISTS generation_task_claim_lease_update_guard;
+DROP TRIGGER IF EXISTS generation_task_claim_delete_live_guard;
+DROP TRIGGER IF EXISTS generation_task_attempt_running_entry_guard;
+DROP TRIGGER IF EXISTS generation_task_attempt_lease_fence_guard;
+DROP TRIGGER IF EXISTS generation_task_running_entry_guard;
 DROP TRIGGER IF EXISTS generation_run_insert_ownership;
 DROP TRIGGER IF EXISTS generation_run_update_immutable;
 
@@ -570,6 +577,12 @@ CREATE TRIGGER generation_task_attempt_insert_guard
 BEFORE INSERT ON generation_task_attempts
 WHEN NEW.materialization_sealed <> 0
   OR NEW.status <> 'queued'
+  OR NEW.owner_id IS NOT NULL
+  OR NEW.lease_token IS NOT NULL
+  OR NEW.lease_expires_at IS NOT NULL
+  OR NEW.heartbeat_at IS NOT NULL
+  OR NEW.started_at IS NOT NULL
+  OR NEW.finished_at IS NOT NULL
   OR NOT EXISTS (
     SELECT 1 FROM generation_tasks task
     JOIN generation_plans plan
@@ -996,10 +1009,422 @@ BEFORE DELETE ON generation_plan_events
 WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
 BEGIN SELECT RAISE(ABORT, 'Generation Plan events are append-only'); END;
 
+CREATE TRIGGER generation_task_claim_insert_guard
+BEFORE INSERT ON generation_task_claims
+WHEN typeof(NEW.created_at) <> 'integer'
+  OR typeof(NEW.lease_expires_at) <> 'integer'
+  OR NEW.created_at < 0
+  OR NEW.created_at > 9007199254740991
+  OR NEW.lease_expires_at > 9007199254740991
+  OR NEW.lease_expires_at <= NEW.created_at
+  OR length(trim(NEW.owner_id)) = 0
+  OR NEW.owner_id IS NOT trim(NEW.owner_id)
+  OR length(trim(NEW.lease_token)) = 0
+  OR NEW.lease_token IS NOT trim(NEW.lease_token)
+  OR NOT EXISTS (
+    SELECT 1
+    FROM generation_task_attempts attempt
+    JOIN generation_tasks task
+      ON task.id = attempt.task_id
+     AND task.plan_id = attempt.plan_id
+     AND task.workspace_id = attempt.workspace_id
+    JOIN generation_plans plan
+      ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+    WHERE attempt.task_id = NEW.task_id
+      AND attempt.plan_id = NEW.plan_id
+      AND attempt.workspace_id = NEW.workspace_id
+      AND attempt.attempt = NEW.attempt
+      AND attempt.materialization_sealed = 1
+      AND attempt.status = 'queued'
+      AND attempt.owner_id IS NULL
+      AND attempt.lease_token IS NULL
+      AND attempt.lease_expires_at IS NULL
+      AND attempt.heartbeat_at IS NULL
+      AND attempt.started_at IS NULL
+      AND attempt.finished_at IS NULL
+      AND task.current_attempt = attempt.attempt
+      AND task.status = 'queued'
+      AND plan.construction_sealed = 1
+      AND plan.status IN ('queued','running')
+      AND json_type(task.resource_limits_json, '$.capacityClasses') = 'array'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM json_each(task.resource_limits_json, '$.capacityClasses') capacity
+        WHERE capacity.type <> 'text'
+          OR capacity.value NOT IN ('agent','render-qa','image')
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM generation_task_dependencies dependency
+        LEFT JOIN generation_tasks predecessor
+          ON predecessor.id = dependency.dependency_task_id
+         AND predecessor.plan_id = dependency.plan_id
+         AND predecessor.workspace_id = dependency.workspace_id
+        LEFT JOIN generation_task_attempts predecessor_attempt
+          ON predecessor_attempt.task_id = predecessor.id
+         AND predecessor_attempt.plan_id = predecessor.plan_id
+         AND predecessor_attempt.workspace_id = predecessor.workspace_id
+         AND predecessor_attempt.attempt = predecessor.current_attempt
+        WHERE dependency.task_id = task.id
+          AND dependency.plan_id = task.plan_id
+          AND dependency.workspace_id = task.workspace_id
+          AND (
+            predecessor.status IS NOT 'succeeded'
+            OR predecessor_attempt.materialization_sealed IS NOT 1
+            OR predecessor_attempt.status IS NOT 'succeeded'
+          )
+      )
+      AND EXISTS (
+        SELECT 1 FROM generation_plan_events event
+        WHERE event.plan_id = task.plan_id
+          AND event.workspace_id = task.workspace_id
+          AND event.task_id = task.id
+          AND event.type = 'task-materialized'
+          AND json_extract(event.payload_json, '$.attempt') = attempt.attempt
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM generation_task_claims existing
+        WHERE existing.task_id = NEW.task_id
+          AND existing.attempt = NEW.attempt
+          AND (
+            existing.plan_id IS NOT NEW.plan_id
+            OR existing.workspace_id IS NOT NEW.workspace_id
+            OR existing.owner_id IS NOT NEW.owner_id
+            OR existing.lease_token IS NOT NEW.lease_token
+            OR existing.lease_expires_at IS NOT NEW.lease_expires_at
+            OR existing.created_at IS NOT NEW.created_at
+          )
+      )
+      AND (
+        (
+          NEW.claim_kind = 'capacity'
+          AND (
+            (
+              NEW.claim_key IN ('capacity:agent:1','capacity:agent:2','capacity:agent:3')
+              AND EXISTS (
+                SELECT 1 FROM json_each(task.resource_limits_json, '$.capacityClasses') capacity
+                WHERE capacity.type = 'text' AND capacity.value = 'agent'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM generation_task_claims existing
+                WHERE existing.task_id = NEW.task_id AND existing.attempt = NEW.attempt
+                  AND existing.claim_key IN (
+                    'capacity:agent:1','capacity:agent:2','capacity:agent:3'
+                  )
+              )
+            )
+            OR (
+              NEW.claim_key IN ('capacity:render-qa:1','capacity:render-qa:2')
+              AND EXISTS (
+                SELECT 1 FROM json_each(task.resource_limits_json, '$.capacityClasses') capacity
+                WHERE capacity.type = 'text' AND capacity.value = 'render-qa'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM generation_task_claims existing
+                WHERE existing.task_id = NEW.task_id AND existing.attempt = NEW.attempt
+                  AND existing.claim_key IN ('capacity:render-qa:1','capacity:render-qa:2')
+              )
+            )
+            OR (
+              NEW.claim_key IN ('capacity:image:1','capacity:image:2')
+              AND EXISTS (
+                SELECT 1 FROM json_each(task.resource_limits_json, '$.capacityClasses') capacity
+                WHERE capacity.type = 'text' AND capacity.value = 'image'
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM generation_task_claims existing
+                WHERE existing.task_id = NEW.task_id AND existing.attempt = NEW.attempt
+                  AND existing.claim_key IN ('capacity:image:1','capacity:image:2')
+              )
+            )
+          )
+        )
+        OR (
+          NEW.claim_kind = 'writer'
+          AND NEW.claim_key = CASE
+            WHEN task.target_type = 'artifact' THEN
+              'writer:artifact:' || lower(hex(CAST(task.workspace_id AS BLOB))) || ':' ||
+              lower(hex(CAST(task.target_artifact_id AS BLOB)))
+            WHEN task.target_type = 'resource' THEN
+              'writer:resource:' || lower(hex(CAST(task.workspace_id AS BLOB))) || ':' ||
+              lower(hex(CAST(task.target_resource_id AS BLOB)))
+            WHEN task.kind = 'checkpoint' THEN
+              'writer:checkpoint:' || lower(hex(CAST(task.workspace_id AS BLOB)))
+          END
+          AND NOT EXISTS (
+            SELECT 1 FROM generation_task_claims existing
+            WHERE existing.task_id = NEW.task_id
+              AND existing.attempt = NEW.attempt
+              AND existing.claim_kind = 'writer'
+          )
+        )
+      )
+  )
+BEGIN SELECT RAISE(ABORT, 'Generation Task Claim is stale, non-canonical, or has an invalid lease fence'); END;
+
 CREATE TRIGGER generation_task_claim_identity_update_immutable
 BEFORE UPDATE OF claim_key, claim_kind, task_id, plan_id, attempt, workspace_id,
   owner_id, lease_token, created_at ON generation_task_claims
 BEGIN SELECT RAISE(ABORT, 'Generation Task Claim identity and fence are immutable'); END;
+
+CREATE TRIGGER generation_task_claim_lease_update_guard
+BEFORE UPDATE OF lease_expires_at ON generation_task_claims
+WHEN NEW.lease_expires_at <= OLD.lease_expires_at
+  OR NEW.lease_expires_at > 9007199254740991
+  OR NOT EXISTS (
+    SELECT 1 FROM generation_task_attempts attempt
+    WHERE attempt.task_id = OLD.task_id
+      AND attempt.plan_id = OLD.plan_id
+      AND attempt.workspace_id = OLD.workspace_id
+      AND attempt.attempt = OLD.attempt
+      AND attempt.status IN ('running','candidate-ready','cancel-requested')
+      AND attempt.owner_id = OLD.owner_id
+      AND attempt.lease_token = OLD.lease_token
+      AND attempt.lease_expires_at = OLD.lease_expires_at
+      AND attempt.heartbeat_at IS NOT NULL
+      AND OLD.lease_expires_at > attempt.heartbeat_at
+  )
+BEGIN SELECT RAISE(ABORT, 'Generation Task Claim lease can only increase under its live fence'); END;
+
+CREATE TRIGGER generation_task_claim_delete_live_guard
+BEFORE DELETE ON generation_task_claims
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+AND EXISTS (
+  SELECT 1 FROM generation_task_attempts attempt
+  WHERE attempt.task_id = OLD.task_id
+    AND attempt.plan_id = OLD.plan_id
+    AND attempt.workspace_id = OLD.workspace_id
+    AND attempt.attempt = OLD.attempt
+    AND attempt.owner_id = OLD.owner_id
+    AND attempt.lease_token = OLD.lease_token
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task Claim cannot be released while its lease is live'); END;
+
+CREATE TRIGGER generation_task_attempt_running_entry_guard
+BEFORE UPDATE OF status ON generation_task_attempts
+WHEN OLD.status = 'queued' AND NEW.status = 'running' AND NOT (
+  OLD.materialization_sealed = 1
+  AND NEW.materialization_sealed = 1
+  AND OLD.owner_id IS NULL
+  AND OLD.lease_token IS NULL
+  AND OLD.lease_expires_at IS NULL
+  AND OLD.heartbeat_at IS NULL
+  AND OLD.started_at IS NULL
+  AND NEW.owner_id IS NOT NULL
+  AND length(trim(NEW.owner_id)) > 0
+  AND NEW.owner_id IS trim(NEW.owner_id)
+  AND NEW.lease_token IS NOT NULL
+  AND length(trim(NEW.lease_token)) > 0
+  AND NEW.lease_token IS trim(NEW.lease_token)
+  AND NEW.heartbeat_at IS NOT NULL
+  AND NEW.started_at IS NEW.heartbeat_at
+  AND NEW.started_at >= NEW.created_at
+  AND NEW.started_at <= 9007199254740991
+  AND NEW.lease_expires_at <= 9007199254740991
+  AND NEW.lease_expires_at > NEW.heartbeat_at
+  AND NEW.finished_at IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM generation_tasks task
+    JOIN generation_plans plan
+      ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+    WHERE task.id = NEW.task_id
+      AND task.plan_id = NEW.plan_id
+      AND task.workspace_id = NEW.workspace_id
+      AND task.current_attempt = NEW.attempt
+      AND task.status = 'queued'
+      AND plan.construction_sealed = 1
+      AND plan.status IN ('queued','running')
+      AND json_type(task.resource_limits_json, '$.capacityClasses') = 'array'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM json_each(task.resource_limits_json, '$.capacityClasses') capacity
+        WHERE capacity.type <> 'text'
+          OR capacity.value NOT IN ('agent','render-qa','image')
+      )
+      AND json_array_length(task.resource_limits_json, '$.capacityClasses')
+        + CASE
+            WHEN task.target_type IN ('artifact','resource') OR task.kind = 'checkpoint' THEN 1
+            ELSE 0
+          END > 0
+      AND (
+        SELECT COUNT(*) FROM generation_task_claims claim
+        WHERE claim.task_id = NEW.task_id AND claim.attempt = NEW.attempt
+      ) = json_array_length(task.resource_limits_json, '$.capacityClasses')
+        + CASE
+            WHEN task.target_type IN ('artifact','resource') OR task.kind = 'checkpoint' THEN 1
+            ELSE 0
+          END
+      AND (
+        SELECT COUNT(*) FROM generation_task_claims claim
+        WHERE claim.task_id = NEW.task_id
+          AND claim.attempt = NEW.attempt
+          AND claim.claim_kind = 'capacity'
+      ) = json_array_length(task.resource_limits_json, '$.capacityClasses')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM json_each(task.resource_limits_json, '$.capacityClasses') capacity
+        WHERE (
+          SELECT COUNT(*) FROM generation_task_claims claim
+          WHERE claim.task_id = NEW.task_id
+            AND claim.attempt = NEW.attempt
+            AND claim.claim_kind = 'capacity'
+            AND (
+              (capacity.value = 'agent' AND claim.claim_key IN (
+                'capacity:agent:1','capacity:agent:2','capacity:agent:3'
+              ))
+              OR (capacity.value = 'render-qa' AND claim.claim_key IN (
+                'capacity:render-qa:1','capacity:render-qa:2'
+              ))
+              OR (capacity.value = 'image' AND claim.claim_key IN (
+                'capacity:image:1','capacity:image:2'
+              ))
+            )
+        ) <> 1
+      )
+      AND (
+        SELECT COUNT(*) FROM generation_task_claims claim
+        WHERE claim.task_id = NEW.task_id
+          AND claim.attempt = NEW.attempt
+          AND claim.claim_kind = 'writer'
+      ) = CASE
+            WHEN task.target_type IN ('artifact','resource') OR task.kind = 'checkpoint' THEN 1
+            ELSE 0
+          END
+      AND NOT EXISTS (
+        SELECT 1 FROM generation_task_claims claim
+        WHERE claim.task_id = NEW.task_id
+          AND claim.attempt = NEW.attempt
+          AND claim.claim_kind = 'writer'
+          AND claim.claim_key IS NOT CASE
+            WHEN task.target_type = 'artifact' THEN
+              'writer:artifact:' || lower(hex(CAST(task.workspace_id AS BLOB))) || ':' ||
+              lower(hex(CAST(task.target_artifact_id AS BLOB)))
+            WHEN task.target_type = 'resource' THEN
+              'writer:resource:' || lower(hex(CAST(task.workspace_id AS BLOB))) || ':' ||
+              lower(hex(CAST(task.target_resource_id AS BLOB)))
+            WHEN task.kind = 'checkpoint' THEN
+              'writer:checkpoint:' || lower(hex(CAST(task.workspace_id AS BLOB)))
+          END
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM generation_task_claims claim
+        WHERE claim.task_id = NEW.task_id
+          AND claim.attempt = NEW.attempt
+          AND (
+            claim.plan_id IS NOT NEW.plan_id
+            OR claim.workspace_id IS NOT NEW.workspace_id
+            OR claim.owner_id IS NOT NEW.owner_id
+            OR claim.lease_token IS NOT NEW.lease_token
+            OR claim.lease_expires_at IS NOT NEW.lease_expires_at
+            OR claim.created_at IS NOT NEW.started_at
+          )
+      )
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt cannot run without its exact durable claims'); END;
+
+CREATE TRIGGER generation_task_attempt_lease_fence_guard
+BEFORE UPDATE OF owner_id, lease_token, lease_expires_at, heartbeat_at, started_at
+ON generation_task_attempts
+WHEN (
+  NEW.owner_id IS NOT OLD.owner_id
+  OR NEW.lease_token IS NOT OLD.lease_token
+  OR NEW.lease_expires_at IS NOT OLD.lease_expires_at
+  OR NEW.heartbeat_at IS NOT OLD.heartbeat_at
+  OR (
+    OLD.status IN ('running','candidate-ready','cancel-requested')
+    AND NEW.started_at IS NOT OLD.started_at
+  )
+)
+AND NOT (
+  (OLD.status = 'queued' AND NEW.status = 'running')
+  OR (
+    OLD.status IN ('running','candidate-ready','cancel-requested')
+    AND NEW.status IS OLD.status
+    AND NEW.owner_id IS OLD.owner_id
+    AND NEW.lease_token IS OLD.lease_token
+    AND NEW.started_at IS OLD.started_at
+    AND OLD.owner_id IS NOT NULL
+    AND OLD.lease_token IS NOT NULL
+    AND OLD.lease_expires_at IS NOT NULL
+    AND OLD.heartbeat_at IS NOT NULL
+    AND NEW.heartbeat_at > OLD.heartbeat_at
+    AND OLD.lease_expires_at > NEW.heartbeat_at
+    AND NEW.lease_expires_at > OLD.lease_expires_at
+    AND EXISTS (
+      SELECT 1 FROM generation_task_claims claim
+      WHERE claim.task_id = OLD.task_id
+        AND claim.attempt = OLD.attempt
+        AND claim.workspace_id = OLD.workspace_id
+        AND claim.owner_id = OLD.owner_id
+        AND claim.lease_token = OLD.lease_token
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM generation_task_claims claim
+      WHERE claim.task_id = OLD.task_id
+        AND claim.attempt = OLD.attempt
+        AND (
+          claim.plan_id IS NOT OLD.plan_id
+          OR claim.workspace_id IS NOT OLD.workspace_id
+          OR claim.owner_id IS NOT OLD.owner_id
+          OR claim.lease_token IS NOT OLD.lease_token
+          OR claim.lease_expires_at IS NOT NEW.lease_expires_at
+        )
+    )
+  )
+  OR (
+    OLD.status IN ('running','candidate-ready','cancel-requested')
+    AND NEW.status IN ('succeeded','retryable-failed','failed','needs-rebase','cancelled')
+    AND NEW.owner_id IS NULL
+    AND NEW.lease_token IS NULL
+    AND NEW.lease_expires_at IS NULL
+    AND NEW.heartbeat_at IS NULL
+    AND NEW.started_at IS OLD.started_at
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt lease fence is stale or internally inconsistent'); END;
+
+CREATE TRIGGER generation_task_running_entry_guard
+BEFORE UPDATE OF status ON generation_tasks
+WHEN OLD.status = 'queued' AND NEW.status = 'running' AND NOT EXISTS (
+  SELECT 1
+  FROM generation_task_attempts attempt
+  JOIN generation_plans plan
+    ON plan.id = attempt.plan_id AND plan.workspace_id = attempt.workspace_id
+  WHERE attempt.task_id = NEW.id
+    AND attempt.plan_id = NEW.plan_id
+    AND attempt.workspace_id = NEW.workspace_id
+    AND attempt.attempt = NEW.current_attempt
+    AND attempt.materialization_sealed = 1
+    AND attempt.status = 'running'
+    AND attempt.owner_id IS NOT NULL
+    AND attempt.lease_token IS NOT NULL
+    AND attempt.lease_expires_at IS NOT NULL
+    AND attempt.heartbeat_at IS NOT NULL
+    AND attempt.started_at IS NOT NULL
+    AND plan.construction_sealed = 1
+    AND plan.status IN ('queued','running')
+    AND EXISTS (
+      SELECT 1 FROM generation_task_claims claim
+      WHERE claim.task_id = attempt.task_id
+        AND claim.attempt = attempt.attempt
+        AND claim.workspace_id = attempt.workspace_id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM generation_task_claims claim
+      WHERE claim.task_id = attempt.task_id
+        AND claim.attempt = attempt.attempt
+        AND (
+          claim.plan_id IS NOT attempt.plan_id
+          OR claim.workspace_id IS NOT attempt.workspace_id
+          OR claim.owner_id IS NOT attempt.owner_id
+          OR claim.lease_token IS NOT attempt.lease_token
+          OR claim.lease_expires_at IS NOT attempt.lease_expires_at
+        )
+    )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task cannot run before its current Attempt owns exact claims'); END;
 
 CREATE TRIGGER generation_run_insert_ownership
 BEFORE INSERT ON runs

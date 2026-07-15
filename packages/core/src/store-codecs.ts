@@ -43,7 +43,10 @@ import type {
   GenerationTaskAttemptResourcePinInput,
   GenerationTaskAttemptStatus,
   GenerationTaskCapacityClass,
+  GenerationTaskCapacityClaimKey,
   GenerationTaskCandidateEvidenceHashInput,
+  GenerationTaskClaim,
+  GenerationTaskClaimKey,
   GenerationTaskIntent,
   GenerationTaskIntentInput,
   GenerationTaskKind,
@@ -55,10 +58,13 @@ import type {
   GenerationTaskRetryContextPolicy,
   GenerationTaskStatus,
   GenerationTaskTarget,
+  GenerationTaskWriterClaimKey,
+  HeartbeatGenerationTaskAttemptInput,
   GenerationPlanEvent,
   GenerationPlanEventType,
   ListGenerationPlanEventsInput,
   RecordGenerationTaskMaterializationFailureInput,
+  TryClaimGenerationTaskAttemptInput,
 } from "./workspace-types.ts";
 
 export type Row = Record<string, unknown>;
@@ -138,6 +144,16 @@ const GENERATION_PLAN_EVENT_TYPES = new Set<GenerationPlanEventType>([
 ]);
 const GENERATION_JSON_MAX_DEPTH = 64;
 const GENERATION_JSON_MAX_NODES = 100_000;
+const GENERATION_TASK_MAX_LEASE_MS = 300_000;
+const GENERATION_CAPACITY_CLAIM_KEYS = new Set<GenerationTaskCapacityClaimKey>([
+  "capacity:agent:1",
+  "capacity:agent:2",
+  "capacity:agent:3",
+  "capacity:render-qa:1",
+  "capacity:render-qa:2",
+  "capacity:image:1",
+  "capacity:image:2",
+]);
 
 function generationRecord(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value) || nodeUtilTypes.isProxy(value)) {
@@ -784,6 +800,152 @@ export function normalizeGenerationTaskAttemptLease(value: unknown): GenerationT
     attempt: generationSafeInteger(input.attempt, "Generation Task Attempt lease attempt", 1),
     ownerId: generationCanonicalString(input.ownerId, "Generation Task Attempt lease owner id"),
     leaseToken: generationCanonicalString(input.leaseToken, "Generation Task Attempt lease token"),
+  };
+}
+
+function generationLeaseMs(value: unknown, label: string): number {
+  const leaseMs = generationSafeInteger(value, label, 1);
+  if (leaseMs > GENERATION_TASK_MAX_LEASE_MS) {
+    throw new WorkspaceStoreCodecError(`${label} must not exceed ${GENERATION_TASK_MAX_LEASE_MS}`);
+  }
+  return leaseMs;
+}
+
+function generationLeaseWindow(
+  nowValue: unknown,
+  leaseMsValue: unknown,
+  label: string,
+): { now: number; leaseMs: number } {
+  const now = generationSafeInteger(nowValue, `${label} time`, 0);
+  const leaseMs = generationLeaseMs(leaseMsValue, `${label} lease ms`);
+  if (now > Number.MAX_SAFE_INTEGER - leaseMs) {
+    throw new WorkspaceStoreCodecError(`${label} lease expiry must be a safe integer`);
+  }
+  return { now, leaseMs };
+}
+
+export function normalizeTryClaimGenerationTaskAttemptInput(
+  value: unknown,
+): TryClaimGenerationTaskAttemptInput {
+  const input = generationRecord(value, "claim Generation Task Attempt input");
+  generationAllowFields(input, ["taskId", "attempt", "ownerId", "now", "leaseMs"], "claim Generation Task Attempt input");
+  const leaseWindow = generationLeaseWindow(input.now, input.leaseMs, "claim Generation Task Attempt");
+  return {
+    taskId: generationCanonicalString(input.taskId, "claim Generation Task Attempt Task id"),
+    attempt: generationSafeInteger(input.attempt, "claim Generation Task Attempt number", 1),
+    ownerId: generationCanonicalString(input.ownerId, "claim Generation Task Attempt owner id"),
+    ...leaseWindow,
+  };
+}
+
+export function normalizeHeartbeatGenerationTaskAttemptInput(
+  value: unknown,
+): HeartbeatGenerationTaskAttemptInput {
+  const input = generationRecord(value, "heartbeat Generation Task Attempt input");
+  generationAllowFields(input, [
+    "taskId",
+    "workspaceId",
+    "attempt",
+    "ownerId",
+    "leaseToken",
+    "now",
+    "leaseMs",
+  ], "heartbeat Generation Task Attempt input");
+  const leaseWindow = generationLeaseWindow(input.now, input.leaseMs, "heartbeat Generation Task Attempt");
+  return {
+    ...normalizeGenerationTaskAttemptLease({
+      taskId: input.taskId,
+      workspaceId: input.workspaceId,
+      attempt: input.attempt,
+      ownerId: input.ownerId,
+      leaseToken: input.leaseToken,
+    }),
+    ...leaseWindow,
+  };
+}
+
+function generationClaimIdHex(value: string, label: string): void {
+  if (!/^(?:[0-9a-f]{2})+$/.test(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must be non-empty lowercase byte hex`);
+  }
+  const decoded = Buffer.from(value, "hex").toString("utf8");
+  if (Buffer.from(decoded, "utf8").toString("hex") !== value) {
+    throw new WorkspaceStoreCodecError(`${label} must encode well-formed UTF-8`);
+  }
+  generationExactString(decoded, label);
+}
+
+function generationTaskClaimKey(value: unknown, claimKind: "capacity" | "writer"): GenerationTaskClaimKey {
+  const claimKey = generationExactString(value, "Generation Task Claim key");
+  if (claimKind === "capacity") {
+    if (!GENERATION_CAPACITY_CLAIM_KEYS.has(claimKey as GenerationTaskCapacityClaimKey)) {
+      throw new WorkspaceStoreCodecError("Generation Task capacity Claim key is unsupported");
+    }
+    return claimKey as GenerationTaskCapacityClaimKey;
+  }
+
+  const parts = claimKey.split(":");
+  const writerScope = parts[1];
+  if (parts[0] !== "writer") {
+    throw new WorkspaceStoreCodecError("Generation Task writer Claim key is unsupported");
+  }
+  if (writerScope === "artifact" || writerScope === "resource") {
+    if (parts.length !== 4) {
+      throw new WorkspaceStoreCodecError("Generation Task writer Claim key is unsupported");
+    }
+    generationClaimIdHex(parts[2]!, "Generation Task writer Claim Workspace id");
+    generationClaimIdHex(parts[3]!, "Generation Task writer Claim target id");
+    return claimKey as GenerationTaskWriterClaimKey;
+  }
+  if (writerScope === "checkpoint" || writerScope === "kernel" || writerScope === "source") {
+    if (parts.length !== 3) {
+      throw new WorkspaceStoreCodecError("Generation Task writer Claim key is unsupported");
+    }
+    generationClaimIdHex(parts[2]!, `Generation Task ${writerScope} writer Claim domain id`);
+    return claimKey as GenerationTaskWriterClaimKey;
+  }
+  throw new WorkspaceStoreCodecError("Generation Task writer Claim key is unsupported");
+}
+
+export function asGenerationTaskClaim(rowValue: Row): GenerationTaskClaim {
+  const row = generationRecord(rowValue, "Generation Task Claim row");
+  generationAllowFields(row, [
+    "claim_key",
+    "claim_kind",
+    "task_id",
+    "plan_id",
+    "attempt",
+    "workspace_id",
+    "owner_id",
+    "lease_token",
+    "lease_expires_at",
+    "created_at",
+  ], "Generation Task Claim row");
+  if (row.claim_kind !== "capacity" && row.claim_kind !== "writer") {
+    throw new WorkspaceStoreCodecError("Generation Task Claim kind is unsupported");
+  }
+  const claimKind = row.claim_kind;
+  const claimKey = generationTaskClaimKey(row.claim_key, claimKind);
+  const createdAt = generationSafeInteger(row.created_at, "Generation Task Claim created at", 0);
+  const leaseExpiresAt = generationSafeInteger(
+    row.lease_expires_at,
+    "Generation Task Claim lease expires at",
+    0,
+  );
+  if (leaseExpiresAt <= createdAt) {
+    throw new WorkspaceStoreCodecError("Generation Task Claim lease must have a positive lifetime");
+  }
+  return {
+    taskId: generationExactString(row.task_id, "Generation Task Claim Task id"),
+    workspaceId: generationExactString(row.workspace_id, "Generation Task Claim Workspace id"),
+    attempt: generationSafeInteger(row.attempt, "Generation Task Claim Attempt number", 1),
+    ownerId: generationExactString(row.owner_id, "Generation Task Claim owner id"),
+    leaseToken: generationExactString(row.lease_token, "Generation Task Claim lease token"),
+    planId: generationExactString(row.plan_id, "Generation Task Claim Plan id"),
+    claimKey,
+    claimKind,
+    leaseExpiresAt,
+    createdAt,
   };
 }
 
