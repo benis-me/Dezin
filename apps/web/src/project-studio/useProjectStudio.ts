@@ -3,6 +3,7 @@ import { useApi } from "../lib/api-context.tsx";
 import { ApiError } from "../lib/api.ts";
 import type {
   ApiClient,
+  ArtifactMutationResult,
   Project,
   ProjectWorkspacePayload,
   ReadyProjectWorkspacePayload,
@@ -56,6 +57,7 @@ export interface ProjectStudioState {
   setTaskQueue: Dispatch<SetStateAction<WorkspaceStudioTask[]>>;
   saveLayout: (commands: readonly WorkspaceLayoutCommand[]) => Promise<WorkspaceLayout>;
   applyGraphCommands: (commands: readonly WorkspaceGraphCommand[]) => Promise<void>;
+  reconcileArtifactPublication: (result: ArtifactMutationResult) => void;
   editProposal: (patch: ProposalEditPatch) => Promise<WorkspaceProposal>;
   renameProposalNode: (change: ProposalChange<unknown>, name: string) => Promise<WorkspaceProposal>;
   revertProposalChange: (change: ProposalChange<unknown>) => Promise<WorkspaceProposal>;
@@ -121,6 +123,65 @@ function resolveLoadState(project: Project, workspace: ProjectWorkspacePayload):
     return { status: "error", message: "Project workspace identity does not match this project." };
   }
   return { status: "ready", project, workspace };
+}
+
+function upsertById<T extends { id: string }>(items: readonly T[], item: T): T[] {
+  return items.some((candidate) => candidate.id === item.id)
+    ? items.map((candidate) => candidate.id === item.id ? item : candidate)
+    : [...items, item];
+}
+
+export function reconcileArtifactPublicationPayload(
+  current: ReadyProjectWorkspacePayload,
+  result: ArtifactMutationResult,
+): ReadyProjectWorkspacePayload {
+  const { revision, snapshot } = result;
+  const track = current.tracks.find((candidate) => candidate.id === revision.trackId);
+  if (revision.workspaceId !== current.workspace.id
+    || snapshot.workspaceId !== current.workspace.id
+    || snapshot.kernelRevisionId !== current.activeKernelRevision.id
+    || snapshot.artifactRevisions[revision.artifactId] !== revision.id
+    || track?.artifactId !== revision.artifactId) {
+    return current;
+  }
+
+  const revisions = upsertById(current.revisions, revision);
+  const snapshots = upsertById(current.snapshots, snapshot);
+  const activeSnapshot = snapshot.id === current.activeSnapshot.id
+    || snapshot.sequence > current.activeSnapshot.sequence
+    ? snapshot
+    : current.activeSnapshot;
+  const activeRevisionId = activeSnapshot.artifactRevisions[revision.artifactId] ?? null;
+  const activeRevision = activeRevisionId === null
+    ? null
+    : revisions.find((candidate) => candidate.id === activeRevisionId) ?? null;
+  const tracks = current.tracks.map((candidate) => candidate.id === revision.trackId
+    && candidate.artifactId === revision.artifactId
+    && activeRevision?.trackId === candidate.id
+    ? { ...candidate, headRevisionId: activeRevision.id }
+    : candidate);
+  const artifacts = current.artifacts.map((candidate) => candidate.id === revision.artifactId
+    ? { ...candidate, updatedAt: Math.max(candidate.updatedAt, activeRevision?.createdAt ?? revision.createdAt) }
+    : candidate);
+  const graph = activeSnapshot.graphRevision >= current.graph.revision
+    ? activeSnapshot.graph
+    : current.graph;
+
+  return {
+    ...current,
+    workspace: {
+      ...current.workspace,
+      activeSnapshotId: activeSnapshot.id,
+      graphRevision: Math.max(current.workspace.graphRevision, graph.revision),
+      updatedAt: Math.max(current.workspace.updatedAt, activeSnapshot.createdAt, revision.createdAt),
+    },
+    graph,
+    activeSnapshot,
+    artifacts,
+    tracks,
+    revisions,
+    snapshots,
+  };
 }
 
 function isWorkspaceRevisionConflict(error: unknown): boolean {
@@ -380,6 +441,13 @@ export function useProjectStudio(projectId: string): ProjectStudioState {
     const review = reviewableProposal(proposalReviewRef.current);
     if (review) commitProposalReview({ ...review, diff: diffProposal(review.proposal, next) });
   }, [commitLoad, commitProposalReview, requireReady]);
+
+  const reconcileArtifactPublication = useCallback((result: ArtifactMutationResult): void => {
+    const current = loadRef.current;
+    if (current.status !== "ready") return;
+    const reconciled = reconcileArtifactPublicationPayload(current.workspace, result);
+    if (reconciled !== current.workspace) updateReadyWorkspace(reconciled);
+  }, [updateReadyWorkspace]);
 
   const enqueueMutation = useCallback(<T,>(work: () => Promise<T>): Promise<T> => {
     const result = mutationQueueRef.current.then(work);
@@ -956,6 +1024,7 @@ export function useProjectStudio(projectId: string): ProjectStudioState {
     setTaskQueue,
     saveLayout,
     applyGraphCommands,
+    reconcileArtifactPublication,
     editProposal,
     renameProposalNode,
     revertProposalChange,

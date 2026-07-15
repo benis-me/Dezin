@@ -377,7 +377,13 @@ export function startCapture(
       c.session = session;
       c.url = url;
       c.requestedUrl = url;
-      const { page, loginRequired } = await capturePage(session, captureArtifactDir(id, dataDir), url, (s) => emit(c, s));
+      const { page, loginRequired } = await capturePage(
+        session,
+        captureArtifactDir(id, dataDir),
+        url,
+        (s) => emit(c, s),
+        { reuseCurrentNavigation: true },
+      );
       if (!isActive(id, c, generation)) return;
       if (loginRequired) { c.phase = "login-required"; return; }
       await finishCapturedSession(id, dataDir, c, page);

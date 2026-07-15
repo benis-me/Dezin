@@ -400,6 +400,150 @@ function canonicalJsonObject(value: unknown, label: string): Record<string, unkn
   return result as Record<string, unknown>;
 }
 
+const VIEWER_BRIDGE_TEXT_CONTROL = /[\u0000-\u001f\u007f]/;
+const VIEWER_BRIDGE_FRAME_TEXT_LIMIT = 256;
+const VIEWER_BRIDGE_BACKGROUND_LIMIT = 4_096;
+const VIEWER_BRIDGE_FIXTURE_DEPTH_LIMIT = 16;
+const VIEWER_BRIDGE_FIXTURE_NODE_LIMIT = 4_096;
+const VIEWER_BRIDGE_FIXTURE_MEMBER_LIMIT = 256;
+const VIEWER_BRIDGE_FIXTURE_STRING_LIMIT = 8_192;
+const VIEWER_BRIDGE_FRAME_JSON_LIMIT = 65_536;
+
+function viewerBridgeText(value: string, label: string, limit: number): string {
+  if (value.length === 0 || value.length > limit) {
+    throw new WorkspaceStoreCodecError(`${label} exceeds the Viewer bridge length limit of ${limit}`);
+  }
+  if (!isWellFormedUtf16(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must contain well-formed Unicode`);
+  }
+  if (VIEWER_BRIDGE_TEXT_CONTROL.test(value)) {
+    throw new WorkspaceStoreCodecError(`${label} cannot contain C0 or DEL control characters`);
+  }
+  return value;
+}
+
+function canonicalViewerBridgeText(value: unknown, label: string, limit: number): string {
+  if (typeof value !== "string") return canonicalString(value, label);
+  viewerBridgeText(value, label, limit);
+  return canonicalString(value, label);
+}
+
+interface ViewerBridgeFixtureState {
+  readonly ancestors: WeakSet<object>;
+  nodes: number;
+}
+
+function canonicalViewerBridgeFixtureValue(
+  value: unknown,
+  label: string,
+  state: ViewerBridgeFixtureState,
+  depth: number,
+): unknown {
+  state.nodes += 1;
+  if (state.nodes > VIEWER_BRIDGE_FIXTURE_NODE_LIMIT) {
+    throw new WorkspaceStoreCodecError(
+      `${label} exceeds the Viewer bridge fixture node limit of ${VIEWER_BRIDGE_FIXTURE_NODE_LIMIT}`,
+    );
+  }
+  if (depth > VIEWER_BRIDGE_FIXTURE_DEPTH_LIMIT) {
+    throw new WorkspaceStoreCodecError(
+      `${label} exceeds the Viewer bridge fixture depth limit of ${VIEWER_BRIDGE_FIXTURE_DEPTH_LIMIT}`,
+    );
+  }
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (!isWellFormedUtf16(value)) {
+      throw new WorkspaceStoreCodecError(`${label} strings must contain well-formed Unicode`);
+    }
+    if (value.length > VIEWER_BRIDGE_FIXTURE_STRING_LIMIT) {
+      throw new WorkspaceStoreCodecError(
+        `${label} exceeds the Viewer bridge fixture string limit of ${VIEWER_BRIDGE_FIXTURE_STRING_LIMIT}`,
+      );
+    }
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new WorkspaceStoreCodecError(`${label} numbers must be finite`);
+    return value;
+  }
+  if (typeof value !== "object") {
+    throw new WorkspaceStoreCodecError(`${label} must contain only Viewer bridge JSON values`);
+  }
+  if (state.ancestors.has(value)) throw new WorkspaceStoreCodecError(`${label} cannot contain cycles`);
+  state.ancestors.add(value);
+  try {
+    let isArray = false;
+    try {
+      isArray = Array.isArray(value);
+    } catch {
+      throw new WorkspaceStoreCodecError(`${label} could not be inspected safely`);
+    }
+    if (isArray) {
+      const values = boundaryArray(value, label);
+      if (values.length > VIEWER_BRIDGE_FIXTURE_MEMBER_LIMIT) {
+        throw new WorkspaceStoreCodecError(
+          `${label} exceeds the Viewer bridge fixture array member limit of ${VIEWER_BRIDGE_FIXTURE_MEMBER_LIMIT}`,
+        );
+      }
+      return values.map((entry, index) => canonicalViewerBridgeFixtureValue(
+        entry,
+        `${label}[${index}]`,
+        state,
+        depth + 1,
+      ));
+    }
+    const record = boundaryRecord(value, label);
+    const keys = sortedUtf8ObjectKeys(record, label);
+    if (keys.length > VIEWER_BRIDGE_FIXTURE_MEMBER_LIMIT) {
+      throw new WorkspaceStoreCodecError(
+        `${label} exceeds the Viewer bridge fixture object member limit of ${VIEWER_BRIDGE_FIXTURE_MEMBER_LIMIT}`,
+      );
+    }
+    const result: Record<string, unknown> = {};
+    for (const key of keys) {
+      viewerBridgeText(key, `${label} key`, VIEWER_BRIDGE_FRAME_TEXT_LIMIT);
+      if (key === "__proto__" || key === "prototype" || key === "constructor") {
+        throw new WorkspaceStoreCodecError(`${label} contains unsafe field ${key}`);
+      }
+      result[key] = canonicalViewerBridgeFixtureValue(record[key], `${label}.${key}`, state, depth + 1);
+    }
+    return result;
+  } finally {
+    state.ancestors.delete(value);
+  }
+}
+
+function canonicalViewerBridgeFixture(value: unknown, label: string): Record<string, unknown> {
+  const result = canonicalViewerBridgeFixtureValue(
+    value,
+    label,
+    { ancestors: new WeakSet<object>(), nodes: 0 },
+    0,
+  );
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    throw new WorkspaceStoreCodecError(`${label} must be a plain JSON object`);
+  }
+  return result as Record<string, unknown>;
+}
+
+function assertViewerBridgeFrameJsonBudget(
+  frame: SharedDesignKernelRevision["responsiveFrames"][number],
+  label: string,
+): void {
+  const bridgeFrame = {
+    protocol: "dezin-frame-v1",
+    frameId: frame.id,
+    ...(frame.initialState === undefined ? {} : { initialState: frame.initialState }),
+    ...(frame.fixture === undefined ? {} : { fixture: frame.fixture }),
+    ...(frame.background === undefined ? {} : { background: frame.background }),
+  };
+  if (JSON.stringify(bridgeFrame).length > VIEWER_BRIDGE_FRAME_JSON_LIMIT) {
+    throw new WorkspaceStoreCodecError(
+      `${label} exceeds the Viewer bridge JSON envelope limit of ${VIEWER_BRIDGE_FRAME_JSON_LIMIT}`,
+    );
+  }
+}
+
 function canonicalStringArray(value: unknown, label: string): string[] {
   return boundaryArray(value, label).map((entry, index) => canonicalString(entry, `${label}[${index}]`));
 }
@@ -591,16 +735,28 @@ function normalizeKernelPayload(value: unknown, label: string): KernelPayload {
     const width = positiveNumber(frame.width, `${frameLabel} width`);
     const height = positiveNumber(frame.height, `${frameLabel} height`);
     const initialState = Object.hasOwn(frame, "initialState")
-      ? canonicalString(frame.initialState, `${frameLabel} initialState`)
+      ? canonicalViewerBridgeText(
+        frame.initialState,
+        `${frameLabel} initialState`,
+        VIEWER_BRIDGE_FRAME_TEXT_LIMIT,
+      )
       : undefined;
     const background = Object.hasOwn(frame, "background")
-      ? canonicalString(frame.background, `${frameLabel} background`)
+      ? canonicalViewerBridgeText(
+        frame.background,
+        `${frameLabel} background`,
+        VIEWER_BRIDGE_BACKGROUND_LIMIT,
+      )
       : undefined;
     const fixture = Object.hasOwn(frame, "fixture")
-      ? canonicalJsonObject(frame.fixture, `${frameLabel} fixture`)
+      ? canonicalViewerBridgeFixture(frame.fixture, `${frameLabel} fixture`)
       : undefined;
-    return {
-      id: canonicalString(frame.id, `${frameLabel} id`),
+    const normalized = {
+      id: canonicalViewerBridgeText(
+        frame.id,
+        `${frameLabel} id`,
+        VIEWER_BRIDGE_FRAME_TEXT_LIMIT,
+      ),
       name: canonicalString(frame.name, `${frameLabel} name`),
       width,
       height,
@@ -608,6 +764,8 @@ function normalizeKernelPayload(value: unknown, label: string): KernelPayload {
       ...(fixture === undefined ? {} : { fixture }),
       ...(background === undefined ? {} : { background }),
     };
+    assertViewerBridgeFrameJsonBudget(normalized, frameLabel);
+    return normalized;
   });
   const frameIds = new Set<string>();
   for (const frame of responsiveFrames) {

@@ -14,11 +14,13 @@ import { buildMoodboardAgentContext, buildMoodboardAgentPrompt, parseMoodboardAg
 import { injectSelectBridge } from "../src/serve-static.ts";
 import * as extensionAuth from "../src/extension-auth.ts";
 import { ensureProbeSession, sharinganCaptureRegistrySizeForTests } from "../src/sharingan-handler.ts";
+import { RuntimeScopeUnavailableError } from "../src/runtime-supervisor.ts";
 
 interface Ctx {
   base: string;
   dataDir: string;
   store: Store;
+  runtimeSupervisor: ReturnType<typeof createRuntimeSupervisor>;
 }
 
 type BudgetedMoodboardAgentContext = {
@@ -41,12 +43,29 @@ async function withServer(fn: (ctx: Ctx) => Promise<void>, extraDeps: Partial<Ap
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
-    await fn({ base: `http://127.0.0.1:${port}`, dataDir, store });
+    await fn({ base: `http://127.0.0.1:${port}`, dataDir, store, runtimeSupervisor });
   } finally {
     await runtimeSupervisor.shutdown();
     await new Promise<void>((r) => server.close(() => r()));
     store.close();
   }
+}
+
+async function waitForProjectAdmissionBlock(
+  runtimeSupervisor: ReturnType<typeof createRuntimeSupervisor>,
+  projectId: string,
+): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    try {
+      runtimeSupervisor.assertAdmission({ projectId });
+    } catch (error) {
+      assert.ok(error instanceof RuntimeScopeUnavailableError);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.fail("project deletion did not block new runtime admission");
 }
 
 async function rawRequest(
@@ -589,7 +608,7 @@ test("project deletion invalidates a delayed Sharingan open and closes the late 
   let closeCalls = 0;
 
   await withServer(
-    async ({ base, dataDir, store }) => {
+    async ({ base, dataDir, store, runtimeSupervisor }) => {
       const project = store.createProject({
         name: "Sharingan open race",
         mode: "standard",
@@ -612,7 +631,7 @@ test("project deletion invalidates a delayed Sharingan open and closes the late 
         deletionSettled = true;
         return response;
       });
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await waitForProjectAdmissionBlock(runtimeSupervisor, project.id);
 
       const restarted = await fetch(`${base}/api/sharingan/${project.id}/start`, {
         method: "POST",

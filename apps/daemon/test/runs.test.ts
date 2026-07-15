@@ -328,7 +328,8 @@ test("clean run: streams SSE, persists, serves the artifact back", async () => {
     assert.equal(done.passed, true);
     assert.equal(done.rounds, 0);
     assert.equal(done.score, 100); // a clean artifact scores 100
-    assert.equal(done.previewUrl, `/projects/${project.id}/preview/`);
+    assert.equal(done.previewUrl, undefined, "durable run-done events must not persist a viewer URL capability");
+    assert.equal(done.bridgeNonce, undefined, "each Prototype viewer must acquire its own bridge nonce");
 
     // artifact served back over /preview/ (with the picker bridge injected)
     const preview = await fetch(`${base}/projects/${project.id}/preview/`);
@@ -344,6 +345,40 @@ test("clean run: streams SSE, persists, serves the artifact back", async () => {
     assert.equal(run.status, "succeeded");
     assert.equal(run.lintPassed, true);
     assert.equal(run.repairRounds, 0);
+  });
+});
+
+test("Prototype durable preview events never persist viewer capabilities", async () => {
+  const runner: AgentRunner = {
+    id: "live-prototype-preview",
+    async runTurn(input) {
+      // Model a real agent writing the artifact while its turn is still live so the
+      // preview poller is guaranteed to publish at least one durable invalidation.
+      writeFileSync(join(input.projectDir, "index.html"), CLEAN);
+      await delay(775);
+      return { text: "done", artifactHtml: CLEAN, artifactPath: "index.html" };
+    },
+  };
+
+  await withRunServer(runner, async ({ base }) => {
+    const project = await createProject(base);
+    const res = await fetch(`${base}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, brief: "stream a live preview" }),
+    });
+    assert.equal(res.status, 200);
+
+    const events = parseSse(await res.text());
+    const preview = events.find((event) => event.type === "preview-update");
+    assert.ok(preview, "the live artifact write must emit a preview invalidation");
+    assert.equal(preview.previewUrl, undefined, "durable preview events must not persist a viewer URL capability");
+    assert.equal(preview.bridgeNonce, undefined, "durable preview events must not persist a bridge nonce");
+
+    const done = events.find((event) => event.type === "run-done");
+    assert.ok(done);
+    assert.equal(done.previewUrl, undefined, "durable terminal events must not persist a viewer URL capability");
+    assert.equal(done.bridgeNonce, undefined, "durable terminal events must not persist a bridge nonce");
   });
 });
 
@@ -1411,6 +1446,21 @@ test("a run snapshots its artifact; versions can be served and restored", async 
     assert.match(versionHtml, /data-dezin-bridge/);
     assert.match(versionHtml, /data-dezin-runtime-probe/);
     assert.match(versionHtml, /sync-scroll/);
+    const previewCapabilityResponse = await fetch(
+      `${base}/api/projects/${project.id}/versions/${runId}/preview-url`,
+    );
+    assert.equal(previewCapabilityResponse.status, 200);
+    const previewCapability = await previewCapabilityResponse.json() as {
+      mode: string;
+      url: string;
+      bridgeNonce?: string;
+    };
+    assert.equal(previewCapability.mode, "prototype");
+    assert.match(previewCapability.bridgeNonce ?? "", /^[a-zA-Z0-9_-]{43}$/);
+    assert.equal(
+      previewCapability.url,
+      `/api/projects/${project.id}/versions/${runId}#dezin-bridge=${previewCapability.bridgeNonce}`,
+    );
     const rawSource = await fetch(`${base}/api/projects/${project.id}/versions/${runId}/source`);
     assert.equal(rawSource.status, 200);
     assert.equal(await rawSource.text(), CLEAN, "Historical Files reads the immutable source without Viewer instrumentation");
@@ -3185,6 +3235,7 @@ test("a Restore metadata failure atomically rolls the Standard tree back", async
 test("standard version preview URL endpoint resolves the dev server URL without iframe redirect", async () => {
   const devServers: Array<{ dir: string; runtimeKey?: string; url: string }> = [];
   const released: string[] = [];
+  const bridgeNonce = "v".repeat(43);
   await withRunServer(
     undefined,
     async ({ base, dataDir, store }) => {
@@ -3204,9 +3255,10 @@ test("standard version preview URL endpoint resolves the dev server URL without 
       const preview = await fetch(`${base}/api/projects/${project.id}/versions/${run.id}/preview-url`);
       assert.equal(preview.status, 200);
       assert.deepEqual(await preview.json(), {
-        url: "http://127.0.0.1:6201/",
+        url: `http://127.0.0.1:6201/#dezin-bridge=${bridgeNonce}`,
         mode: "standard",
         leaseId: "version-lease-1",
+        bridgeNonce,
         expiresAt: 123_456,
       });
       assert.match(devServers[0]!.dir, new RegExp(`version-worktrees/${project.id}/${run.id}$`));
@@ -3219,9 +3271,16 @@ test("standard version preview URL endpoint resolves the dev server URL without 
     },
     {
       ensureDevServer: async (_projectId, dir, runtimeKey) => {
-        const url = `http://127.0.0.1:${6201 + devServers.length}/`;
+        const baseUrl = `http://127.0.0.1:${6201 + devServers.length}/`;
+        const url = `${baseUrl}#dezin-bridge=${bridgeNonce}`;
         devServers.push({ dir, runtimeKey, url });
-        return { url, leaseId: "version-lease-1", expiresAt: 123_456, release: async () => {} };
+        return {
+          url,
+          leaseId: "version-lease-1",
+          bridgeNonce,
+          expiresAt: 123_456,
+          release: async () => {},
+        };
       },
       previewLeaseManager: {
         acquire: async () => { throw new Error("not used"); },
@@ -3264,6 +3323,11 @@ test("standard run succeeds only after project files change", async () => {
       });
       const events = parseSse(await res.text());
       const done = events.find((e) => e.type === "run-done")!;
+      const invalidPreview = events.find((event) => event.type === "preview-update" && event.mode === "standard");
+      assert.equal(invalidPreview?.previewUrl, undefined, "a URL-only adapter must never be handed to the Viewer");
+      assert.equal(invalidPreview?.leaseId, undefined);
+      assert.ok(events.some((event) => event.type === "activity"
+        && String((event.activity as { summary?: string } | undefined)?.summary ?? "").includes("renewable nonce-bound lease")));
       assert.equal(done.mode, "standard");
       assert.equal(done.passed, true);
       assert.equal(store.getRun(done.runId as string)?.status, "succeeded");
@@ -3277,6 +3341,8 @@ test("standard run succeeds only after project files change", async () => {
 
 test("standard run streams preview updates from the live dev server before completion", async () => {
   const devServers: Array<{ dir: string; runtimeKey?: string; url: string }> = [];
+  const releasedProducerLeases: string[] = [];
+  const bridgeNonce = "r".repeat(43);
   const runner: AgentRunner = {
     id: "standard-live-preview",
     async runTurn(input) {
@@ -3310,16 +3376,26 @@ test("standard run streams preview updates from the live dev server before compl
       assert.ok(previewIndex >= 0, "standard run emitted a live preview update");
       assert.ok(doneIndex > previewIndex, "preview update arrived before run-done");
       assert.equal(preview.runId, done.runId);
-      assert.equal(preview.previewUrl, "http://127.0.0.1:6207/");
+      assert.equal(preview.previewUrl, undefined, "durable events must not persist a viewer capability");
+      assert.equal(preview.leaseId, undefined, "each viewer must acquire its own lease");
+      assert.equal(preview.bridgeNonce, undefined, "each viewer must acquire its own bridge nonce");
+      assert.equal(preview.expiresAt, undefined, "durable events must not persist an expiry snapshot");
       assert.equal(preview.variantId, store.getActiveVariantId(project.id));
       assert.match(devServers[0]!.runtimeKey ?? "", /:/);
+      assert.ok(releasedProducerLeases.includes("run-preview-lease-1"), "the run released its producer lease");
       assert.ok(store.getRun(done.runId as string)?.commitHash, "run persisted a git snapshot before completion");
     },
     {
       ensureDevServer: async (_projectId, dir, runtimeKey) => {
-        const url = "http://127.0.0.1:6207/";
+        const url = `http://127.0.0.1:6207/#dezin-bridge=${bridgeNonce}`;
         devServers.push({ dir, runtimeKey, url });
-        return { url };
+        return {
+          url,
+          leaseId: "run-preview-lease-1",
+          bridgeNonce,
+          expiresAt: 123_456,
+          release: async () => { releasedProducerLeases.push("run-preview-lease-1"); },
+        };
       },
       captureCoverUrl: async () => true,
     },

@@ -1,10 +1,21 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type MutableRefObject } from "react";
-import { Columns2, GripVertical, SlidersHorizontal } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { CircleAlert, Columns2, GripVertical, RotateCw, SlidersHorizontal, X } from "lucide-react";
 import { Dialog, Segmented } from "./ui/index.ts";
+import { usePreviewChannel, type PreviewChannelMessage } from "../lib/preview-channel.ts";
+import { usePreviewRuntimeErrors, type RuntimeError } from "../lib/preview-runtime-errors.ts";
 import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
 
 interface Side {
   url?: string;
+  bridgeNonce?: string;
   label: string;
   error?: string;
 }
@@ -37,17 +48,14 @@ function applyDocumentScroll(doc: Document | null, top: number, left: number): v
   }
 }
 
-function postScrollSync(frame: HTMLIFrameElement | null, top: number, left: number): void {
-  try {
-    frame?.contentWindow?.postMessage({ source: "dezin-parent", type: "sync-scroll", top, left }, "*");
-  } catch {
-    // Cross-origin frames can still receive postMessage, but tolerate browser edge cases.
-  }
-}
-
-function syncFrameScroll(frame: HTMLIFrameElement | null, top: number, left: number): void {
+function syncFrameScroll(
+  frame: HTMLIFrameElement | null,
+  top: number,
+  left: number,
+  sendScroll?: (top: number, left: number) => void,
+): void {
   applyDocumentScroll(frameDocument(frame), top, left);
-  postScrollSync(frame, top, left);
+  sendScroll?.(top, left);
 }
 
 function addFrameScrollListener(win: Window | null, onScroll: EventListener): void {
@@ -66,14 +74,19 @@ function removeFrameScrollListener(win: Window | null, onScroll: EventListener):
   }
 }
 
-export function bindFrameScroll(sourceDoc: Document, targetFrame: HTMLIFrameElement | null, syncingRef: MutableRefObject<boolean>): () => void {
+export function bindFrameScroll(
+  sourceDoc: Document,
+  targetFrame: HTMLIFrameElement | null,
+  syncingRef: MutableRefObject<boolean>,
+  sendScroll?: (top: number, left: number) => void,
+): () => void {
   const sourceWindow = sourceDoc.defaultView;
   const onScroll = (): void => {
     if (syncingRef.current) return;
     const source = frameScrollElement(sourceDoc);
     if (!source) return;
     syncingRef.current = true;
-    syncFrameScroll(targetFrame, source.scrollTop, source.scrollLeft);
+    syncFrameScroll(targetFrame, source.scrollTop, source.scrollLeft, sendScroll);
     window.setTimeout(() => {
       syncingRef.current = false;
     }, 0);
@@ -94,6 +107,58 @@ export function bindFrameScroll(sourceDoc: Document, targetFrame: HTMLIFrameElem
   };
 }
 
+function CompareRuntimeNotice({
+  label,
+  fatal,
+  nonFatal,
+  side,
+  onReload,
+  onDismissFatal,
+  onDismissNonFatal,
+}: {
+  label: string;
+  fatal: RuntimeError | null;
+  nonFatal: RuntimeError[];
+  side: "left" | "right";
+  onReload: () => void;
+  onDismissFatal: () => void;
+  onDismissNonFatal: (sig: string) => void;
+}) {
+  const visible = fatal ?? nonFatal.at(-1) ?? null;
+  if (visible === null) return null;
+  const dismiss = fatal ? onDismissFatal : () => onDismissNonFatal(visible.sig);
+  return (
+    <div
+      role="alert"
+      aria-label={`${label} preview error`}
+      className={`absolute bottom-3 z-30 w-[min(20rem,calc(50%-1.25rem))] rounded-lg border border-border bg-card/95 p-3 shadow-lg backdrop-blur-sm ${side === "left" ? "left-3" : "right-3"}`}
+    >
+      <div className="mb-1.5 flex items-start justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5 text-destructive">
+          <CircleAlert aria-hidden size={14} strokeWidth={2} className="shrink-0" />
+          <strong className="truncate text-xs">{label} preview error</strong>
+        </div>
+        <button type="button" aria-label={`Dismiss ${label} preview error`} onClick={dismiss} className="shrink-0 text-muted-foreground hover:text-foreground">
+          <X aria-hidden size={13} />
+        </button>
+      </div>
+      <p className="line-clamp-3 break-words font-mono text-[11px] leading-relaxed text-foreground">{visible.message}</p>
+      {nonFatal.length > 1 && !fatal ? (
+        <p className="mt-1 text-[10px] text-muted-foreground">{nonFatal.length} console errors in this pane</p>
+      ) : null}
+      <button
+        type="button"
+        aria-label={`Reload ${label} preview`}
+        onClick={onReload}
+        className="mt-2 inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-[11px] text-foreground hover:bg-surface-2"
+      >
+        <RotateCw aria-hidden size={11} strokeWidth={1.8} />
+        Reload pane
+      </button>
+    </div>
+  );
+}
+
 /** Visual diff between two versions/branches: side-by-side, or a before/after slider. */
 export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose: () => void; a: Side; b: Side }) {
   const [mode, setMode] = useState<"slider" | "split">("slider");
@@ -101,13 +166,71 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
   const wrapRef = useRef<HTMLDivElement>(null);
   const aRef = useRef<HTMLIFrameElement>(null);
   const bRef = useRef<HTMLIFrameElement>(null);
-  const handleRef = useRef<HTMLButtonElement>(null);
+  const handleRef = useRef<HTMLDivElement>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
   const syncingScrollRef = useRef(false);
+  const aSendRef = useRef<(message: { type: string } & Record<string, unknown>) => boolean>(() => false);
+  const bSendRef = useRef<(message: { type: string } & Record<string, unknown>) => boolean>(() => false);
   const hasUnavailablePane = Boolean(a.error || b.error || !a.url || !b.url);
+  const aErrors = usePreviewRuntimeErrors({
+    iframeRef: aRef,
+    previewSrc: a.url ?? null,
+    runActive: false,
+    listenToWindow: false,
+  });
+  const bErrors = usePreviewRuntimeErrors({
+    iframeRef: bRef,
+    previewSrc: b.url ?? null,
+    runActive: false,
+    listenToWindow: false,
+  });
+  const syncFromA = useCallback((message: PreviewChannelMessage): void => {
+    aErrors.ingestMessage(message);
+    if (message.type !== "scroll" || syncingScrollRef.current) return;
+    const top = typeof message.top === "number" && Number.isFinite(message.top) ? message.top : 0;
+    const left = typeof message.left === "number" && Number.isFinite(message.left) ? message.left : 0;
+    syncingScrollRef.current = true;
+    syncFrameScroll(bRef.current, top, left, (nextTop, nextLeft) => {
+      bSendRef.current({ type: "sync-scroll", top: nextTop, left: nextLeft });
+    });
+    window.setTimeout(() => { syncingScrollRef.current = false; }, 0);
+  }, [aErrors.ingestMessage]);
+  const syncFromB = useCallback((message: PreviewChannelMessage): void => {
+    bErrors.ingestMessage(message);
+    if (message.type !== "scroll" || syncingScrollRef.current) return;
+    const top = typeof message.top === "number" && Number.isFinite(message.top) ? message.top : 0;
+    const left = typeof message.left === "number" && Number.isFinite(message.left) ? message.left : 0;
+    syncingScrollRef.current = true;
+    syncFrameScroll(aRef.current, top, left, (nextTop, nextLeft) => {
+      aSendRef.current({ type: "sync-scroll", top: nextTop, left: nextLeft });
+    });
+    window.setTimeout(() => { syncingScrollRef.current = false; }, 0);
+  }, [bErrors.ingestMessage]);
+  const aChannel = usePreviewChannel({
+    iframeRef: aRef,
+    previewSrc: a.url ?? null,
+    bridgeNonce: a.bridgeNonce ?? null,
+    enabled: open && Boolean(a.url && a.bridgeNonce),
+    onMessage: syncFromA,
+  });
+  const bChannel = usePreviewChannel({
+    iframeRef: bRef,
+    previewSrc: b.url ?? null,
+    bridgeNonce: b.bridgeNonce ?? null,
+    enabled: open && Boolean(b.url && b.bridgeNonce),
+    onMessage: syncFromB,
+  });
+  aSendRef.current = aChannel.send;
+  bSendRef.current = bChannel.send;
 
   useEffect(() => {
     if (hasUnavailablePane) setMode("split");
   }, [hasUnavailablePane]);
+
+  useEffect(() => {
+    if (!open) dragCleanupRef.current?.();
+    return () => dragCleanupRef.current?.();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -126,41 +249,36 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
       cleanupFrameScroll();
       const aDoc = frameDocument(aRef.current);
       const bDoc = frameDocument(bRef.current);
-      if (aDoc) frameCleanups.push(bindFrameScroll(aDoc, bRef.current, syncingScrollRef));
-      if (bDoc) frameCleanups.push(bindFrameScroll(bDoc, aRef.current, syncingScrollRef));
-    };
-    const onMessage = (event: MessageEvent): void => {
-      const data = event.data as { source?: string; type?: string; top?: unknown; left?: unknown } | null;
-      if (!data || data.source !== "dezin" || data.type !== "scroll") return;
-      const sourceWindow = event.source;
-      const targetFrame = sourceWindow === aRef.current?.contentWindow ? bRef.current : sourceWindow === bRef.current?.contentWindow ? aRef.current : null;
-      if (!targetFrame) return;
-      const top = typeof data.top === "number" && Number.isFinite(data.top) ? data.top : 0;
-      const left = typeof data.left === "number" && Number.isFinite(data.left) ? data.left : 0;
-      if (syncingScrollRef.current) return;
-      syncingScrollRef.current = true;
-      syncFrameScroll(targetFrame, top, left);
-      window.setTimeout(() => {
-        syncingScrollRef.current = false;
-      }, 0);
+      if (aDoc) frameCleanups.push(bindFrameScroll(aDoc, bRef.current, syncingScrollRef, (top, left) => {
+        bChannel.send({ type: "sync-scroll", top, left });
+      }));
+      if (bDoc) frameCleanups.push(bindFrameScroll(bDoc, aRef.current, syncingScrollRef, (top, left) => {
+        aChannel.send({ type: "sync-scroll", top, left });
+      }));
     };
     const aFrame = aRef.current;
     const bFrame = bRef.current;
     attachFrameScroll();
     aFrame?.addEventListener("load", attachFrameScroll);
     bFrame?.addEventListener("load", attachFrameScroll);
-    window.addEventListener("message", onMessage);
     return () => {
       aFrame?.removeEventListener("load", attachFrameScroll);
       bFrame?.removeEventListener("load", attachFrameScroll);
-      window.removeEventListener("message", onMessage);
       cleanupFrameScroll();
     };
-  }, [open, mode, a.url, b.url]);
+  }, [a.url, aChannel.send, b.url, bChannel.send, mode, open]);
 
-  const frame = (side: Side, ref: MutableRefObject<HTMLIFrameElement | null>) =>
+  const frame = (side: Side, ref: MutableRefObject<HTMLIFrameElement | null>, onLoad: () => void) =>
     side.url ? (
-      <iframe key={side.url} ref={ref} src={side.url} title={side.label} sandbox={previewSandboxForSrc(side.url)} className="h-full w-full bg-white" />
+      <iframe
+        key={side.url}
+        ref={ref}
+        src={side.url}
+        title={side.label}
+        sandbox={previewSandboxForSrc(side.url)}
+        onLoad={onLoad}
+        className="h-full w-full bg-white"
+      />
     ) : (
       <div className="grid h-full place-items-center p-8">
         <div className="max-w-sm rounded-lg border border-border bg-card p-4 text-center">
@@ -170,32 +288,89 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
       </div>
     );
 
-  // Drive the drag through the DOM directly (no per-frame React re-render of the iframes),
-  // and turn off the iframes' hit-testing so fast drags don't get swallowed by them.
-  const drag = (e: ReactMouseEvent): void => {
+  const renderDividerPosition = useCallback((value: number): void => {
+    if (aRef.current) aRef.current.style.clipPath = `inset(0 ${100 - value}% 0 0)`;
+    if (handleRef.current) handleRef.current.style.left = `${value}%`;
+  }, []);
+  const commitDividerPosition = useCallback((value: number): void => {
+    const next = Math.min(99, Math.max(1, value));
+    renderDividerPosition(next);
+    setPos(next);
+  }, [renderDividerPosition]);
+
+  // Drive pointer drags through the DOM directly (no per-frame React re-render of the iframes),
+  // and turn off the iframes' hit-testing so fast mouse, pen, and touch drags stay captured.
+  const drag = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (typeof e.button === "number" && e.button !== 0 && e.pointerType !== "touch") return;
     e.preventDefault();
+    dragCleanupRef.current?.();
     let p = pos;
-    if (aRef.current) aRef.current.style.pointerEvents = "none";
-    if (bRef.current) bRef.current.style.pointerEvents = "none";
-    const move = (ev: MouseEvent): void => {
+    const pointerId = Number.isFinite(e.pointerId) ? e.pointerId : null;
+    const handle = e.currentTarget;
+    const comparedFrame = aRef.current;
+    const currentFrame = bRef.current;
+    try { if (pointerId !== null) handle.setPointerCapture(pointerId); } catch { /* JSDOM and detached handles may not implement capture. */ }
+    if (comparedFrame) comparedFrame.style.pointerEvents = "none";
+    if (currentFrame) currentFrame.style.pointerEvents = "none";
+    const move = (ev: PointerEvent): void => {
+      if (pointerId !== null && Number.isFinite(ev.pointerId) && ev.pointerId !== pointerId) return;
       const el = wrapRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || !Number.isFinite(ev.clientX)) return;
       p = Math.min(99, Math.max(1, ((ev.clientX - rect.left) / rect.width) * 100));
-      if (aRef.current) aRef.current.style.clipPath = `inset(0 ${100 - p}% 0 0)`;
-      if (handleRef.current) handleRef.current.style.left = `${p}%`;
+      renderDividerPosition(p);
+      handleRef.current?.setAttribute("aria-valuenow", String(Math.round(p)));
+      handleRef.current?.setAttribute("aria-valuetext", `${Math.round(p)}% compared version`);
     };
-    const up = (): void => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
+    const cleanupDrag = (): void => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      handle.removeEventListener("lostpointercapture", lostCapture);
       document.body.style.cursor = "";
-      if (aRef.current) aRef.current.style.pointerEvents = "";
-      if (bRef.current) bRef.current.style.pointerEvents = "";
-      setPos(p);
+      if (comparedFrame) comparedFrame.style.pointerEvents = "";
+      if (currentFrame) currentFrame.style.pointerEvents = "";
+      if (dragCleanupRef.current === cleanupDrag) dragCleanupRef.current = null;
+    };
+    const up = (ev: PointerEvent): void => {
+      if (pointerId !== null && Number.isFinite(ev.pointerId) && ev.pointerId !== pointerId) return;
+      cleanupDrag();
+      commitDividerPosition(p);
+    };
+    const lostCapture = (): void => {
+      cleanupDrag();
+      commitDividerPosition(p);
     };
     document.body.style.cursor = "col-resize";
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    handle.addEventListener("lostpointercapture", lostCapture, { once: true });
+    dragCleanupRef.current = cleanupDrag;
+  };
+
+  const moveDividerWithKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const step = event.shiftKey ? 10 : 1;
+    let next: number | null = null;
+    if (event.key === "ArrowLeft" || event.key === "ArrowDown") next = pos - step;
+    else if (event.key === "ArrowRight" || event.key === "ArrowUp") next = pos + step;
+    else if (event.key === "PageDown") next = pos - 10;
+    else if (event.key === "PageUp") next = pos + 10;
+    else if (event.key === "Home") next = 1;
+    else if (event.key === "End") next = 99;
+    if (next === null) return;
+    event.preventDefault();
+    commitDividerPosition(next);
+  };
+
+  const reloadPane = (
+    ref: MutableRefObject<HTMLIFrameElement | null>,
+    errors: typeof aErrors,
+  ): void => {
+    errors.reset();
+    const frame = ref.current;
+    if (frame) frame.src = frame.src;
   };
 
   const tag = "pointer-events-none absolute top-2.5 z-10 rounded-md bg-foreground/85 px-2 py-0.5 text-[11px] font-medium text-background";
@@ -226,11 +401,11 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
             <div className="flex h-full">
               <div className="relative h-full flex-1 border-r border-border">
                 <span className={`${tag} left-2.5`}>{a.label}</span>
-                {frame(a, aRef)}
+                {frame(a, aRef, aChannel.connect)}
               </div>
               <div className="relative h-full flex-1">
                 <span className={`${tag} left-2.5`}>{b.label}</span>
-                {frame(b, bRef)}
+                {frame(b, bRef, bChannel.connect)}
               </div>
             </div>
           ) : (
@@ -242,6 +417,7 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
                 src={b.url}
                 title={b.label}
                 sandbox={previewSandboxForSrc(b.url)}
+                onLoad={bChannel.connect}
                 className="absolute inset-0 h-full w-full bg-white"
               />
               <iframe
@@ -250,26 +426,52 @@ export function VersionCompare({ open, onClose, a, b }: { open: boolean; onClose
                 src={a.url}
                 title={a.label}
                 sandbox={previewSandboxForSrc(a.url)}
+                onLoad={aChannel.connect}
                 className="absolute inset-0 h-full w-full bg-white"
                 style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}
               />
               <span className={`${tag} left-2.5`}>{a.label}</span>
               <span className={`${tag} right-2.5`}>{b.label}</span>
-              <button
+              <div
                 ref={handleRef}
-                type="button"
+                role="slider"
+                tabIndex={0}
                 aria-label="Drag to compare"
-                onMouseDown={drag}
-                className="absolute inset-y-0 z-20 flex w-9 -translate-x-1/2 cursor-col-resize items-center justify-center"
+                aria-orientation="horizontal"
+                aria-valuemin={1}
+                aria-valuemax={99}
+                aria-valuenow={Math.round(pos)}
+                aria-valuetext={`${Math.round(pos)}% compared version`}
+                onPointerDown={drag}
+                onKeyDown={moveDividerWithKeyboard}
+                className="absolute inset-y-0 z-20 flex w-9 touch-none -translate-x-1/2 cursor-col-resize items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
                 style={{ left: `${pos}%` }}
               >
                 <span data-testid="compare-divider-line" className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 bg-primary" />
                 <span className="relative grid size-7 place-items-center rounded-full border border-border bg-card shadow-pop">
                   <GripVertical size={14} strokeWidth={2} className="text-foreground" />
                 </span>
-              </button>
+              </div>
             </>
           )}
+          <CompareRuntimeNotice
+            label={a.label}
+            fatal={aErrors.fatal}
+            nonFatal={aErrors.nonFatal}
+            side="left"
+            onReload={() => reloadPane(aRef, aErrors)}
+            onDismissFatal={aErrors.dismissFatal}
+            onDismissNonFatal={aErrors.dismissNonFatal}
+          />
+          <CompareRuntimeNotice
+            label={b.label}
+            fatal={bErrors.fatal}
+            nonFatal={bErrors.nonFatal}
+            side="right"
+            onReload={() => reloadPane(bRef, bErrors)}
+            onDismissFatal={bErrors.dismissFatal}
+            onDismissNonFatal={bErrors.dismissNonFatal}
+          />
         </div>
       </div>
     </Dialog>

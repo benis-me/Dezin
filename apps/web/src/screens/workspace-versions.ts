@@ -1,4 +1,5 @@
 import type { RunSummary, Variant } from "../lib/api.ts";
+import { cacheBustedPreviewUrl } from "../lib/preview-channel.ts";
 
 export const UNASSIGNED_VARIANT_ID = "__unassigned__";
 
@@ -62,7 +63,7 @@ export function sortRunsNewestFirst(runs: RunSummary[]): RunSummary[] {
 }
 
 export function cacheBustPreviewUrl(url: string, t = Date.now()): string {
-  return `${url.split("?")[0]}?t=${t}`;
+  return cacheBustedPreviewUrl(url, t);
 }
 
 export function isVersionPreviewSrc(projectId: string, src: string | null): boolean {

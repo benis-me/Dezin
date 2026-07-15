@@ -1,5 +1,7 @@
 import type { ApiClient } from "../lib/api.ts";
 
+const FAKE_BRIDGE_NONCE = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+
 /** Build a fake ApiClient for tests; override only the methods a test needs. */
 export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
   const notImpl = () => {
@@ -10,10 +12,65 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     createProject: notImpl as ApiClient["createProject"],
     generateProjectTitle: async (id: string) => (over.getProject ? over.getProject(id) : notImpl()),
     getSetup: async () => ({ phase: "ready" as const }),
-    getDevServerUrl: async (id: string) => ({ url: `http://127.0.0.1:5300/${id}` }),
+    getDevServerUrl: async (id: string) => ({
+      leaseId: `lease-${id}`,
+      url: `http://127.0.0.1:5300/${id}#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
+      bridgeNonce: FAKE_BRIDGE_NONCE,
+      expiresAt: Date.now() + 60_000,
+    }),
     releaseDevServer: async () => {},
-    renewPreviewLease: async (leaseId: string) => ({ leaseId, url: "http://127.0.0.1:5300/", expiresAt: Date.now() + 60_000 }),
+    renewPreviewLease: async (leaseId: string) => ({
+      leaseId,
+      url: `http://127.0.0.1:5300/#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
+      bridgeNonce: FAKE_BRIDGE_NONCE,
+      expiresAt: Date.now() + 60_000,
+    }),
     releasePreviewLease: async () => {},
+    resolvePreviewTarget: async (projectId, target) => {
+      const artifactId = target.kind === "artifact-current"
+        ? target.artifactId
+        : target.kind === "workspace-flow"
+          ? target.startArtifactId
+          : "artifact-test";
+      const revisionId = target.kind === "artifact-revision" || target.kind === "component-state"
+        ? target.revisionId
+        : "revision-test";
+      return {
+        version: 1,
+        targetKey: `${target.kind}:${revisionId}`,
+        requestedKind: target.kind,
+        projectId,
+        workspaceId: `workspace-${projectId}`,
+        artifactId,
+        artifactKind: "page",
+        revisionId,
+        trackId: target.kind === "artifact-current" ? target.trackId ?? "track-test" : "track-test",
+        snapshotId: target.kind === "workspace-flow" ? target.snapshotId : null,
+        sourceCommitHash: `commit-${revisionId}`,
+        sourceTreeHash: `tree-${revisionId}`,
+        dependencyLockHash: `dependencies-${revisionId}`,
+        assemblyHash: `assembly-${revisionId}`,
+        artifactRoot: artifactId === "artifact-test" ? "." : `artifacts/${artifactId}`,
+        renderSpec: {},
+        variantKey: target.kind === "component-state" ? target.variantKey : null,
+        stateKey: target.kind === "component-state" ? target.stateKey : null,
+        runId: target.kind === "run-candidate" ? target.runId : null,
+      };
+    },
+    acquirePreviewTargetLease: async (_projectId, resolved) => ({
+      leaseId: `lease-${resolved.revisionId}`,
+      url: `http://127.0.0.1:5300/${resolved.revisionId}#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
+      bridgeNonce: FAKE_BRIDGE_NONCE,
+      expiresAt: Date.now() + 60_000,
+      resolved,
+    }),
+    renewPreviewTargetLease: async (leaseId: string) => ({
+      leaseId,
+      url: `http://127.0.0.1:5300/#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
+      bridgeNonce: FAKE_BRIDGE_NONCE,
+      expiresAt: Date.now() + 60_000,
+    }),
+    releasePreviewTargetLease: async () => {},
     captureProjectCover: async () => ({ captured: false }),
     getProject: notImpl as ApiClient["getProject"],
     getWorkspace: async (projectId) => ({
@@ -34,6 +91,10 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     listArtifactTracks: async () => [],
     listArtifactRevisions: async () => [],
     getArtifactRevision: notImpl as ApiClient["getArtifactRevision"],
+    applyArtifactMutation: notImpl as ApiClient["applyArtifactMutation"],
+    getArtifactThumbnail: async () => new Blob(),
+    artifactThumbnailUrl: (projectId, artifactId, revisionId) =>
+      `/api/projects/${projectId}/artifacts/${artifactId}/revisions/${revisionId}/thumbnail`,
     listWorkspaceSnapshots: async () => [],
     getWorkspaceSnapshot: notImpl as ApiClient["getWorkspaceSnapshot"],
     patchProject: notImpl as ApiClient["patchProject"],
@@ -109,7 +170,11 @@ export function makeFakeApi(over: Partial<ApiClient> = {}): ApiClient {
     getFileText: async () => "",
     listRuns: async () => [],
     versionPreviewUrl: (id: string, runId: string) => `/api/projects/${id}/versions/${runId}`,
-    getVersionPreview: async (id: string, runId: string) => ({ url: `/api/projects/${id}/versions/${runId}`, mode: "prototype" as const }),
+    getVersionPreview: async (id: string, runId: string) => ({
+      url: `/api/projects/${id}/versions/${runId}#dezin-bridge=${FAKE_BRIDGE_NONCE}`,
+      bridgeNonce: FAKE_BRIDGE_NONCE,
+      mode: "prototype" as const,
+    }),
     getVersionText: async () => "",
     getVersionDiff: async () => [],
     restoreVersion: notImpl as ApiClient["restoreVersion"],

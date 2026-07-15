@@ -134,7 +134,13 @@ test("Canvas and Artifact routes preserve the project-keyed Studio and Workspace
   expect(screen.getByText("artifact-p-1")).toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "Project canvas" })).not.toBeInTheDocument();
   expect(screen.getByTestId("project-studio-shell")).toBe(shell);
-  expect(screen.getByRole("textbox", { name: "Workspace Agent draft" })).toHaveValue("Create a checkout page");
+  expect(screen.getByRole("complementary", { name: "Artifact Agent" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Artifact Agent" })).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Artifact Agent draft" })).toHaveValue("Create a checkout page");
+  expect(screen.getByRole("textbox", { name: "Artifact Agent draft" })).toHaveAttribute(
+    "placeholder",
+    "Describe a focused change to this artifact or selected element…",
+  );
   expect(canvas).not.toBeInTheDocument();
   expect(getProject).toHaveBeenCalledTimes(1);
   expect(getWorkspace).toHaveBeenCalledTimes(1);

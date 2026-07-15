@@ -1,15 +1,49 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { agentSpawnEnv } from "../../../packages/agent/src/index.ts";
 import type { RuntimeScope } from "./runtime-supervisor.ts";
 
 export interface PreviewLease {
   leaseId: string;
   url: string;
+  bridgeNonce: string;
   expiresAt: number;
   release(): Promise<void>;
+}
+
+export interface PreviewBridgeCapability {
+  url: string;
+  bridgeNonce: string;
+}
+
+export function requirePreviewLease(value: unknown, label = "preview runtime"): PreviewLease {
+  if (!value || typeof value !== "object") throw new Error(`${label} did not return a renewable lease`);
+  const lease = value as Partial<PreviewLease>;
+  const validNonce = typeof lease.bridgeNonce === "string"
+    && /^[a-zA-Z0-9_-]{43}$/.test(lease.bridgeNonce);
+  let matchingFragment = false;
+  if (typeof lease.url === "string" && validNonce) {
+    try {
+      matchingFragment = new URL(lease.url, "http://dezin.invalid").hash
+        === `#dezin-bridge=${lease.bridgeNonce}`;
+    } catch {
+      matchingFragment = false;
+    }
+  }
+  if (typeof lease.leaseId !== "string"
+    || lease.leaseId.length === 0
+    || typeof lease.url !== "string"
+    || lease.url.length === 0
+    || !validNonce
+    || !matchingFragment
+    || typeof lease.expiresAt !== "number"
+    || !Number.isFinite(lease.expiresAt)
+    || typeof lease.release !== "function") {
+    throw new Error(`${label} did not return a renewable nonce-bound lease`);
+  }
+  return lease as PreviewLease;
 }
 
 export interface PreviewChild {
@@ -30,11 +64,27 @@ export interface PreviewSpawnInput {
   onLog?: (message: string, level: "info" | "error") => void;
 }
 
+export interface PreviewRuntimeIdentity {
+  artifactId: string;
+  revisionId: string;
+  sourceTreeHash: string;
+  dependencyLockHash: string;
+}
+
 export interface PreviewAcquireOptions {
   fingerprint?: string;
   configPath?: string;
+  runtimeIdentity?: PreviewRuntimeIdentity;
   signal?: AbortSignal;
   onLog?: PreviewSpawnInput["onLog"];
+  /** Immutable targets do not keep a process whose last client lease is gone. */
+  disposeOnIdle?: boolean;
+  /** Per-client resource cleanup, run exactly once after the lease is detached. */
+  onLeaseRelease?: () => void | Promise<void>;
+  /** Per-process cleanup, run exactly once after the preview process is gone. */
+  onEntryDispose?: () => void | Promise<void>;
+  /** Internal lifecycle hook fired once when a new process entry becomes owned. */
+  onEntryReady?: () => void;
 }
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -72,9 +122,12 @@ export interface PreviewLeaseManager {
 
 interface LeaseState {
   leaseId: string;
+  bridgeNonce: string;
   entry: PreviewEntry;
   expiresAt: number;
   timer?: Timer;
+  onRelease?: PreviewAcquireOptions["onLeaseRelease"];
+  releasePromise?: Promise<void>;
 }
 
 interface PreviewEntry {
@@ -85,13 +138,24 @@ interface PreviewEntry {
   child: PreviewChild;
   url: string;
   leases: Map<string, LeaseState>;
+  /** Leases detached by stopEntry but not releasable until the process is gone. */
+  pendingReleaseLeases: Set<LeaseState>;
   pendingHandoffs: number;
+  disposeOnIdle: boolean;
+  onDispose?: PreviewAcquireOptions["onEntryDispose"];
   idleSince?: number;
   idleTimer?: Timer;
+  healthCheck?: PreviewHealthCheck;
+  unhealthy?: boolean;
   stopping?: Promise<void>;
   teardownFailed?: boolean;
   onClose: (code: number | null, signal: NodeJS.Signals | null) => void;
   onError: (error: Error) => void;
+}
+
+interface PreviewHealthCheck {
+  controller: AbortController;
+  promise: Promise<void>;
 }
 
 interface PreviewFlight {
@@ -100,6 +164,9 @@ interface PreviewFlight {
   projectDir: string;
   fingerprint: string;
   configPath?: string;
+  disposeOnIdle: boolean;
+  onEntryDispose?: PreviewAcquireOptions["onEntryDispose"];
+  onEntryReady?: PreviewAcquireOptions["onEntryReady"];
   controller: AbortController;
   waiters: number;
   entry?: PreviewEntry;
@@ -119,7 +186,10 @@ interface StopBarrier {
   scope?: RuntimeScope;
 }
 
-const DEFAULT_READY_TIMEOUT_MS = 15_000;
+// Fresh Vite processes can cross 15s when the full daemon suite or several
+// immutable previews contend for CPU and disk. Keep that startup tolerant but
+// still bounded; cached-process health checks remain intentionally short.
+const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_STOP_GRACE_MS = 1_000;
 const DEFAULT_LEASE_TTL_MS = 60_000;
 const DEFAULT_IDLE_TTL_MS = 60_000;
@@ -150,8 +220,26 @@ function identityKey(scope: RuntimeScope, projectDir: string, fingerprint: strin
   return `${scopeKey(scope)}\u0000${resolve(projectDir)}\u0000${fingerprint}`;
 }
 
+export function previewRuntimeIdentityKey(identity: PreviewRuntimeIdentity): string {
+  return JSON.stringify([
+    identity.artifactId,
+    identity.revisionId,
+    identity.sourceTreeHash,
+    identity.dependencyLockHash,
+  ]);
+}
+
 function isExited(child: PreviewChild): boolean {
   return child.exitCode !== null || child.signalCode !== null;
+}
+
+export function previewBridgeUrl(baseUrl: string, nonce: string): string {
+  return `${baseUrl.replace(/#.*$/s, "")}#dezin-bridge=${nonce}`;
+}
+
+export function issuePreviewBridgeCapability(baseUrl: string): PreviewBridgeCapability {
+  const bridgeNonce = randomBytes(32).toString("base64url");
+  return { url: previewBridgeUrl(baseUrl, bridgeNonce), bridgeNonce };
 }
 
 async function allocateFreePort(): Promise<number> {
@@ -273,6 +361,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
   const idleTtlMs = options.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
   const maxIdle = options.maxIdle ?? DEFAULT_MAX_IDLE;
   const entries = new Map<string, PreviewEntry>();
+  const allEntries = new Set<PreviewEntry>();
   const flights = new Map<string, PreviewFlight>();
   const leases = new Map<string, LeaseState>();
   const acquires = new Map<number, AcquireRecord>();
@@ -368,30 +457,53 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     return stopping;
   }
 
-  function clearEntryLeases(entry: PreviewEntry): void {
+  function detachEntryLeases(entry: PreviewEntry): LeaseState[] {
     clearIdleTimer(entry);
-    for (const lease of entry.leases.values()) {
+    const detached = [...entry.leases.values()];
+    for (const lease of detached) {
       clearLeaseTimer(lease);
       leases.delete(lease.leaseId);
     }
     entry.leases.clear();
+    for (const lease of detached) entry.pendingReleaseLeases.add(lease);
+    return detached;
+  }
+
+  function releaseLeaseResource(lease: LeaseState): Promise<void> {
+    lease.releasePromise ??= Promise.resolve().then(() => lease.onRelease?.());
+    return lease.releasePromise;
   }
 
   function forgetEntry(entry: PreviewEntry): void {
     if (entries.get(entry.identity) === entry) entries.delete(entry.identity);
-    clearEntryLeases(entry);
+    allEntries.delete(entry);
     entry.child.off("close", entry.onClose);
     entry.child.off("error", entry.onError);
   }
 
   function stopEntry(entry: PreviewEntry): Promise<void> {
     if (entry.stopping) return entry.stopping;
-    clearEntryLeases(entry);
-    const stopping = (async () => {
+    if (entry.healthCheck && !entry.healthCheck.controller.signal.aborted) {
+      entry.healthCheck.controller.abort(stoppingError());
+    }
+    detachEntryLeases(entry);
+    // Defer the body until entry.stopping is assigned: killProcessGroup may emit
+    // close synchronously and re-enter stopEntry through the child's listener.
+    const stopping = Promise.resolve().then(async () => {
       await stopChild(entry.child);
       entry.teardownFailed = false;
       forgetEntry(entry);
-    })();
+      const pendingReleases = [...entry.pendingReleaseLeases];
+      try {
+        await entry.onDispose?.();
+      } finally {
+        try {
+          await Promise.all(pendingReleases.map(releaseLeaseResource));
+        } finally {
+          for (const lease of pendingReleases) entry.pendingReleaseLeases.delete(lease);
+        }
+      }
+    });
     entry.stopping = stopping;
     void stopping.catch(() => {
       entry.teardownFailed = true;
@@ -414,7 +526,15 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
   }
 
   function markIdle(entry: PreviewEntry): void {
-    if (entry.stopping || entry.teardownFailed || entry.leases.size > 0 || entries.get(entry.identity) !== entry) return;
+    if (entry.stopping
+      || entry.teardownFailed
+      || entry.leases.size > 0
+      || entry.pendingHandoffs > 0
+      || entries.get(entry.identity) !== entry) return;
+    if (entry.disposeOnIdle || entry.unhealthy) {
+      void stopEntry(entry).catch(() => {});
+      return;
+    }
     if (!entry.idleTimer) {
       entry.idleSince = now();
       entry.idleTimer = schedule(() => {
@@ -426,12 +546,23 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     evictIdleOverflow();
   }
 
-  function expireLease(lease: LeaseState): boolean {
+  async function expireLease(lease: LeaseState): Promise<boolean> {
     if (leases.get(lease.leaseId) !== lease) return false;
     clearLeaseTimer(lease);
     leases.delete(lease.leaseId);
     lease.entry.leases.delete(lease.leaseId);
-    markIdle(lease.entry);
+    if (lease.entry.unhealthy
+      && lease.entry.leases.size === 0
+      && lease.entry.pendingHandoffs === 0) {
+      await stopEntry(lease.entry);
+    } else if (lease.entry.disposeOnIdle
+      && lease.entry.leases.size === 0
+      && lease.entry.pendingHandoffs === 0) {
+      await stopEntry(lease.entry);
+    } else {
+      markIdle(lease.entry);
+    }
+    await releaseLeaseResource(lease);
     return true;
   }
 
@@ -440,7 +571,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     lease.expiresAt = now() + leaseTtlMs;
     lease.timer = schedule(() => {
       lease.timer = undefined;
-      expireLease(lease);
+      void expireLease(lease).catch(() => {});
     }, leaseTtlMs);
     unref(lease.timer);
   }
@@ -448,21 +579,24 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
   function publicLease(lease: LeaseState): PreviewLease {
     return {
       leaseId: lease.leaseId,
-      url: lease.entry.url,
+      url: previewBridgeUrl(lease.entry.url, lease.bridgeNonce),
+      bridgeNonce: lease.bridgeNonce,
       expiresAt: lease.expiresAt,
       release: async () => {
-        expireLease(lease);
+        await expireLease(lease);
       },
     };
   }
 
-  function addLease(entry: PreviewEntry): PreviewLease {
+  function addLease(entry: PreviewEntry, onRelease?: PreviewAcquireOptions["onLeaseRelease"]): PreviewLease {
     clearIdleTimer(entry);
     entry.idleSince = undefined;
     const state: LeaseState = {
       leaseId: randomUUID(),
+      bridgeNonce: randomBytes(32).toString("base64url"),
       entry,
       expiresAt: 0,
+      onRelease,
     };
     entry.leases.set(state.leaseId, state);
     leases.set(state.leaseId, state);
@@ -525,7 +659,11 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     entry.child = child;
     entry.url = url;
     entry.leases = new Map();
+    entry.pendingReleaseLeases = new Set();
     entry.pendingHandoffs = flight.waiters;
+    entry.disposeOnIdle = flight.disposeOnIdle;
+    entry.onDispose = flight.onEntryDispose;
+    entry.unhealthy = false;
     entry.teardownFailed = false;
     entry.onClose = () => { void stopEntry(entry).catch(() => {}); };
     entry.onError = () => { void stopEntry(entry).catch(() => {}); };
@@ -533,8 +671,10 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     child.once("error", entry.onError);
     flight.entry = entry;
     entries.set(entry.identity, entry);
-    markIdle(entry);
+    allEntries.add(entry);
     try {
+      flight.onEntryReady?.();
+      markIdle(entry);
       await readyEntryCheckpoint?.(flight.controller.signal);
       flight.controller.signal.throwIfAborted();
       assertAdmission(flight.scope);
@@ -552,6 +692,9 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     projectDir: string,
     fingerprint: string,
     configPath: string | undefined,
+    disposeOnIdle: boolean,
+    onEntryDispose: PreviewAcquireOptions["onEntryDispose"],
+    onEntryReady: PreviewAcquireOptions["onEntryReady"],
     onLog?: PreviewSpawnInput["onLog"],
   ): PreviewFlight {
     assertAdmission(scope);
@@ -563,6 +706,9 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
       projectDir: resolve(projectDir),
       fingerprint,
       configPath,
+      disposeOnIdle,
+      onEntryDispose,
+      onEntryReady,
       controller: new AbortController(),
       waiters: 0,
       promise: undefined as unknown as Promise<PreviewEntry>,
@@ -574,22 +720,47 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     return flight;
   }
 
-  async function confirmCachedReady(entry: PreviewEntry, callerSignal?: AbortSignal): Promise<void> {
+  function cachedHealthCheck(entry: PreviewEntry): Promise<void> {
+    if (entry.healthCheck) return entry.healthCheck.promise;
     const controller = new AbortController();
     const timeout = new Error(`Cached preview readiness timed out after ${cachedReadyTimeoutMs}ms`);
     timeout.name = "TimeoutError";
     const timer = schedule(() => controller.abort(timeout), cachedReadyTimeoutMs);
-    const onAbort = (): void => controller.abort(abortError(callerSignal?.reason));
-    callerSignal?.addEventListener("abort", onAbort, { once: true });
-    if (callerSignal?.aborted) onAbort();
-    try {
-      await waitUntilReady(entry.url, entry.child, controller.signal);
-      controller.signal.throwIfAborted();
-      if (isExited(entry.child)) throw new Error("Preview process exited before readiness");
-    } finally {
-      cancelTimer(timer);
-      callerSignal?.removeEventListener("abort", onAbort);
-    }
+    const health = {} as PreviewHealthCheck;
+    health.controller = controller;
+    health.promise = Promise.resolve()
+      .then(async () => {
+        await waitUntilReady(entry.url, entry.child, controller.signal);
+        controller.signal.throwIfAborted();
+        if (isExited(entry.child)) throw new Error("Preview process exited before readiness");
+      })
+      .finally(() => {
+        cancelTimer(timer);
+        if (entry.healthCheck === health) entry.healthCheck = undefined;
+      });
+    entry.healthCheck = health;
+    return health.promise;
+  }
+
+  function confirmCachedReady(entry: PreviewEntry, callerSignal?: AbortSignal): Promise<void> {
+    const health = cachedHealthCheck(entry);
+    if (!callerSignal) return health;
+    if (callerSignal.aborted) return Promise.reject(abortError(callerSignal.reason));
+    return new Promise<void>((resolveReady, reject) => {
+      let settled = false;
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        callerSignal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = (): void => finish(() => reject(abortError(callerSignal.reason)));
+      callerSignal.addEventListener("abort", onAbort, { once: true });
+      void health.then(
+        () => finish(resolveReady),
+        (error) => finish(() => reject(error)),
+      );
+    });
   }
 
   function waitForFlight(flight: PreviewFlight, signal?: AbortSignal): Promise<PreviewEntry> {
@@ -638,7 +809,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     while (true) {
       const matchingAcquires = [...acquires.values()].filter((record) => barrierMatches(record.scope, barrier));
       const matchingFlights = [...flights.values()].filter((flight) => barrierMatches(flight.scope, barrier));
-      const matchingEntries = [...entries.values()].filter((entry) => barrierMatches(entry.scope, barrier));
+      const matchingEntries = [...allEntries].filter((entry) => barrierMatches(entry.scope, barrier));
       if (matchingAcquires.length === 0 && matchingFlights.length === 0 && matchingEntries.length === 0) return;
 
       const reason = stoppingError();
@@ -653,10 +824,16 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
         ...matchingFlights.map((flight) => flight.promise.then(() => {}, () => {})),
         ...matchingEntries.map((entry) => stopEntry(entry)),
       ]);
-      const teardownFailure = settlements.find(
-        (result): result is PromiseRejectedResult => result.status === "rejected" && result.reason instanceof Error && result.reason.name === "PreviewTeardownError",
+      const failures = settlements.filter(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
       );
-      if (teardownFailure) throw teardownFailure.reason;
+      // A dead process is not a successful lifecycle stop if its ownership
+      // cleanup failed. Prefer the harder process-teardown error when multiple
+      // entries fail, but never silently discard resource cleanup failures.
+      const failure = failures.find(
+        (result) => result.reason instanceof Error && result.reason.name === "PreviewTeardownError",
+      ) ?? failures[0];
+      if (failure) throw failure.reason;
     }
   }
 
@@ -670,29 +847,81 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
       try {
         assertAdmission(scope);
         const fingerprint = acquireOptions.fingerprint ?? "";
-        const identity = `${identityKey(scope, projectDir, fingerprint)}\u0000${acquireOptions.configPath ?? ""}`;
+        const identity = [
+          identityKey(scope, projectDir, fingerprint),
+          acquireOptions.configPath ?? "",
+          acquireOptions.runtimeIdentity ? previewRuntimeIdentityKey(acquireOptions.runtimeIdentity) : "",
+        ].join("\u0000");
         const cached = entries.get(identity);
         if (cached && !cached.stopping && !cached.teardownFailed && isProcessGroupAlive(cached.child)) {
+          if (cached.unhealthy) {
+            if (cached.leases.size > 0) {
+              if (entries.get(identity) === cached) entries.delete(identity);
+            } else {
+              await stopEntry(cached);
+            }
+            operationSignal.throwIfAborted();
+            assertAdmission(scope);
+          } else {
+          cached.disposeOnIdle ||= acquireOptions.disposeOnIdle === true;
+          cached.onDispose ??= acquireOptions.onEntryDispose;
           try {
             await confirmCachedReady(cached, operationSignal);
             operationSignal.throwIfAborted();
             assertAdmission(scope);
             if (entries.get(identity) === cached && !cached.stopping && !cached.teardownFailed && isProcessGroupAlive(cached.child)) {
-              return addLease(cached);
+              cached.unhealthy = false;
+              return addLease(cached, acquireOptions.onLeaseRelease);
             }
           } catch (error) {
             if (operationSignal.aborted) throw abortError(operationSignal.reason);
+            cached.unhealthy = true;
+            if (cached.leases.size > 0 && entries.get(identity) === cached) entries.delete(identity);
+            if (cached.leases.size === 0) await stopEntry(cached);
           }
-          await stopEntry(cached);
+          if (!cached.unhealthy) await stopEntry(cached);
           operationSignal.throwIfAborted();
           assertAdmission(scope);
+          }
         } else if (cached) {
           await stopEntry(cached);
           operationSignal.throwIfAborted();
           assertAdmission(scope);
         }
 
-        const flight = getOrCreateFlight(identity, scope, projectDir, fingerprint, acquireOptions.configPath, acquireOptions.onLog);
+        let flight = getOrCreateFlight(
+          identity,
+          scope,
+          projectDir,
+          fingerprint,
+          acquireOptions.configPath,
+          acquireOptions.disposeOnIdle === true,
+          acquireOptions.onEntryDispose,
+          acquireOptions.onEntryReady,
+          acquireOptions.onLog,
+        );
+        // A sole caller can abort a shared startup while startFlight is still
+        // reaping its process.  The flight remains registered until teardown
+        // settles so a new caller must wait for that cleanup, then create a
+        // fresh generation instead of inheriting the prior caller's AbortError.
+        while (flight.controller.signal.aborted) {
+          await flight.promise.catch(() => {});
+          operationSignal.throwIfAborted();
+          assertAdmission(scope);
+          flight = getOrCreateFlight(
+            identity,
+            scope,
+            projectDir,
+            fingerprint,
+            acquireOptions.configPath,
+            acquireOptions.disposeOnIdle === true,
+            acquireOptions.onEntryDispose,
+            acquireOptions.onEntryReady,
+            acquireOptions.onLog,
+          );
+        }
+        flight.disposeOnIdle ||= acquireOptions.disposeOnIdle === true;
+        flight.onEntryDispose ??= acquireOptions.onEntryDispose;
         flight.waiters += 1;
         if (flight.entry) flight.entry.pendingHandoffs += 1;
         try {
@@ -700,7 +929,7 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
           operationSignal.throwIfAborted();
           assertAdmission(scope);
           if (entries.get(identity) !== entry || entry.stopping || entry.teardownFailed || !isProcessGroupAlive(entry.child)) throw stoppingError();
-          return addLease(entry);
+          return addLease(entry, acquireOptions.onLeaseRelease);
         } catch (error) {
           if (operationSignal.aborted && flight.waiters === 1 && !flight.controller.signal.aborted) {
             flight.controller.abort(abortError(operationSignal.reason));
@@ -724,14 +953,14 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
 
     async renew(leaseId) {
       const lease = leases.get(leaseId);
-      if (!lease || lease.entry.stopping || lease.entry.teardownFailed || isExited(lease.entry.child)) return null;
+      if (!lease || lease.entry.unhealthy || lease.entry.stopping || lease.entry.teardownFailed || isExited(lease.entry.child)) return null;
       armLease(lease);
       return publicLease(lease);
     },
 
     async release(leaseId) {
       const lease = leases.get(leaseId);
-      return lease ? expireLease(lease) : false;
+      return lease ? await expireLease(lease) : false;
     },
 
     async stopScope(scope) {
@@ -763,11 +992,11 @@ export function createPreviewLeaseManager(options: PreviewLeaseManagerOptions = 
     },
 
     activeCount() {
-      return entries.size;
+      return allEntries.size;
     },
 
     hasActiveLease(scope) {
-      return [...entries.values()].some((entry) => matchesScope(entry.scope, scope) && entry.leases.size > 0);
+      return [...allEntries].some((entry) => matchesScope(entry.scope, scope) && entry.leases.size > 0);
     },
   };
 

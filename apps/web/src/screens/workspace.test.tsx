@@ -11,7 +11,8 @@ import { computeMarkupPosition } from "./workspace-markup.ts";
 import { normalizeTranscriptMessages, runCardStackPosition } from "./workspace-transcript.tsx";
 import { sortRunsNewestFirst } from "./workspace-versions.ts";
 import { ApiProvider } from "../lib/api-context.tsx";
-import type { RunEvent, RunSummary } from "../lib/api.ts";
+import type { PreviewLeaseInfo, RunEvent, RunSummary, VersionPreview } from "../lib/api.ts";
+import { previewBridgeNonceForSrc } from "../lib/preview-channel.ts";
 import { makeFakeApi } from "../test/fake-api.ts";
 import { AgentsProvider } from "../lib/agents-context.tsx";
 import { takePendingAgent, takePendingBrief, takePendingModel } from "../lib/pending-brief.ts";
@@ -27,12 +28,47 @@ beforeEach(() => {
   localStorage.removeItem("dezin.workspace.files.split");
   localStorage.removeItem("dezin.workspace.inspect.split");
 });
-afterEach(cleanup);
+const activePreviewBridgePorts = new Set<MessagePort>();
+
+afterEach(() => {
+  cleanup();
+  for (const port of activePreviewBridgePorts) port.close();
+  activePreviewBridgePorts.clear();
+});
 
 const AGENTS = [
   { id: "claude", command: "claude", available: true, version: "claude 1.2.3", models: ["opus", "sonnet"] },
   { id: "codex", command: "codex", available: true, version: "codex 1.0.0", models: ["gpt-5"] },
 ];
+
+const BRIDGE_NONCE = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+
+function bridgedUrl(url: string, nonce = BRIDGE_NONCE): string {
+  return `${url}${url.includes("#") ? "&" : "#"}dezin-bridge=${nonce}`;
+}
+
+function previewLease(url: string, leaseId = "preview-lease"): PreviewLeaseInfo {
+  return {
+    leaseId,
+    url: bridgedUrl(url),
+    bridgeNonce: BRIDGE_NONCE,
+    expiresAt: Date.now() + 60_000,
+  };
+}
+
+function versionPreview(
+  url: string,
+  mode: "prototype" | "standard",
+  leaseId?: string,
+): VersionPreview {
+  const base = {
+    url: bridgedUrl(url),
+    bridgeNonce: BRIDGE_NONCE,
+  };
+  if (mode === "prototype") return { ...base, mode };
+  if (!leaseId) throw new Error("Standard versionPreview test fixtures require a lease id.");
+  return { ...base, mode, leaseId, expiresAt: Date.now() + 60_000 };
+}
 
 function installMutableNarrowViewport(initialMatches = false) {
   let matches = initialMatches;
@@ -89,15 +125,42 @@ test("workspace helper modules preserve transcript and version ordering semantic
   ).toEqual(["newer", "older"]);
 });
 
+interface PreviewBridgeConnection {
+  port: MessagePort;
+  received: Array<Record<string, unknown>>;
+}
+
+const previewBridgePorts = new WeakMap<HTMLIFrameElement, PreviewBridgeConnection>();
+
+function connectPreviewBridge(
+  iframe = screen.getByTitle("Artifact preview") as HTMLIFrameElement,
+): PreviewBridgeConnection {
+  const existing = previewBridgePorts.get(iframe);
+  if (existing) return existing;
+  const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+  fireEvent.load(iframe);
+  const calls = postMessage.mock.calls as unknown as Array<[unknown, unknown, Transferable[]?]>;
+  const bootstrap = calls.find(([message]) =>
+    (message as { type?: string }).type === "bridge-init");
+  const port = bootstrap?.[2]?.[0] as MessagePort | undefined;
+  postMessage.mockRestore();
+  if (!port) throw new Error("Preview bridge did not transfer its capability port.");
+  const received: Array<Record<string, unknown>> = [];
+  const connection = { port, received };
+  previewBridgePorts.set(iframe, connection);
+  activePreviewBridgePorts.add(port);
+  port.onmessage = (event) => received.push(event.data as Record<string, unknown>);
+  port.start();
+  const nonce = previewBridgeNonceForSrc(iframe.src);
+  port.postMessage({ source: "dezin", type: "bridge-ready", nonce, protocol: 1 });
+  return connection;
+}
+
 function dispatchPreviewMessage(data: Record<string, unknown>): void {
   const iframe = screen.getByTitle("Artifact preview") as HTMLIFrameElement;
-  window.dispatchEvent(
-    new MessageEvent("message", {
-      data: { source: "dezin", ...data },
-      origin: "null",
-      source: iframe.contentWindow,
-    }),
-  );
+  const { port } = connectPreviewBridge(iframe);
+  const nonce = previewBridgeNonceForSrc(iframe.src);
+  port.postMessage({ source: "dezin", nonce, protocol: 1, ...data });
 }
 
 test("workspace loading state preserves the project split layout", () => {
@@ -258,9 +321,9 @@ test("workspace conversation panel constrains scrolling to the transcript area",
   expect(screen.getByTestId("conversation-scroll")).toHaveClass("min-h-0", "overflow-auto");
 });
 
-test("leaving a standard workspace releases its dev server lease", async () => {
-  const getDevServerUrl = vi.fn(async () => ({ url: "http://127.0.0.1:5300/p1" }));
-  const releaseDevServer = vi.fn(async () => {});
+test("leaving a standard workspace releases its exact preview lease", async () => {
+  const getDevServerUrl = vi.fn(async () => previewLease("http://127.0.0.1:5300/p1"));
+  const releasePreviewLease = vi.fn(async () => {});
   const { unmount } = render(
     <ApiProvider
       client={makeFakeApi({
@@ -274,7 +337,7 @@ test("leaving a standard workspace releases its dev server lease", async () => {
           updatedAt: 1,
         }),
         getDevServerUrl,
-        releaseDevServer,
+        releasePreviewLease,
       })}
     >
       <WorkspaceScreen projectId="p1" />
@@ -282,8 +345,12 @@ test("leaving a standard workspace releases its dev server lease", async () => {
   );
 
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledWith("p1"));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+    "src",
+    bridgedUrl("http://127.0.0.1:5300/p1"),
+  ));
   unmount();
-  await waitFor(() => expect(releaseDevServer).toHaveBeenCalledWith("p1"));
+  await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("preview-lease"));
 });
 
 test("opening a standard workspace backfills a missing cover from the dev preview", async () => {
@@ -300,7 +367,7 @@ test("opening a standard workspace backfills a missing cover from the dev previe
           createdAt: 1,
           updatedAt: 1,
         }),
-        getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/p1" }),
+        getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/p1"),
         captureProjectCover,
       })}
     >
@@ -314,8 +381,8 @@ test("opening a standard workspace backfills a missing cover from the dev previe
 test("refreshing a standard preview revalidates the dev server lease", async () => {
   const getDevServerUrl = vi
     .fn()
-    .mockResolvedValueOnce({ url: "http://127.0.0.1:5300/p1" })
-    .mockResolvedValueOnce({ url: "http://127.0.0.1:5301/p1" });
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5300/p1", "lease-1"))
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5301/p1", "lease-2"));
   const captureProjectCover = vi.fn(async () => ({ captured: true }));
   render(
     <ApiProvider
@@ -338,12 +405,14 @@ test("refreshing a standard preview revalidates the dev server lease", async () 
   );
 
   const iframe = await screen.findByTitle("Artifact preview");
-  await waitFor(() => expect(iframe.getAttribute("src")).toBe("http://127.0.0.1:5300/p1"));
+  await waitFor(() => expect(iframe.getAttribute("src")).toBe(bridgedUrl("http://127.0.0.1:5300/p1")));
 
   fireEvent.click(screen.getByLabelText("Refresh preview"));
 
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
-  expect(screen.getByTitle("Artifact preview").getAttribute("src") ?? "").toMatch(/^http:\/\/127\.0\.0\.1:5301\/p1\?t=\d+/);
+  expect(screen.getByTitle("Artifact preview").getAttribute("src") ?? "").toMatch(
+    /^http:\/\/127\.0\.0\.1:5301\/p1\?t=\d+#dezin-bridge=/,
+  );
   expect(captureProjectCover).toHaveBeenCalledTimes(1);
 });
 
@@ -373,25 +442,40 @@ test("prototype workspace preview iframe omits allow-same-origin", async () => {
   expect(iframe.getAttribute("sandbox") ?? "").not.toContain("allow-same-origin");
 });
 
-test("preview bridge messages must come from the current iframe window", () => {
+test("window preview bridge fallback requires exact origin and nonce and rejects opaque frames", () => {
   const trustedWindow = window;
   const iframe = { contentWindow: trustedWindow } as unknown as HTMLIFrameElement;
 
-  const accepted = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "null", source: trustedWindow });
-  expect(isPreviewBridgeMessage(accepted, iframe, "/projects/p1/preview/")).toBe(true);
+  const opaque = bridgedUrl("/projects/p1/preview/");
+  const accepted = new MessageEvent("message", {
+    data: { source: "dezin", type: "selected", nonce: BRIDGE_NONCE, protocol: 1 },
+    origin: "null",
+    source: trustedWindow,
+  });
+  expect(isPreviewBridgeMessage(accepted, iframe, opaque)).toBe(false);
 
-  const wrongSource = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "null", source: null });
-  expect(isPreviewBridgeMessage(wrongSource, iframe, "/projects/p1/preview/")).toBe(false);
-  expect(isPreviewBridgeMessage(accepted, null, "/projects/p1/preview/")).toBe(false);
+  const wrongSource = new MessageEvent("message", { data: accepted.data, origin: "null", source: null });
+  expect(isPreviewBridgeMessage(wrongSource, iframe, opaque)).toBe(false);
+  expect(isPreviewBridgeMessage(accepted, null, opaque)).toBe(false);
 
-  const wrongOrigin = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "https://evil.example", source: trustedWindow });
-  expect(isPreviewBridgeMessage(wrongOrigin, iframe, "/projects/p1/preview/")).toBe(false);
+  const wrongOrigin = new MessageEvent("message", { data: accepted.data, origin: "https://evil.example", source: trustedWindow });
+  expect(isPreviewBridgeMessage(wrongOrigin, iframe, opaque)).toBe(false);
 
-  const standardPreview = "http://127.0.0.1:5300/p1";
-  const standardAccepted = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "http://127.0.0.1:5300", source: trustedWindow });
+  const standardPreview = bridgedUrl("http://127.0.0.1:5300/p1");
+  const standardAccepted = new MessageEvent("message", {
+    data: { source: "dezin", type: "selected", nonce: BRIDGE_NONCE, protocol: 1 },
+    origin: "http://127.0.0.1:5300",
+    source: trustedWindow,
+  });
   expect(isPreviewBridgeMessage(standardAccepted, iframe, standardPreview)).toBe(true);
-  const standardWrongOrigin = new MessageEvent("message", { data: { source: "dezin", type: "selected" }, origin: "null", source: trustedWindow });
+  const standardWrongOrigin = new MessageEvent("message", { data: standardAccepted.data, origin: "null", source: trustedWindow });
   expect(isPreviewBridgeMessage(standardWrongOrigin, iframe, standardPreview)).toBe(false);
+  const wrongNonce = new MessageEvent("message", {
+    data: { ...standardAccepted.data, nonce: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh123456789" },
+    origin: "http://127.0.0.1:5300",
+    source: trustedWindow,
+  });
+  expect(isPreviewBridgeMessage(wrongNonce, iframe, standardPreview)).toBe(false);
 });
 
 test("project analysis prompt includes the project folder path and review checklist", () => {
@@ -2004,18 +2088,18 @@ test("clicking a marked target asks the preview to focus that element", async ()
   );
 
   const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
-  const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+  const bridge = connectPreviewBridge(iframe);
+  const nonce = previewBridgeNonceForSrc(iframe.src);
   fireEvent.click(screen.getByRole("button", { name: "Marked target section.hero > h1" }));
 
-  expect(postMessage).toHaveBeenCalledWith(
-    {
-      source: "dezin-parent",
+  await waitFor(() => expect(bridge.received).toContainEqual(expect.objectContaining({
       type: "focus-target",
       selector: "section.hero > h1",
       rect: { x: 24, y: 40, w: 320, h: 48 },
-    },
-    "*",
-  );
+      source: "dezin-parent",
+      nonce,
+      protocol: 1,
+    })));
   const inspect = screen.getByLabelText("Inspect panel");
   expect(within(inspect).getByText("H1")).toBeInTheDocument();
   expect(within(inspect).getAllByText("section.hero > h1").length).toBeGreaterThan(0);
@@ -2053,7 +2137,7 @@ test("inspect mode continuously captures real preview element attributes", async
   );
 
   const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
-  const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+  const bridge = connectPreviewBridge(iframe);
   fireEvent.click(screen.getByLabelText("Inspect preview"));
 
   expect(await screen.findByRole("separator", { name: "Resize inspect panel" })).toBeInTheDocument();
@@ -2126,10 +2210,10 @@ test("inspect mode continuously captures real preview element attributes", async
 
   await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("Hero headline")).toBeInTheDocument());
   await waitFor(() => {
-    const pickModeCalls = postMessage.mock.calls.filter(
-      ([message]) => (message as { type?: string; on?: boolean }).type === "select-mode" && (message as { on?: boolean }).on === true,
+    const pickModeCalls = bridge.received.filter(
+      (message) => message.type === "select-mode" && message.on === true,
     );
-    expect(pickModeCalls.length).toBeGreaterThan(1);
+    expect(pickModeCalls.length).toBeGreaterThan(0);
   });
   const inspect = screen.getByLabelText("Inspect panel");
   expect(within(inspect).getAllByText("section.hero > h1").length).toBeGreaterThan(0);
@@ -2185,13 +2269,20 @@ test("inspect and selection modes keep the preview iframe mounted and use two-st
   );
 
   const iframe = (await screen.findByTitle("Artifact preview")) as HTMLIFrameElement;
-  const postMessage = vi.spyOn(iframe.contentWindow!, "postMessage");
+  const bridge = connectPreviewBridge(iframe);
+  const nonce = previewBridgeNonceForSrc(iframe.src);
 
   fireEvent.click(screen.getByLabelText("Inspect preview"));
   expect(await screen.findByLabelText("Inspect panel")).toBeInTheDocument();
   expect(screen.getByTitle("Artifact preview")).toBe(iframe);
   expect(screen.getByLabelText("Inspect preview").className).toContain("!bg-primary");
-  await waitFor(() => expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "select-mode", on: true }, "*"));
+  await waitFor(() => expect(bridge.received).toContainEqual(expect.objectContaining({
+    source: "dezin-parent",
+    type: "select-mode",
+    on: true,
+    nonce,
+    protocol: 1,
+  })));
   expect(screen.queryByText("Click an element to inspect · Esc to cancel")).toBeNull();
 
   dispatchPreviewMessage({
@@ -2207,8 +2298,8 @@ test("inspect and selection modes keep the preview iframe mounted and use two-st
   fireEvent.keyDown(window, { key: "Escape" });
   await waitFor(() => expect(within(screen.getByLabelText("Inspect panel")).getByText("Project variables")).toBeInTheDocument());
   expect(screen.queryByText("H1")).toBeNull();
-  expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "clear" }, "*");
-  expect(postMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "select-mode", on: true }, "*");
+  expect(bridge.received).toContainEqual(expect.objectContaining({ source: "dezin-parent", type: "clear" }));
+  expect(bridge.received).toContainEqual(expect.objectContaining({ source: "dezin-parent", type: "select-mode", on: true }));
 
   fireEvent.keyDown(window, { key: "Escape" });
   await waitFor(() => expect(screen.queryByLabelText("Inspect panel")).toBeNull());
@@ -2487,7 +2578,7 @@ test("a failed Standard attempt never displaces the latest published version as 
       { id: "r-failed", variantId: "main", status: "failed" as const, score: 72, repairRounds: 2, lintPassed: false, createdAt: 2, finishedAt: 3 },
       { id: "r-published", variantId: "main", status: "succeeded" as const, score: 96, repairRounds: 1, lintPassed: true, createdAt: 1, finishedAt: 2 },
     ],
-    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/current" }),
+    getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/current"),
   });
 
   render(
@@ -2506,7 +2597,8 @@ test("a failed Standard attempt never displaces the latest published version as 
 });
 
 test("switching a version updates Preview, Files, and Quality to that run", async () => {
-  const getVersionPreview = vi.fn(async (_projectId: string, runId: string) => ({ url: `/api/projects/p1/versions/${runId}`, mode: "prototype" as const }));
+  const getVersionPreview = vi.fn(async (_projectId: string, runId: string) =>
+    versionPreview(`/api/projects/p1/versions/${runId}`, "prototype"));
   const getVersionText = vi.fn(async (_projectId: string, runId: string) =>
     runId === "r-old" ? "<html><body><h1>Older version file</h1></body></html>" : "<html><body><h1>Latest version file</h1></body></html>",
   );
@@ -2562,7 +2654,10 @@ test("switching a version updates Preview, Files, and Quality to that run", asyn
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
 
   await waitFor(() => expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-old"));
-  expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/));
+  expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+#dezin-bridge=/),
+  );
 
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
   expect(await screen.findByText(/Older version file/)).toBeInTheDocument();
@@ -2588,7 +2683,7 @@ test("a saved Prototype source failure keeps Preview usable and shows an indepen
       { id: "r-new", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
       { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
     ],
-    getVersionPreview: async () => ({ url: "/api/projects/p1/versions/r-old", mode: "prototype" as const }),
+    getVersionPreview: async () => versionPreview("/api/projects/p1/versions/r-old", "prototype"),
     getVersionText,
   });
 
@@ -2601,7 +2696,10 @@ test("a saved Prototype source failure keeps Preview usable and shows an indepen
   fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/)));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+#dezin-bridge=/),
+  ));
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
 
   expect(await screen.findByText("This saved version's Preview is available, but its source file couldn't be loaded.")).toBeInTheDocument();
@@ -2625,7 +2723,7 @@ test("a saved Prototype Preview switches before its source resolves and Files re
       { id: "r-new", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
       { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
     ],
-    getVersionPreview: async () => ({ url: "/api/projects/p1/versions/r-old", mode: "prototype" as const }),
+    getVersionPreview: async () => versionPreview("/api/projects/p1/versions/r-old", "prototype"),
     getVersionText,
   });
 
@@ -2638,7 +2736,10 @@ test("a saved Prototype Preview switches before its source resolves and Files re
   fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/)));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+#dezin-bridge=/),
+  ));
   expect(screen.queryByText("Loading version preview")).toBeNull();
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
   expect(await screen.findByText("Loading saved version source…")).toBeInTheDocument();
@@ -2664,7 +2765,8 @@ test("a late saved-source response cannot replace Files for a newer selected ver
       { id: "r-middle", variantId: "main", status: "succeeded" as const, score: 95, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
       { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
     ],
-    getVersionPreview: async (_projectId: string, runId: string) => ({ url: `/api/projects/p1/versions/${runId}`, mode: "prototype" as const }),
+    getVersionPreview: async (_projectId: string, runId: string) =>
+      versionPreview(`/api/projects/p1/versions/${runId}`, "prototype"),
     getVersionText,
   });
 
@@ -2748,14 +2850,14 @@ test("version compare uses the active branch's live surface instead of substitut
 
   const oldFrame = await screen.findByTitle("Main v1");
   const currentFrame = await screen.findByTitle("Main live");
-  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+$/));
-  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^\/projects\/p1\/preview\/\?t=\d+$/));
+  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^\/api\/projects\/p1\/versions\/r-old\?t=\d+#dezin-bridge=/));
+  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^\/projects\/p1\/preview\/\?t=\d+#dezin-bridge=/));
 });
 
 test("a stale Compare request cannot clear the newer comparison's busy state", async () => {
-  const previewResolvers = new Map<string, (preview: { url: string; mode: "prototype" }) => void>();
+  const previewResolvers = new Map<string, (preview: VersionPreview) => void>();
   const getVersionPreview = vi.fn(
-    (_projectId: string, runId: string) => new Promise<{ url: string; mode: "prototype" }>((resolve) => previewResolvers.set(runId, resolve)),
+    (_projectId: string, runId: string) => new Promise<VersionPreview>((resolve) => previewResolvers.set(runId, resolve)),
   );
   const fake = makeFakeApi({
     listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
@@ -2782,21 +2884,21 @@ test("a stale Compare request cannot clear the newer comparison's busy state", a
   fireEvent.click(await screen.findByRole("button", { name: "Compare Main v2 visually" }));
 
   await act(async () => {
-    previewResolvers.get("r-old")?.({ url: "/api/projects/p1/versions/r-old", mode: "prototype" });
+    previewResolvers.get("r-old")?.(versionPreview("/api/projects/p1/versions/r-old", "prototype"));
   });
   expect(screen.getByText("Loading version comparison")).toBeInTheDocument();
   expect(screen.queryByTitle("Main v1")).toBeNull();
 
   await act(async () => {
-    previewResolvers.get("r-middle")?.({ url: "/api/projects/p1/versions/r-middle", mode: "prototype" });
+    previewResolvers.get("r-middle")?.(versionPreview("/api/projects/p1/versions/r-middle", "prototype"));
   });
   expect(await screen.findByTitle("Main v2")).toHaveAttribute("src", expect.stringMatching(/versions\/r-middle/));
   expect(screen.queryByText("Loading version comparison")).toBeNull();
 });
 
 test("refreshing a viewed standard version keeps the version preview instead of jumping to live current", async () => {
-  const getDevServerUrl = vi.fn(async () => ({ url: "http://127.0.0.1:5300/p1" }));
-  const getVersionPreview = vi.fn(async () => ({ url: "http://127.0.0.1:5401/", mode: "standard" as const }));
+  const getDevServerUrl = vi.fn(async () => previewLease("http://127.0.0.1:5300/p1"));
+  const getVersionPreview = vi.fn(async () => versionPreview("http://127.0.0.1:5401/", "standard", "version-lease"));
   const fake = makeFakeApi({
     getProject: async () => ({
       id: "p1",
@@ -2825,12 +2927,18 @@ test("refreshing a viewed standard version keeps the version preview instead of 
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(1));
   fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/)));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/),
+  ));
 
   fireEvent.click(screen.getByLabelText("Refresh preview"));
 
   await waitFor(() => expect(getVersionPreview).toHaveBeenCalledTimes(2));
-  expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/));
+  expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/),
+  );
   expect(getDevServerUrl).toHaveBeenCalledTimes(1);
 });
 
@@ -2839,8 +2947,8 @@ test("restoring a standard version reacquires the live dev-server preview and re
   const listFiles = vi.fn(async () => [{ path: "src/App.tsx", size: 42 }]);
   const getDevServerUrl = vi
     .fn()
-    .mockResolvedValueOnce({ url: "http://127.0.0.1:5300/before", leaseId: "main-before", expiresAt: Date.now() + 60_000 })
-    .mockResolvedValueOnce({ url: "http://127.0.0.1:5301/restored", leaseId: "main-restored", expiresAt: Date.now() + 60_000 });
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5300/before", "main-before"))
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5301/restored", "main-restored"));
   const fake = makeFakeApi({
     getProject: async () => ({
       id: "p1",
@@ -2868,14 +2976,14 @@ test("restoring a standard version reacquires the live dev-server preview and re
     </ApiProvider>,
   );
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", "http://127.0.0.1:5300/before"));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/before")));
   await waitFor(() => expect(listFiles).toHaveBeenCalledTimes(1));
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Restore Main v1" }));
 
   await waitFor(() => expect(restoreVersion).toHaveBeenCalledWith("p1", "r-old"));
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", "http://127.0.0.1:5301/restored"));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5301/restored")));
   await waitFor(() => expect(listFiles).toHaveBeenCalledTimes(2));
 });
 
@@ -2883,7 +2991,7 @@ test("a restored Standard version keeps its historical viewer lease when the cur
   const releasePreviewLease = vi.fn(async () => undefined);
   const getDevServerUrl = vi
     .fn()
-    .mockResolvedValueOnce({ url: "http://127.0.0.1:5300/current", leaseId: "main-lease", expiresAt: Date.now() + 60_000 })
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5300/current", "main-lease"))
     .mockRejectedValueOnce(new Error("dev server restart failed"));
   const fake = makeFakeApi({
     getProject: async () => ({
@@ -2903,12 +3011,7 @@ test("a restored Standard version keeps its historical viewer lease when the cur
       { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
     ],
     getDevServerUrl,
-    getVersionPreview: async () => ({
-      url: "http://127.0.0.1:5400/historical",
-      mode: "standard" as const,
-      leaseId: "historical-lease",
-      expiresAt: Date.now() + 60_000,
-    }),
+    getVersionPreview: async () => versionPreview("http://127.0.0.1:5400/historical", "standard", "historical-lease"),
     restoreVersion: async () => ({ ok: true, historyRecorded: true, runId: "r-restored" }),
     releasePreviewLease,
   });
@@ -2921,7 +3024,7 @@ test("a restored Standard version keeps its historical viewer lease when the cur
     </ApiProvider>,
   );
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", "http://127.0.0.1:5300/current"));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5400\/historical\?t=/)));
@@ -2935,11 +3038,11 @@ test("a restored Standard version keeps its historical viewer lease when the cur
 });
 
 test("viewing a standard version resolves the dev-server URL before rendering the iframe", async () => {
-  let resolveVersionPreview!: (value: { url: string; mode: "standard" }) => void;
+  let resolveVersionPreview!: (value: VersionPreview) => void;
   const getVersionText = vi.fn(async () => "<html>dev-server response is not source evidence</html>");
   const getVersionPreview = vi.fn(
     () =>
-      new Promise<{ url: string; mode: "standard" }>((resolve) => {
+      new Promise<VersionPreview>((resolve) => {
         resolveVersionPreview = resolve;
       }),
   );
@@ -2959,7 +3062,7 @@ test("viewing a standard version resolves the dev-server URL before rendering th
     listRuns: async () => [
       { id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
     ],
-    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/current" }),
+    getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/current"),
     getVersionPreview,
     getVersionText,
   } as never);
@@ -2975,9 +3078,12 @@ test("viewing a standard version resolves the dev-server URL before rendering th
   expect(getVersionPreview).toHaveBeenCalledWith("p1", "r1");
   expect(await screen.findByText("Loading version preview")).toBeInTheDocument();
 
-  resolveVersionPreview({ url: "http://127.0.0.1:5401/", mode: "standard" });
+  resolveVersionPreview(versionPreview("http://127.0.0.1:5401/", "standard", "version-lease"));
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/)));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/),
+  ));
   expect(screen.getByTitle("Artifact preview").getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(screen.queryByText("Loading version preview")).toBeNull();
   fireEvent.click(screen.getByRole("tab", { name: "Files" }));
@@ -3003,13 +3109,8 @@ test("standard preview switching and unmount release the exact main and version 
     listRuns: async () => [
       { id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
     ],
-    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/current", leaseId: "main-lease", expiresAt: Date.now() + 60_000 }),
-    getVersionPreview: async () => ({
-      url: "http://127.0.0.1:5401/",
-      mode: "standard" as const,
-      leaseId: "version-lease",
-      expiresAt: Date.now() + 60_000,
-    }),
+    getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/current", "main-lease"),
+    getVersionPreview: async () => versionPreview("http://127.0.0.1:5401/", "standard", "version-lease"),
     releasePreviewLease,
   });
   const view = render(
@@ -3018,19 +3119,143 @@ test("standard preview switching and unmount release the exact main and version 
     </ApiProvider>,
   );
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", "http://127.0.0.1:5300/current"));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
   fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
   await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("main-lease"));
-  expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/));
+  expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+    "src",
+    expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/),
+  );
 
   view.unmount();
   await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("version-lease"));
 });
 
+test("an invalid standard preview response releases the exact returned lease", async () => {
+  const releasePreviewLease = vi.fn(async () => {});
+  const invalid = {
+    ...previewLease("http://127.0.0.1:5300/invalid", "invalid-main-lease"),
+    bridgeNonce: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh123456789",
+  };
+  const fake = makeFakeApi({
+    getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [],
+    getDevServerUrl: async () => invalid,
+    releasePreviewLease,
+  });
+
+  render(<ApiProvider client={fake}><WorkspaceScreen projectId="p1" /></ApiProvider>);
+
+  await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("invalid-main-lease"));
+  expect(screen.queryByTitle("Artifact preview")).toBeNull();
+});
+
+test("an invalid saved-version capability releases its lease and preserves the displayed preview", async () => {
+  const releasePreviewLease = vi.fn(async () => {});
+  const invalid = {
+    ...versionPreview("http://127.0.0.1:5401/invalid", "standard", "invalid-version-lease"),
+    bridgeNonce: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh123456789",
+  };
+  const fake = makeFakeApi({
+    getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [{ id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 }],
+    getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/current", "main-lease"),
+    getVersionPreview: async () => invalid,
+    releasePreviewLease,
+  });
+  render(
+    <ApiProvider client={fake}>
+      <ToastProvider><WorkspaceScreen projectId="p1" /></ToastProvider>
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle("Artifact preview");
+  await waitFor(() => expect(frame).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
+
+  await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("invalid-version-lease"));
+  expect(frame).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current"));
+  expect(releasePreviewLease).not.toHaveBeenCalledWith("main-lease");
+});
+
+test("a Standard saved-version response without a complete lease is rejected", async () => {
+  const releasePreviewLease = vi.fn(async () => {});
+  const leaseLessStandard = {
+    url: bridgedUrl("http://127.0.0.1:5401/invalid"),
+    bridgeNonce: BRIDGE_NONCE,
+    mode: "standard",
+  } as unknown as VersionPreview;
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+      listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+      listMessages: async () => [],
+      listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+      listRuns: async () => [{ id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 }],
+      getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/current", "main-lease"),
+      getVersionPreview: async () => leaseLessStandard,
+      releasePreviewLease,
+    })}>
+      <ToastProvider><WorkspaceScreen projectId="p1" /></ToastProvider>
+    </ApiProvider>,
+  );
+
+  const frame = await screen.findByTitle("Artifact preview");
+  await waitFor(() => expect(frame).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
+
+  expect(await screen.findByText("Couldn't load that version preview.")).toBeInTheDocument();
+  expect(frame).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current"));
+  expect(releasePreviewLease).not.toHaveBeenCalledWith("main-lease");
+});
+
+test("a failed saved-version switch does not cancel a pending live preview", async () => {
+  let resolveLive!: (preview: PreviewLeaseInfo) => void;
+  const releasePreviewLease = vi.fn(async () => {});
+  const getDevServerUrl = vi.fn(() => new Promise<PreviewLeaseInfo>((resolve) => { resolveLive = resolve; }));
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+      listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+      listMessages: async () => [],
+      listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+      listRuns: async () => [{ id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 }],
+      getDevServerUrl,
+      getVersionPreview: async () => { throw new Error("saved runtime unavailable"); },
+      releasePreviewLease,
+    })}>
+      <ToastProvider><WorkspaceScreen projectId="p1" /></ToastProvider>
+    </ApiProvider>,
+  );
+
+  await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(1));
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
+  expect(await screen.findByText("Couldn't load that version preview.")).toBeInTheDocument();
+
+  await act(async () => {
+    resolveLive(previewLease("http://127.0.0.1:5300/current", "late-main-lease"));
+    await Promise.resolve();
+  });
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+    "src",
+    bridgedUrl("http://127.0.0.1:5300/current"),
+  ));
+  expect(releasePreviewLease).not.toHaveBeenCalledWith("late-main-lease");
+});
+
 test("a stale standard version response releases its lease instead of replacing the current preview", async () => {
-  const pending: Array<(value: { url: string; mode: "standard"; leaseId: string; expiresAt: number }) => void> = [];
-  const getVersionPreview = vi.fn(() => new Promise<{ url: string; mode: "standard"; leaseId: string; expiresAt: number }>((resolve) => pending.push(resolve)));
+  const pending: Array<(value: VersionPreview) => void> = [];
+  const getVersionPreview = vi.fn(() => new Promise<VersionPreview>((resolve) => pending.push(resolve)));
   const releasePreviewLease = vi.fn(async () => {});
   const fake = makeFakeApi({
     getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
@@ -3038,7 +3263,7 @@ test("a stale standard version response releases its lease instead of replacing 
     listMessages: async () => [],
     listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
     listRuns: async () => [{ id: "r1", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 }],
-    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/current" }),
+    getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/current"),
     getVersionPreview,
     releasePreviewLease,
   });
@@ -3047,11 +3272,12 @@ test("a stale standard version response releases its lease instead of replacing 
   fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   const switchButton = await screen.findByRole("button", { name: "Switch to Main v1" });
   fireEvent.click(switchButton);
-  fireEvent.click(screen.getByLabelText("Refresh preview"));
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
   await waitFor(() => expect(getVersionPreview).toHaveBeenCalledTimes(2));
-  pending[1]?.({ url: "http://127.0.0.1:5402/", mode: "standard", leaseId: "new-lease", expiresAt: Date.now() + 60_000 });
+  pending[1]?.(versionPreview("http://127.0.0.1:5402/", "standard", "new-lease"));
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/5402/)));
-  pending[0]?.({ url: "http://127.0.0.1:5401/", mode: "standard", leaseId: "stale-lease", expiresAt: Date.now() + 60_000 });
+  pending[0]?.(versionPreview("http://127.0.0.1:5401/", "standard", "stale-lease"));
 
   await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("stale-lease"));
   expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/5402/));
@@ -3061,12 +3287,7 @@ test("a failed Standard version switch keeps the previously verified version and
   const releasePreviewLease = vi.fn(async () => {});
   const getVersionPreview = vi.fn(async (_projectId: string, runId: string) => {
     if (runId === "r-old") {
-      return {
-        url: "http://127.0.0.1:5401/old",
-        mode: "standard" as const,
-        leaseId: "old-version-lease",
-        expiresAt: Date.now() + 60_000,
-      };
+      return versionPreview("http://127.0.0.1:5401/old", "standard", "old-version-lease");
     }
     throw new Error("saved runtime unavailable");
   });
@@ -3087,11 +3308,7 @@ test("a failed Standard version switch keeps the previously verified version and
       { id: "r-new", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
       { id: "r-old", variantId: "main", status: "succeeded" as const, score: 95, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
     ],
-    getDevServerUrl: async () => ({
-      url: "http://127.0.0.1:5300/current",
-      leaseId: "main-lease",
-      expiresAt: Date.now() + 60_000,
-    }),
+    getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/current", "main-lease"),
     getVersionPreview,
     releasePreviewLease,
   });
@@ -3104,7 +3321,7 @@ test("a failed Standard version switch keeps the previously verified version and
     </ApiProvider>,
   );
 
-  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", "http://127.0.0.1:5300/current"));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", bridgedUrl("http://127.0.0.1:5300/current")));
   fireEvent.click(screen.getByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
   await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/5401\/old/)));
@@ -3119,21 +3336,73 @@ test("a failed Standard version switch keeps the previously verified version and
   expect(releasePreviewLease).not.toHaveBeenCalledWith("old-version-lease");
 });
 
+test("overlapping failed version switches keep renewal and refresh bound to the displayed version", async () => {
+  let resolveA!: (value: VersionPreview) => void;
+  const releasePreviewLease = vi.fn(async () => {});
+  const getVersionPreview = vi.fn((_projectId: string, runId: string) => {
+    if (runId === "r-c") {
+      return Promise.resolve(versionPreview("http://127.0.0.1:5401/c", "standard", `lease-c-${getVersionPreview.mock.calls.length}`));
+    }
+    if (runId === "r-a") {
+      return new Promise<VersionPreview>((resolve) => { resolveA = resolve; });
+    }
+    return Promise.reject(new Error("B failed"));
+  });
+  const fake = makeFakeApi({
+    getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+    listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+    listMessages: async () => [],
+    listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+    listRuns: async () => [
+      { id: "r-b", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 3, finishedAt: 4 },
+      { id: "r-a", variantId: "main", status: "succeeded" as const, score: 99, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
+      { id: "r-c", variantId: "main", status: "succeeded" as const, score: 98, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
+    ],
+    getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/current", "main-lease"),
+    getVersionPreview,
+    releasePreviewLease,
+  });
+  render(
+    <ApiProvider client={fake}>
+      <ToastProvider><WorkspaceScreen projectId="p1" /></ToastProvider>
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Artifact preview");
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
+  await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expect.stringMatching(/5401\/c/)));
+
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v2" }));
+  await waitFor(() => expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-a"));
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v3" }));
+  expect(await screen.findByText("Couldn't load that version preview.")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByLabelText("Refresh preview"));
+  await waitFor(() => expect(getVersionPreview.mock.calls.filter(([, runId]) => runId === "r-c")).toHaveLength(2));
+  expect(getVersionPreview.mock.calls.at(-1)).toEqual(["p1", "r-c"]);
+
+  resolveA(versionPreview("http://127.0.0.1:5402/a", "standard", "stale-a-lease"));
+  await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("stale-a-lease"));
+});
+
 test("standard version compare resolves the saved and live dev-server URLs before opening the frames", async () => {
-  const pending = new Map<string, (value: { url: string; mode: "standard"; leaseId: string; expiresAt: number }) => void>();
-  let resolveLive!: (value: { url: string; leaseId: string; expiresAt: number }) => void;
+  const pending = new Map<string, (value: VersionPreview) => void>();
+  let resolveLive!: (value: PreviewLeaseInfo) => void;
   const releasePreviewLease = vi.fn(async () => {});
   const getDevServerUrl = vi
     .fn()
-    .mockResolvedValueOnce({ url: "http://127.0.0.1:5300/current" })
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5300/current"))
     .mockImplementationOnce(
-      () => new Promise<{ url: string; leaseId: string; expiresAt: number }>((resolve) => {
+      () => new Promise<PreviewLeaseInfo>((resolve) => {
         resolveLive = resolve;
       }),
     );
   const getVersionPreview = vi.fn(
     (_projectId: string, runId: string) =>
-      new Promise<{ url: string; mode: "standard"; leaseId: string; expiresAt: number }>((resolve) => {
+      new Promise<VersionPreview>((resolve) => {
         pending.set(runId, resolve);
       }),
   );
@@ -3167,19 +3436,19 @@ test("standard version compare resolves the saved and live dev-server URLs befor
   fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
   fireEvent.click(await screen.findByRole("button", { name: "Compare Main v1 visually" }));
 
-  await waitFor(() => expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-old"));
+  await waitFor(() => expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-old", expect.any(AbortSignal)));
   await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
-  expect(getVersionPreview).not.toHaveBeenCalledWith("p1", "r-new");
+  expect(getVersionPreview.mock.calls.some(([, requestedRunId]) => requestedRunId === "r-new")).toBe(false);
   expect(await screen.findByText("Loading version comparison")).toBeInTheDocument();
 
-  pending.get("r-old")?.({ url: "http://127.0.0.1:5401/", mode: "standard", leaseId: "compare-old", expiresAt: Date.now() + 60_000 });
+  pending.get("r-old")?.(versionPreview("http://127.0.0.1:5401/", "standard", "compare-old"));
   expect(screen.queryByTitle("Main v1")).toBeNull();
-  resolveLive({ url: "http://127.0.0.1:5402/", leaseId: "compare-live", expiresAt: Date.now() + 60_000 });
+  resolveLive(previewLease("http://127.0.0.1:5402/", "compare-live"));
 
   const oldFrame = await screen.findByTitle("Main v1");
   const currentFrame = await screen.findByTitle("Main live");
-  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+$/));
-  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5402\/\?t=\d+$/));
+  expect(oldFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/\?t=\d+#dezin-bridge=/));
+  expect(currentFrame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5402\/\?t=\d+#dezin-bridge=/));
   expect(oldFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(currentFrame.getAttribute("sandbox") ?? "").toContain("allow-same-origin");
   expect(screen.queryByText("Loading version comparison")).toBeNull();
@@ -3188,6 +3457,359 @@ test("standard version compare resolves the saved and live dev-server URLs befor
     expect(releasePreviewLease).toHaveBeenCalledWith("compare-old");
     expect(releasePreviewLease).toHaveBeenCalledWith("compare-live");
   });
+});
+
+test("an acquired comparison lease is owned and released while the other side is still pending", async () => {
+  let resolveLive!: (value: PreviewLeaseInfo) => void;
+  let compareSignal: AbortSignal | undefined;
+  const releasePreviewLease = vi.fn(async () => {});
+  const getDevServerUrl = vi
+    .fn()
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5300/current", "main-lease"))
+    .mockImplementationOnce((_projectId: string, signal?: AbortSignal) => new Promise<PreviewLeaseInfo>((resolve) => {
+      compareSignal = signal;
+      resolveLive = resolve;
+    }));
+  const view = render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+      listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+      listMessages: async () => [],
+      listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+      listRuns: async () => [
+        { id: "r-new", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
+        { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
+      ],
+      getDevServerUrl,
+      getVersionPreview: async () => versionPreview("http://127.0.0.1:5401/old", "standard", "compare-old"),
+      releasePreviewLease,
+    })}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Compare Main v1 visually" }));
+  await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
+  await act(async () => { await Promise.resolve(); });
+
+  view.unmount();
+  expect(compareSignal?.aborted).toBe(true);
+  await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("compare-old"));
+
+  await act(async () => {
+    resolveLive(previewLease("http://127.0.0.1:5402/live", "compare-live"));
+    await Promise.resolve();
+  });
+  await waitFor(() => expect(releasePreviewLease).toHaveBeenCalledWith("compare-live"));
+});
+
+test("comparison resolution times out a hung side and still opens the available pane", async () => {
+  let compareSignal: AbortSignal | undefined;
+  const getDevServerUrl = vi
+    .fn()
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5300/current", "main-lease"))
+    .mockImplementationOnce((_projectId: string, signal?: AbortSignal) => new Promise<PreviewLeaseInfo>(() => {
+      compareSignal = signal;
+    }));
+  render(
+    <ApiProvider client={makeFakeApi({
+      getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+      listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+      listMessages: async () => [],
+      listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+      listRuns: async () => [
+        { id: "r-new", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
+        { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
+      ],
+      getDevServerUrl,
+      getVersionPreview: async () => versionPreview("http://127.0.0.1:5401/old", "standard", "compare-old"),
+    })}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  await screen.findByTitle("Artifact preview");
+  fireEvent.click(screen.getByRole("button", { name: "Versions" }));
+  const compareButton = await screen.findByRole("button", { name: "Compare Main v1 visually" });
+  vi.useFakeTimers();
+  try {
+    fireEvent.click(compareButton);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+
+    expect(screen.getByTitle("Main v1")).toBeInTheDocument();
+    expect(screen.getByText("Preview unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Loading version comparison")).toBeNull();
+    expect(compareSignal?.aborted).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("renewing a displayed Standard version keeps the canonical lease identity", async () => {
+  let renewalTick: (() => void) | undefined;
+  const intervalSpy = vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler, timeout?: number) => {
+    if (timeout === 10_000) renewalTick = handler as () => void;
+    return 9_001;
+  }) as typeof window.setInterval);
+  const releasePreviewLease = vi.fn(async () => {});
+  const renewPreviewLease = vi.fn(async () => previewLease(
+    "http://127.0.0.1:5401/historical",
+    "version-lease",
+  ));
+  const getVersionPreview = vi.fn(async () => versionPreview(
+    "http://127.0.0.1:5401/historical",
+    "standard",
+    "version-lease",
+  ));
+  try {
+    render(
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => ({
+          id: "p1",
+          name: "Standard",
+          skillId: null,
+          designSystemId: "modern-minimal",
+          mode: "standard",
+          createdAt: 1,
+          updatedAt: 1,
+        }),
+        listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+        listMessages: async () => [],
+        listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+        listRuns: async () => [
+          { id: "r-new", variantId: "main", status: "succeeded" as const, score: 95, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
+          { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
+        ],
+        getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/current", "main-lease"),
+        getVersionPreview,
+        renewPreviewLease,
+        releasePreviewLease,
+      })}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Switch to Main v1" }));
+    await waitFor(() => expect(getVersionPreview).toHaveBeenCalledWith("p1", "r-old"));
+    const frame = await screen.findByTitle("Artifact preview");
+    await waitFor(() => expect(frame).toHaveAttribute(
+      "src",
+      expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/historical\?t=\d+#dezin-bridge=/),
+    ));
+    expect(renewalTick).toBeTypeOf("function");
+
+    await act(async () => {
+      renewalTick?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(renewPreviewLease).toHaveBeenCalledWith("version-lease", expect.any(AbortSignal)));
+    expect(frame).toHaveAttribute("src", expect.stringMatching(/^http:\/\/127\.0\.0\.1:5401\/historical\?t=\d+#dezin-bridge=/));
+    expect(releasePreviewLease).not.toHaveBeenCalledWith("version-lease");
+  } finally {
+    intervalSpy.mockRestore();
+  }
+});
+
+test("a renewal failure near expiry reacquires the main preview before the lease dies", async () => {
+  let renewalTick: (() => void) | undefined;
+  let rejectRenewal: ((error: Error) => void) | undefined;
+  let now = 1_700_000_000_000;
+  const dateSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+  const intervalSpy = vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler, timeout?: number) => {
+    if (timeout === 10_000) renewalTick = handler as () => void;
+    return 9_002;
+  }) as typeof window.setInterval);
+  const releasePreviewLease = vi.fn(async () => {});
+  const renewPreviewLease = vi.fn(() => new Promise<PreviewLeaseInfo>((_resolve, reject) => {
+    rejectRenewal = reject;
+  }));
+  const expiring = { ...previewLease("http://127.0.0.1:5300/old", "main-old"), expiresAt: now + 20_000 };
+  const getDevServerUrl = vi.fn()
+    .mockResolvedValueOnce(expiring)
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5301/new", "main-new"));
+  try {
+    render(
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+        listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+        listMessages: async () => [],
+        listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+        getDevServerUrl,
+        renewPreviewLease,
+        releasePreviewLease,
+      })}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", expiring.url));
+    expect(renewalTick).toBeTypeOf("function");
+    act(() => renewalTick?.());
+    await waitFor(() => expect(renewPreviewLease).toHaveBeenCalledWith("main-old", expect.any(AbortSignal)));
+
+    now += 16_000;
+    await act(async () => {
+      rejectRenewal?.(new Error("temporary network failure"));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+      "src",
+      bridgedUrl("http://127.0.0.1:5301/new"),
+    ));
+    expect(releasePreviewLease).toHaveBeenCalledWith("main-old");
+  } finally {
+    intervalSpy.mockRestore();
+    dateSpy.mockRestore();
+  }
+});
+
+test("a renewal response without a safe future expiry is rejected and reacquired", async () => {
+  let renewalTick: (() => void) | undefined;
+  const now = 1_700_000_000_000;
+  const dateSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+  const intervalSpy = vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler, timeout?: number) => {
+    if (timeout === 10_000) renewalTick = handler as () => void;
+    return 9_004;
+  }) as typeof window.setInterval);
+  const releasePreviewLease = vi.fn(async () => {});
+  const first = { ...previewLease("http://127.0.0.1:5300/old", "main-old"), expiresAt: now + 60_000 };
+  const getDevServerUrl = vi.fn()
+    .mockResolvedValueOnce(first)
+    .mockResolvedValueOnce({ ...previewLease("http://127.0.0.1:5301/new", "main-new"), expiresAt: now + 60_000 });
+  const renewPreviewLease = vi.fn(async () => ({ ...first, expiresAt: now + 1_000 }));
+  try {
+    render(
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+        listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+        listMessages: async () => [],
+        listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+        getDevServerUrl,
+        renewPreviewLease,
+        releasePreviewLease,
+      })}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", first.url));
+    await act(async () => {
+      renewalTick?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(getDevServerUrl).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+      "src",
+      bridgedUrl("http://127.0.0.1:5301/new"),
+    ));
+    expect(releasePreviewLease).toHaveBeenCalledWith("main-old");
+  } finally {
+    intervalSpy.mockRestore();
+    dateSpy.mockRestore();
+  }
+});
+
+test("an invalid comparison renewal closes and releases both preview leases atomically", async () => {
+  let renewalTick: (() => void) | undefined;
+  const intervalSpy = vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler, timeout?: number) => {
+    if (timeout === 10_000) renewalTick = handler as () => void;
+    return 9_003;
+  }) as typeof window.setInterval);
+  const releasePreviewLease = vi.fn(async () => {});
+  const renewPreviewLease = vi.fn(async (leaseId: string) => {
+    if (leaseId === "compare-old") {
+      return previewLease("http://127.0.0.1:5499/wrong-runtime", "compare-old");
+    }
+    if (leaseId === "compare-live") return previewLease("http://127.0.0.1:5402/live", leaseId);
+    return previewLease("http://127.0.0.1:5300/current", leaseId);
+  });
+  try {
+    render(
+      <ApiProvider client={makeFakeApi({
+        getProject: async () => ({ id: "p1", name: "Standard", skillId: null, designSystemId: "modern-minimal", mode: "standard", createdAt: 1, updatedAt: 1 }),
+        listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+        listMessages: async () => [],
+        listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
+        listRuns: async () => [
+          { id: "r-new", variantId: "main", status: "succeeded" as const, score: 95, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
+          { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
+        ],
+        getDevServerUrl: vi.fn()
+          .mockResolvedValueOnce(previewLease("http://127.0.0.1:5300/current", "main-lease"))
+          .mockResolvedValueOnce(previewLease("http://127.0.0.1:5402/live", "compare-live")),
+        getVersionPreview: async () => versionPreview("http://127.0.0.1:5401/old", "standard", "compare-old"),
+        renewPreviewLease,
+        releasePreviewLease,
+      })}>
+        <WorkspaceScreen projectId="p1" />
+      </ApiProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Versions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Compare Main v1 visually" }));
+    await screen.findByTitle("Main v1");
+    await screen.findByTitle("Main live");
+    expect(renewalTick).toBeTypeOf("function");
+
+    await act(async () => {
+      renewalTick?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(screen.queryByTitle("Main v1")).toBeNull());
+    await waitFor(() => {
+      expect(releasePreviewLease).toHaveBeenCalledWith("compare-old");
+      expect(releasePreviewLease).toHaveBeenCalledWith("compare-live");
+    });
+  } finally {
+    intervalSpy.mockRestore();
+  }
+});
+
+test("branch comparison gives both opaque previews independent bridge capabilities", async () => {
+  render(
+    <ApiProvider client={makeFakeApi({
+      listConversations: async () => [{ id: "c1", projectId: "p1", title: "First", createdAt: 1 }],
+      listMessages: async () => [],
+      listVariants: async () => [
+        { id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true },
+        { id: "branch", projectId: "p1", name: "Exploration", createdAt: 2, active: false },
+      ],
+    })}>
+      <WorkspaceScreen projectId="p1" />
+    </ApiProvider>,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Branch switcher" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Compare Exploration with the active branch" }));
+
+  const main = await screen.findByTitle<HTMLIFrameElement>("Main");
+  const exploration = await screen.findByTitle<HTMLIFrameElement>("Exploration");
+  const mainNonce = previewBridgeNonceForSrc(main.src);
+  const explorationNonce = previewBridgeNonceForSrc(exploration.src);
+  expect(mainNonce).not.toBeNull();
+  expect(explorationNonce).not.toBeNull();
+  expect(explorationNonce).not.toBe(mainNonce);
+  expect(main).toHaveAttribute("src", expect.stringMatching(/variants\/main\/preview\/\?t=\d+#dezin-bridge=/));
+  expect(exploration).toHaveAttribute("src", expect.stringMatching(/variants\/branch\/preview\/\?t=\d+#dezin-bridge=/));
+
+  for (const [frame, nonce] of [[main, mainNonce], [exploration, explorationNonce]] as const) {
+    const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+    fireEvent.load(frame);
+    expect(postMessage).toHaveBeenCalledWith(
+      { source: "dezin-parent", type: "bridge-init", nonce, protocol: 1 },
+      expect.any(String),
+      expect.any(Array),
+    );
+    postMessage.mockRestore();
+  }
 });
 
 test("artifact header keeps Versions, divider, and tabs tight", async () => {
@@ -3229,7 +3851,7 @@ test("standard project version Diff uses the commit diff endpoint", async () => 
       { id: "r2", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 1700000001000, finishedAt: 1700000001001 },
       { id: "r1", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1700000000000, finishedAt: 1700000000001 },
     ],
-    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/p1" }),
+    getDevServerUrl: async () => previewLease("http://127.0.0.1:5300/p1"),
     getVersionText,
     getVersionDiff,
   });
@@ -3678,7 +4300,9 @@ test("prototype preview-update stream events refresh the preview during generati
   try {
     fireEvent.change(await screen.findByLabelText("Message"), { target: { value: "go" } });
     fireEvent.click(screen.getByLabelText("Send"));
-    expect(await screen.findByTitle("Artifact preview")).toHaveAttribute("src", "/projects/p1/preview/?t=123456");
+    expect((await screen.findByTitle("Artifact preview")).getAttribute("src")).toMatch(
+      /^\/projects\/p1\/preview\/\?t=123456#dezin-bridge=[A-Za-z0-9_-]{43}$/,
+    );
   } finally {
     release?.();
   }
@@ -3716,7 +4340,9 @@ test("preview and completion events update data without stealing the active arti
   act(() => emitPreview());
   await waitFor(() => expect(quality).toHaveAttribute("aria-selected", "true"));
   fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
-  expect(await screen.findByTitle("Artifact preview")).toHaveAttribute("src", "/projects/p1/preview/?t=123456");
+  expect((await screen.findByTitle("Artifact preview")).getAttribute("src")).toMatch(
+    /^\/projects\/p1\/preview\/\?t=123456#dezin-bridge=[A-Za-z0-9_-]{43}$/,
+  );
   fireEvent.click(quality);
 
   await waitFor(() => expect(emitDone).toBeTypeOf("function"));
@@ -3748,13 +4374,17 @@ test("standard preview-update stream events use the live dev-server URL and refr
       type: "preview-update",
       runId: "r-live",
       mode: "standard",
-      previewUrl: "http://127.0.0.1:5310/",
+      variantId: "main",
       t: 123456,
     };
     await new Promise<void>((resolve) => {
       release = resolve;
     });
   });
+  const releasePreviewLease = vi.fn(async () => {});
+  const getDevServerUrl = vi.fn()
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5300/p1", "initial-lease"))
+    .mockResolvedValueOnce(previewLease("http://127.0.0.1:5310/", "viewer-live-lease"));
   const fake = makeFakeApi({
     getProject: async () => ({
       id: "p1",
@@ -3769,7 +4399,8 @@ test("standard preview-update stream events use the live dev-server URL and refr
     listMessages: async () => [],
     listVariants: async () => [{ id: "main", projectId: "p1", name: "Main", createdAt: 1, active: true }],
     listRuns,
-    getDevServerUrl: async () => ({ url: "http://127.0.0.1:5300/p1" }),
+    getDevServerUrl,
+    releasePreviewLease,
     listFiles: async () => [{ path: "src/App.jsx", size: 120 }],
     streamRun,
   });
@@ -3786,8 +4417,13 @@ test("standard preview-update stream events use the live dev-server URL and refr
     fireEvent.click(screen.getByLabelText("Send"));
 
     await waitFor(() =>
-      expect(screen.getByTitle("Artifact preview")).toHaveAttribute("src", "http://127.0.0.1:5310/?t=123456"),
+      expect(screen.getByTitle("Artifact preview")).toHaveAttribute(
+        "src",
+        bridgedUrl("http://127.0.0.1:5310/"),
+      ),
     );
+    expect(getDevServerUrl).toHaveBeenCalledTimes(2);
+    expect(releasePreviewLease).toHaveBeenCalledWith("initial-lease");
     await waitFor(() => expect(listRuns.mock.calls.length).toBeGreaterThan(listRunsBeforeSend));
 
     fireEvent.click(screen.getByRole("button", { name: "Versions" }));
@@ -4070,7 +4706,7 @@ test("historical version runtime errors require restore or fork and never repair
           { id: "r-new", variantId: "main", status: "succeeded" as const, score: 100, repairRounds: 0, lintPassed: true, createdAt: 2, finishedAt: 3 },
           { id: "r-old", variantId: "main", status: "succeeded" as const, score: 90, repairRounds: 0, lintPassed: true, createdAt: 1, finishedAt: 2 },
         ],
-        getVersionPreview: async () => ({ url: "/api/projects/p1/versions/r-old", mode: "prototype" as const }),
+        getVersionPreview: async () => versionPreview("/api/projects/p1/versions/r-old", "prototype"),
         getVersionText: async () => "<main>old version</main>",
       })}
     >

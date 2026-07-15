@@ -1414,7 +1414,9 @@ test("Proposal validation errors retain the editable draft and focus its issue s
   expect(alert).toHaveTextContent("Resolve the invalid proposal before approval.");
   expect(screen.getByRole("textbox", { name: "Proposal rationale" })).not.toHaveAttribute("readonly");
   expect(screen.getByRole("button", { name: "Approve and generate" })).toBeEnabled();
-  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Proposal needs attention" }));
+  await waitFor(() => {
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Proposal needs attention" }));
+  });
   expect(approveWorkspaceProposal).toHaveBeenCalledTimes(1);
 });
 

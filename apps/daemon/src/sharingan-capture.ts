@@ -173,10 +173,28 @@ export async function capturePage(
   projectDir: string,
   url: string,
   onStep: (s: CaptureStep) => void,
+  options: { reuseCurrentNavigation?: boolean } = {},
 ): Promise<{ page: CapturedPage | null; loginRequired: boolean }> {
   const step = (kind: CaptureStep["kind"], text: string) => onStep({ at: Date.now(), kind, text });
   step("navigate", `Navigating to ${url}`);
-  const nav = await session.navigate(url);
+  const cachedNavigation = options.reuseCurrentNavigation ? session.navigationFor?.(url) : null;
+  let reusableNavigation = false;
+  if (cachedNavigation && cachedNavigation.status > 0) {
+    try {
+      const protocol = new URL(cachedNavigation.finalUrl).protocol;
+      reusableNavigation = protocol === "http:" || protocol === "https:";
+    } catch {
+      reusableNavigation = false;
+    }
+  }
+  const nav = reusableNavigation ? cachedNavigation! : await session.navigate(url);
+  const assertNavigationIdentity = (): void => {
+    const currentUrl = session.currentUrl?.();
+    if (currentUrl && currentUrl !== nav.finalUrl) {
+      throw new Error(`Sharingan capture refused a page that changed after navigation from ${nav.finalUrl} to ${currentUrl}.`);
+    }
+  };
+  assertNavigationIdentity();
   const dom = await session.readDom(400);
   const hasPasswordField = await session.hasPasswordField();
   const textLength = dom.reduce((a, n) => a + n.text.length, 0);
@@ -198,6 +216,7 @@ export async function capturePage(
   if (!isAllowedCaptureRedirect(url, nav.finalUrl)) {
     throw new Error(`Sharingan capture refused a non-canonical redirect from ${url} to ${nav.finalUrl}.`);
   }
+  assertNavigationIdentity();
   const page = { ...(await captureCurrentPage(session, projectDir, nav.finalUrl, onStep)), requestedUrl: url };
   // A fresh entry capture makes every scaffold/region artifact derived from the previous raw
   // evidence stale. Delete them only after captureCurrentPage has completed successfully, so a

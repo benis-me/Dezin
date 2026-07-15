@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { PreviewModal } from "./PreviewModal.tsx";
 import { bindFrameScroll, VersionCompare } from "./VersionCompare.tsx";
@@ -38,38 +38,195 @@ test("VersionCompare slider keeps compared on the left and current on the right"
   expect(frames.map((frame) => frame.title)).toEqual(["Main current", "Main v1"]);
   expect(frames[0]).toHaveAttribute("src", "/current");
   expect(frames[1]).toHaveAttribute("src", "/old");
-  expect(screen.getByRole("button", { name: "Drag to compare" })).toHaveClass("w-9", "-translate-x-1/2");
+  expect(screen.getByRole("slider", { name: "Drag to compare" })).toHaveClass("w-9", "-translate-x-1/2");
   expect(screen.getByTestId("compare-divider-line")).toHaveClass("left-1/2", "-translate-x-1/2");
 });
 
-test("VersionCompare synchronizes iframe scroll bridge messages in both directions", async () => {
+test("VersionCompare exposes an operable keyboard and pointer slider", () => {
   render(
     <VersionCompare open onClose={vi.fn()} a={{ url: "/old", label: "Main v1" }} b={{ url: "/current", label: "Main current" }} />,
   );
 
+  const divider = screen.getByRole("slider", { name: "Drag to compare" });
+  expect(divider).toHaveAttribute("aria-valuemin", "1");
+  expect(divider).toHaveAttribute("aria-valuemax", "99");
+  expect(divider).toHaveAttribute("aria-valuenow", "50");
+
+  fireEvent.keyDown(divider, { key: "ArrowRight" });
+  expect(divider).toHaveAttribute("aria-valuenow", "51");
+  expect(screen.getByTitle("Main v1")).toHaveStyle({ clipPath: "inset(0 49% 0 0)" });
+
+  const stage = divider.parentElement!;
+  vi.spyOn(stage, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 200,
+    bottom: 100,
+    width: 200,
+    height: 100,
+    toJSON: () => ({}),
+  });
+  fireEvent.pointerDown(divider, { pointerId: 7, clientX: 102 });
+  const pointerMove = new MouseEvent("pointermove", { bubbles: true, clientX: 150 });
+  Object.defineProperty(pointerMove, "pointerId", { value: 7 });
+  fireEvent(window, pointerMove);
+  expect(divider).toHaveAttribute("aria-valuenow", "75");
+  const pointerUp = new MouseEvent("pointerup", { bubbles: true, clientX: 150 });
+  Object.defineProperty(pointerUp, "pointerId", { value: 7 });
+  fireEvent(window, pointerUp);
+  expect(divider).toHaveAttribute("aria-valuenow", "75");
+});
+
+test("VersionCompare cleans up an active pointer drag when it unmounts", () => {
+  const view = render(
+    <VersionCompare open onClose={vi.fn()} a={{ url: "/old", label: "Main v1" }} b={{ url: "/current", label: "Main current" }} />,
+  );
+  const divider = screen.getByRole("slider", { name: "Drag to compare" });
+  const compared = screen.getByTitle("Main v1") as HTMLIFrameElement;
+  const current = screen.getByTitle("Main current") as HTMLIFrameElement;
+
+  fireEvent.pointerDown(divider, { pointerId: 9, clientX: 100 });
+  expect(document.body.style.cursor).toBe("col-resize");
+  expect(compared.style.pointerEvents).toBe("none");
+  expect(current.style.pointerEvents).toBe("none");
+
+  view.unmount();
+  expect(document.body.style.cursor).toBe("");
+  expect(compared.style.pointerEvents).toBe("");
+  expect(current.style.pointerEvents).toBe("");
+});
+
+test("VersionCompare synchronizes iframe scroll bridge messages in both directions", async () => {
+  const comparedNonce = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+  const currentNonce = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh123456789";
+  render(
+    <VersionCompare
+      open
+      onClose={vi.fn()}
+      a={{ url: `/old#dezin-bridge=${comparedNonce}`, bridgeNonce: comparedNonce, label: "Main v1" }}
+      b={{ url: `/current#dezin-bridge=${currentNonce}`, bridgeNonce: currentNonce, label: "Main current" }}
+    />,
+  );
+
   const currentFrame = screen.getByTitle("Main current") as HTMLIFrameElement;
   const comparedFrame = screen.getByTitle("Main v1") as HTMLIFrameElement;
-  const currentPostMessage = vi.spyOn(currentFrame.contentWindow!, "postMessage");
-  const comparedPostMessage = vi.spyOn(comparedFrame.contentWindow!, "postMessage");
+  const connect = (frame: HTMLIFrameElement, nonce: string) => {
+    const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+    fireEvent.load(frame);
+    const calls = postMessage.mock.calls as unknown as Array<[unknown, unknown, Transferable[]?]>;
+    const bootstrap = calls.find(([message]) => (message as { type?: string }).type === "bridge-init");
+    const port = bootstrap?.[2]?.[0] as MessagePort | undefined;
+    postMessage.mockRestore();
+    if (!port) throw new Error("Version compare did not transfer its capability port.");
+    const received: Array<Record<string, unknown>> = [];
+    port.onmessage = (event) => received.push(event.data as Record<string, unknown>);
+    port.start();
+    port.postMessage({ source: "dezin", type: "bridge-ready", nonce, protocol: 1 });
+    return { port, received };
+  };
+  const current = connect(currentFrame, currentNonce);
+  const compared = connect(comparedFrame, comparedNonce);
 
-  window.dispatchEvent(
-    new MessageEvent("message", {
-      data: { source: "dezin", type: "scroll", top: 180, left: 12 },
-      source: currentFrame.contentWindow as MessageEventSource,
-    }),
-  );
+  current.port.postMessage({
+    source: "dezin",
+    type: "scroll",
+    top: 180,
+    left: 12,
+    nonce: currentNonce,
+    protocol: 1,
+  });
 
-  await waitFor(() => expect(comparedPostMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "sync-scroll", top: 180, left: 12 }, "*"));
+  await waitFor(() => expect(compared.received).toContainEqual(expect.objectContaining({
+    source: "dezin-parent",
+    type: "sync-scroll",
+    top: 180,
+    left: 12,
+    nonce: comparedNonce,
+    protocol: 1,
+  })));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  window.dispatchEvent(
-    new MessageEvent("message", {
-      data: { source: "dezin", type: "scroll", top: 42, left: 4 },
-      source: comparedFrame.contentWindow as MessageEventSource,
-    }),
+  compared.port.postMessage({
+    source: "dezin",
+    type: "scroll",
+    top: 42,
+    left: 4,
+    nonce: comparedNonce,
+    protocol: 1,
+  });
+
+  await waitFor(() => expect(current.received).toContainEqual(expect.objectContaining({
+    source: "dezin-parent",
+    type: "sync-scroll",
+    top: 42,
+    left: 4,
+    nonce: currentNonce,
+    protocol: 1,
+  })));
+
+  const count = compared.received.length;
+  current.port.postMessage({ source: "dezin", type: "scroll", top: 999, left: 0, nonce: comparedNonce, protocol: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(compared.received).toHaveLength(count);
+  current.port.close();
+  compared.port.close();
+});
+
+test("VersionCompare attributes authenticated runtime errors to the failing pane and offers recovery", async () => {
+  const comparedNonce = "abcdefghijklmnopqrstuvwxyzABCDEFGH123456789";
+  const currentNonce = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh123456789";
+  render(
+    <VersionCompare
+      open
+      onClose={vi.fn()}
+      a={{ url: `/old#dezin-bridge=${comparedNonce}`, bridgeNonce: comparedNonce, label: "Main v1" }}
+      b={{ url: `/current#dezin-bridge=${currentNonce}`, bridgeNonce: currentNonce, label: "Main current" }}
+    />,
   );
 
-  await waitFor(() => expect(currentPostMessage).toHaveBeenCalledWith({ source: "dezin-parent", type: "sync-scroll", top: 42, left: 4 }, "*"));
+  const comparedFrame = screen.getByTitle("Main v1") as HTMLIFrameElement;
+  const postMessage = vi.spyOn(comparedFrame.contentWindow!, "postMessage");
+  fireEvent.load(comparedFrame);
+  const calls = postMessage.mock.calls as unknown as Array<[unknown, unknown, Transferable[]?]>;
+  const bootstrap = calls.find(([message]) => (message as { type?: string }).type === "bridge-init");
+  const port = bootstrap?.[2]?.[0] as MessagePort | undefined;
+  postMessage.mockRestore();
+  if (!port) throw new Error("Version compare did not transfer its capability port.");
+  port.start();
+  port.postMessage({ source: "dezin", type: "bridge-ready", nonce: comparedNonce, protocol: 1 });
+  port.postMessage({
+    source: "dezin",
+    type: "runtime-error",
+    kind: "fatal",
+    errorType: "error",
+    message: "Compared render crashed",
+    count: 1,
+    at: 123,
+    nonce: comparedNonce,
+    protocol: 1,
+  });
+
+  const notice = await screen.findByRole("alert", { name: "Main v1 preview error" });
+  expect(notice).toHaveTextContent("Compared render crashed");
+  fireEvent.click(screen.getByRole("button", { name: "Reload Main v1 preview" }));
+  await waitFor(() => expect(screen.queryByRole("alert", { name: "Main v1 preview error" })).toBeNull());
+
+  port.postMessage({
+    source: "dezin",
+    type: "runtime-error",
+    kind: "fatal",
+    errorType: "error",
+    message: "Compared render crashed",
+    count: 1,
+    at: 124,
+    nonce: comparedNonce,
+    protocol: 1,
+  });
+  expect(await screen.findByRole("alert", { name: "Main v1 preview error" })).toHaveTextContent("Compared render crashed");
+  expect(screen.queryByRole("alert", { name: "Main current preview error" })).toBeNull();
+  port.close();
 });
 
 test("VersionCompare iframe scroll cleanup tolerates cross-origin WindowProxy errors", () => {

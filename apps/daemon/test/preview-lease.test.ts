@@ -8,9 +8,28 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   createPreviewLeaseManager,
+  requirePreviewLease,
   type PreviewChild,
   type PreviewLeaseManagerOptions,
 } from "../src/preview-lease.ts";
+
+test("renewable preview lease accepts only the shared 32-byte base64url capability contract", () => {
+  const release = async (): Promise<void> => {};
+  const lease = (nonce: string, suffix = `#dezin-bridge=${nonce}`) => ({
+    leaseId: "lease-contract",
+    url: `http://127.0.0.1:4310/${suffix}`,
+    bridgeNonce: nonce,
+    expiresAt: Date.now() + 60_000,
+    release,
+  });
+  assert.equal(requirePreviewLease(lease("a".repeat(43))).bridgeNonce, "a".repeat(43));
+  assert.throws(() => requirePreviewLease(lease("a".repeat(42))), /nonce-bound lease/);
+  assert.throws(() => requirePreviewLease(lease("a".repeat(44))), /nonce-bound lease/);
+  assert.throws(
+    () => requirePreviewLease(lease("a".repeat(43), `#other=1&dezin-bridge=${"a".repeat(43)}`)),
+    /nonce-bound lease/,
+  );
+});
 
 class FakeChild extends EventEmitter implements PreviewChild {
   readonly pid: number;
@@ -130,13 +149,117 @@ test("concurrent acquire shares one ready process but returns distinct renewable
 
   const [first, second] = await Promise.all([firstPending, secondPending]);
   assert.notEqual(first.leaseId, second.leaseId);
-  assert.equal(first.url, second.url);
+  assert.notEqual(first.url, second.url);
+  assert.equal(new URL(first.url).origin, new URL(second.url).origin);
   assert.equal(manager.activeCount(), 1);
   const renewed = await manager.renew(first.leaseId);
   assert.equal(renewed?.leaseId, first.leaseId);
   assert.ok((renewed?.expiresAt ?? 0) >= first.expiresAt);
   assert.equal(await manager.release(first.leaseId), true);
   assert.equal(await manager.release(first.leaseId), false);
+  await second.release();
+  await manager.stopAll();
+});
+
+test("each client lease gets a distinct high-entropy bridge capability in the URL fragment", async () => {
+  const fixture = fakeOptions();
+  const manager = createPreviewLeaseManager(fixture.options);
+  const scope = { projectId: "bridge-capability", runId: "assembly-a" };
+  const first = await manager.acquire(scope, "/tmp/bridge-capability", { fingerprint: "same" });
+  const second = await manager.acquire(scope, "/tmp/bridge-capability", { fingerprint: "same" });
+
+  const firstNonce = Reflect.get(first, "bridgeNonce");
+  const secondNonce = Reflect.get(second, "bridgeNonce");
+  assert.match(firstNonce, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(secondNonce, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(firstNonce, secondNonce);
+  assert.equal(new URL(first.url).search, "", "the bridge capability is never sent to the preview server");
+  assert.equal(new URL(first.url).hash, `#dezin-bridge=${firstNonce}`);
+  assert.equal(new URL(second.url).hash, `#dezin-bridge=${secondNonce}`);
+  assert.equal((await manager.renew(first.leaseId))?.bridgeNonce, firstNonce);
+
+  await first.release();
+  await second.release();
+  await manager.stopAll();
+});
+
+test("dispose-on-idle release tears down the process before resource cleanup", async () => {
+  const order: string[] = [];
+  const fixture = fakeOptions({
+    killProcessGroup: (child, signal) => {
+      order.push(`kill:${signal}`);
+      (child as FakeChild).exit(0, signal);
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const lease = await manager.acquire(
+    { projectId: "bounded-preview", runId: "assembly-a" },
+    "/tmp/bounded-preview",
+    {
+      fingerprint: "assembly-a",
+      disposeOnIdle: true,
+      onLeaseRelease: async () => { order.push("lease-release"); },
+      onEntryDispose: async () => { order.push("entry-dispose"); },
+    },
+  );
+
+  assert.equal(manager.activeCount(), 1);
+  assert.equal(await manager.release(lease.leaseId), true);
+  assert.equal(manager.activeCount(), 0);
+  assert.deepEqual(order, ["kill:SIGTERM", "entry-dispose", "lease-release"]);
+});
+
+test("stopAll reports entry and lease cleanup failures instead of returning false success", async (t) => {
+  for (const failure of ["entry", "lease"] as const) {
+    await t.test(failure, async () => {
+      const fixture = fakeOptions();
+      const manager = createPreviewLeaseManager(fixture.options);
+      await manager.acquire(
+        { projectId: `cleanup-failure-${failure}` },
+        `/tmp/cleanup-failure-${failure}`,
+        {
+          fingerprint: "a",
+          onEntryDispose: failure === "entry" ? async () => { throw new Error("entry cleanup failed"); } : undefined,
+          onLeaseRelease: failure === "lease" ? async () => { throw new Error("lease cleanup failed"); } : undefined,
+        },
+      );
+
+      await assert.rejects(manager.stopAll(), new RegExp(`${failure} cleanup failed`));
+      assert.equal(manager.activeCount(), 0, "a stopped process is not reported as active after cleanup fails");
+      await manager.stopAll();
+    });
+  }
+});
+
+test("artifact preview identity isolates revisions with the same directory fingerprint", async () => {
+  const fixture = fakeOptions();
+  const manager = createPreviewLeaseManager(fixture.options);
+  const shared = {
+    artifactId: "artifact-a",
+    sourceTreeHash: "tree-shared",
+    dependencyLockHash: "dependencies-shared",
+  };
+
+  const first = await manager.acquire(
+    { projectId: "project-a" },
+    "/tmp/project-a",
+    {
+      fingerprint: "git-fingerprint-shared",
+      runtimeIdentity: { ...shared, revisionId: "revision-a" },
+    },
+  );
+  const second = await manager.acquire(
+    { projectId: "project-a" },
+    "/tmp/project-a",
+    {
+      fingerprint: "git-fingerprint-shared",
+      runtimeIdentity: { ...shared, revisionId: "revision-b" },
+    },
+  );
+
+  assert.equal(fixture.children.length, 2);
+  assert.notEqual(first.url, second.url);
+  await first.release();
   await second.release();
   await manager.stopAll();
 });
@@ -153,6 +276,65 @@ test("a process that never becomes ready rejects and is reaped", async () => {
   );
   assert.equal(manager.activeCount(), 0);
   assert.deepEqual(fixture.signals.map(({ signal }) => signal), ["SIGTERM", "SIGKILL"]);
+});
+
+test("default fresh readiness tolerates loaded startup while retaining a bounded total deadline", async () => {
+  const clock = new FakeClock();
+  const entered = deferred<void>();
+  const ready = deferred<void>();
+  const children: FakeChild[] = [];
+  const manager = createPreviewLeaseManager({
+    allocatePort: async () => 4390,
+    spawnProcess: () => {
+      const child = new FakeChild(43_900);
+      children.push(child);
+      return child;
+    },
+    waitUntilReady: async (_url, _child, signal) => {
+      entered.resolve();
+      await ready.promise;
+      signal.throwIfAborted();
+    },
+    isProcessGroupAlive: (child) => child.exitCode === null && child.signalCode === null,
+    killProcessGroup: (child, signal) => (child as FakeChild).exit(0, signal),
+    now: () => clock.now,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    stopGraceMs: 0,
+  });
+
+  const acquiring = manager.acquire({ projectId: "loaded-startup" }, "/tmp/loaded-startup");
+  await entered.promise;
+  await clock.advance(15_001);
+  ready.resolve();
+  const lease = await acquiring;
+  assert.match(lease.url, /:4390\//);
+  await lease.release();
+  await manager.stopAll();
+
+  const timeoutClock = new FakeClock();
+  const timeoutEntered = deferred<void>();
+  const timeoutManager = createPreviewLeaseManager({
+    allocatePort: async () => 4391,
+    spawnProcess: () => new FakeChild(43_901),
+    waitUntilReady: async (_url, _child, signal) => {
+      timeoutEntered.resolve();
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    },
+    isProcessGroupAlive: (child) => child.exitCode === null && child.signalCode === null,
+    killProcessGroup: (child, signal) => (child as FakeChild).exit(0, signal),
+    now: () => timeoutClock.now,
+    setTimeout: timeoutClock.setTimeout,
+    clearTimeout: timeoutClock.clearTimeout,
+    stopGraceMs: 0,
+  });
+  const timingOut = timeoutManager.acquire({ projectId: "bounded-startup" }, "/tmp/bounded-startup");
+  await timeoutEntered.promise;
+  await timeoutClock.advance(30_000);
+  await assert.rejects(timingOut, /timed out after 30000ms/i);
+  assert.equal(timeoutManager.activeCount(), 0);
 });
 
 test("a process that exits before readiness rejects without a registry entry", async () => {
@@ -194,6 +376,39 @@ test("aborting the only acquire waiter tears down its starting process", async (
   await assert.rejects(pending, (error: unknown) => error instanceof Error && error.name === "AbortError");
   assert.equal(manager.activeCount(), 0);
   assert.deepEqual(fixture.signals.map(({ signal }) => signal), ["SIGTERM", "SIGKILL"]);
+});
+
+test("an immediate retry never joins a prior caller's already-aborted startup flight", async () => {
+  const firstFlightAborted = deferred<void>();
+  const fixture = fakeOptions({
+    waitUntilReady: async (_url, child, signal) => {
+      if (child.pid !== 10_000) return;
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          firstFlightAborted.resolve();
+          reject(signal.reason);
+        }, { once: true });
+      });
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const scope = { projectId: "retry-after-abort", runId: "assembly-a" };
+  const controller = new AbortController();
+  const first = manager.acquire(scope, "/tmp/retry-after-abort", {
+    fingerprint: "assembly-a",
+    signal: controller.signal,
+  });
+  await waitUntil(() => fixture.children.length === 1, "first preview process did not start");
+
+  controller.abort(new Error("first caller disconnected"));
+  await firstFlightAborted.promise;
+  const retry = manager.acquire(scope, "/tmp/retry-after-abort", { fingerprint: "assembly-a" });
+
+  await assert.rejects(first, /first caller disconnected/);
+  const lease = await retry;
+  assert.equal(fixture.children.length, 2, "the retry must start a fresh flight after aborted cleanup");
+  await lease.release();
+  await manager.stopAll();
 });
 
 test("released processes expire after 60 seconds of idle time", async () => {
@@ -337,6 +552,42 @@ test("stopScope prevents cached readiness from handing out a lease after the bar
   assert.equal(manager.activeCount(), 0);
 });
 
+test("concurrent cached health checks share one result and one replacement generation", async () => {
+  const cachedFailure = deferred<void>();
+  let readinessCalls = 0;
+  const fixture = fakeOptions({
+    waitUntilReady: async () => {
+      readinessCalls += 1;
+      if (readinessCalls === 2) {
+        await cachedFailure.promise;
+        throw new Error("transient cached readiness failure");
+      }
+    },
+  });
+  const manager = createPreviewLeaseManager(fixture.options);
+  const scope = { projectId: "cached-health-singleflight", variantId: "v1" };
+  const existing = await manager.acquire(scope, "/tmp/cached-health-singleflight", { fingerprint: "a" });
+
+  const first = manager.acquire(scope, "/tmp/cached-health-singleflight", { fingerprint: "a" });
+  const second = manager.acquire(scope, "/tmp/cached-health-singleflight", { fingerprint: "a" });
+  await waitUntil(() => readinessCalls >= 2, "cached readiness did not begin");
+  await Promise.resolve();
+  assert.equal(readinessCalls, 2, "concurrent callers must share one cached health probe");
+  cachedFailure.resolve();
+
+  const [replacementA, replacementB] = await Promise.all([first, second]);
+  assert.equal(fixture.children.length, 2, "one replacement process serves every failed cached probe waiter");
+  assert.equal(readinessCalls, 3, "the replacement readiness check is also shared");
+  assert.equal(await manager.renew(existing.leaseId), null, "the old lease is explicitly unhealthy rather than silently renewed");
+  assert.equal((await manager.renew(replacementA.leaseId))?.leaseId, replacementA.leaseId);
+  assert.equal((await manager.renew(replacementB.leaseId))?.leaseId, replacementB.leaseId);
+  assert.equal(manager.activeCount(), 2);
+  await existing.release();
+  await replacementA.release();
+  await replacementB.release();
+  await manager.stopAll();
+});
+
 test("stopScope blocks a replacement flight after cached readiness fails", async () => {
   const cachedFailure = deferred<void>();
   let readinessCalls = 0;
@@ -452,6 +703,7 @@ test("failed stopScope quarantines its hierarchy until a successful broad-enough
 test("failed stopAll keeps global admission quarantined until a successful retry", async () => {
   let failedChild: FakeChild | undefined;
   let teardownFails = true;
+  let releaseCount = 0;
   const fixture = fakeOptions({
     stopGraceMs: 5,
     forceKillWaitMs: 20,
@@ -466,13 +718,18 @@ test("failed stopAll keeps global admission quarantined until a successful retry
     },
   });
   const manager = createPreviewLeaseManager(fixture.options);
-  await manager.acquire({ projectId: "global-failure" }, "/tmp/global-failure", { fingerprint: "a" });
+  await manager.acquire(
+    { projectId: "global-failure" },
+    "/tmp/global-failure",
+    { fingerprint: "a", onLeaseRelease: () => { releaseCount += 1; } },
+  );
   failedChild = fixture.children[0];
 
   await assert.rejects(
     manager.stopAll(),
     (error: unknown) => error instanceof Error && error.name === "PreviewTeardownError",
   );
+  assert.equal(releaseCount, 0, "lease resources stay owned until the preview process is actually gone");
   const spawnedAtFailure = fixture.children.length;
   await assert.rejects(
     manager.acquire({ projectId: "global-blocked" }, "/tmp/global-blocked", { fingerprint: "b" }),
@@ -489,6 +746,7 @@ test("failed stopAll keeps global admission quarantined until a successful retry
 
   teardownFails = false;
   await manager.stopAll();
+  assert.equal(releaseCount, 1, "the successful teardown retry releases leases detached by the failed attempt");
   const resumed = await manager.acquire(
     { projectId: "global-resumed" },
     "/tmp/global-resumed",
@@ -602,7 +860,8 @@ test("default readiness rejects 404 and accepts an owned 2xx response", async ()
         await assert.rejects(manager.acquire({ projectId: "strict-404" }, `/tmp/strict-${status}`), /timed out/i);
       } else {
         const lease = await manager.acquire({ projectId: "strict-204" }, `/tmp/strict-${status}`);
-        assert.match(lease.url, new RegExp(`:${port}/$`));
+        assert.equal(new URL(lease.url).origin, `http://127.0.0.1:${port}`);
+        assert.equal(new URL(lease.url).hash, `#dezin-bridge=${lease.bridgeNonce}`);
       }
     } finally {
       await manager.stopAll();

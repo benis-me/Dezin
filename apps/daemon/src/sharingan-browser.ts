@@ -111,6 +111,7 @@ export class SharinganSession {
   private browser: Browser;
   private page: Page;
   private origin: string;
+  private lastNavigation: { requestedUrl: string; status: number; finalUrl: string } | null = null;
 
   private constructor(browser: Browser, page: Page, origin: string) {
     this.browser = browser;
@@ -153,6 +154,15 @@ export class SharinganSession {
 
   currentUrl(): string { return this.page.url(); }
 
+  navigationFor(url: string): { status: number; finalUrl: string } | null {
+    const navigation = this.lastNavigation;
+    if (!navigation || navigation.requestedUrl !== url || this.page.url() !== navigation.finalUrl) return null;
+    let protocol = "";
+    try { protocol = new URL(navigation.finalUrl).protocol; } catch { return null; }
+    if (navigation.status < 1 || (protocol !== "http:" && protocol !== "https:")) return null;
+    return { status: navigation.status, finalUrl: navigation.finalUrl };
+  }
+
   async navigate(url: string): Promise<{ status: number; finalUrl: string }> {
     const res = await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null);
     // Give client-rendered pages a moment + trigger lazy content by scrolling.
@@ -172,7 +182,9 @@ export class SharinganSession {
     await this.settle();
     const finalUrl = this.page.url();
     try { this.origin = new URL(finalUrl).origin; } catch { /* keep the prior origin on an unparseable url */ }
-    return { status: res?.status() ?? 0, finalUrl };
+    const navigation = { status: res?.status() ?? 0, finalUrl };
+    this.lastNavigation = { requestedUrl: url, ...navigation };
+    return navigation;
   }
 
   /** Wait for the page to settle before a screenshot, so async SPA content isn't shot as a skeleton:

@@ -26,7 +26,12 @@ import type { SharinganSession } from "../src/sharingan-browser.ts";
 import { projectDir } from "../src/serve-static.ts";
 
 test("POST /start begins a capture and GET /status reports progress", { skip: !findChrome() && "no Chrome" }, async () => {
-  const fixture = createServer((_r, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><title>T</title><h1>Acme</h1><p>" + "w ".repeat(60) + "</p>"); });
+  let documentRequests = 0;
+  const fixture = createServer((req, res) => {
+    if (req.url === "/") documentRequests += 1;
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end("<!doctype html><title>T</title><h1>Acme</h1><p>" + "w ".repeat(60) + "</p>");
+  });
   await new Promise<void>((r) => fixture.listen(0, "127.0.0.1", r));
   const target = `http://127.0.0.1:${(fixture.address() as AddressInfo).port}/`;
 
@@ -48,6 +53,7 @@ test("POST /start begins a capture and GET /status reports progress", { skip: !f
       await new Promise((r) => setTimeout(r, 250));
     }
     assert.equal(phase, "captured");
+    assert.equal(documentRequests, 1, "entry capture reuses the navigation completed while opening Chrome");
   } finally {
     await new Promise<void>((r) => app.close(() => r()));
     await new Promise<void>((r) => fixture.close(() => r()));

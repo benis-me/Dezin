@@ -183,6 +183,78 @@ export interface ArtifactRevision {
   createdAt: number;
 }
 
+export type PreviewTarget =
+  | { kind: "artifact-current"; projectId: string; artifactId: string; trackId?: string }
+  | { kind: "artifact-revision"; projectId: string; revisionId: string }
+  | { kind: "run-candidate"; projectId: string; runId: string }
+  | { kind: "workspace-flow"; projectId: string; snapshotId: string; startArtifactId: string }
+  | { kind: "component-state"; projectId: string; revisionId: string; variantKey: string; stateKey: string };
+
+/** Immutable identity returned by PreviewTarget resolution and revalidated on lease acquire. */
+export interface ResolvedPreviewTarget {
+  version: 1;
+  targetKey: string;
+  requestedKind: PreviewTarget["kind"];
+  projectId: string;
+  workspaceId: string;
+  artifactId: string;
+  artifactKind: WorkspaceArtifactKind;
+  revisionId: string;
+  trackId: string;
+  snapshotId: string | null;
+  sourceCommitHash: string;
+  sourceTreeHash: string;
+  dependencyLockHash: string;
+  assemblyHash: string;
+  artifactRoot: string;
+  renderSpec: Record<string, unknown>;
+  variantKey: string | null;
+  stateKey: string | null;
+  runId: string | null;
+}
+
+export type DirectTokenProperty =
+  | "color"
+  | "background-color"
+  | "border-color"
+  | "font-family"
+  | "font-size"
+  | "border-radius";
+
+export interface SupportedLayoutPatch {
+  width?: number | "auto" | "fill";
+  height?: number | "auto" | "fill";
+  padding?: number;
+  gap?: number;
+  alignment?: "start" | "center" | "end" | "stretch";
+  visibility?: "visible" | "hidden";
+}
+
+export type DirectArtifactMutationCommand =
+  | {
+      type: "set-text";
+      locator: WorkspaceDesignNodeLocator;
+      expectedCurrentValue: string;
+      value: string;
+    }
+  | { type: "set-accessible-label"; locator: WorkspaceDesignNodeLocator; value: string }
+  | { type: "set-asset"; locator: WorkspaceDesignNodeLocator; resourceRevisionId: string }
+  | { type: "set-token"; locator: WorkspaceDesignNodeLocator; property: DirectTokenProperty; token: string }
+  | { type: "set-layout"; locator: WorkspaceDesignNodeLocator; patch: SupportedLayoutPatch };
+
+export type ArtifactMutationCommand = DirectArtifactMutationCommand;
+
+export interface ArtifactMutationInput {
+  expectedHeadRevisionId: string;
+  expectedSnapshotId: string;
+  command: ArtifactMutationCommand;
+}
+
+export interface ArtifactMutationResult {
+  revision: ArtifactRevision;
+  snapshot: WorkspaceSnapshot;
+}
+
 export interface WorkspaceRenderFrameSpec {
   id: string;
   name: string;
@@ -1172,22 +1244,37 @@ export interface VersionRestoreResult {
 export interface PreviewLeaseInfo {
   leaseId: string;
   url: string;
+  bridgeNonce: string;
   expiresAt: number;
 }
-export interface VersionPreview extends Partial<Pick<PreviewLeaseInfo, "leaseId" | "expiresAt">> {
-  url: string;
-  mode: ProjectMode;
+export interface PreviewTargetLease extends PreviewLeaseInfo {
+  resolved: ResolvedPreviewTarget;
 }
+interface VersionPreviewBase {
+  url: string;
+  bridgeNonce: string;
+}
+export type VersionPreview =
+  | (VersionPreviewBase & { mode: "prototype"; leaseId?: never; expiresAt?: never })
+  | (VersionPreviewBase & { mode: "standard"; leaseId: string; expiresAt: number });
 
 export interface ApiClient {
   listProjects(): Promise<Project[]>;
   createProject(input: CreateProjectInput): Promise<Project>;
   generateProjectTitle(id: string, brief: string): Promise<Project>;
   getSetup(id: string): Promise<SetupStatus>;
-  getDevServerUrl(id: string): Promise<{ url: string; leaseId?: string; expiresAt?: number }>;
+  getDevServerUrl(id: string, signal?: AbortSignal): Promise<PreviewLeaseInfo>;
   releaseDevServer(id: string): Promise<void>;
-  renewPreviewLease(leaseId: string): Promise<PreviewLeaseInfo>;
+  renewPreviewLease(leaseId: string, signal?: AbortSignal): Promise<PreviewLeaseInfo>;
   releasePreviewLease(leaseId: string): Promise<void>;
+  resolvePreviewTarget(projectId: string, target: PreviewTarget, signal?: AbortSignal): Promise<ResolvedPreviewTarget>;
+  acquirePreviewTargetLease(
+    projectId: string,
+    resolved: ResolvedPreviewTarget,
+    signal?: AbortSignal,
+  ): Promise<PreviewTargetLease>;
+  renewPreviewTargetLease(leaseId: string, signal?: AbortSignal): Promise<PreviewLeaseInfo>;
+  releasePreviewTargetLease(leaseId: string): Promise<void>;
   captureProjectCover(id: string, options?: { release?: boolean }): Promise<{ captured: boolean; reason?: string }>;
   getProject(id: string): Promise<Project>;
   getWorkspace(projectId: string): Promise<ProjectWorkspacePayload>;
@@ -1207,6 +1294,9 @@ export interface ApiClient {
   listArtifactTracks(projectId: string, artifactId: string): Promise<ArtifactTrack[]>;
   listArtifactRevisions(projectId: string, artifactId: string): Promise<ArtifactRevision[]>;
   getArtifactRevision(projectId: string, artifactId: string, revisionId: string): Promise<ArtifactRevision>;
+  applyArtifactMutation(projectId: string, artifactId: string, input: ArtifactMutationInput): Promise<ArtifactMutationResult>;
+  getArtifactThumbnail(projectId: string, artifactId: string, revisionId: string, signal?: AbortSignal): Promise<Blob>;
+  artifactThumbnailUrl(projectId: string, artifactId: string, revisionId: string): string;
   listWorkspaceSnapshots(projectId: string): Promise<WorkspaceSnapshot[]>;
   getWorkspaceSnapshot(projectId: string, snapshotId: string): Promise<WorkspaceSnapshot>;
   patchProject(id: string, patch: Partial<CreateProjectInput> & { archived?: boolean }): Promise<Project>;
@@ -1251,7 +1341,7 @@ export interface ApiClient {
   getFileText(id: string, path: string): Promise<string>;
   listRuns(id: string, options?: { all?: boolean }): Promise<RunSummary[]>;
   versionPreviewUrl(id: string, runId: string): string;
-  getVersionPreview(id: string, runId: string): Promise<VersionPreview>;
+  getVersionPreview(id: string, runId: string, signal?: AbortSignal): Promise<VersionPreview>;
   getVersionText(id: string, runId: string): Promise<string>;
   getVersionDiff(id: string, runId: string): Promise<VersionDiffLine[]>;
   restoreVersion(id: string, runId: string): Promise<VersionRestoreResult>;
@@ -1355,6 +1445,15 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     return (await res.json()) as T;
   }
 
+  async function blob(path: string, init?: RequestInit): Promise<Blob> {
+    const res = await f(baseUrl + path, initWithDaemonToken(init));
+    if (!res.ok) {
+      const error = await readApiError(res);
+      throw new ApiError(res.status, error.message, error.details);
+    }
+    return res.blob();
+  }
+
   async function* consumeSse(res: Response): AsyncGenerator<RunEvent> {
     if (!res.ok) throw new ApiError(res.status, await safeText(res));
     if (!res.body) {
@@ -1447,10 +1546,23 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     createProject: (input) => json<Project>("/api/projects", jsonInit("POST", input)),
     generateProjectTitle: (id, brief) => json<Project>(`/api/projects/${enc(id)}/title`, jsonInit("POST", { brief })),
     getSetup: (id) => json<SetupStatus>(`/api/projects/${enc(id)}/setup`),
-    getDevServerUrl: (id) => json<{ url: string; leaseId?: string; expiresAt?: number }>(`/api/projects/${enc(id)}/devserver`),
+    getDevServerUrl: (id, signal) => json<PreviewLeaseInfo>(`/api/projects/${enc(id)}/devserver`, { signal }),
     releaseDevServer: (id) => json<{ released: boolean }>(`/api/projects/${enc(id)}/devserver`, { method: "DELETE" }).then(() => {}),
-    renewPreviewLease: (leaseId) => json<PreviewLeaseInfo>(`/api/preview-leases/${enc(leaseId)}`, { method: "PATCH" }),
+    renewPreviewLease: (leaseId, signal) => json<PreviewLeaseInfo>(`/api/preview-leases/${enc(leaseId)}`, { method: "PATCH", signal }),
     releasePreviewLease: (leaseId) => json<{ released: boolean }>(`/api/preview-leases/${enc(leaseId)}`, { method: "DELETE" }).then(() => {}),
+    resolvePreviewTarget: (projectId, target, signal) =>
+      json<{ resolved: ResolvedPreviewTarget }>(
+        `/api/projects/${enc(projectId)}/preview-targets/resolve`,
+        { ...jsonInit("POST", { target }), signal },
+      ).then((result) => result.resolved),
+    acquirePreviewTargetLease: (projectId, resolved, signal) =>
+      json<PreviewTargetLease>(
+        `/api/projects/${enc(projectId)}/preview-targets/leases`,
+        { ...jsonInit("POST", { resolved }), signal },
+      ),
+    renewPreviewTargetLease: (leaseId, signal) =>
+      json<PreviewLeaseInfo>(`/api/preview-leases/${enc(leaseId)}`, { method: "PATCH", signal }),
+    releasePreviewTargetLease: (leaseId) => json<{ released: boolean }>(`/api/preview-leases/${enc(leaseId)}`, { method: "DELETE" }).then(() => {}),
     captureProjectCover: (id, options) =>
       json<{ captured: boolean; reason?: string }>(`/api/projects/${enc(id)}/cover/capture${options?.release ? "?release=1" : ""}`, { method: "POST" }),
     getProject: (id) => json<Project>(`/api/projects/${enc(id)}`),
@@ -1479,6 +1591,18 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
       json<ArtifactRevision[]>(`/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions`),
     getArtifactRevision: (projectId, artifactId, revisionId) =>
       json<ArtifactRevision>(`/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions/${enc(revisionId)}`),
+    applyArtifactMutation: (projectId, artifactId, input) =>
+      json<ArtifactMutationResult>(
+        `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/mutations`,
+        jsonInit("POST", input),
+      ),
+    getArtifactThumbnail: (projectId, artifactId, revisionId, signal) =>
+      blob(
+        `/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions/${enc(revisionId)}/thumbnail`,
+        { signal },
+      ),
+    artifactThumbnailUrl: (projectId, artifactId, revisionId) =>
+      `${baseUrl}/api/projects/${enc(projectId)}/artifacts/${enc(artifactId)}/revisions/${enc(revisionId)}/thumbnail`,
     listWorkspaceSnapshots: (projectId) =>
       json<WorkspaceSnapshot[]>(`/api/projects/${enc(projectId)}/workspace/snapshots`),
     getWorkspaceSnapshot: (projectId, snapshotId) =>
@@ -1528,7 +1652,7 @@ export function createApiClient(opts: ApiClientOptions = {}): ApiClient {
     listFiles: (id) => json<ProjectFile[]>(`/api/projects/${enc(id)}/files`),
     listRuns: (id, options) => json<RunSummary[]>(`/api/projects/${enc(id)}/runs${options?.all ? "?all=1" : ""}`),
     versionPreviewUrl: (id, runId) => `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}`,
-    getVersionPreview: (id, runId) => json<VersionPreview>(`/api/projects/${enc(id)}/versions/${enc(runId)}/preview-url`),
+    getVersionPreview: (id, runId, signal) => json<VersionPreview>(`/api/projects/${enc(id)}/versions/${enc(runId)}/preview-url`, { signal }),
     getVersionText: async (id, runId) => {
       const url = `${baseUrl}/api/projects/${enc(id)}/versions/${enc(runId)}/source`;
       const init = initWithDaemonToken();

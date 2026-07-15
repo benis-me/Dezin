@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { previewBridgeOriginForSrc } from "./preview-sandbox.ts";
 
 export type RuntimeErrorKind = "fatal" | "nonfatal";
@@ -19,12 +19,27 @@ export interface RuntimeErrorMessage {
 }
 
 const KINDS = new Set<RuntimeErrorKind>(["fatal", "nonfatal"]);
+const ERROR_TYPES = new Set<RuntimeErrorType>(["error", "unhandledrejection", "console", "resource", "request", "blank"]);
+
+function boundedOptionalString(value: unknown, maxLength: number): boolean {
+  return value === undefined || (typeof value === "string" && value.length <= maxLength);
+}
+
+function finiteOptionalNumber(value: unknown): boolean {
+  return value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0);
+}
 
 export function isRuntimeErrorMessage(data: unknown): data is RuntimeErrorMessage {
   const d = data as Partial<RuntimeErrorMessage> | null;
   return Boolean(
     d && typeof d === "object" && d.source === "dezin" && d.type === "runtime-error" &&
-      typeof d.message === "string" && typeof d.kind === "string" && KINDS.has(d.kind as RuntimeErrorKind),
+      typeof d.message === "string" && d.message.length > 0 && d.message.length <= 4_096 &&
+      typeof d.kind === "string" && KINDS.has(d.kind as RuntimeErrorKind) &&
+      typeof d.errorType === "string" && ERROR_TYPES.has(d.errorType as RuntimeErrorType) &&
+      typeof d.count === "number" && Number.isInteger(d.count) && d.count >= 1 && d.count <= 1_000_000 &&
+      typeof d.at === "number" && Number.isFinite(d.at) && d.at >= 0 &&
+      boundedOptionalString(d.stack, 16_384) && boundedOptionalString(d.src, 2_048) &&
+      finiteOptionalNumber(d.line) && finiteOptionalNumber(d.col),
   );
 }
 
@@ -83,30 +98,45 @@ export function usePreviewRuntimeErrors(args: {
   iframeRef: RefObject<HTMLIFrameElement | null>;
   previewSrc: string | null;
   runActive: boolean;
-}): { fatal: RuntimeError | null; nonFatal: RuntimeError[]; dismissFatal(): void; dismissNonFatal(sig: string): void } {
-  const { iframeRef, previewSrc, runActive } = args;
+  listenToWindow?: boolean;
+}): {
+  fatal: RuntimeError | null;
+  nonFatal: RuntimeError[];
+  ingestMessage(data: unknown): void;
+  reset(): void;
+  dismissFatal(): void;
+  dismissNonFatal(sig: string): void;
+} {
+  const { iframeRef, previewSrc, runActive, listenToWindow = true } = args;
   const [state, setState] = useState<RuntimeErrorState>(initialRuntimeErrorState);
   const runActiveRef = useRef(runActive);
   runActiveRef.current = runActive;
 
+  const ingestMessage = useCallback((data: unknown): void => {
+    if (isRuntimeErrorMessage(data)) {
+      setState((current) => ingestRuntimeError(current, data, { runActive: runActiveRef.current }));
+    }
+  }, []);
+  const reset = useCallback((): void => setState(resetRuntimeErrors()), []);
+
   useEffect(() => {
     setState(resetRuntimeErrors());
+    if (!listenToWindow) return;
     const onMessage = (event: MessageEvent): void => {
       const iframe = iframeRef.current;
       if (!iframe?.contentWindow || event.source !== iframe.contentWindow) return;
       if (event.origin !== previewBridgeOriginForSrc(previewSrc)) return;
-      const data = event.data;
-      if (isRuntimeErrorMessage(data)) {
-        setState((s) => ingestRuntimeError(s, data, { runActive: runActiveRef.current }));
-      }
+      ingestMessage(event.data);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [iframeRef, previewSrc]);
+  }, [iframeRef, ingestMessage, listenToWindow, previewSrc]);
 
   return {
     fatal: state.fatal,
     nonFatal: state.nonFatal,
+    ingestMessage,
+    reset,
     dismissFatal: () => setState(dismissFatal),
     dismissNonFatal: (sig: string) => setState((s) => dismissNonFatal(s, sig)),
   };

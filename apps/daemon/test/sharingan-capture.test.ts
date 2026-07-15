@@ -256,6 +256,40 @@ test("capturePage accepts a same-origin canonical redirect and labels evidence w
   assert.match(page?.dom ?? "", new RegExp(pageDir(finalUrl).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+test("capturePage retries an unusable navigation cached by browser startup", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "shar-retry-open-navigation-"));
+  let navigations = 0;
+  const session = {
+    ...fakeCaptureSession(),
+    navigationFor: () => ({ status: 0, finalUrl: "about:blank" }),
+    navigate: async (url: string) => {
+      navigations += 1;
+      return { status: 200, finalUrl: url };
+    },
+  } as unknown as SharinganSession;
+
+  const result = await capturePage(session, projectDir, "https://x.test/", () => {}, {
+    reuseCurrentNavigation: true,
+  });
+
+  assert.equal(navigations, 1, "a failed startup navigation gets one explicit retry");
+  assert.equal(result.page?.url, "https://x.test/");
+});
+
+test("capturePage refuses to label evidence after the browser drifts from the attested final URL", async () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "shar-navigation-drift-"));
+  const session = {
+    ...fakeCaptureSession(),
+    currentUrl: () => "https://x.test/changed",
+  } as unknown as SharinganSession;
+
+  await assert.rejects(
+    capturePage(session, projectDir, "https://x.test/", () => {}),
+    /changed after navigation|navigation identity/i,
+  );
+  assert.equal(existsSync(join(projectDir, ".sharingan")), false);
+});
+
 test("capturePage preserves a login wall reached through a redirect instead of treating it as source evidence", async () => {
   const projectDir = mkdtempSync(join(tmpdir(), "shar-login-redirect-"));
 

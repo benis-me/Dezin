@@ -43,6 +43,7 @@ import {
   releaseProjectRuntime,
   releaseVariantRuntime,
   stopAllProjectRuntimes,
+  type PreviewRuntimeOptions,
 } from "./project-runtime.ts";
 import { handleSharinganStart, handleSharinganCancel, handleSharinganStatus, handleSharinganShot, handleSharinganEvents, handleSharinganContinue, handleSharinganFocus, handleSharinganNavigate, handleSharinganReadDom, handleSharinganComputedStyles, handleSharinganLinks, handleSharinganClick, handleSharinganScroll, handleSharinganCapture, closeAllSharinganSessions, releaseSharinganProject, removeSharinganProjectProfiles, sharinganRunCaptureId, type SharinganOpen } from "./sharingan-handler.ts";
 import { activeArtifactDir, variantArtifactDir, variantRuntimeKey, isStandardRootVariant, removeStandardVariantWorktree, removeStandardVersionWorktree } from "./variant-workspaces.ts";
@@ -54,7 +55,16 @@ import { handleListModelProviderModels, handleTestModelProvider } from "./model-
 import { analyzeImage } from "./analyze-image.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { optimizePrompt, type PromptOptimizer } from "./prompt-optimize.ts";
-import { captureCover, captureCoverUrl } from "./capture-cover.ts";
+import {
+  captureCover,
+  captureCoverUrl,
+  type ArtifactThumbnailCapture,
+} from "./capture-cover.ts";
+import type {
+  ApplyArtifactMutationInput,
+  ArtifactMutationCandidateContext,
+} from "./artifact-mutation.ts";
+import type { ArtifactThumbnailRenderer } from "./artifact-thumbnail.ts";
 import type { VisualQaRunner } from "./visual-qa.ts";
 import { handleGenerateProjectTitle, type TitleGenerator } from "./title-handler.ts";
 import {
@@ -94,6 +104,7 @@ import {
 import { removeStandardRunTransaction } from "./standard-run-transaction.ts";
 import {
   previewLeaseManager,
+  requirePreviewLease,
   type PreviewLease,
   type PreviewLeaseManager,
 } from "./preview-lease.ts";
@@ -115,6 +126,14 @@ import {
   handleRejectProposal,
   handleUpdateProposal,
 } from "./workspace-handler.ts";
+import {
+  handleAcquirePreviewTargetLease,
+  handleResolvePreviewTarget,
+} from "./preview-target-handler.ts";
+import {
+  handleArtifactMutation,
+  handleArtifactThumbnail,
+} from "./artifact-editor-handler.ts";
 
 export type DevServerLease = Pick<PreviewLease, "url"> & Partial<Omit<PreviewLease, "url">>;
 
@@ -142,6 +161,7 @@ export interface AppDeps {
     runtimeKey?: string,
     signal?: AbortSignal,
     leaseManager?: PreviewLeaseManager,
+    options?: PreviewRuntimeOptions,
   ) => Promise<DevServerLease>;
   releaseDevServer?: typeof releaseDevServer;
   /** Daemon-owned preview process leases; tests may inject a deterministic manager. */
@@ -150,6 +170,14 @@ export interface AppDeps {
   captureCoverUrl?: (url: string, outPath: string, signal?: AbortSignal) => Promise<boolean>;
   /** Cover capture hook for HTML snapshot files; tests can avoid launching Chrome. */
   captureCover?: (htmlPath: string, outPath: string, signal?: AbortSignal) => Promise<boolean>;
+  /** Additional project-specific validation after the built-in bounded source parser succeeds. */
+  artifactMutationValidator?: (candidate: ArtifactMutationCandidateContext) => void | Promise<void>;
+  /** Immutable Resource Revision URL resolver for the bounded set-asset command. */
+  artifactMutationAssetResolver?: NonNullable<ApplyArtifactMutationInput["resolveAssetSource"]>;
+  /** Exact immutable Artifact Revision thumbnail renderer; null explicitly disables rendering. */
+  artifactThumbnailRenderer?: ArtifactThumbnailRenderer | null;
+  /** Low-level exact-frame capture hook used by the production thumbnail renderer. */
+  artifactThumbnailCapture?: ArtifactThumbnailCapture;
   /** Sharingan browser opener; tests can delay session creation without launching Chrome. */
   sharinganOpen?: SharinganOpen;
   /** Import continuation checkpoint; tests can pause immediately after project ownership is registered. */
@@ -314,6 +342,43 @@ function validateRouteParams(params: Record<string, string>): void {
   }
 }
 
+async function withRequestAbortSignal(
+  req: IncomingMessage,
+  res: ServerResponse,
+  scopeSignal: AbortSignal,
+  operation: (signal: AbortSignal) => void | Promise<void>,
+): Promise<void> {
+  const requestController = new AbortController();
+  const abortRequest = (): void => {
+    if (!requestController.signal.aborted) {
+      requestController.abort(new DOMException("request closed", "AbortError"));
+    }
+  };
+  const closeResponse = (): void => {
+    if (!res.writableEnded) abortRequest();
+  };
+  req.once("aborted", abortRequest);
+  res.once("close", closeResponse);
+  try {
+    try {
+      await operation(AbortSignal.any([scopeSignal, requestController.signal]));
+    } catch (error) {
+      if (
+        scopeSignal.aborted
+        && !requestController.signal.aborted
+        && error instanceof Error
+        && error.name === "AbortError"
+      ) {
+        throw new HttpError(409, "Runtime scope operation was cancelled");
+      }
+      throw error;
+    }
+  } finally {
+    req.off("aborted", abortRequest);
+    res.off("close", closeResponse);
+  }
+}
+
 const routes: Route[] = [
   {
     method: "GET",
@@ -386,6 +451,32 @@ const routes: Route[] = [
     handler: handleGetArtifactRevision,
   },
   {
+    method: "POST",
+    pattern: "/api/projects/:id/artifacts/:artifactId/mutations",
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      (scopeSignal) => withRequestAbortSignal(
+        req,
+        res,
+        scopeSignal,
+        (signal) => handleArtifactMutation(req, res, params, deps, signal),
+      ),
+    ),
+  },
+  {
+    method: "GET",
+    pattern: "/api/projects/:id/artifacts/:artifactId/revisions/:revisionId/thumbnail",
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      (scopeSignal) => withRequestAbortSignal(
+        req,
+        res,
+        scopeSignal,
+        (signal) => handleArtifactThumbnail(req, res, params, deps, signal),
+      ),
+    ),
+  },
+  {
     method: "GET",
     pattern: "/api/projects/:id/workspace/snapshots",
     handler: handleListWorkspaceSnapshots,
@@ -401,12 +492,44 @@ const routes: Route[] = [
     handler: (_req, res, _p, deps) => sendJson(res, 200, { ok: true, version: deps.version ?? "0.0.0" }),
   },
   {
+    method: "POST",
+    pattern: "/api/projects/:id/preview-targets/resolve",
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      (scopeSignal) => withRequestAbortSignal(
+        req,
+        res,
+        scopeSignal,
+        (signal) => handleResolvePreviewTarget(req, res, params, deps, signal),
+      ),
+    ),
+  },
+  {
+    method: "POST",
+    pattern: "/api/projects/:id/preview-targets/leases",
+    handler: (req, res, params, deps) => deps.runtimeSupervisor!.trackOperation(
+      { projectId: params.id! },
+      (scopeSignal) => withRequestAbortSignal(
+        req,
+        res,
+        scopeSignal,
+        (signal) => handleAcquirePreviewTargetLease(req, res, params, deps, signal),
+      ),
+    ),
+  },
+  {
     method: "PATCH",
     pattern: "/api/preview-leases/:leaseId",
     handler: async (_req, res, { leaseId }, deps) => {
-      const lease = await deps.previewLeaseManager!.renew(leaseId!);
-      if (!lease) return sendError(res, 404, "preview lease not found");
-      sendJson(res, 200, { leaseId: lease.leaseId, url: lease.url, expiresAt: lease.expiresAt });
+      const renewed = await deps.previewLeaseManager!.renew(leaseId!);
+      if (!renewed) return sendError(res, 404, "preview lease not found");
+      const lease = requirePreviewLease(renewed, "preview lease renewal");
+      sendJson(res, 200, {
+        leaseId: lease.leaseId,
+        url: lease.url,
+        bridgeNonce: lease.bridgeNonce,
+        expiresAt: lease.expiresAt,
+      });
     },
   },
   {
@@ -813,7 +936,7 @@ const routes: Route[] = [
       if (!project) return sendError(res, 404, "project not found");
       try {
         const active = deps.store.getActiveVariantId(id!) ?? deps.store.ensureMainVariant(id!).id;
-        const lease = await deps.runtimeSupervisor!.trackOperation(
+        const lease = requirePreviewLease(await deps.runtimeSupervisor!.trackOperation(
           { projectId: id!, variantId: active },
           async (signal) => {
             const dir = await activeArtifactDir(deps, project);
@@ -826,8 +949,13 @@ const routes: Route[] = [
               deps.previewLeaseManager,
             );
           },
-        );
-        sendJson(res, 200, { url: lease.url, leaseId: lease.leaseId, expiresAt: lease.expiresAt });
+        ), "project dev server");
+        sendJson(res, 200, {
+          url: lease.url,
+          leaseId: lease.leaseId,
+          bridgeNonce: lease.bridgeNonce,
+          expiresAt: lease.expiresAt,
+        });
       } catch (err) {
         sendError(res, 409, err instanceof Error ? err.message : "dev server unavailable");
       }
@@ -1491,6 +1619,7 @@ export function createApp(deps: AppDeps): http.Server {
       requireDaemonRequest(req, appDeps.security);
       sendError(res, 404, "not found");
     } catch (err) {
+      if (req.aborted || res.destroyed || res.writableEnded) return;
       if (err instanceof RuntimeScopeUnavailableError) {
         if (!res.headersSent) sendError(res, 409, err.message);
         else res.end();

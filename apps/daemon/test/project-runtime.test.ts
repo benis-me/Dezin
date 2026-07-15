@@ -5,7 +5,8 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { ensureDevServer, ensureProjectPickerBridge, gitRestoreTree, getSetup, releaseProjectRuntime, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
+import { disposePreviewRuntimeState, ensureDevServer, ensureProjectPickerBridge, gitRestoreTree, getSetup, releaseProjectRuntime, setupImportedStandardProject, stopAllDevServers, templateDir } from "../src/project-runtime.ts";
+import type { PreviewLeaseManager } from "../src/preview-lease.ts";
 import {
   StandardRunPublishConflictError,
   StandardRunSourceDirtyError,
@@ -49,6 +50,14 @@ async function waitForFile(path: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`timed out waiting for ${path}`);
+}
+
+async function waitForCondition(predicate: () => boolean, message: string): Promise<void> {
+  for (let i = 0; i < 100; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  throw new Error(message);
 }
 
 test("ensureProjectPickerBridge updates only the copied Dezin picker bridge", async () => {
@@ -121,6 +130,8 @@ test("a historical dev server instruments preview HTML without committing or dir
       devDependencies: { vite: "*", "@vitejs/plugin-react": "*" },
     }));
     writeFileSync(join(dir, "index.html"), '<!doctype html><html><head></head><body><main id="root">Historical</main></body></html>');
+    mkdirSync(join(dir, ".dezin"));
+    writeFileSync(join(dir, ".dezin", "render-context.js"), "window.__DEZIN_RENDER_CONTEXT__={version:1};\n");
     mkdirSync(join(dir, "src"));
     writeFileSync(join(dir, "src", "App.jsx"), "export default function App(){ return <main>Historical source</main> }\n");
     mkdirSync(join(dir, "node_modules", ".bin"), { recursive: true });
@@ -145,10 +156,14 @@ test("a historical dev server instruments preview HTML without committing or dir
 
     const lease = await ensureDevServer("historical-project", dir, runtimeKey);
     const firstHtml = await waitForText(lease.url);
+    const renderContextResponse = await fetch(new URL("/.dezin/render-context.js", lease.url));
     await new Promise((resolve) => setTimeout(resolve, 300));
     const settledHtml = await waitForText(lease.url);
 
     assert.match(firstHtml, /data-dezin-runtime-probe/);
+    assert.match(firstHtml, /data-dezin-render-context src="\/\.dezin\/render-context\.js"/);
+    assert.equal(renderContextResponse.status, 200);
+    assert.match(await renderContextResponse.text(), /__DEZIN_RENDER_CONTEXT__\s*=\s*\{\s*version:\s*1\s*\}/);
     assert.match(firstHtml, /attrs:attrs\(el\)/, "the external runtime config carries the current picker bridge");
     assert.match(settledHtml, /attrs:attrs\(el\)/, "instrumentation remains after Vite has settled");
     assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim(), head);
@@ -156,6 +171,224 @@ test("a historical dev server instruments preview HTML without committing or dir
     assert.equal(existsSync(join(dir, "hook-ran.txt")), false);
     assert.equal(execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }), "");
   } finally {
+    await stopAllDevServers();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("one aborted immutable-preview caller cannot dispose a runtime still being acquired by another", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-preview-runtime-shared-"));
+  const runtimeKey = "shared-preview:version:immutable-a";
+  let acquireCount = 0;
+  let releaseSecond!: () => void;
+  const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const configPaths: string[] = [];
+  const activeLeases = new Set<string>();
+  const manager: PreviewLeaseManager = {
+    async acquire(_scope, _projectDir, options = {}) {
+      acquireCount += 1;
+      const call = acquireCount;
+      assert.ok(options.configPath);
+      configPaths.push(options.configPath);
+      if (call === 1) {
+        await new Promise<void>((_resolve, reject) => {
+          const rejectAbort = () => reject(options.signal?.reason);
+          options.signal?.addEventListener("abort", rejectAbort, { once: true });
+          if (options.signal?.aborted) rejectAbort();
+        });
+      } else if (call === 2) {
+        await secondGate;
+        assert.equal(existsSync(options.configPath), true, "the shared historical config must outlive the other caller");
+      } else {
+        await new Promise<void>((_resolve, reject) => {
+          const rejectAbort = () => reject(options.signal?.reason);
+          options.signal?.addEventListener("abort", rejectAbort, { once: true });
+          if (options.signal?.aborted) rejectAbort();
+        });
+      }
+      options.onEntryReady?.();
+      activeLeases.add(`lease-${call}`);
+      return {
+        leaseId: `lease-${call}`,
+        url: `http://127.0.0.1:4310/#dezin-bridge=${"a".repeat(43)}`,
+        bridgeNonce: "a".repeat(43),
+        expiresAt: Date.now() + 60_000,
+        async release() {
+          activeLeases.delete(`lease-${call}`);
+          await options.onEntryDispose?.();
+        },
+      };
+    },
+    async renew(leaseId) {
+      return activeLeases.has(leaseId)
+        ? {
+            leaseId,
+            url: `http://127.0.0.1:4310/#dezin-bridge=${"a".repeat(43)}`,
+            bridgeNonce: "a".repeat(43),
+            expiresAt: Date.now() + 60_000,
+            async release() { activeLeases.delete(leaseId); },
+          }
+        : null;
+    },
+    async release() { return false; },
+    async stopScope() {},
+    async stopAll() {},
+    activeCount() { return 0; },
+  };
+
+  try {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module", scripts: { dev: "vite" } }));
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify({
+      name: "shared-preview-fixture",
+      version: "1.0.0",
+      lockfileVersion: 3,
+      requires: true,
+      packages: { "": { name: "shared-preview-fixture", version: "1.0.0" } },
+    }));
+    writeFileSync(join(dir, "vite.config.js"), "export default {};\n");
+    mkdirSync(join(dir, "node_modules"));
+    const fingerprintHash = createHash("sha256");
+    for (const name of ["package.json", "package-lock.json"]) {
+      fingerprintHash.update(name).update("\0").update(readFileSync(join(dir, name))).update("\0");
+    }
+    const fingerprint = fingerprintHash.digest("hex");
+    writeFileSync(join(dir, "node_modules", ".dezin-dependency-fingerprint"), `${fingerprint}\n`);
+
+    const controller = new AbortController();
+    const first = ensureDevServer("shared-preview", dir, runtimeKey, controller.signal, manager, { immutableSource: true })
+      .catch(async (error) => {
+        await disposePreviewRuntimeState(runtimeKey);
+        throw error;
+      });
+    await waitForCondition(() => acquireCount === 1, "first shared preview did not reach lease acquisition");
+    const second = ensureDevServer("shared-preview", dir, runtimeKey, undefined, manager, { immutableSource: true });
+    await waitForCondition(() => acquireCount === 2, "second shared preview did not reach lease acquisition");
+
+    controller.abort(new Error("first preview caller disconnected"));
+    await assert.rejects(first, /first preview caller disconnected/);
+    assert.equal(configPaths[0], configPaths[1]);
+    releaseSecond();
+    const lease = await second;
+    assert.equal(lease.leaseId, "lease-2");
+
+    const laterController = new AbortController();
+    const later = ensureDevServer("shared-preview", dir, runtimeKey, laterController.signal, manager, { immutableSource: true })
+      .catch(async (error) => {
+        await disposePreviewRuntimeState(runtimeKey);
+        throw error;
+      });
+    await waitForCondition(() => acquireCount === 3, "later shared preview did not reach lease acquisition");
+    laterController.abort(new Error("later caller disconnected"));
+    await assert.rejects(later, /later caller disconnected/);
+    assert.ok(configPaths[1]);
+    assert.equal(existsSync(configPaths[1]), true, "a failed sibling caller must not dispose the owned runtime");
+    assert.equal((await manager.renew(lease.leaseId))?.leaseId, lease.leaseId);
+    await lease.release();
+  } finally {
+    releaseSecond();
+    await stopAllDevServers();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an aborted immutable preparation remains a barrier for a late caller", { timeout: 8_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-preview-runtime-late-join-"));
+  const binDir = join(dir, "bin");
+  const npmLog = join(dir, "npm.log");
+  const npmGate = join(dir, "npm.release");
+  const runtimeKey = "late-join-preview:version:immutable-a";
+  const previousPath = process.env.PATH;
+  let first: Promise<unknown> | undefined;
+  let second: Promise<Awaited<ReturnType<typeof ensureDevServer>>> | undefined;
+  let entryCount = 0;
+  const manager: PreviewLeaseManager = {
+    async acquire(_scope, _projectDir, options = {}) {
+      entryCount += 1;
+      options.onEntryReady?.();
+      const leaseId = `late-join-${entryCount}`;
+      return {
+        leaseId,
+        url: `http://127.0.0.1:4311/#dezin-bridge=${"b".repeat(43)}`,
+        bridgeNonce: "b".repeat(43),
+        expiresAt: Date.now() + 60_000,
+        async release() { await options.onEntryDispose?.(); },
+      };
+    },
+    async renew() { return null; },
+    async release() { return false; },
+    async stopScope() {},
+    async stopAll() {},
+    activeCount() { return entryCount; },
+  };
+
+  try {
+    mkdirSync(binDir);
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "late-join-fixture", version: "1.0.0" }));
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify({
+      name: "late-join-fixture",
+      version: "1.0.0",
+      lockfileVersion: 3,
+      requires: true,
+      packages: { "": { name: "late-join-fixture", version: "1.0.0" } },
+    }));
+    writeFileSync(join(dir, "vite.config.js"), "export default {};\n");
+    const fakeNpm = join(binDir, "npm");
+    writeFileSync(
+      fakeNpm,
+      `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(npmLog)}, "start " + process.pid + "\\n");
+process.on("SIGTERM", () => fs.appendFileSync(${JSON.stringify(npmLog)}, "term " + process.pid + "\\n"));
+const timer = setInterval(() => {
+  if (!fs.existsSync(${JSON.stringify(npmGate)})) return;
+  clearInterval(timer);
+  fs.mkdirSync(${JSON.stringify(join(dir, "node_modules"))}, { recursive: true });
+  process.exit(0);
+}, 5);
+`,
+    );
+    chmodSync(fakeNpm, 0o755);
+    process.env.PATH = `${binDir}:${previousPath ?? ""}`;
+
+    const controller = new AbortController();
+    first = ensureDevServer(
+      "late-join-preview",
+      dir,
+      runtimeKey,
+      controller.signal,
+      manager,
+      { immutableSource: true },
+    );
+    void first.catch(() => {});
+    await waitForFile(npmLog);
+    assert.match(readFileSync(npmLog, "utf8"), /start /);
+
+    controller.abort(new Error("first immutable caller disconnected"));
+    await waitForCondition(() => readFileSync(npmLog, "utf8").includes("term"), "aborted npm ci was not asked to stop");
+    second = ensureDevServer(
+      "late-join-preview",
+      dir,
+      runtimeKey,
+      undefined,
+      manager,
+      { immutableSource: true },
+    );
+    void second.catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(
+      readFileSync(npmLog, "utf8").split("\n").filter((line) => line.startsWith("start ")).length,
+      1,
+      "a late caller must wait for the aborted preparation to settle before starting another npm ci",
+    );
+
+    writeFileSync(npmGate, "release\n");
+    await assert.rejects(first, /first immutable caller disconnected|runtime released/);
+    const lease = await second;
+    await lease.release();
+  } finally {
+    writeFileSync(npmGate, "release\n");
+    await Promise.allSettled([first, second].filter((promise): promise is Promise<unknown> => promise !== undefined));
+    process.env.PATH = previousPath;
     await stopAllDevServers();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -324,6 +557,40 @@ setInterval(() => {}, 1000);
   } finally {
     await stopAllDevServers();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("immutable preview fails closed before resolution when its npm lockfile is missing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dezin-immutable-lock-"));
+  let acquireCount = 0;
+  const manager: PreviewLeaseManager = {
+    async acquire() {
+      acquireCount += 1;
+      return {
+        leaseId: "should-not-acquire",
+        url: `http://127.0.0.1:4310/#dezin-bridge=${"a".repeat(43)}`,
+        bridgeNonce: "a".repeat(43),
+        expiresAt: Date.now() + 60_000,
+        async release() {},
+      };
+    },
+    async renew() { return null; },
+    async release() { return false; },
+    async stopScope() {},
+    async stopAll() {},
+    activeCount() { return 0; },
+  };
+  try {
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "immutable-no-lock", version: "1.0.0" }));
+    await assert.rejects(
+      ensureDevServer("immutable-no-lock", dir, "immutable-no-lock:assembly-a", undefined, manager, { immutableSource: true }),
+      /immutable preview requires an npm lockfile/i,
+    );
+    assert.equal(acquireCount, 0);
+    assert.equal(existsSync(join(dir, "package-lock.json")), false, "preview preparation cannot resolve and write a new lock");
+  } finally {
+    await stopAllDevServers();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

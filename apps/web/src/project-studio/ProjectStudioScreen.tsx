@@ -1,7 +1,8 @@
 import { lazy, Suspense, type ComponentType, type ExoticComponent } from "react";
 import { Button } from "../components/ui/index.ts";
-import type { WorkspaceArtifact } from "../lib/api.ts";
 import { navigate } from "../router.tsx";
+import { ArtifactEditorSurface, useArtifactEditorController } from "./artifact/ArtifactEditorSurface.tsx";
+import { ArtifactInspector } from "./artifact/ArtifactInspector.tsx";
 import { ProjectStudioShell } from "./ProjectStudioShell.tsx";
 import { ProposalReviewPanel } from "./proposal/ProposalReviewPanel.tsx";
 import { useProjectStudio } from "./useProjectStudio.ts";
@@ -48,32 +49,6 @@ function ProjectCanvasLoading() {
   );
 }
 
-function ArtifactPlaceholder({ artifactId, artifact }: { artifactId: string; artifact: WorkspaceArtifact | null }) {
-  return (
-    <section role="region" aria-label="Artifact editor" className="flex h-full min-h-0 min-w-0 flex-col">
-      <header className="app-drag flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border px-3.5">
-        <div className="min-w-0">
-          <h1 className="truncate text-xs font-medium tracking-[-0.01em] text-foreground">
-            {artifact?.name ?? "Artifact unavailable"}
-          </h1>
-          <p className="mt-0.5 truncate font-mono text-[9px] text-muted-foreground">{artifactId}</p>
-        </div>
-        <span className="shrink-0 rounded-md bg-surface-2 px-1.5 py-0.5 text-[10px] font-medium capitalize text-muted-foreground">
-          {artifact?.kind ?? "artifact"}
-        </span>
-      </header>
-      <div className="dz-canvas grid min-h-0 flex-1 place-items-center px-8 text-center">
-        <div className="max-w-xs rounded-lg border border-border bg-card/90 px-4 py-3 shadow-sm">
-          <p className="text-xs font-medium text-foreground">
-            {artifact ? "Artifact editor ready" : "Artifact isn't in the active workspace"}
-          </p>
-          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">The focused editing surface arrives with artifact tools.</p>
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function InspectorPlaceholder({ selectedCount, zoom }: { selectedCount: number; zoom: number }) {
   return (
     <section className="flex h-full min-h-0 flex-col" aria-labelledby="studio-inspector-title">
@@ -104,6 +79,20 @@ export function ProjectStudioScreen({
 }) {
   const studio = useProjectStudio(projectId);
   const { load } = studio;
+  const readyWorkspace = load.status === "ready" ? load.workspace : null;
+  const activeArtifact = artifactId === null
+    ? null
+    : readyWorkspace?.artifacts.find((candidate) => candidate.id === artifactId) ?? null;
+  const artifactEditor = useArtifactEditorController({
+    projectId,
+    artifactId,
+    artifact: activeArtifact,
+    tracks: readyWorkspace?.tracks.filter((track) => track.artifactId === artifactId) ?? [],
+    revisions: readyWorkspace?.revisions.filter((revision) => revision.artifactId === artifactId) ?? [],
+    activeRevisionId: artifactId === null ? null : readyWorkspace?.activeSnapshot.artifactRevisions[artifactId] ?? null,
+    activeSnapshotId: readyWorkspace?.activeSnapshot.id ?? null,
+    onArtifactPublished: studio.reconcileArtifactPublication,
+  });
 
   if (load.status === "loading") return <RouteLoading artifact={artifactId !== null} />;
   if (load.status === "error") {
@@ -126,10 +115,11 @@ export function ProjectStudioScreen({
     return <LegacyFallback projectId={projectId} onOpenSettings={onOpenSettings} />;
   }
 
-  const artifact = artifactId === null
-    ? null
-    : load.workspace.artifacts.find((candidate) => candidate.id === artifactId) ?? null;
-  const contextLabel = `${load.workspace.artifacts.length} ${load.workspace.artifacts.length === 1 ? "artifact" : "artifacts"}`;
+  const artifactScope = activeArtifact?.kind === "component" ? "Component" : activeArtifact?.kind === "page" ? "Page" : "Artifact";
+  const contextLabel = artifactId === null
+    ? `${load.workspace.artifacts.length} ${load.workspace.artifacts.length === 1 ? "artifact" : "artifacts"}`
+    : `${artifactScope} · ${artifactEditor.selection ? "1 selected element" : "artifact context"}`;
+  const agentTitle = artifactId === null ? "Workspace Agent" : "Artifact Agent";
   const reviewableProposal = studio.proposalReview.status === "draft"
     || studio.proposalReview.status === "saving"
     || studio.proposalReview.status === "validation-error"
@@ -158,21 +148,14 @@ export function ProjectStudioScreen({
           />
         </Suspense>
       )
-    : <ArtifactPlaceholder artifactId={artifactId} artifact={artifact} />;
-
-  return (
-    <ProjectStudioShell
-      agent={(
-        <WorkspaceAgentPanel
-          draft={studio.workspaceAgentDraft}
-          onDraftChange={studio.setWorkspaceAgentDraft}
-          contextLabel={contextLabel}
+    : (
+        <ArtifactEditorSurface
+          editor={artifactEditor}
+          onBack={() => navigate(`/projects/${encodeURIComponent(projectId)}/canvas`)}
         />
-      )}
-      main={main}
-      inspector={studio.proposalReview.status === "idle" ? (
-        <InspectorPlaceholder selectedCount={studio.selectedGraphObjectIds.length} zoom={studio.viewport.zoom} />
-      ) : (
+      );
+  const proposalReviewOpen = studio.proposalReview.status !== "idle";
+  const inspector = proposalReviewOpen ? (
         <ProposalReviewPanel
           review={studio.proposalReview}
           focusedChangeKey={studio.focusedProposalChangeKey}
@@ -187,8 +170,46 @@ export function ProjectStudioScreen({
           onReject={studio.rejectProposal}
           onClose={studio.closeProposalReview}
         />
+      ) : artifactId !== null
+    ? <ArtifactInspector editor={artifactEditor} />
+    : (
+        <InspectorPlaceholder selectedCount={studio.selectedGraphObjectIds.length} zoom={studio.viewport.zoom} />
+      );
+
+  return (
+    <ProjectStudioShell
+      agent={(
+        <WorkspaceAgentPanel
+          draft={studio.workspaceAgentDraft}
+          onDraftChange={studio.setWorkspaceAgentDraft}
+          contextLabel={contextLabel}
+          title={agentTitle}
+          draftLabel={`${agentTitle} draft`}
+          placeholder={artifactId === null
+            ? "Plan a page, component, or workspace change…"
+            : "Describe a focused change to this artifact or selected element…"}
+          scopeLabel={artifactId === null ? "Workspace" : artifactScope}
+          contextItems={artifactId !== null && artifactEditor.selection ? [{
+            id: artifactEditor.selection.id,
+            label: artifactEditor.selection.label,
+            kind: "Selected element",
+            projectId: artifactEditor.selection.projectId,
+            artifactId: artifactEditor.selection.artifactId,
+            revisionId: artifactEditor.selection.revisionId,
+            targetKey: artifactEditor.selection.targetKey,
+            assemblyHash: artifactEditor.selection.assemblyHash,
+            frameId: artifactEditor.selection.frameId,
+            locator: artifactEditor.selection.locator,
+          }] : []}
+        />
       )}
-      inspectorOpen={studio.proposalReview.status !== "idle"}
+      main={main}
+      inspector={inspector}
+      agentLabel={agentTitle}
+      inspectorOpen={artifactId !== null || proposalReviewOpen}
+      inspectorLabel="Inspector"
+      inspectorToggleLabel={proposalReviewOpen ? "proposal review" : "artifact inspector"}
+      presentation={artifactId !== null && artifactEditor.presentation}
     />
   );
 }

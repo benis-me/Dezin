@@ -41,6 +41,7 @@ import { bestVersion } from "./best-version.ts";
 import type { QualityFinding, Run, Settings } from "../../../packages/core/src/index.ts";
 import { readJsonBody, sendError, sendJson } from "./http-util.ts";
 import { projectDir } from "./serve-static.ts";
+import { requirePreviewLease } from "./preview-lease.ts";
 import { standardVariantArtifactDir, variantRuntimeKey } from "./variant-workspaces.ts";
 import {
   StandardRunSourceDirtyError,
@@ -1073,7 +1074,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
   if (project.mode === "standard") {
     let publishedSuccessPatch: RunSettlementPatch | null = null;
     let livePreviewLease: DevServerLease | null = null;
-    let handedOffLivePreviewLease = false;
     const settlePublishedSuccess = (patch: RunSettlementPatch): void => {
       let lastError: unknown;
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1121,12 +1121,15 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const stuckDefectKeys = new Set<string>(); // defects the agent repeatedly failed to fix
       const emitStandardPreviewUpdate = async (eventRound: number): Promise<void> => {
         try {
-          const nextLease = await ensureStandardDevServer(
-            project.id,
-            dir,
-            variantRuntimeKey(project.id, targetVariantId),
-            ctrl!.signal,
-            deps.previewLeaseManager,
+          const nextLease = requirePreviewLease(
+            await ensureStandardDevServer(
+              project.id,
+              dir,
+              variantRuntimeKey(project.id, targetVariantId),
+              ctrl!.signal,
+              deps.previewLeaseManager,
+            ),
+            "standard preview runtime",
           );
           const previousLease = livePreviewLease;
           livePreviewLease = nextLease;
@@ -1137,9 +1140,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
             runId: run.id,
             mode: "standard",
             variantId: targetVariantId,
-            previewUrl: nextLease.url,
-            leaseId: nextLease.leaseId,
-            expiresAt: nextLease.expiresAt,
             t: Date.now(),
             round: eventRound,
           });
@@ -1490,7 +1490,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         event: { type: "run-done", runId: run.id, passed, rounds: repairRounds, score, mode: "standard", designReviewed, findings: persistedFindings },
       };
       settlePublishedSuccess(publishedSuccessPatch);
-      handedOffLivePreviewLease = true;
       const activeForCover = store.getActiveVariantId(project.id) ?? mainVariant.id;
       if (targetVariantId === activeForCover) {
         const cover = deps.runtimeSupervisor!.trackOperation(
@@ -1549,14 +1548,17 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       const message = cancelled ? "Stopped." : `The run failed: ${errorMessage}`;
       store.addMessage(conversation.id, "system", resultMessage(message, cancelled ? {} : { error: true }));
     } finally {
-      if (!handedOffLivePreviewLease) await (livePreviewLease as DevServerLease | null)?.release?.();
+      await (livePreviewLease as DevServerLease | null)?.release?.();
     }
     return;
   }
 
   // Stream the preview live: emit an event whenever the agent rewrites index.html.
-  const previewUrl = `/projects/${project.id}/preview/`;
-  stopPoll = startPreviewPoller(join(dir, "index.html"), (t) => sse({ type: "preview-update", previewUrl, t }));
+  const previewBaseUrl = `/projects/${project.id}/preview/`;
+  stopPoll = startPreviewPoller(join(dir, "index.html"), (t) => sse({
+    type: "preview-update",
+    t,
+  }));
 
   try {
     const result = await generateArtifact({
@@ -1664,7 +1666,7 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
       // screenshot even when review is disabled, and never create immutable evidence for a
       // disabled review.
       await rm(visualScreenshotPath, { force: true });
-      const screenshotUrl = `${previewUrl}.visual-qa/screenshot.png`;
+      const screenshotUrl = `${previewBaseUrl}.visual-qa/screenshot.png`;
       if (settings.visualQaEnabled) sse({ ...visualQaStartPayload(round, settings, runAgentCommand, runModel, screenshotUrl), runId: run.id });
       let visualFindings = await runVisualQa(deps, join(dir, artifactPath), settings, runAgentCommand, runModel, visibleBrief, repairHistory, {
         projectRoot: dir,
@@ -1837,7 +1839,6 @@ export async function handleRun(req: IncomingMessage, res: ServerResponse, deps:
         rounds: repairRounds,
         score,
         designReviewed,
-        previewUrl: `/projects/${project.id}/preview/`,
         findings: persistedFindings,
       },
     });

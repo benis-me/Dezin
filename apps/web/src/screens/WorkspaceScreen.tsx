@@ -86,10 +86,18 @@ import { navigate } from "../router.tsx";
 import { persistAgentModelDefaults } from "../lib/agent-model-defaults.ts";
 import { filesFromDataTransfer, hasDraggedFiles } from "../lib/drag-drop.ts";
 import { setPendingAgent, setPendingBrief, takePendingBrief, takePendingImages, takePendingAgent, takePendingModel, takePendingRefs } from "../lib/pending-brief.ts";
-import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Moodboard, Project, ProjectFile, ProjectMode, QualityFinding, ResearchDetail, RunEvent, RunSummary, Settings as AppSettings, SetupPhase, VersionPreview } from "../lib/api.ts";
+import type { Conversation, Variant, DesignSystemCard, EffectCard, Message, Moodboard, PreviewLeaseInfo, Project, ProjectFile, ProjectMode, QualityFinding, ResearchDetail, RunEvent, RunSummary, Settings as AppSettings, SetupPhase, VersionPreview } from "../lib/api.ts";
 import { fetchProjectArtifact, slugify, toBase64 } from "../lib/project-ref.ts";
 import { panelPercentFromPixels, readPanelPercent, readStoredPanelPercent, RESIZE_SEPARATOR_CLASS, savePanelFraction, twoPanelLayout } from "../lib/panel-layout.ts";
-import { previewBridgeOriginForSrc, previewSandboxForSrc } from "../lib/preview-sandbox.ts";
+import { previewSandboxForSrc } from "../lib/preview-sandbox.ts";
+import {
+  cacheBustedPreviewUrl,
+  previewBridgeAddressForSrc,
+  previewBridgeNonceForSrc,
+  usePreviewChannel,
+  withPreviewBridgeNonce,
+  type PreviewChannelMessage,
+} from "../lib/preview-channel.ts";
 import { usePreviewRuntimeErrors, buildRuntimeErrorRepairPrompt, type RuntimeError } from "../lib/preview-runtime-errors.ts";
 import { PreviewRuntimeErrorOverlay } from "../components/PreviewRuntimeErrorOverlay.tsx";
 import { cn } from "../lib/utils.ts";
@@ -109,7 +117,8 @@ type MoodboardRunRef = RunReference;
 type EffectRunRef = RunReference;
 type QueuedPrompt = { text: string; moodboardRefs?: MoodboardRunRef[]; effectRefs?: EffectRunRef[] };
 type PreviewBusyState = { title: string; detail?: string };
-type OwnedPreviewLease = { leaseId: string; expiresAt?: number };
+type OwnedPreviewLease = PreviewLeaseInfo;
+type DisplayVersionPreview = VersionPreview & { displayUrl: string };
 type WorkspaceContextItem = AgentComposerContextItem<MarkupTarget>;
 
 const SEVERITY_STYLE: Record<string, string> = {
@@ -138,6 +147,10 @@ const ACTIVE_TOOL_BUTTON_CLASS = "!bg-primary !text-primary-foreground hover:!bg
 const FLOATING_COMPOSER_FADE_PX = 48;
 const SCROLL_TO_BOTTOM_GAP_PX = 12;
 const MESSAGE_BOTTOM_CLEARANCE_PX = 44;
+const PREVIEW_LEASE_RENEW_INTERVAL_MS = 10_000;
+const PREVIEW_LEASE_EXPIRY_MARGIN_MS = 15_000;
+const PREVIEW_LEASE_RENEW_TIMEOUT_MS = 5_000;
+const COMPARE_PREVIEW_RESOLVE_TIMEOUT_MS = 15_000;
 // Per-conversation cap on unattended auto-fix dispatches. Bounds a pathological
 // "each repair yields a different crash" chain from firing unbounded runs.
 // Manual "Fix with Agent" clicks are not subject to this cap.
@@ -192,6 +205,8 @@ function readQueue(projectId: string): QueuedPrompt[] {
 
 type PreviewBridgeMessage = {
   source: "dezin";
+  nonce: string;
+  protocol: 1;
   type?: string;
   selector?: string;
   tag?: string;
@@ -203,14 +218,49 @@ type PreviewBridgeMessage = {
 
 export function isPreviewBridgeMessage(event: MessageEvent, iframe: HTMLIFrameElement | null, previewSrc?: string | null): event is MessageEvent<PreviewBridgeMessage> {
   const data = event.data as Partial<PreviewBridgeMessage> | null;
+  const address = previewBridgeAddressForSrc(previewSrc);
+  const nonce = previewBridgeNonceForSrc(previewSrc);
   return Boolean(
+    address.kind === "origin" &&
+      nonce !== null &&
     data &&
       typeof data === "object" &&
       data.source === "dezin" &&
+      data.nonce === nonce &&
+      data.protocol === 1 &&
       iframe?.contentWindow &&
       event.source === iframe.contentWindow &&
-      event.origin === previewBridgeOriginForSrc(previewSrc),
+      event.origin === address.expectedEventOrigin,
   );
+}
+
+function requirePreviewLease(preview: PreviewLeaseInfo): OwnedPreviewLease {
+  if (!preview.leaseId.trim() || !Number.isFinite(preview.expiresAt)
+    || preview.expiresAt - Date.now() <= PREVIEW_LEASE_EXPIRY_MARGIN_MS
+    || previewBridgeNonceForSrc(preview.url) !== preview.bridgeNonce) {
+    throw new Error("Preview lease capability does not match its URL.");
+  }
+  return preview;
+}
+
+function requireVersionPreview(preview: VersionPreview): VersionPreview {
+  if (previewBridgeNonceForSrc(preview.url) !== preview.bridgeNonce) {
+    throw new Error("Version preview capability does not match its URL.");
+  }
+  if (preview.mode === "standard") {
+    if (typeof preview.leaseId !== "string" || preview.leaseId.trim().length === 0
+      || typeof preview.expiresAt !== "number" || !Number.isFinite(preview.expiresAt)
+      || preview.expiresAt - Date.now() <= PREVIEW_LEASE_EXPIRY_MARGIN_MS) {
+      throw new Error("Standard version preview lease metadata is incomplete or expired.");
+    }
+  } else if (preview.mode !== "prototype" || preview.leaseId !== undefined || preview.expiresAt !== undefined) {
+    throw new Error("Prototype version previews cannot carry a server lease.");
+  }
+  return preview;
+}
+
+function prototypePreviewUrl(url: string, timestamp = Date.now()): string {
+  return cacheBustedPreviewUrl(withPreviewBridgeNonce(url), timestamp);
 }
 
 export function buildProjectAnalysisPrompt(project: Project): string {
@@ -2074,8 +2124,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [variants, setVariants] = useState<Variant[]>([]);
   const [compare, setCompare] = useState<{
-    a: { url?: string; label: string; error?: string };
-    b: { url?: string; label: string; error?: string };
+    a: { url?: string; bridgeNonce?: string; label: string; error?: string };
+    b: { url?: string; bridgeNonce?: string; label: string; error?: string };
   } | null>(null);
   const { agents, rescan: rescanAgents } = useAgents();
   const [settingsAgent, setSettingsAgent] = useState<string | null>(null); // null = settings not loaded yet
@@ -2117,11 +2167,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
   const versionSourceRequestRef = useRef(0);
   const versionPreviewTargetRunIdRef = useRef<string | null>(null);
   const comparePreviewRequestRef = useRef(0);
+  const comparePreviewAbortRef = useRef<AbortController | null>(null);
   const mainPreviewRequestRef = useRef(0);
   const mainPreviewLeaseRef = useRef<OwnedPreviewLease | null>(null);
   const versionPreviewLeaseRef = useRef<OwnedPreviewLease | null>(null);
   const comparePreviewLeasesRef = useRef<OwnedPreviewLease[]>([]);
   const workspaceDisposedRef = useRef(false);
+  const reacquireMainPreviewRef = useRef<() => void>(() => {});
+  const reacquireVersionPreviewRef = useRef<(runId: string) => void>(() => {});
   const inspectedTargetRef = useRef<MarkupTarget | null>(null);
   const terminalEventRef = useRef(false);
   const liveQualityRef = useRef(false);
@@ -2136,6 +2189,30 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   const releaseOwnedPreviewLease = (lease: OwnedPreviewLease | null): void => {
     if (lease?.leaseId) void api.releasePreviewLease(lease.leaseId).catch(() => {});
+  };
+
+  const releaseReturnedPreviewLease = (leaseId: unknown): void => {
+    if (typeof leaseId === "string" && leaseId.length > 0) {
+      void api.releasePreviewLease(leaseId).catch(() => {});
+    }
+  };
+
+  const acceptPreviewLease = (preview: PreviewLeaseInfo): OwnedPreviewLease => {
+    try {
+      return requirePreviewLease(preview);
+    } catch (error) {
+      releaseReturnedPreviewLease(preview.leaseId);
+      throw error;
+    }
+  };
+
+  const acceptVersionPreview = (preview: VersionPreview): VersionPreview => {
+    try {
+      return requireVersionPreview(preview);
+    } catch (error) {
+      releaseReturnedPreviewLease(preview.leaseId);
+      throw error;
+    }
   };
 
   const replaceOwnedPreviewLease = (
@@ -2155,24 +2232,103 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
 
   useEffect(() => {
     workspaceDisposedRef.current = false;
+    const renewalControllers = new Map<string, AbortController>();
     const renewTimer = window.setInterval(() => {
-      const ids = new Set<string>();
-      for (const lease of [
-        mainPreviewLeaseRef.current,
-        versionPreviewLeaseRef.current,
-        ...comparePreviewLeasesRef.current,
-      ]) {
-        if (lease?.leaseId) ids.add(lease.leaseId);
-      }
-      for (const leaseId of ids) void api.renewPreviewLease(leaseId).catch(() => {});
-    }, 30_000);
+      const renew = (
+        lease: OwnedPreviewLease,
+        isCurrent: () => boolean,
+        onValid: (renewed: OwnedPreviewLease) => void,
+        onInvalid: () => void,
+      ): void => {
+        if (!isCurrent() || renewalControllers.has(lease.leaseId)) return;
+        if (lease.expiresAt - Date.now() <= PREVIEW_LEASE_EXPIRY_MARGIN_MS) {
+          onInvalid();
+          return;
+        }
+        const controller = new AbortController();
+        renewalControllers.set(lease.leaseId, controller);
+        const remainingBudget = Math.max(1, lease.expiresAt - Date.now() - PREVIEW_LEASE_EXPIRY_MARGIN_MS);
+        const timeout = window.setTimeout(
+          () => controller.abort(new Error("Preview lease renewal timed out")),
+          Math.min(PREVIEW_LEASE_RENEW_TIMEOUT_MS, remainingBudget),
+        );
+        void api.renewPreviewLease(lease.leaseId, controller.signal).then((renewed) => {
+          if (workspaceDisposedRef.current || !isCurrent()) return;
+          const valid = renewed.leaseId === lease.leaseId
+            && renewed.url === lease.url
+            && renewed.bridgeNonce === lease.bridgeNonce
+            && previewBridgeNonceForSrc(renewed.url) === renewed.bridgeNonce
+            && Number.isFinite(renewed.expiresAt)
+            && renewed.expiresAt - Date.now() > PREVIEW_LEASE_EXPIRY_MARGIN_MS;
+          if (valid) onValid(renewed);
+          else onInvalid();
+        }).catch(() => {
+          if (workspaceDisposedRef.current || !isCurrent()) return;
+          if (lease.expiresAt - Date.now() <= PREVIEW_LEASE_EXPIRY_MARGIN_MS) onInvalid();
+        }).finally(() => {
+          window.clearTimeout(timeout);
+          if (renewalControllers.get(lease.leaseId) === controller) renewalControllers.delete(lease.leaseId);
+        });
+      };
+      const main = mainPreviewLeaseRef.current;
+      if (main) renew(
+        main,
+        () => mainPreviewLeaseRef.current?.leaseId === main.leaseId,
+        (renewed) => {
+          if (mainPreviewLeaseRef.current?.leaseId === main.leaseId) mainPreviewLeaseRef.current = renewed;
+        },
+        () => {
+          if (mainPreviewLeaseRef.current?.leaseId === main.leaseId) {
+            mainPreviewLeaseRef.current = null;
+            releaseOwnedPreviewLease(main);
+            setPreviewSrc(null);
+            reacquireMainPreviewRef.current();
+          }
+        },
+      );
+      const version = versionPreviewLeaseRef.current;
+      if (version) renew(
+        version,
+        () => versionPreviewLeaseRef.current?.leaseId === version.leaseId,
+        (renewed) => {
+          if (versionPreviewLeaseRef.current?.leaseId === version.leaseId) versionPreviewLeaseRef.current = renewed;
+        },
+        () => {
+          if (versionPreviewLeaseRef.current?.leaseId === version.leaseId) {
+            const runId = versionPreviewTargetRunIdRef.current;
+            versionPreviewLeaseRef.current = null;
+            releaseOwnedPreviewLease(version);
+            setPreviewSrc(null);
+            if (runId) reacquireVersionPreviewRef.current(runId);
+          }
+        },
+      );
+      for (const compared of [...comparePreviewLeasesRef.current]) renew(
+        compared,
+        () => comparePreviewLeasesRef.current.some((candidate) => candidate.leaseId === compared.leaseId),
+        (renewed) => {
+          comparePreviewLeasesRef.current = comparePreviewLeasesRef.current.map((candidate) =>
+            candidate.leaseId === compared.leaseId ? renewed : candidate);
+        },
+        () => {
+          if (!comparePreviewLeasesRef.current.some((candidate) => candidate.leaseId === compared.leaseId)) return;
+          comparePreviewRequestRef.current += 1;
+          releaseComparePreviewLeases();
+          setCompare(null);
+        },
+      );
+    }, PREVIEW_LEASE_RENEW_INTERVAL_MS);
     return () => {
       workspaceDisposedRef.current = true;
       versionPreviewRequestRef.current += 1;
       versionSourceRequestRef.current += 1;
       comparePreviewRequestRef.current += 1;
+      comparePreviewAbortRef.current?.abort(new Error("Workspace disposed"));
+      comparePreviewAbortRef.current = null;
       mainPreviewRequestRef.current += 1;
       window.clearInterval(renewTimer);
+      for (const controller of renewalControllers.values()) controller.abort(new Error("Workspace disposed"));
+      renewalControllers.clear();
       const mainLease = mainPreviewLeaseRef.current;
       mainPreviewLeaseRef.current = null;
       releaseOwnedPreviewLease(mainLease);
@@ -2295,7 +2451,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       // Show the existing artifact when reopening a prototype project (standard
       // projects preview the dev server, not a static index.html).
       if (modeRef.current !== "standard" && fs.some((f) => f.path === "index.html")) {
-        setPreviewSrc((cur) => cur ?? `${api.previewUrl(projectId)}?t=${Date.now()}`);
+        setPreviewSrc((cur) => cur ?? prototypePreviewUrl(api.previewUrl(projectId)));
       }
     } catch {
       // no artifact files yet
@@ -2377,8 +2533,8 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         await new Promise((r) => setTimeout(r, 1500));
       }
       if (!ready) return false;
-      const preview = await api.getDevServerUrl(projectId);
-      const acquiredLease = preview.leaseId ? { leaseId: preview.leaseId, expiresAt: preview.expiresAt } : null;
+      const preview = acceptPreviewLease(await api.getDevServerUrl(projectId));
+      const acquiredLease = preview;
       if (workspaceDisposedRef.current || mainPreviewRequestRef.current !== requestId) {
         releaseOwnedPreviewLease(acquiredLease);
         return false;
@@ -2398,6 +2554,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       return false;
     }
   };
+  reacquireMainPreviewRef.current = () => { void loadDevPreview(); };
 
   useEffect(() => {
     const onTitle = (event: Event): void => {
@@ -2408,42 +2565,53 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     return () => window.removeEventListener("dezin:project-title", onTitle);
   }, [projectId]);
 
-  const resolveVersionPreview = async (runId: string): Promise<VersionPreview> => {
-    const preview = await api.getVersionPreview(projectId, runId);
-    return { ...preview, url: cacheBustPreviewUrl(preview.url) };
+  const resolveVersionPreview = async (runId: string, signal?: AbortSignal): Promise<DisplayVersionPreview> => {
+    const response = signal === undefined
+      ? await api.getVersionPreview(projectId, runId)
+      : await api.getVersionPreview(projectId, runId, signal);
+    const preview = acceptVersionPreview(response);
+    return { ...preview, displayUrl: cacheBustPreviewUrl(preview.url) };
   };
 
-  const resolveLiveComparisonPreview = async (): Promise<VersionPreview> => {
+  const resolveLiveComparisonPreview = async (signal?: AbortSignal): Promise<DisplayVersionPreview> => {
     if (modeRef.current === "standard") {
-      const preview = await api.getDevServerUrl(projectId);
-      return { ...preview, mode: "standard", url: cacheBustPreviewUrl(preview.url) };
+      const response = signal === undefined
+        ? await api.getDevServerUrl(projectId)
+        : await api.getDevServerUrl(projectId, signal);
+      const preview = acceptPreviewLease(response);
+      return { ...preview, mode: "standard", displayUrl: cacheBustPreviewUrl(preview.url) };
     }
-    return { mode: "prototype", url: cacheBustPreviewUrl(api.previewUrl(projectId)) };
+    const url = prototypePreviewUrl(api.previewUrl(projectId));
+    return { mode: "prototype", url, displayUrl: url, bridgeNonce: previewBridgeNonceForSrc(url)! };
   };
 
   const viewVersion = async (runId: string): Promise<void> => {
-    mainPreviewRequestRef.current += 1;
     const requestId = versionPreviewRequestRef.current + 1;
     versionPreviewRequestRef.current = requestId;
-    const previousTargetRunId = versionPreviewTargetRunIdRef.current;
-    versionPreviewTargetRunIdRef.current = runId;
     const isStandardVersion = modeRef.current === "standard";
     setPreviewBusy({ title: "Loading version preview", detail: "Preparing the saved snapshot and starting its preview server." });
     setTab("Preview");
     try {
       const preview = await resolveVersionPreview(runId);
-      const acquiredLease = preview.leaseId ? { leaseId: preview.leaseId, expiresAt: preview.expiresAt } : null;
+      const acquiredLease = preview.leaseId ? {
+        leaseId: preview.leaseId,
+        url: preview.url,
+        bridgeNonce: preview.bridgeNonce,
+        expiresAt: preview.expiresAt!,
+      } : null;
       if (workspaceDisposedRef.current || versionPreviewRequestRef.current !== requestId) {
         releaseOwnedPreviewLease(acquiredLease);
         return;
       }
+      mainPreviewRequestRef.current += 1;
       const mainLease = mainPreviewLeaseRef.current;
       mainPreviewLeaseRef.current = null;
       releaseOwnedPreviewLease(mainLease);
       if (!mainLease?.leaseId && modeRef.current === "standard") void api.releaseDevServer(projectId).catch(() => {});
       replaceOwnedPreviewLease(versionPreviewLeaseRef, acquiredLease);
+      versionPreviewTargetRunIdRef.current = runId;
       setPreviewVersionRunId(runId);
-      setPreviewSrc(preview.url);
+      setPreviewSrc(preview.displayUrl);
       const sourceRequestId = versionSourceRequestRef.current + 1;
       versionSourceRequestRef.current = sourceRequestId;
       setVersionFiles([]);
@@ -2469,41 +2637,79 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       setVersionActiveFile("index.html");
     } catch {
       if (versionPreviewRequestRef.current === requestId) {
-        versionPreviewTargetRunIdRef.current = previousTargetRunId;
         setPreviewBusy(null);
         toast("Couldn't load that version preview.", { variant: "error" });
       }
     }
   };
+  reacquireVersionPreviewRef.current = (runId) => { void viewVersion(runId); };
 
   const openVersionCompare = async (runId: string, label: string): Promise<void> => {
     const requestId = comparePreviewRequestRef.current + 1;
     comparePreviewRequestRef.current = requestId;
+    comparePreviewAbortRef.current?.abort(new Error("Superseded comparison request"));
+    const controller = new AbortController();
+    comparePreviewAbortRef.current = controller;
+    releaseComparePreviewLeases();
+    setCompare(null);
     setPreviewBusy({ title: "Loading version comparison", detail: "Preparing both saved snapshots for visual comparison." });
-    try {
-      const results = await Promise.allSettled([resolveVersionPreview(runId), resolveLiveComparisonPreview()]);
-      const previews = results
-        .filter((result): result is PromiseFulfilledResult<VersionPreview> => result.status === "fulfilled")
-        .map((result) => result.value);
-      const acquiredLeases = previews
-        .filter((preview): preview is VersionPreview & { leaseId: string } => Boolean(preview.leaseId))
-        .map((preview) => ({ leaseId: preview.leaseId, expiresAt: preview.expiresAt }));
-      if (workspaceDisposedRef.current || comparePreviewRequestRef.current !== requestId) {
-        for (const lease of acquiredLeases) releaseOwnedPreviewLease(lease);
-        return;
+    let acceptingLateLeases = true;
+    const ownPreview = async (promise: Promise<DisplayVersionPreview>): Promise<DisplayVersionPreview> => {
+      const preview = await promise;
+      const lease = typeof preview.leaseId === "string" && typeof preview.expiresAt === "number"
+        ? { leaseId: preview.leaseId, url: preview.url, bridgeNonce: preview.bridgeNonce, expiresAt: preview.expiresAt }
+        : null;
+      if (controller.signal.aborted || workspaceDisposedRef.current
+        || comparePreviewRequestRef.current !== requestId || !acceptingLateLeases) {
+        releaseOwnedPreviewLease(lease);
+        throw new Error("Comparison request was cancelled.");
       }
-      releaseComparePreviewLeases();
-      comparePreviewLeasesRef.current = acquiredLeases;
+      if (lease && !comparePreviewLeasesRef.current.some((candidate) => candidate.leaseId === lease.leaseId)) {
+        comparePreviewLeasesRef.current = [...comparePreviewLeasesRef.current, lease];
+      }
+      return preview;
+    };
+    const bounded = <T,>(promise: Promise<T>, side: string): Promise<T> => new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: (value: T | Error) => void, value: T | Error): void => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        controller.signal.removeEventListener("abort", onAbort);
+        callback(value);
+      };
+      const onAbort = (): void => finish((error) => reject(error), new Error("Comparison request was cancelled."));
+      const timeout = window.setTimeout(
+        () => finish((error) => reject(error), new Error(`${side} preview preparation timed out.`)),
+        COMPARE_PREVIEW_RESOLVE_TIMEOUT_MS,
+      );
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+      promise.then(
+        (value) => finish((result) => resolve(result as T), value),
+        (error: unknown) => finish((reason) => reject(reason), error instanceof Error ? error : new Error(String(error))),
+      );
+    });
+    try {
+      const results = await Promise.allSettled([
+        bounded(ownPreview(resolveVersionPreview(runId, controller.signal)), "Saved version"),
+        bounded(ownPreview(resolveLiveComparisonPreview(controller.signal)), "Live version"),
+      ]);
+      acceptingLateLeases = false;
+      if (controller.signal.aborted || workspaceDisposedRef.current || comparePreviewRequestRef.current !== requestId) return;
       const unavailable = (result: PromiseRejectedResult): string =>
         result.reason instanceof Error ? result.reason.message : "This saved preview could not be prepared.";
       const versionResult = results[0]!;
       const currentResult = results[1]!;
       setCompare({
         a: versionResult.status === "fulfilled"
-          ? { url: versionResult.value.url, label }
+          ? { url: versionResult.value.displayUrl, bridgeNonce: versionResult.value.bridgeNonce, label }
           : { label, error: unavailable(versionResult) },
         b: currentResult.status === "fulfilled"
-          ? { url: currentResult.value.url, label: `${activeVersionGroup?.name ?? "Current branch"} live` }
+          ? {
+              url: currentResult.value.displayUrl,
+              bridgeNonce: currentResult.value.bridgeNonce,
+              label: `${activeVersionGroup?.name ?? "Current branch"} live`,
+            }
           : { label: `${activeVersionGroup?.name ?? "Current branch"} live`, error: unavailable(currentResult) },
       });
       if (results.some((result) => result.status === "rejected")) {
@@ -2512,12 +2718,17 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     } catch {
       toast("Couldn't load that comparison.", { variant: "error" });
     } finally {
+      acceptingLateLeases = false;
+      if (!controller.signal.aborted) controller.abort(new Error("Comparison preparation settled"));
+      if (comparePreviewAbortRef.current === controller) comparePreviewAbortRef.current = null;
       if (comparePreviewRequestRef.current === requestId) setPreviewBusy(null);
     }
   };
 
   const closeVersionCompare = (): void => {
     comparePreviewRequestRef.current += 1;
+    comparePreviewAbortRef.current?.abort(new Error("Comparison closed"));
+    comparePreviewAbortRef.current = null;
     releaseComparePreviewLeases();
     setCompare(null);
   };
@@ -2544,7 +2755,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         }
       } else {
         clearVersionPreviewState();
-        setPreviewSrc(`${api.previewUrl(projectId)}?t=${Date.now()}`);
+        setPreviewSrc(prototypePreviewUrl(api.previewUrl(projectId)));
       }
       if (restored.historyRecorded === false) {
         toast("Restored the design, but version history couldn't be recorded.", { variant: "error" });
@@ -2891,16 +3102,12 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       case "preview-update":
         // The agent rewrote the artifact mid-run — show it building live.
         clearVersionPreviewState();
-        if (typeof ev.leaseId === "string" && ev.leaseId) {
-          replaceOwnedPreviewLease(mainPreviewLeaseRef, {
-            leaseId: ev.leaseId,
-            expiresAt: typeof ev.expiresAt === "number" ? ev.expiresAt : undefined,
-          });
-        }
-        if (typeof ev.previewUrl === "string" && ev.previewUrl.trim()) {
-          setPreviewSrc(cacheBustPreviewUrl(ev.previewUrl.trim(), typeof ev.t === "number" ? ev.t : Date.now()));
-        } else if (ev.mode !== "standard" && modeRef.current !== "standard") {
-          setPreviewSrc(`${api.previewUrl(id)}?t=${typeof ev.t === "number" ? ev.t : Date.now()}`);
+        if (ev.mode === "standard" || modeRef.current === "standard") {
+          // Durable run events are multicast and replayable, so they carry only an invalidation.
+          // Every Viewer acquires its own renewable, nonce-bound capability from the daemon.
+          void loadDevPreview();
+        } else {
+          setPreviewSrc(prototypePreviewUrl(api.previewUrl(id), typeof ev.t === "number" ? ev.t : Date.now()));
         }
         void loadFiles(); // refresh the Files list live as the artifact is rewritten (both modes)
         if (ev.mode === "standard" || modeRef.current === "standard") {
@@ -3004,7 +3211,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
         if (modeRef.current === "standard") void loadDevPreview();
         else {
           clearVersionPreviewState();
-          setPreviewSrc(`${api.previewUrl(id)}?t=${Date.now()}`);
+          setPreviewSrc(prototypePreviewUrl(api.previewUrl(id)));
         }
         setRanOnce(true);
         void loadFiles();
@@ -3028,7 +3235,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
           if (modeRef.current === "standard") void loadDevPreview();
           else {
             clearVersionPreviewState();
-            setPreviewSrc(`${api.previewUrl(id)}?t=${Date.now()}`);
+            setPreviewSrc(prototypePreviewUrl(api.previewUrl(id)));
           }
           void loadFiles();
         }
@@ -3661,9 +3868,77 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     }, 70);
   };
 
+  const runtimeErrors = usePreviewRuntimeErrors({
+    iframeRef: previewIframeRef,
+    previewSrc,
+    runActive: running,
+    listenToWindow: false,
+  });
+
+  const onPreviewChannelMessage = useCallback((message: PreviewChannelMessage): void => {
+    if (message.type === "runtime-error") {
+      runtimeErrors.ingestMessage(message);
+      return;
+    }
+    if (message.type === "selected" && typeof message.selector === "string"
+      && message.selector.length > 0 && message.selector.length <= 4_096) {
+      const rectValue = message.rect as PreviewBridgeMessage["rect"];
+      const rect = rectValue
+        && [rectValue.x, rectValue.y, rectValue.w, rectValue.h].every((coordinate) => Number.isFinite(coordinate))
+        && rectValue.w >= 0 && rectValue.h >= 0
+        && Math.abs(rectValue.x) <= 10_000_000 && Math.abs(rectValue.y) <= 10_000_000
+        && rectValue.w <= 10_000_000 && rectValue.h <= 10_000_000
+        ? rectValue
+        : undefined;
+      const target = {
+        selector: message.selector,
+        tag: typeof message.tag === "string" && message.tag.length <= 64 ? message.tag : "",
+        text: typeof message.text === "string" && message.text.length <= 512 ? message.text : "",
+        rect,
+        styles: message.styles && typeof message.styles === "object" ? message.styles as MarkupStyles : undefined,
+        attrs: message.attrs && typeof message.attrs === "object" ? message.attrs as MarkupAttributes : undefined,
+      };
+      setInspectedTarget(target);
+      inspectedTargetRef.current = target;
+      if (selectionModeRef.current === "inspect") {
+        setPendingMark(null);
+        setSelectMode(false);
+        setInspectOpen(true);
+        return;
+      }
+      const ir = previewIframeRef.current?.getBoundingClientRect();
+      const pos = computeMarkupPosition(ir, rect, { width: window.innerWidth, height: window.innerHeight });
+      setPendingMark({ ...target, x: pos.x, y: pos.y });
+      setInspectOpen(false);
+      setSelectMode(false);
+      return;
+    }
+    if (message.type === "cancel" || message.type === "element-cleared") {
+      setPendingMark(null);
+      setSelectMode(false);
+      if (selectionModeRef.current === "inspect") {
+        if (inspectedTargetRef.current) {
+          inspectedTargetRef.current = null;
+          setInspectedTarget(null);
+          setInspectOpen(true);
+        } else {
+          setInspectOpen(false);
+        }
+      }
+    }
+  }, [runtimeErrors.ingestMessage]);
+  const previewChannel = usePreviewChannel({
+    iframeRef: previewIframeRef,
+    previewSrc,
+    bridgeNonce: previewBridgeNonceForSrc(previewSrc),
+    enabled: previewSrc !== null,
+    onMessage: onPreviewChannelMessage,
+  });
+
   const postPreviewBridge = useCallback((message: Record<string, unknown>): void => {
-    previewIframeRef.current?.contentWindow?.postMessage({ source: "dezin-parent", ...message }, "*");
-  }, []);
+    if (typeof message.type !== "string") return;
+    previewChannel.send(message as { type: string } & Record<string, unknown>);
+  }, [previewChannel.send]);
 
   const setPreviewPickMode = useCallback(
     (on: boolean): void => {
@@ -3676,49 +3951,10 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     postPreviewBridge({ type: "clear" });
   }, [postPreviewBridge]);
 
-  // Element picker — receive the clicked element from the preview bridge.
-  useEffect(() => {
-    const onMessage = (e: MessageEvent): void => {
-      if (!isPreviewBridgeMessage(e, previewIframeRef.current, previewSrc)) return;
-      const d = e.data;
-      if (d.type === "selected" && d.selector) {
-        const target = { selector: d.selector, tag: d.tag ?? "", text: d.text ?? "", rect: d.rect, styles: d.styles, attrs: d.attrs };
-        setInspectedTarget(target);
-        inspectedTargetRef.current = target;
-        if (selectionModeRef.current === "inspect") {
-          setPendingMark(null);
-          setSelectMode(false);
-          setInspectOpen(true);
-          setPreviewPickMode(true);
-          return;
-        }
-        // Position a "Mark up" popover near the clicked element (iframe coords → page coords).
-        const ir = previewIframeRef.current?.getBoundingClientRect();
-        const r = d.rect;
-        const pos = computeMarkupPosition(ir, r, { width: window.innerWidth, height: window.innerHeight });
-        setPendingMark({ ...target, x: pos.x, y: pos.y });
-        setInspectOpen(false);
-        setSelectMode(false);
-      } else if (d.type === "cancel") {
-        setPendingMark(null);
-        setSelectMode(false);
-        if (selectionModeRef.current === "inspect") {
-          clearPreviewBridge();
-          if (inspectedTargetRef.current) {
-            inspectedTargetRef.current = null;
-            setInspectedTarget(null);
-            setInspectOpen(true);
-            setPreviewPickMode(true);
-          } else {
-            setInspectOpen(false);
-          }
-          return;
-        }
-      }
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [clearPreviewBridge, previewSrc, setPreviewPickMode]);
+  const onPreviewFrameLoad = useCallback((): void => {
+    previewChannel.connect();
+    setPreviewPickMode(selectionModeRef.current !== null);
+  }, [previewChannel.connect, setPreviewPickMode]);
 
   useEffect(() => {
     inspectedTargetRef.current = inspectedTarget;
@@ -3851,7 +4087,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     if (modeRef.current === "standard") void loadDevPreview();
     else {
       clearVersionPreviewState();
-      setPreviewSrc(`${api.previewUrl(projectId)}?t=${Date.now()}`);
+      setPreviewSrc(prototypePreviewUrl(api.previewUrl(projectId)));
     }
   };
 
@@ -4081,15 +4317,15 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
     const requestId = mainPreviewRequestRef.current + 1;
     mainPreviewRequestRef.current = requestId;
     try {
-      const preview = await api.getDevServerUrl(projectId);
-      const acquiredLease = preview.leaseId ? { leaseId: preview.leaseId, expiresAt: preview.expiresAt } : null;
+      const preview = acceptPreviewLease(await api.getDevServerUrl(projectId));
+      const acquiredLease = preview;
       if (workspaceDisposedRef.current || mainPreviewRequestRef.current !== requestId) {
         releaseOwnedPreviewLease(acquiredLease);
         return;
       }
       clearVersionPreviewState();
       replaceOwnedPreviewLease(mainPreviewLeaseRef, acquiredLease);
-      setPreviewSrc(`${preview.url.split("?")[0]}?t=${Date.now()}`);
+      setPreviewSrc(cacheBustPreviewUrl(preview.url));
       void api.getSetup(projectId)
         .then((s) => {
           setSetupPhase(s.phase);
@@ -4117,14 +4353,13 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       void refreshDevPreview();
       return;
     }
-    if (previewSrc) setPreviewSrc(previewSrc.startsWith("http") ? cacheBustPreviewUrl(previewSrc) : cacheBustPreviewUrl(api.previewUrl(projectId)));
+    if (previewSrc) {
+      setPreviewSrc(previewSrc.startsWith("http")
+        ? cacheBustPreviewUrl(previewSrc)
+        : prototypePreviewUrl(api.previewUrl(projectId)));
+    }
   };
 
-  const runtimeErrors = usePreviewRuntimeErrors({
-    iframeRef: previewIframeRef,
-    previewSrc,
-    runActive: running,
-  });
   const fixRuntimeErrors = useCallback(
     (errors: RuntimeError[]) => {
       if (errors.length === 0) return;
@@ -4283,6 +4518,7 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
       title="Artifact preview"
       src={previewSrc ?? undefined}
       sandbox={previewSandboxForSrc(previewSrc)}
+      onLoad={onPreviewFrameLoad}
       style={{ width: DEVICE_WIDTH[device], maxWidth: "100%" }}
       className={`h-full border-0 bg-white ${device === "desktop" ? "" : "my-3 rounded-lg border border-border"}`}
     />
@@ -4346,10 +4582,14 @@ export function WorkspaceScreen({ projectId, onOpenSettings }: { projectId: stri
                     const b = variants.find((v) => v.id === vid);
                     if (a && b) {
                       comparePreviewRequestRef.current += 1;
+                      comparePreviewAbortRef.current?.abort(new Error("Switched to branch comparison"));
+                      comparePreviewAbortRef.current = null;
                       releaseComparePreviewLeases();
+                      const aUrl = prototypePreviewUrl(api.variantPreviewUrl(projectId, a.id));
+                      const bUrl = prototypePreviewUrl(api.variantPreviewUrl(projectId, b.id));
                       setCompare({
-                        a: { url: api.variantPreviewUrl(projectId, a.id), label: a.name },
-                        b: { url: api.variantPreviewUrl(projectId, b.id), label: b.name },
+                        a: { url: aUrl, bridgeNonce: previewBridgeNonceForSrc(aUrl)!, label: a.name },
+                        b: { url: bUrl, bridgeNonce: previewBridgeNonceForSrc(bUrl)!, label: b.name },
                       });
                     }
                   }}

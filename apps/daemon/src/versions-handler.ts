@@ -12,6 +12,7 @@ import { injectRuntimeProbe, injectSelectBridge, projectDir, safeJoin, serveFile
 import type { AppDeps, DevServerLease } from "./app.ts";
 import { captureCoverUrl } from "./capture-cover.ts";
 import { ensureDevServer } from "./project-runtime.ts";
+import { issuePreviewBridgeCapability, requirePreviewLease } from "./preview-lease.ts";
 import {
   activeArtifactDir,
   diffStandardArtifactDirFromCommit,
@@ -269,11 +270,15 @@ export async function handleGetVersionPreviewUrl(
   if (!found) return sendError(res, 404, "project not found");
   if (found.project.mode === "standard") {
     try {
-      const lease = await standardVersionPreviewLease(deps, found.project, found.run, signal);
+      const lease = requirePreviewLease(
+        await standardVersionPreviewLease(deps, found.project, found.run, signal),
+        "version preview runtime",
+      );
       sendJson(res, 200, {
         url: lease.url,
         mode: "standard",
         leaseId: lease.leaseId,
+        bridgeNonce: lease.bridgeNonce,
         expiresAt: lease.expiresAt,
       });
     } catch (err) {
@@ -283,7 +288,10 @@ export async function handleGetVersionPreviewUrl(
   }
   const file = prototypeVersionHtmlPath(deps.dataDir, params.id!, params.runId!);
   if (!existsSync(file)) return sendError(res, 404, "no snapshot for this run");
-  sendJson(res, 200, { url: versionPreviewPath(found.project.id, found.run.id), mode: "prototype" });
+  sendJson(res, 200, {
+    ...issuePreviewBridgeCapability(versionPreviewPath(found.project.id, found.run.id)),
+    mode: "prototype",
+  });
 }
 
 export async function handleGetVersionDiff(res: ServerResponse, params: Record<string, string>, deps: AppDeps): Promise<void> {

@@ -16,6 +16,7 @@ import {
   previewLeaseManager,
   type PreviewLease,
   type PreviewLeaseManager,
+  type PreviewRuntimeIdentity,
 } from "./preview-lease.ts";
 import type { RuntimeScope } from "./runtime-supervisor.ts";
 
@@ -41,6 +42,19 @@ interface Runtime {
   operation?: Promise<void>;
   stopPromise?: Promise<void>;
   historicalPreviewConfig?: { dir: string; path: string; projectDir: string };
+  previewCallers: number;
+  previewEntryCount: number;
+  previewPreparation?: PreviewPreparation;
+}
+
+interface PreviewPreparationResult {
+  configPath?: string;
+  fingerprint: string;
+}
+
+interface PreviewPreparation {
+  key: string;
+  promise: Promise<PreviewPreparationResult>;
 }
 
 const DEPENDENCY_MANIFESTS = ["package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"] as const;
@@ -131,6 +145,8 @@ function createRuntime(runtimeKey: string, phase: SetupPhase, signal?: AbortSign
     phase,
     logs: [],
     children: new Set(),
+    previewCallers: 0,
+    previewEntryCount: 0,
   };
   runtimes.set(runtimeKey, rt);
   return { rt, detach: attachRuntimeSignal(rt, signal) };
@@ -139,7 +155,11 @@ function createRuntime(runtimeKey: string, phase: SetupPhase, signal?: AbortSign
 function retireRuntime(rt: Runtime): void {
   retiredRuntimes.add(rt);
   void Promise.resolve().then(async () => {
-    await Promise.allSettled([stopRuntime(rt), rt.operation ?? Promise.resolve()]);
+    await Promise.allSettled([
+      stopRuntime(rt),
+      rt.operation ?? Promise.resolve(),
+      rt.previewPreparation?.promise ?? Promise.resolve(),
+    ]);
     retiredRuntimes.delete(rt);
   });
 }
@@ -202,7 +222,6 @@ async function historicalPreviewConfig(projectDir: string, rt: Runtime): Promise
   if (current) await rm(current.dir, { recursive: true, force: true });
 
   const viteConfig = findViteConfig(projectDir);
-  if (!viteConfig) return undefined;
   const template = await readFile(join(templateDir(), "vite.config.js"), "utf8");
   const instrumentationStart = template.indexOf(PICKER_BRIDGE_START);
   const instrumentationEnd = template.indexOf(PICKER_CONFIG_EXPORT_START, instrumentationStart);
@@ -210,11 +229,16 @@ async function historicalPreviewConfig(projectDir: string, rt: Runtime): Promise
 
   const configDir = await mkdtemp(join(tmpdir(), "dezin-version-preview-"));
   const configPath = join(configDir, "vite.config.mjs");
-  const originalConfigUrl = pathToFileURL(viteConfig).href;
+  const originalConfigDeclaration = viteConfig
+    ? `import originalConfig from ${JSON.stringify(pathToFileURL(viteConfig).href)};`
+    : "const originalConfig = {};";
+  const renderContextUrl = existsSync(join(projectDir, ".dezin", "render-context.js"))
+    ? "/.dezin/render-context.js"
+    : undefined;
   const instrumentation = template.slice(instrumentationStart, instrumentationEnd);
   await writeFile(
     configPath,
-    `import originalConfig from ${JSON.stringify(originalConfigUrl)};
+    `${originalConfigDeclaration}
 ${instrumentation}
 
 function withoutStaleDezinPicker(plugin) {
@@ -229,7 +253,7 @@ export default async function dezinHistoricalPreviewConfig(env) {
   const plugins = (Array.isArray(config.plugins) ? config.plugins : [])
     .map(withoutStaleDezinPicker)
     .filter(Boolean);
-  return { ...config, plugins: [...plugins, dezinPicker()] };
+  return { ...config, plugins: [...plugins, dezinPicker(${JSON.stringify(renderContextUrl)})] };
 }
 `,
     "utf8",
@@ -255,7 +279,7 @@ function appendLog(rt: Runtime, message: string, level: RuntimeLog["level"] = "i
 
 function run(command: string, args: string[], cwd: string, rt?: Runtime, label = `${command} ${args.join(" ")}`): Promise<number> {
   return new Promise((resolve) => {
-    appendLog(rt ?? { runtimeKey: "", generation: 0, released: false, phase: "ready", logs: [], children: new Set() }, `$ ${label}`);
+    appendLog(rt ?? { runtimeKey: "", generation: 0, released: false, phase: "ready", logs: [], children: new Set(), previewCallers: 0, previewEntryCount: 0 }, `$ ${label}`);
     if (rt?.released) return resolve(1);
     const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: agentSpawnEnv() });
     rt?.children.add(child);
@@ -384,9 +408,20 @@ export function getSetup(projectId: string, projectDir: string): { phase: SetupP
   return { phase: "scaffolding", logs: relatedLogs };
 }
 
-async function ensurePreviewDependencies(projectDir: string, runtimeKey: string, rt: Runtime, signal?: AbortSignal): Promise<void> {
+async function ensurePreviewDependencies(
+  projectDir: string,
+  runtimeKey: string,
+  rt: Runtime,
+  signal?: AbortSignal,
+  immutableSource = false,
+): Promise<void> {
   assertRuntimeActive(runtimeKey, rt, signal);
   if (!existsSync(join(projectDir, "package.json"))) throw new Error("dependencies not installed yet");
+  if (immutableSource
+    && !existsSync(join(projectDir, "package-lock.json"))
+    && !existsSync(join(projectDir, "npm-shrinkwrap.json"))) {
+    throw new Error("immutable preview requires an npm lockfile");
+  }
   const expectedFingerprint = await dependencyManifestFingerprint(projectDir);
   const nodeModules = join(projectDir, "node_modules");
   const installedFingerprint = await readFile(join(nodeModules, DEPENDENCY_STAMP), "utf8").catch(() => "");
@@ -400,7 +435,14 @@ async function ensurePreviewDependencies(projectDir: string, runtimeKey: string,
   rt.error = undefined;
   appendLog(rt, existsSync(nodeModules) ? "Refreshing preview dependencies after manifest change" : "Installing preview dependencies");
   await rm(nodeModules, { recursive: true, force: true });
-  const code = await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], projectDir, rt, "npm install --ignore-scripts");
+  const installArgs = [
+    immutableSource ? "ci" : "install",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--loglevel=error",
+  ];
+  const code = await run("npm", installArgs, projectDir, rt, `npm ${immutableSource ? "ci" : "install"} --ignore-scripts`);
   assertRuntimeActive(runtimeKey, rt, signal);
   if (code !== 0) {
     rt.phase = "error";
@@ -420,6 +462,98 @@ export function previewRuntimeScope(projectId: string, runtimeKey = projectId): 
   return { projectId };
 }
 
+export interface PreviewRuntimeOptions {
+  runtimeIdentity?: PreviewRuntimeIdentity;
+  immutableSource?: boolean;
+  disposeOnIdle?: boolean;
+  onLeaseRelease?: () => void | Promise<void>;
+  onEntryDispose?: () => void | Promise<void>;
+}
+
+function waitForCaller<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolveValue, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(signal.reason));
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(
+      (value) => finish(() => resolveValue(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
+async function preparePreviewRuntime(
+  projectId: string,
+  projectDir: string,
+  runtimeKey: string,
+  rt: Runtime,
+  immutableSource: boolean,
+): Promise<PreviewPreparationResult> {
+  assertRuntimeActive(runtimeKey, rt);
+  const scope = previewRuntimeScope(projectId, runtimeKey);
+  const isHistoricalVersion = scope.runId !== undefined;
+  const hasGit = existsSync(join(projectDir, ".git"));
+  const sourceStatus = hasGit ? await workingTreeFingerprint(projectDir) : "";
+  if (isHistoricalVersion && sourceStatus) throw new Error("historical preview source is not clean");
+  assertRuntimeActive(runtimeKey, rt);
+  if (!isHistoricalVersion) {
+    const bridgeUpdated = await ensureProjectPickerBridge(projectDir).catch(() => false);
+    assertRuntimeActive(runtimeKey, rt);
+    if (bridgeUpdated) {
+      appendLog(rt, "Updated preview inspect bridge");
+      if (!sourceStatus) await gitCommit(projectDir, "Dezin: update preview inspect bridge", { skipHooks: true });
+    }
+  }
+  await ensurePreviewDependencies(projectDir, runtimeKey, rt, undefined, immutableSource);
+  if (isHistoricalVersion && hasGit && await workingTreeFingerprint(projectDir) !== sourceStatus) {
+    await run("git", ["reset", "--hard", "HEAD"], projectDir, rt, "git reset --hard HEAD");
+    await run("git", ["clean", "-fd"], projectDir, rt, "git clean -fd");
+    if (await workingTreeFingerprint(projectDir) !== sourceStatus) throw new Error("historical preview preparation changed source files");
+  }
+  const configPath = isHistoricalVersion ? await historicalPreviewConfig(projectDir, rt) : undefined;
+  const fingerprint = await devServerFingerprint(projectDir);
+  assertRuntimeActive(runtimeKey, rt);
+  return { configPath, fingerprint };
+}
+
+async function acquirePreviewPreparation(
+  projectId: string,
+  projectDir: string,
+  runtimeKey: string,
+  rt: Runtime,
+  immutableSource: boolean,
+  signal?: AbortSignal,
+): Promise<PreviewPreparationResult> {
+  const key = `${projectDir}\u0000${immutableSource ? "immutable" : "mutable"}`;
+  while (true) {
+    let preparation = rt.previewPreparation;
+    if (preparation && preparation.key !== key) {
+      await waitForCaller(preparation.promise.catch(() => ({ fingerprint: "" })), signal);
+      assertRuntimeActive(runtimeKey, rt, signal);
+      continue;
+    }
+    if (!preparation) {
+      const next = {} as PreviewPreparation;
+      next.key = key;
+      next.promise = preparePreviewRuntime(projectId, projectDir, runtimeKey, rt, immutableSource)
+        .finally(() => {
+          if (rt.previewPreparation === next) rt.previewPreparation = undefined;
+        });
+      rt.previewPreparation = next;
+      preparation = next;
+    }
+    return waitForCaller(preparation.promise, signal);
+  }
+}
+
 /**
  * Ensure a Vite dev server is running for the project; return its URL. The iframe
  * loads this URL directly (cross-origin) with allow-same-origin, so JSX is
@@ -431,51 +565,81 @@ export async function ensureDevServer(
   runtimeKey = projectId,
   signal?: AbortSignal,
   leaseManager: PreviewLeaseManager = previewLeaseManager,
+  options: PreviewRuntimeOptions = {},
 ): Promise<PreviewLease> {
   let rt = runtimes.get(runtimeKey);
-  let detach = (): void => {};
-  if (!rt) {
-    const created = createRuntime(runtimeKey, existsSync(join(projectDir, "node_modules")) ? "ready" : "installing", signal);
-    rt = created.rt;
-    detach = created.detach;
-  } else {
-    detach = attachRuntimeSignal(rt, signal);
+  // A released generation can still be reaping an aborted npm preparation.
+  // Keep it as a per-runtime-key barrier: replacing it early would let a late
+  // caller run rm(node_modules)/npm ci against the same immutable directory.
+  while (rt?.released) {
+    const settling = Promise.allSettled([
+      rt.stopPromise ?? Promise.resolve(),
+      rt.operation ?? Promise.resolve(),
+      rt.previewPreparation?.promise ?? Promise.resolve(),
+    ]).then(() => undefined);
+    await waitForCaller(settling, signal);
+    if (runtimes.get(runtimeKey) === rt) runtimes.delete(runtimeKey);
+    rt = runtimes.get(runtimeKey);
   }
+  if (!rt) {
+    rt = createRuntime(runtimeKey, existsSync(join(projectDir, "node_modules")) ? "ready" : "installing").rt;
+  }
+  rt.previewCallers += 1;
+  let acquired = false;
   try {
     assertRuntimeActive(runtimeKey, rt, signal);
     const scope = previewRuntimeScope(projectId, runtimeKey);
-    const isHistoricalVersion = scope.runId !== undefined;
-    const hasGit = existsSync(join(projectDir, ".git"));
-    const sourceStatus = hasGit ? await workingTreeFingerprint(projectDir) : "";
-    if (isHistoricalVersion && sourceStatus) throw new Error("historical preview source is not clean");
-    assertRuntimeActive(runtimeKey, rt, signal);
-    if (!isHistoricalVersion) {
-      const bridgeUpdated = await ensureProjectPickerBridge(projectDir).catch(() => false);
-      assertRuntimeActive(runtimeKey, rt, signal);
-      if (bridgeUpdated) {
-        appendLog(rt, "Updated preview inspect bridge");
-        if (!sourceStatus) await gitCommit(projectDir, "Dezin: update preview inspect bridge", { skipHooks: true });
-      }
-    }
-    await ensurePreviewDependencies(projectDir, runtimeKey, rt, signal);
-    if (isHistoricalVersion && hasGit && await workingTreeFingerprint(projectDir) !== sourceStatus) {
-      await run("git", ["reset", "--hard", "HEAD"], projectDir, rt, "git reset --hard HEAD");
-      await run("git", ["clean", "-fd"], projectDir, rt, "git clean -fd");
-      if (await workingTreeFingerprint(projectDir) !== sourceStatus) throw new Error("historical preview preparation changed source files");
-    }
-    const configPath = isHistoricalVersion ? await historicalPreviewConfig(projectDir, rt) : undefined;
-    const currentFingerprint = await devServerFingerprint(projectDir);
+    const prepared = await acquirePreviewPreparation(
+      projectId,
+      projectDir,
+      runtimeKey,
+      rt,
+      options.immutableSource === true,
+      signal,
+    );
     assertRuntimeActive(runtimeKey, rt, signal);
     appendLog(rt, "Acquiring ready preview server");
-    return await leaseManager.acquire(scope, projectDir, {
-      fingerprint: currentFingerprint,
-      configPath,
+    const lease = await leaseManager.acquire(scope, projectDir, {
+      fingerprint: prepared.fingerprint,
+      configPath: prepared.configPath,
+      runtimeIdentity: options.runtimeIdentity,
+      disposeOnIdle: options.disposeOnIdle,
+      onLeaseRelease: options.onLeaseRelease,
+      onEntryReady: () => {
+        rt!.previewEntryCount += 1;
+      },
+      onEntryDispose: async () => {
+        rt!.previewEntryCount = Math.max(0, rt!.previewEntryCount - 1);
+        await options.onEntryDispose?.();
+      },
       signal,
       onLog: (message, level) => appendLog(rt!, message, level),
     });
+    acquired = true;
+    return lease;
   } finally {
-    detach();
+    rt.previewCallers = Math.max(0, rt.previewCallers - 1);
+    if (!acquired && rt.previewCallers === 0 && rt.previewEntryCount === 0 && runtimes.get(runtimeKey) === rt) {
+      await disposePreviewRuntimeState(runtimeKey);
+    }
   }
+}
+
+/** Drop the in-memory setup state and temporary Vite config after its leased process is gone. */
+export async function disposePreviewRuntimeState(runtimeKey: string): Promise<void> {
+  const rt = runtimes.get(runtimeKey);
+  if (!rt) return;
+  if (rt.previewCallers > 0 || rt.previewEntryCount > 0) return;
+  const operation = rt.operation;
+  const preparation = rt.previewPreparation?.promise;
+  const stopping = stopRuntime(rt);
+  await Promise.allSettled([
+    stopping,
+    operation ?? Promise.resolve(),
+    preparation ?? Promise.resolve(),
+  ]);
+  if (runtimes.get(runtimeKey) === rt) runtimes.delete(runtimeKey);
+  await removeHistoricalPreviewConfig(rt);
 }
 
 /** Compatibility cleanup for legacy callers that only retained the runtime key. */
@@ -483,8 +647,7 @@ export async function releaseDevServer(runtimeKey: string): Promise<boolean> {
   const projectId = runtimeKey.split(":", 1)[0];
   if (!projectId) return false;
   await previewLeaseManager.stopScope(previewRuntimeScope(projectId, runtimeKey));
-  const rt = runtimes.get(runtimeKey);
-  if (rt) await removeHistoricalPreviewConfig(rt);
+  await disposePreviewRuntimeState(runtimeKey);
   return true;
 }
 
@@ -567,7 +730,11 @@ export async function releaseProjectRuntime(projectId: string): Promise<void> {
   const retired = [...retiredRuntimes].filter((rt) => rt.runtimeKey === projectId || rt.runtimeKey.startsWith(`${projectId}:`));
   const owned = [...new Set([...entries.map(([, rt]) => rt), ...retired])];
   for (const rt of owned) void stopRuntime(rt);
-  await Promise.allSettled(owned.flatMap((rt) => [stopRuntime(rt), rt.operation ?? Promise.resolve()]));
+  await Promise.allSettled(owned.flatMap((rt) => [
+    stopRuntime(rt),
+    rt.operation ?? Promise.resolve(),
+    rt.previewPreparation?.promise ?? Promise.resolve(),
+  ]));
   for (const rt of retired) retiredRuntimes.delete(rt);
   for (const [key, rt] of entries) {
     if (runtimes.get(key) === rt) runtimes.delete(key);
@@ -583,7 +750,11 @@ export async function releaseVariantRuntime(projectId: string, variantId: string
   const retired = [...retiredRuntimes].filter((rt) => keys.has(rt.runtimeKey));
   const owned = [...new Set([...entries.map(([, rt]) => rt), ...retired])];
   for (const rt of owned) void stopRuntime(rt);
-  await Promise.allSettled(owned.flatMap((rt) => [stopRuntime(rt), rt.operation ?? Promise.resolve()]));
+  await Promise.allSettled(owned.flatMap((rt) => [
+    stopRuntime(rt),
+    rt.operation ?? Promise.resolve(),
+    rt.previewPreparation?.promise ?? Promise.resolve(),
+  ]));
   for (const rt of retired) retiredRuntimes.delete(rt);
   for (const [key, rt] of entries) {
     if (runtimes.get(key) === rt) runtimes.delete(key);
@@ -599,7 +770,11 @@ export async function releaseVariantRuntime(projectId: string, variantId: string
 export async function stopAllProjectRuntimes(): Promise<void> {
   const entries = [...new Set([...runtimes.values(), ...retiredRuntimes])];
   for (const rt of entries) void stopRuntime(rt);
-  await Promise.allSettled(entries.flatMap((rt) => [stopRuntime(rt), rt.operation ?? Promise.resolve()]));
+  await Promise.allSettled(entries.flatMap((rt) => [
+    stopRuntime(rt),
+    rt.operation ?? Promise.resolve(),
+    rt.previewPreparation?.promise ?? Promise.resolve(),
+  ]));
   for (const [key, rt] of runtimes) {
     if (entries.includes(rt)) runtimes.delete(key);
   }
