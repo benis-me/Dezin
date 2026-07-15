@@ -4499,24 +4499,22 @@ export class WorkspaceStore {
     task: GenerationTask,
     attempt: GenerationTaskAttempt,
   ): void {
-    const exactStatus = task.status === "queued"
-      || task.status === "running"
-      || task.status === "candidate-ready"
-      || task.status === "needs-rebase"
-      || task.status === "cancel-requested"
-      || task.status === "succeeded"
-      || task.status === "cancelled"
-      ? task.status
-      : null;
-    const materializationFailureRetainsRebaseAttempt = task.materializationFailures > 0
-      && attempt.status === "needs-rebase";
-    const retryOrFailureStatusMatches = task.status === "retry-wait"
-      ? attempt.status === "retryable-failed" || materializationFailureRetainsRebaseAttempt
-      : task.status === "failed"
-        ? attempt.status === "failed" || attempt.status === "retryable-failed"
-          || materializationFailureRetainsRebaseAttempt
-        : true;
-    if ((exactStatus !== null && attempt.status !== exactStatus) || !retryOrFailureStatusMatches) {
+    const allowedStatuses: Record<GenerationTask["status"], readonly GenerationTaskAttempt["status"][]> = {
+      "materialization-pending": ["failed", "retryable-failed", "needs-rebase"],
+      "retry-wait": ["failed", "retryable-failed", "needs-rebase"],
+      "blocked-context": ["failed", "retryable-failed", "needs-rebase"],
+      queued: ["queued"],
+      running: ["running"],
+      "candidate-ready": ["candidate-ready"],
+      "needs-rebase": ["needs-rebase"],
+      "awaiting-context-refresh": ["needs-rebase"],
+      "cancel-requested": ["cancel-requested"],
+      succeeded: ["succeeded"],
+      failed: ["failed", "retryable-failed", "needs-rebase"],
+      blocked: [],
+      cancelled: ["cancelled"],
+    };
+    if (!allowedStatuses[task.status].includes(attempt.status)) {
       throw new WorkspaceStoreCodecError(
         `Generation Task ${task.id} status ${task.status} does not match current Attempt ${attempt.attempt} status ${attempt.status}`,
       );

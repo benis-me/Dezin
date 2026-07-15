@@ -340,3 +340,21 @@ test("durable Plan read rejects incompatible Task and current Attempt statuses",
     /Task.*status.*Attempt|Attempt.*status|incompatible/i,
   );
 });
+
+test("durable Plan read rejects control and blocked states with incompatible current Attempts", (t) => {
+  const store = new Store(":memory:", fakeClock());
+  t.after(() => store.close());
+  const fixture = createMaterializedValidationTask(store);
+  for (const status of ["blocked", "blocked-context", "awaiting-context-refresh"] as const) {
+    store.db.prepare(
+      "UPDATE generation_tasks SET status = ? WHERE id = ? AND plan_id = ?",
+    ).run(status, fixture.task.id, fixture.plan.id);
+    assert.throws(
+      () => store.workspace.getGenerationPlanDetailForProject(fixture.project.id, fixture.plan.id),
+      /Task.*status.*Attempt|Attempt.*status|incompatible/i,
+    );
+    store.db.prepare(
+      "UPDATE generation_tasks SET status = 'queued' WHERE id = ? AND plan_id = ?",
+    ).run(fixture.task.id, fixture.plan.id);
+  }
+});
