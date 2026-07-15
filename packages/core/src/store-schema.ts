@@ -119,6 +119,15 @@ CREATE TABLE IF NOT EXISTS generation_task_attempts (
   pinned_resource_revision_ids_json TEXT NOT NULL,
   component_dependency_revision_ids_json TEXT NOT NULL,
   materialization_sealed INTEGER NOT NULL DEFAULT 0 CHECK(materialization_sealed IN (0, 1)),
+  attempt_origin TEXT NOT NULL DEFAULT 'materialized' CHECK(attempt_origin IN (
+    'materialized','same-input-retry','publication-retry'
+  )),
+  predecessor_attempt INTEGER CHECK(
+    predecessor_attempt > 0 AND predecessor_attempt <= 9007199254740991
+  ),
+  automatic_retry_index INTEGER NOT NULL DEFAULT 0 CHECK(
+    automatic_retry_index >= 0 AND automatic_retry_index <= 3
+  ),
   retry_context_policy TEXT NOT NULL CHECK(retry_context_policy IN ('same-context','latest-context')),
   status TEXT NOT NULL CHECK(status IN (
     'queued','running','cancel-requested','candidate-ready','succeeded','retryable-failed',
@@ -158,6 +167,8 @@ CREATE TABLE IF NOT EXISTS generation_task_attempts (
     REFERENCES artifact_revisions(id, artifact_id, track_id, workspace_id),
   FOREIGN KEY(candidate_resource_revision_id, target_resource_id, workspace_id)
     REFERENCES resource_revisions(id, resource_id, workspace_id),
+  FOREIGN KEY(task_id, predecessor_attempt)
+    REFERENCES generation_task_attempts(task_id, attempt),
   CHECK(
     (target_artifact_id IS NOT NULL AND target_track_id IS NOT NULL AND target_resource_id IS NULL) OR
     (target_artifact_id IS NULL AND target_track_id IS NULL)
@@ -355,7 +366,9 @@ DROP TRIGGER IF EXISTS generation_task_dependency_delete_history_guard;
 DROP TRIGGER IF EXISTS generation_task_current_attempt_guard;
 DROP TRIGGER IF EXISTS generation_task_result_write_once;
 DROP TRIGGER IF EXISTS generation_task_attempt_insert_guard;
+DROP TRIGGER IF EXISTS generation_task_attempt_retry_insert_guard;
 DROP TRIGGER IF EXISTS generation_task_attempt_materialization_seal_guard;
+DROP TRIGGER IF EXISTS generation_task_attempt_retry_materialization_seal_guard;
 DROP TRIGGER IF EXISTS generation_task_attempt_advance_current;
 DROP TRIGGER IF EXISTS generation_task_attempt_input_update_immutable;
 DROP TRIGGER IF EXISTS generation_task_attempt_candidate_write_once;
@@ -575,7 +588,10 @@ BEGIN SELECT RAISE(ABORT, 'Generation Task result is write-once'); END;
 
 CREATE TRIGGER generation_task_attempt_insert_guard
 BEFORE INSERT ON generation_task_attempts
-WHEN NEW.materialization_sealed <> 0
+WHEN NEW.attempt_origin = 'materialized' AND (
+  NEW.predecessor_attempt IS NOT NULL
+  OR NEW.automatic_retry_index <> 0
+  OR NEW.materialization_sealed <> 0
   OR NEW.status <> 'queued'
   OR NEW.owner_id IS NOT NULL
   OR NEW.lease_token IS NOT NULL
@@ -599,6 +615,15 @@ WHEN NEW.materialization_sealed <> 0
       AND plan.status IN ('queued','running')
       AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
       AND NEW.attempt = task.current_attempt + 1
+      AND NOT EXISTS (
+        SELECT 1 FROM generation_task_attempts current_attempt
+        WHERE current_attempt.task_id = task.id
+          AND current_attempt.plan_id = task.plan_id
+          AND current_attempt.workspace_id = task.workspace_id
+          AND current_attempt.attempt = task.current_attempt
+          AND current_attempt.materialization_sealed = 1
+          AND current_attempt.status = 'queued'
+      )
       AND workspace.active_snapshot_id = NEW.expected_snapshot_id
       AND snapshot.sealed = 1
       AND snapshot.kernel_revision_id = NEW.kernel_revision_id
@@ -651,11 +676,118 @@ WHEN NEW.materialization_sealed <> 0
           AND NEW.context_pack_id IS NULL)
       )
   )
+)
 BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt input or target ownership is invalid'); END;
+
+CREATE TRIGGER generation_task_attempt_retry_insert_guard
+BEFORE INSERT ON generation_task_attempts
+WHEN NEW.attempt_origin IN ('same-input-retry','publication-retry') AND (
+  NEW.materialization_sealed <> 0
+  OR NEW.status <> 'queued'
+  OR NEW.predecessor_attempt IS NULL
+  OR NEW.predecessor_attempt <> NEW.attempt - 1
+  OR NEW.automatic_retry_index < 1
+  OR NEW.automatic_retry_index > 3
+  OR NEW.blocked_reason IS NOT NULL
+  OR NEW.failure_class IS NOT NULL
+  OR NEW.error_json IS NOT NULL
+  OR NEW.next_eligible_at IS NOT NULL
+  OR NEW.owner_id IS NOT NULL
+  OR NEW.lease_token IS NOT NULL
+  OR NEW.lease_expires_at IS NOT NULL
+  OR NEW.heartbeat_at IS NOT NULL
+  OR NEW.started_at IS NOT NULL
+  OR NEW.finished_at IS NOT NULL
+  OR NOT EXISTS (
+    SELECT 1
+    FROM generation_tasks task
+    JOIN generation_plans plan
+      ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+    JOIN generation_task_attempts predecessor
+      ON predecessor.task_id = task.id
+     AND predecessor.plan_id = task.plan_id
+     AND predecessor.workspace_id = task.workspace_id
+     AND predecessor.attempt = NEW.predecessor_attempt
+    JOIN workspace_snapshots snapshot
+      ON snapshot.id = predecessor.expected_snapshot_id
+     AND snapshot.workspace_id = predecessor.workspace_id
+    WHERE task.id = NEW.task_id
+      AND task.plan_id = NEW.plan_id
+      AND task.workspace_id = NEW.workspace_id
+      AND task.current_attempt = predecessor.attempt
+      AND NEW.attempt = predecessor.attempt + 1
+      AND plan.construction_sealed = 1
+      AND plan.status IN ('queued','running')
+      AND predecessor.materialization_sealed = 1
+      AND predecessor.finished_at IS NOT NULL
+      AND predecessor.owner_id IS NULL
+      AND predecessor.lease_token IS NULL
+      AND predecessor.lease_expires_at IS NULL
+      AND predecessor.heartbeat_at IS NULL
+      AND snapshot.sealed = 1
+      AND NEW.automatic_retry_index = predecessor.automatic_retry_index + 1
+      AND NEW.target_artifact_id IS predecessor.target_artifact_id
+      AND NEW.target_track_id IS predecessor.target_track_id
+      AND NEW.target_resource_id IS predecessor.target_resource_id
+      AND NEW.base_revision_id IS predecessor.base_revision_id
+      AND NEW.expected_snapshot_id IS predecessor.expected_snapshot_id
+      AND NEW.context_pack_id IS predecessor.context_pack_id
+      AND NEW.kernel_revision_id IS predecessor.kernel_revision_id
+      AND snapshot.kernel_revision_id IS NEW.kernel_revision_id
+      AND NEW.payload_json IS predecessor.payload_json
+      AND NEW.input_hash IS NOT predecessor.input_hash
+      AND NEW.pinned_resource_revision_ids_json IS predecessor.pinned_resource_revision_ids_json
+      AND NEW.component_dependency_revision_ids_json IS predecessor.component_dependency_revision_ids_json
+      AND NEW.retry_context_policy IS predecessor.retry_context_policy
+      AND (
+        (
+          NEW.attempt_origin = 'same-input-retry'
+          AND predecessor.status = 'retryable-failed'
+          AND task.status = 'retry-wait'
+          AND NEW.execution_mode IS predecessor.execution_mode
+          AND predecessor.candidate_revision_id IS NULL
+          AND predecessor.candidate_resource_revision_id IS NULL
+          AND predecessor.candidate_evidence_json IS NULL
+          AND predecessor.candidate_evidence_hash IS NULL
+          AND NEW.candidate_revision_id IS NULL
+          AND NEW.candidate_resource_revision_id IS NULL
+          AND NEW.candidate_evidence_json IS NULL
+          AND NEW.candidate_evidence_hash IS NULL
+        ) OR (
+          NEW.attempt_origin = 'publication-retry'
+          AND predecessor.status = 'needs-rebase'
+          AND task.status = 'needs-rebase'
+          AND NEW.execution_mode = 'publication-only'
+          AND (
+            (
+              predecessor.candidate_revision_id IS NULL
+              AND predecessor.candidate_resource_revision_id IS NULL
+              AND predecessor.candidate_evidence_json IS NULL
+              AND predecessor.candidate_evidence_hash IS NULL
+              AND NEW.candidate_revision_id IS NULL
+              AND NEW.candidate_resource_revision_id IS NULL
+              AND NEW.candidate_evidence_json IS NULL
+              AND NEW.candidate_evidence_hash IS NULL
+            ) OR (
+              predecessor.candidate_evidence_json IS NOT NULL
+              AND predecessor.candidate_evidence_hash IS NOT NULL
+              AND NEW.candidate_revision_id IS predecessor.candidate_revision_id
+              AND NEW.candidate_resource_revision_id IS predecessor.candidate_resource_revision_id
+              AND NEW.candidate_evidence_json IS predecessor.candidate_evidence_json
+              AND NEW.candidate_evidence_hash IS NOT NULL
+              AND NEW.candidate_evidence_hash IS NOT predecessor.candidate_evidence_hash
+            )
+          )
+        )
+      )
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task retry Attempt must be an exact fenced successor'); END;
 
 CREATE TRIGGER generation_task_attempt_materialization_seal_guard
 BEFORE UPDATE OF materialization_sealed ON generation_task_attempts
-WHEN NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
+WHEN NEW.attempt_origin = 'materialized'
+AND NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
   OLD.materialization_sealed = 0
   AND NEW.materialization_sealed = 1
   AND OLD.status = 'queued'
@@ -676,6 +808,15 @@ WHEN NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
       AND plan.status IN ('queued','running')
       AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
       AND NEW.attempt = task.current_attempt + 1
+      AND NOT EXISTS (
+        SELECT 1 FROM generation_task_attempts current_attempt
+        WHERE current_attempt.task_id = task.id
+          AND current_attempt.plan_id = task.plan_id
+          AND current_attempt.workspace_id = task.workspace_id
+          AND current_attempt.attempt = task.current_attempt
+          AND current_attempt.materialization_sealed = 1
+          AND current_attempt.status = 'queued'
+      )
       AND workspace.active_snapshot_id = NEW.expected_snapshot_id
       AND snapshot.sealed = 1
       AND snapshot.kernel_revision_id = NEW.kernel_revision_id
@@ -796,6 +937,178 @@ WHEN NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
 )
 BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt materialization seal is incomplete or stale'); END;
 
+CREATE TRIGGER generation_task_attempt_retry_materialization_seal_guard
+BEFORE UPDATE OF materialization_sealed ON generation_task_attempts
+WHEN NEW.attempt_origin IN ('same-input-retry','publication-retry')
+AND NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
+  OLD.materialization_sealed = 0
+  AND NEW.materialization_sealed = 1
+  AND OLD.status = 'queued'
+  AND NEW.status = 'queued'
+  AND EXISTS (
+    SELECT 1
+    FROM generation_tasks task
+    JOIN generation_plans plan
+      ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+    JOIN generation_task_attempts predecessor
+      ON predecessor.task_id = task.id
+     AND predecessor.plan_id = task.plan_id
+     AND predecessor.workspace_id = task.workspace_id
+     AND predecessor.attempt = NEW.predecessor_attempt
+    JOIN workspace_snapshots snapshot
+      ON snapshot.id = predecessor.expected_snapshot_id
+     AND snapshot.workspace_id = predecessor.workspace_id
+    WHERE task.id = NEW.task_id
+      AND task.plan_id = NEW.plan_id
+      AND task.workspace_id = NEW.workspace_id
+      AND task.current_attempt = predecessor.attempt
+      AND NEW.predecessor_attempt = NEW.attempt - 1
+      AND plan.construction_sealed = 1
+      AND plan.status IN ('queued','running')
+      AND predecessor.materialization_sealed = 1
+      AND predecessor.finished_at IS NOT NULL
+      AND predecessor.owner_id IS NULL
+      AND predecessor.lease_token IS NULL
+      AND predecessor.lease_expires_at IS NULL
+      AND predecessor.heartbeat_at IS NULL
+      AND snapshot.sealed = 1
+      AND NEW.automatic_retry_index = predecessor.automatic_retry_index + 1
+      AND NEW.target_artifact_id IS predecessor.target_artifact_id
+      AND NEW.target_track_id IS predecessor.target_track_id
+      AND NEW.target_resource_id IS predecessor.target_resource_id
+      AND NEW.base_revision_id IS predecessor.base_revision_id
+      AND NEW.expected_snapshot_id IS predecessor.expected_snapshot_id
+      AND NEW.context_pack_id IS predecessor.context_pack_id
+      AND NEW.kernel_revision_id IS predecessor.kernel_revision_id
+      AND snapshot.kernel_revision_id IS NEW.kernel_revision_id
+      AND NEW.payload_json IS predecessor.payload_json
+      AND NEW.input_hash IS NOT predecessor.input_hash
+      AND NEW.pinned_resource_revision_ids_json IS predecessor.pinned_resource_revision_ids_json
+      AND NEW.component_dependency_revision_ids_json IS predecessor.component_dependency_revision_ids_json
+      AND NEW.retry_context_policy IS predecessor.retry_context_policy
+      AND (
+        (
+          NEW.attempt_origin = 'same-input-retry'
+          AND predecessor.status = 'retryable-failed'
+          AND task.status = 'retry-wait'
+          AND NEW.execution_mode IS predecessor.execution_mode
+          AND predecessor.candidate_revision_id IS NULL
+          AND predecessor.candidate_resource_revision_id IS NULL
+          AND predecessor.candidate_evidence_json IS NULL
+          AND predecessor.candidate_evidence_hash IS NULL
+          AND NEW.candidate_revision_id IS NULL
+          AND NEW.candidate_resource_revision_id IS NULL
+          AND NEW.candidate_evidence_json IS NULL
+          AND NEW.candidate_evidence_hash IS NULL
+        ) OR (
+          NEW.attempt_origin = 'publication-retry'
+          AND predecessor.status = 'needs-rebase'
+          AND task.status = 'needs-rebase'
+          AND NEW.execution_mode = 'publication-only'
+          AND (
+            (
+              predecessor.candidate_revision_id IS NULL
+              AND predecessor.candidate_resource_revision_id IS NULL
+              AND predecessor.candidate_evidence_json IS NULL
+              AND predecessor.candidate_evidence_hash IS NULL
+              AND NEW.candidate_revision_id IS NULL
+              AND NEW.candidate_resource_revision_id IS NULL
+              AND NEW.candidate_evidence_json IS NULL
+              AND NEW.candidate_evidence_hash IS NULL
+            ) OR (
+              predecessor.candidate_evidence_json IS NOT NULL
+              AND predecessor.candidate_evidence_hash IS NOT NULL
+              AND NEW.candidate_revision_id IS predecessor.candidate_revision_id
+              AND NEW.candidate_resource_revision_id IS predecessor.candidate_resource_revision_id
+              AND NEW.candidate_evidence_json IS predecessor.candidate_evidence_json
+              AND NEW.candidate_evidence_hash IS NOT NULL
+              AND NEW.candidate_evidence_hash IS NOT predecessor.candidate_evidence_hash
+            )
+          )
+        )
+      )
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT ordinal, dependency_task_id, result_revision_id,
+        result_resource_revision_id, result_snapshot_id
+      FROM generation_task_attempt_dependency_outputs
+      WHERE task_id = NEW.task_id AND attempt = NEW.attempt
+      EXCEPT
+      SELECT ordinal, dependency_task_id, result_revision_id,
+        result_resource_revision_id, result_snapshot_id
+      FROM generation_task_attempt_dependency_outputs
+      WHERE task_id = NEW.task_id AND attempt = NEW.predecessor_attempt
+    )
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT ordinal, dependency_task_id, result_revision_id,
+        result_resource_revision_id, result_snapshot_id
+      FROM generation_task_attempt_dependency_outputs
+      WHERE task_id = NEW.task_id AND attempt = NEW.predecessor_attempt
+      EXCEPT
+      SELECT ordinal, dependency_task_id, result_revision_id,
+        result_resource_revision_id, result_snapshot_id
+      FROM generation_task_attempt_dependency_outputs
+      WHERE task_id = NEW.task_id AND attempt = NEW.attempt
+    )
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT ordinal, resource_id, revision_id, source_task_id
+      FROM generation_task_attempt_resource_pins
+      WHERE task_id = NEW.task_id AND attempt = NEW.attempt
+      EXCEPT
+      SELECT ordinal, resource_id, revision_id, source_task_id
+      FROM generation_task_attempt_resource_pins
+      WHERE task_id = NEW.task_id AND attempt = NEW.predecessor_attempt
+    )
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT ordinal, resource_id, revision_id, source_task_id
+      FROM generation_task_attempt_resource_pins
+      WHERE task_id = NEW.task_id AND attempt = NEW.predecessor_attempt
+      EXCEPT
+      SELECT ordinal, resource_id, revision_id, source_task_id
+      FROM generation_task_attempt_resource_pins
+      WHERE task_id = NEW.task_id AND attempt = NEW.attempt
+    )
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT ordinal, instance_id, owner_artifact_id, component_artifact_id, revision_id,
+        source_task_id, variant_key, state_key, design_node_id, source_locator_json,
+        overrides_json, status
+      FROM generation_task_attempt_component_pins
+      WHERE task_id = NEW.task_id AND attempt = NEW.attempt
+      EXCEPT
+      SELECT ordinal, instance_id, owner_artifact_id, component_artifact_id, revision_id,
+        source_task_id, variant_key, state_key, design_node_id, source_locator_json,
+        overrides_json, status
+      FROM generation_task_attempt_component_pins
+      WHERE task_id = NEW.task_id AND attempt = NEW.predecessor_attempt
+    )
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM (
+      SELECT ordinal, instance_id, owner_artifact_id, component_artifact_id, revision_id,
+        source_task_id, variant_key, state_key, design_node_id, source_locator_json,
+        overrides_json, status
+      FROM generation_task_attempt_component_pins
+      WHERE task_id = NEW.task_id AND attempt = NEW.predecessor_attempt
+      EXCEPT
+      SELECT ordinal, instance_id, owner_artifact_id, component_artifact_id, revision_id,
+        source_task_id, variant_key, state_key, design_node_id, source_locator_json,
+        overrides_json, status
+      FROM generation_task_attempt_component_pins
+      WHERE task_id = NEW.task_id AND attempt = NEW.attempt
+    )
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task retry Attempt seal diverges from its immutable predecessor'); END;
+
 CREATE TRIGGER generation_task_attempt_advance_current
 AFTER UPDATE OF materialization_sealed ON generation_task_attempts
 WHEN OLD.materialization_sealed = 0 AND NEW.materialization_sealed = 1
@@ -810,6 +1123,7 @@ BEFORE UPDATE OF task_id, plan_id, workspace_id, attempt, target_artifact_id, ta
   target_resource_id, base_revision_id, expected_snapshot_id, context_pack_id,
   kernel_revision_id, execution_mode, payload_json, input_hash,
   pinned_resource_revision_ids_json, component_dependency_revision_ids_json,
+  attempt_origin, predecessor_attempt, automatic_retry_index,
   retry_context_policy, created_at
 ON generation_task_attempts
 BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt input is immutable'); END;
@@ -850,7 +1164,12 @@ WHEN NEW.ordinal <> COALESCE((
       AND attempt.status = 'queued'
       AND attempt.materialization_sealed = 0
       AND task.current_attempt + 1 = attempt.attempt
-      AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
+      AND (
+        (attempt.attempt_origin = 'materialized'
+          AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase'))
+        OR (attempt.attempt_origin = 'same-input-retry' AND task.status = 'retry-wait')
+        OR (attempt.attempt_origin = 'publication-retry' AND task.status = 'needs-rebase')
+      )
       AND plan.construction_sealed = 1
       AND plan.status IN ('queued','running')
   )
@@ -906,7 +1225,12 @@ WHEN NEW.ordinal <> COALESCE((
       AND attempt.status = 'queued'
       AND attempt.materialization_sealed = 0
       AND task.current_attempt + 1 = attempt.attempt
-      AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
+      AND (
+        (attempt.attempt_origin = 'materialized'
+          AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase'))
+        OR (attempt.attempt_origin = 'same-input-retry' AND task.status = 'retry-wait')
+        OR (attempt.attempt_origin = 'publication-retry' AND task.status = 'needs-rebase')
+      )
   )
 BEGIN SELECT RAISE(ABORT, 'Generation Task Resource pins must be constructed contiguously before materialization seal'); END;
 
@@ -936,7 +1260,12 @@ WHEN NEW.ordinal <> COALESCE((
       AND attempt.status = 'queued'
       AND attempt.materialization_sealed = 0
       AND task.current_attempt + 1 = attempt.attempt
-      AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
+      AND (
+        (attempt.attempt_origin = 'materialized'
+          AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase'))
+        OR (attempt.attempt_origin = 'same-input-retry' AND task.status = 'retry-wait')
+        OR (attempt.attempt_origin = 'publication-retry' AND task.status = 'needs-rebase')
+      )
   )
 BEGIN SELECT RAISE(ABORT, 'Generation Task Component pins must be constructed contiguously before materialization seal'); END;
 
@@ -3613,6 +3942,27 @@ export function migrateStoreSchema(db: DatabaseSync): void {
     "materialization_sealed",
     "materialization_sealed INTEGER NOT NULL DEFAULT 0 CHECK(materialization_sealed IN (0, 1))",
   );
+  ensureColumn(
+    "generation_task_attempts",
+    "attempt_origin",
+    "attempt_origin TEXT NOT NULL DEFAULT 'materialized' CHECK(attempt_origin IN ('materialized','same-input-retry','publication-retry'))",
+  );
+  ensureColumn(
+    "generation_task_attempts",
+    "predecessor_attempt",
+    "predecessor_attempt INTEGER CHECK(predecessor_attempt > 0 AND predecessor_attempt <= 9007199254740991)",
+  );
+  ensureColumn(
+    "generation_task_attempts",
+    "automatic_retry_index",
+    "automatic_retry_index INTEGER NOT NULL DEFAULT 0 CHECK(automatic_retry_index >= 0 AND automatic_retry_index <= 3)",
+  );
+  // This index must be installed after the additive lineage columns. STORE_SCHEMA
+  // is replayed before migrateStoreSchema() for an existing database, including
+  // databases created by the claim/lease foundation that predate these columns.
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_generation_task_attempt_retry_predecessor
+    ON generation_task_attempts(task_id, predecessor_attempt)
+    WHERE predecessor_attempt IS NOT NULL`);
   db.exec(TASK12_GENERATION_TABLE_SCHEMA);
   db.exec(TASK12_GENERATION_TRIGGER_SCHEMA);
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packs_workspace_hash ON context_packs(workspace_id, hash)");

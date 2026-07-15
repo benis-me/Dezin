@@ -533,6 +533,9 @@ function durableAttemptFixture() {
     context_pack_id: input.contextPackId,
     kernel_revision_id: input.kernelRevisionId,
     materialization_sealed: 1,
+    attempt_origin: "materialized",
+    predecessor_attempt: null,
+    automatic_retry_index: 0,
     execution_mode: input.executionMode,
     payload_json: JSON.stringify(input.payload),
     input_hash: input.inputHash,
@@ -695,6 +698,32 @@ test("Generation Task Attempt row codec fails closed on corrupted durable bounda
     ...fixture.row,
     materialization_sealed: 0,
   }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /materialization must be sealed/i);
+  for (const lineage of [
+    {
+      attempt: 1,
+      attempt_origin: "same-input-retry",
+      predecessor_attempt: 0,
+      automatic_retry_index: 1,
+    },
+    {
+      attempt: 2,
+      attempt_origin: "same-input-retry",
+      predecessor_attempt: 1,
+      automatic_retry_index: 3,
+    },
+    {
+      attempt: 2,
+      attempt_origin: "publication-retry",
+      predecessor_attempt: 1,
+      automatic_retry_index: 1,
+      execution_mode: "full",
+    },
+  ]) {
+    assert.throws(() => asGenerationTaskAttempt({
+      ...fixture.row,
+      ...lineage,
+    }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /lineage is incoherent/);
+  }
 });
 
 test("Generation Plan event codecs enforce the exhaustive task/plan event boundary", () => {

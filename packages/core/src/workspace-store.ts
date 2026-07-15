@@ -36,6 +36,7 @@ import type {
   GenerationTaskExecutionMode,
   GenerationTaskMaterializationObservation,
   GenerationTaskMaterializationFailure,
+  GenerationTaskRecoverySummary,
   GenerationTaskAttemptLease,
   HeartbeatGenerationTaskAttemptInput,
   KernelImpactAnalysis,
@@ -138,6 +139,7 @@ import {
   asGenerationPlanEvent,
   asGenerationTask,
   asGenerationTaskMaterializationFailure,
+  generationTaskCandidateEvidenceHash,
   normalizeGenerationTaskAttemptInput,
   normalizeGenerationTaskAttemptLease,
   normalizeHeartbeatGenerationTaskAttemptInput,
@@ -2646,6 +2648,7 @@ export class WorkspaceStore {
       throw new WorkspaceStoreCodecError("ready Generation Task Attempt limit must not exceed 1000");
     }
     return this.transactionRead(() => {
+      const now = boundarySafeInteger(this.clock.now(), "ready Generation Task Attempt time");
       const rows = this.db.prepare(
         `SELECT task.id AS task_id, task.current_attempt AS attempt
          FROM generation_tasks task
@@ -2656,7 +2659,8 @@ export class WorkspaceStore {
           AND attempt.plan_id = task.plan_id
           AND attempt.workspace_id = task.workspace_id
           AND attempt.attempt = task.current_attempt
-         WHERE task.status = 'queued'
+         WHERE (task.status = 'queued'
+                OR (task.status = 'retry-wait' AND task.next_eligible_at <= ?))
            AND attempt.status = 'queued'
            AND attempt.materialization_sealed = 1
            AND plan.construction_sealed = 1
@@ -2678,7 +2682,7 @@ export class WorkspaceStore {
          ORDER BY plan.created_at ASC, plan.id COLLATE BINARY ASC,
                   task.ordinal ASC, task.id COLLATE BINARY ASC
          LIMIT ?`,
-      ).all(limit) as Array<{ task_id: string; attempt: number }>;
+      ).all(now, limit) as Array<{ task_id: string; attempt: number }>;
       return rows.map((row) => {
         const taskId = requiredCell(row.task_id, "ready Generation Task id");
         const attemptNumber = boundarySafeInteger(row.attempt, "ready Generation Task Attempt number", 1);
@@ -2710,7 +2714,9 @@ export class WorkspaceStore {
       const projectId = requiredCell(ownership.project_id, "claim Generation Task Project id");
       const detail = this.readGenerationPlanDetailForProject(projectId, planId);
       const task = detail.tasks.find((candidate) => candidate.id === input.taskId);
-      if (!task || task.currentAttempt !== input.attempt || task.status !== "queued"
+      const dueRetry = task?.status === "retry-wait"
+        && task.nextEligibleAt !== null && task.nextEligibleAt <= input.now;
+      if (!task || task.currentAttempt !== input.attempt || (task.status !== "queued" && !dueRetry)
         || (detail.plan.status !== "queued" && detail.plan.status !== "running")
         || task.dependencyIds.some((dependencyId) => (
           detail.tasks.find((candidate) => candidate.id === dependencyId)?.status !== "succeeded"
@@ -2745,6 +2751,18 @@ export class WorkspaceStore {
         this.db.prepare("SELECT 1 FROM generation_task_claims WHERE claim_key = ?").get(claimKey)
       ))) {
         return null;
+      }
+      if (dueRetry) {
+        const activated = this.db.prepare(
+          `UPDATE generation_tasks
+           SET status = 'queued', failure_class = NULL, error_json = NULL,
+               next_eligible_at = NULL, finished_at = NULL
+           WHERE id = ? AND plan_id = ? AND workspace_id = ?
+             AND current_attempt = ? AND status = 'retry-wait' AND next_eligible_at <= ?`,
+        ).run(task.id, task.planId, task.workspaceId, input.attempt, input.now);
+        if (Number(activated.changes) !== 1) {
+          throw new WorkspaceStoreCodecError("Generation Task retry activation lost its due-state fence");
+        }
       }
       const now = input.now;
       if (now > Number.MAX_SAFE_INTEGER - input.leaseMs) {
@@ -2946,6 +2964,244 @@ export class WorkspaceStore {
            AND owner_id = ? AND lease_token = ?`,
       ).run(lease.taskId, lease.attempt, lease.workspaceId, lease.ownerId, lease.leaseToken);
       return Number(deleted.changes) > 0;
+    });
+  }
+
+  recoverExpiredGenerationTaskAttempts(
+    nowValue: number,
+    limitValue = 100,
+  ): GenerationTaskRecoverySummary {
+    const now = boundarySafeInteger(nowValue, "Generation Task recovery time");
+    const limit = boundarySafeInteger(limitValue, "Generation Task recovery limit", 1);
+    if (limit > 1_000) {
+      throw new WorkspaceStoreCodecError("Generation Task recovery limit must not exceed 1000");
+    }
+    return this.transactionImmediate(() => {
+      const rows = this.db.prepare(
+        `SELECT attempt.task_id, attempt.attempt
+         FROM generation_task_attempts attempt
+         JOIN generation_tasks task
+           ON task.id = attempt.task_id
+          AND task.plan_id = attempt.plan_id
+          AND task.workspace_id = attempt.workspace_id
+          AND task.current_attempt = attempt.attempt
+         JOIN generation_plans plan
+           ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+         WHERE attempt.status IN ('running','candidate-ready','cancel-requested')
+           AND task.status = attempt.status
+           AND attempt.lease_expires_at <= ?
+           AND plan.status IN ('queued','running')
+         ORDER BY attempt.lease_expires_at ASC,
+                  attempt.task_id COLLATE BINARY ASC, attempt.attempt ASC
+         LIMIT ?`,
+      ).all(now, limit) as Array<{ task_id: string; attempt: number }>;
+      const summary: GenerationTaskRecoverySummary = {
+        planIds: [],
+        retriedTaskIds: [],
+        needsRebaseTaskIds: [],
+        cancelledTaskIds: [],
+        failedTaskIds: [],
+      };
+      const recoveredPlanIds = new Set<string>();
+      for (const row of rows) {
+        const taskId = requiredCell(row.task_id, "expired Generation Task id");
+        const attemptNumber = boundarySafeInteger(
+          row.attempt,
+          "expired Generation Task Attempt number",
+          1,
+        );
+        const task = this.readGenerationTaskForExecutionInTransaction(taskId);
+        if (!task || task.currentAttempt !== attemptNumber) continue;
+        const source = this.readGenerationTaskAttemptInTransaction(taskId, attemptNumber);
+        if (!source || !source.lease || source.leaseExpiresAt === null || source.leaseExpiresAt > now) continue;
+        const live = this.readGenerationTaskExecutionLeaseInTransaction(task, attemptNumber);
+        const error = {
+          code: "generation-task-lease-expired",
+          expiredAt: live.leaseExpiresAt,
+          recoveredAt: now,
+        };
+        const retryIndex = source.automaticRetryIndex + 1;
+        const publicationRetry = source.status === "candidate-ready"
+          || source.executionMode === "publication-only";
+        const retryDelay = retryIndex <= 3
+          ? ([1_000, 4_000, 16_000] as const)[retryIndex - 1] ?? null
+          : null;
+        const shouldRetry = source.status !== "cancel-requested" && retryDelay !== null;
+        const sourceStatus = source.status === "cancel-requested"
+          ? "cancelled"
+          : shouldRetry
+            ? (publicationRetry ? "needs-rebase" : "retryable-failed")
+            : "failed";
+        const nextEligibleAt = shouldRetry ? now + retryDelay : null;
+        if (nextEligibleAt !== null && !Number.isSafeInteger(nextEligibleAt)) {
+          throw new WorkspaceStoreCodecError("Generation Task recovery backoff is exhausted");
+        }
+        const finishedSource = this.db.prepare(
+          `UPDATE generation_task_attempts
+           SET status = ?, blocked_reason = NULL, failure_class = ?, error_json = ?,
+               next_eligible_at = ?, owner_id = NULL, lease_token = NULL,
+               lease_expires_at = NULL, heartbeat_at = NULL, finished_at = ?
+           WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+             AND status = ? AND owner_id = ? AND lease_token = ?
+             AND lease_expires_at = ? AND lease_expires_at <= ?`,
+        ).run(
+          sourceStatus,
+          sourceStatus === "cancelled" ? "cancelled" : "build-infrastructure",
+          canonicalJsonText(error, "Generation Task lease expiry error"),
+          sourceStatus === "retryable-failed" ? nextEligibleAt : null,
+          now,
+          task.id,
+          task.planId,
+          task.workspaceId,
+          source.attempt,
+          source.status,
+          live.ownerId,
+          live.leaseToken,
+          live.leaseExpiresAt,
+          now,
+        );
+        if (Number(finishedSource.changes) !== 1) {
+          throw new GenerationTaskLeaseFenceError(task.id, source.attempt, "expired Attempt changed during recovery");
+        }
+        const deletedClaims = this.db.prepare(
+          `DELETE FROM generation_task_claims
+           WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+             AND owner_id = ? AND lease_token = ? AND lease_expires_at = ?`,
+        ).run(
+          task.id,
+          task.planId,
+          task.workspaceId,
+          source.attempt,
+          live.ownerId,
+          live.leaseToken,
+          live.leaseExpiresAt,
+        );
+        if (Number(deletedClaims.changes) !== live.claims.length) {
+          throw new WorkspaceStoreCodecError("Generation Task recovery did not release its exact claim set");
+        }
+        recoveredPlanIds.add(task.planId);
+
+        if (shouldRetry) {
+          const retryStagingStatus = publicationRetry ? "needs-rebase" : "retry-wait";
+          const stagedTask = this.db.prepare(
+            `UPDATE generation_tasks
+             SET status = ?, blocked_reason = NULL, blocked_by_task_id = NULL,
+                 pending_context_policy = NULL, failure_class = 'build-infrastructure', error_json = ?,
+                 next_eligible_at = ?, finished_at = NULL
+             WHERE id = ? AND plan_id = ? AND workspace_id = ?
+               AND current_attempt = ? AND status = ?`,
+          ).run(
+            retryStagingStatus,
+            canonicalJsonText(error, "Generation Task lease expiry error"),
+            retryStagingStatus === "retry-wait" ? nextEligibleAt : null,
+            task.id,
+            task.planId,
+            task.workspaceId,
+            source.attempt,
+            task.status,
+          );
+          if (Number(stagedTask.changes) !== 1) {
+            throw new WorkspaceStoreCodecError("Generation Task changed before scheduling its exact retry");
+          }
+          const terminalSource = this.readGenerationTaskAttemptInTransaction(task.id, source.attempt);
+          if (!terminalSource) {
+            throw new WorkspaceStoreCodecError("Generation Task recovery source Attempt disappeared");
+          }
+          const successor = this.appendExactGenerationTaskRetrySuccessorInTransaction({
+            task,
+            source: terminalSource,
+            createdAt: now,
+            publicationRetry,
+          });
+          const movedTask = this.db.prepare(
+            `UPDATE generation_tasks
+             SET status = 'retry-wait', blocked_reason = NULL, blocked_by_task_id = NULL,
+                 pending_context_policy = NULL, failure_class = 'build-infrastructure', error_json = ?,
+                 next_eligible_at = ?, finished_at = NULL
+             WHERE id = ? AND plan_id = ? AND workspace_id = ?
+               AND current_attempt = ? AND status = ?`,
+          ).run(
+            canonicalJsonText(error, "Generation Task lease expiry error"),
+            nextEligibleAt,
+            task.id,
+            task.planId,
+            task.workspaceId,
+            successor.attempt,
+            retryStagingStatus,
+          );
+          if (Number(movedTask.changes) !== 1) {
+            throw new WorkspaceStoreCodecError("Generation Task changed while scheduling its exact retry");
+          }
+          this.appendGenerationPlanEventInTransaction({
+            planId: task.planId,
+            workspaceId: task.workspaceId,
+            taskId: task.id,
+            type: "task-retry-wait",
+            payload: {
+              sourceAttempt: source.attempt,
+              successorAttempt: successor.attempt,
+              failureClass: "build-infrastructure",
+              error,
+              retryOrdinal: successor.automaticRetryIndex,
+              nextEligibleAt,
+              reason: "lease-expired",
+              executionMode: successor.executionMode,
+            },
+          });
+          summary.retriedTaskIds.push(task.id);
+          if (publicationRetry) summary.needsRebaseTaskIds.push(task.id);
+          continue;
+        }
+
+        const terminalTaskStatus = sourceStatus === "cancelled" ? "cancelled" : "failed";
+        const movedTask = this.db.prepare(
+          `UPDATE generation_tasks
+           SET status = ?, blocked_reason = ?, blocked_by_task_id = NULL,
+               pending_context_policy = NULL, failure_class = ?, error_json = ?,
+               next_eligible_at = NULL, finished_at = ?
+           WHERE id = ? AND plan_id = ? AND workspace_id = ?
+             AND current_attempt = ? AND status = ?`,
+        ).run(
+          terminalTaskStatus,
+          terminalTaskStatus === "cancelled" ? "Cancelled after its execution lease expired" : null,
+          terminalTaskStatus === "cancelled" ? "cancelled" : "build-infrastructure",
+          canonicalJsonText(error, "Generation Task lease expiry error"),
+          now,
+          task.id,
+          task.planId,
+          task.workspaceId,
+          source.attempt,
+          task.status,
+        );
+        if (Number(movedTask.changes) !== 1) {
+          throw new WorkspaceStoreCodecError("Generation Task changed while terminalizing its expired lease");
+        }
+        this.appendGenerationPlanEventInTransaction({
+          planId: task.planId,
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          type: terminalTaskStatus === "cancelled" ? "task-cancelled" : "task-failed",
+          payload: {
+            attempt: source.attempt,
+            failureClass: terminalTaskStatus === "cancelled" ? "cancelled" : "build-infrastructure",
+            error,
+            retryExhausted: terminalTaskStatus === "failed",
+          },
+        });
+        if (terminalTaskStatus === "cancelled") {
+          summary.cancelledTaskIds.push(task.id);
+        } else {
+          summary.failedTaskIds.push(task.id);
+          this.blockGenerationTaskDescendantsInTransaction(task, error, now);
+          this.terminalizeFailedGenerationPlanIfSettledInTransaction(task, now);
+        }
+      }
+      summary.planIds = [...recoveredPlanIds].sort(compareBinary);
+      summary.retriedTaskIds.sort(compareBinary);
+      summary.needsRebaseTaskIds.sort(compareBinary);
+      summary.cancelledTaskIds.sort(compareBinary);
+      summary.failedTaskIds.sort(compareBinary);
+      return summary;
     });
   }
 
@@ -4471,9 +4727,18 @@ export class WorkspaceStore {
       || task.status === "awaiting-context-refresh"
       || task.status === "needs-rebase"
       || (task.status === "retry-wait" && task.nextEligibleAt !== null && task.nextEligibleAt <= now);
-    return stateIsReady
-      && task.currentAttempt < Number.MAX_SAFE_INTEGER
-      && task.dependencyIds.every((dependencyId) => taskById.get(dependencyId)?.status === "succeeded");
+    if (!stateIsReady || task.currentAttempt >= Number.MAX_SAFE_INTEGER
+      || !task.dependencyIds.every((dependencyId) => taskById.get(dependencyId)?.status === "succeeded")) {
+      return false;
+    }
+    if (task.currentAttempt > 0) {
+      const currentAttempt = this.readGenerationTaskAttemptInTransaction(task.id, task.currentAttempt);
+      // Expired-lease recovery has already appended and sealed this immutable
+      // successor. Backoff makes it claimable; it must never be observed again
+      // or replaced by a newly materialized Attempt from a later Snapshot.
+      if (currentAttempt?.status === "queued") return false;
+    }
+    return true;
   }
 
   private generationTaskMaterializationExecutionModeInTransaction(
@@ -4818,6 +5083,323 @@ export class WorkspaceStore {
     return asGenerationTask(row, dependencyRows);
   }
 
+  private appendExactGenerationTaskRetrySuccessorInTransaction(input: {
+    task: GenerationTask;
+    source: GenerationTaskAttempt;
+    createdAt: number;
+    publicationRetry: boolean;
+  }): GenerationTaskAttempt {
+    if (!this.db.isTransaction) throw new Error("Generation Task retry successor requires a transaction");
+    const { task, source, createdAt, publicationRetry } = input;
+    if (source.taskId !== task.id || source.planId !== task.planId
+      || source.workspaceId !== task.workspaceId || source.attempt !== task.currentAttempt
+      || source.lease !== null
+      || (source.status !== "retryable-failed" && source.status !== "needs-rebase")) {
+      throw new WorkspaceStoreCodecError("Generation Task retry source is not its exact terminal current Attempt");
+    }
+    if (source.attempt >= Number.MAX_SAFE_INTEGER) {
+      throw new WorkspaceStoreCodecError("Generation Task retry Attempt number is exhausted");
+    }
+    const attemptNumber = source.attempt + 1;
+    const automaticRetryIndex = source.automaticRetryIndex + 1;
+    if (automaticRetryIndex > 3) {
+      throw new WorkspaceStoreCodecError("Generation Task automatic retry budget is exhausted");
+    }
+    const executionMode = publicationRetry ? "publication-only" : source.executionMode;
+    const successorInput = normalizeGenerationTaskAttemptInput({
+      taskId: source.taskId,
+      planId: source.planId,
+      workspaceId: source.workspaceId,
+      attempt: attemptNumber,
+      target: source.target,
+      baseRevisionId: source.baseRevisionId,
+      expectedSnapshotId: source.expectedSnapshotId,
+      contextPackId: source.contextPackId,
+      kernelRevisionId: source.kernelRevisionId,
+      payload: source.payload,
+      dependencyOutputs: source.dependencyOutputs.map(({ ordinal: _ordinal, ...output }) => output),
+      resourcePins: source.resourcePins.map(({ ordinal: _ordinal, ...pin }) => pin),
+      componentPins: source.componentPins.map(({
+        ordinal: _ordinal,
+        designNodeId: _designNodeId,
+        ...pin
+      }) => pin),
+      retryContextPolicy: source.retryContextPolicy,
+      executionMode,
+    });
+    const candidateRevisionId = publicationRetry ? source.candidateRevisionId : null;
+    const candidateResourceRevisionId = publicationRetry ? source.candidateResourceRevisionId : null;
+    const candidateEvidence = publicationRetry ? source.candidateEvidence : null;
+    const candidateEvidenceHash = candidateEvidence === null
+      ? null
+      : generationTaskCandidateEvidenceHash({
+        taskId: source.taskId,
+        planId: source.planId,
+        workspaceId: source.workspaceId,
+        attempt: attemptNumber,
+        candidateRevisionId,
+        candidateResourceRevisionId,
+        candidateEvidence,
+      });
+    this.db.prepare(
+      `INSERT INTO generation_task_attempts (
+         task_id, plan_id, workspace_id, attempt, attempt_origin, predecessor_attempt,
+         automatic_retry_index, target_artifact_id, target_track_id, target_resource_id,
+         base_revision_id, expected_snapshot_id, context_pack_id, kernel_revision_id,
+         execution_mode, payload_json, input_hash, pinned_resource_revision_ids_json,
+         component_dependency_revision_ids_json, retry_context_policy, status,
+         materialization_sealed, candidate_revision_id, candidate_resource_revision_id,
+         candidate_evidence_json, candidate_evidence_hash, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                 'queued', 0, ?, ?, ?, ?, ?)`,
+    ).run(
+      successorInput.taskId,
+      successorInput.planId,
+      successorInput.workspaceId,
+      successorInput.attempt,
+      publicationRetry ? "publication-retry" : "same-input-retry",
+      source.attempt,
+      automaticRetryIndex,
+      successorInput.target.type === "artifact" ? successorInput.target.id : null,
+      successorInput.target.type === "artifact" ? successorInput.target.trackId : null,
+      successorInput.target.type === "resource" ? successorInput.target.id : null,
+      successorInput.baseRevisionId,
+      successorInput.expectedSnapshotId,
+      successorInput.contextPackId,
+      successorInput.kernelRevisionId,
+      successorInput.executionMode,
+      canonicalJsonText(successorInput.payload, "Generation Task retry payload"),
+      successorInput.inputHash,
+      canonicalJsonText(
+        successorInput.resourcePins.map((pin) => pin.revisionId),
+        "Generation Task retry Resource revision summary",
+      ),
+      canonicalJsonText(
+        successorInput.componentPins.map((pin) => pin.revisionId),
+        "Generation Task retry Component revision summary",
+      ),
+      successorInput.retryContextPolicy,
+      candidateRevisionId,
+      candidateResourceRevisionId,
+      candidateEvidence === null
+        ? null
+        : canonicalJsonText(candidateEvidence, "Generation Task retry candidate evidence"),
+      candidateEvidenceHash,
+      createdAt,
+    );
+    this.db.prepare(
+      `INSERT INTO generation_task_attempt_dependency_outputs (
+         task_id, plan_id, attempt, workspace_id, ordinal, dependency_task_id,
+         result_revision_id, result_resource_revision_id, result_snapshot_id
+       )
+       SELECT task_id, plan_id, ?, workspace_id, ordinal, dependency_task_id,
+              result_revision_id, result_resource_revision_id, result_snapshot_id
+       FROM generation_task_attempt_dependency_outputs
+       WHERE task_id = ? AND attempt = ? ORDER BY ordinal ASC`,
+    ).run(attemptNumber, source.taskId, source.attempt);
+    this.db.prepare(
+      `INSERT INTO generation_task_attempt_resource_pins (
+         task_id, plan_id, attempt, workspace_id, ordinal, resource_id, revision_id, source_task_id
+       )
+       SELECT task_id, plan_id, ?, workspace_id, ordinal, resource_id, revision_id, source_task_id
+       FROM generation_task_attempt_resource_pins
+       WHERE task_id = ? AND attempt = ? ORDER BY ordinal ASC`,
+    ).run(attemptNumber, source.taskId, source.attempt);
+    this.db.prepare(
+      `INSERT INTO generation_task_attempt_component_pins (
+         task_id, plan_id, attempt, workspace_id, ordinal, instance_id, owner_artifact_id,
+         component_artifact_id, revision_id, source_task_id, variant_key, state_key,
+         design_node_id, source_locator_json, overrides_json, status
+       )
+       SELECT task_id, plan_id, ?, workspace_id, ordinal, instance_id, owner_artifact_id,
+              component_artifact_id, revision_id, source_task_id, variant_key, state_key,
+              design_node_id, source_locator_json, overrides_json, status
+       FROM generation_task_attempt_component_pins
+       WHERE task_id = ? AND attempt = ? ORDER BY ordinal ASC`,
+    ).run(attemptNumber, source.taskId, source.attempt);
+    const sealed = this.db.prepare(
+      `UPDATE generation_task_attempts SET materialization_sealed = 1
+       WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+         AND materialization_sealed = 0`,
+    ).run(task.id, task.planId, task.workspaceId, attemptNumber);
+    if (Number(sealed.changes) !== 1) {
+      throw new WorkspaceStoreCodecError("Generation Task exact retry successor could not be sealed");
+    }
+    this.appendGenerationPlanEventInTransaction({
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      type: "task-materialized",
+      payload: {
+        attempt: successorInput.attempt,
+        inputHash: successorInput.inputHash,
+        expectedSnapshotId: successorInput.expectedSnapshotId,
+        baseRevisionId: successorInput.baseRevisionId,
+        contextPackId: successorInput.contextPackId,
+        kernelRevisionId: successorInput.kernelRevisionId,
+        retryContextPolicy: successorInput.retryContextPolicy,
+        executionMode: successorInput.executionMode,
+        attemptOrigin: publicationRetry ? "publication-retry" : "same-input-retry",
+        predecessorAttempt: source.attempt,
+        automaticRetryIndex,
+      },
+    });
+    const successor = this.readGenerationTaskAttemptInTransaction(task.id, attemptNumber);
+    if (!successor || successor.inputHash !== successorInput.inputHash
+      || successor.predecessorAttempt !== source.attempt
+      || successor.automaticRetryIndex !== automaticRetryIndex) {
+      throw new WorkspaceStoreCodecError("Generation Task exact retry successor did not round-trip");
+    }
+    return successor;
+  }
+
+  private blockGenerationTaskDescendantsInTransaction(
+    root: GenerationTask,
+    error: Record<string, unknown>,
+    now: number,
+  ): void {
+    const rows = this.db.prepare(
+      `WITH RECURSIVE descendants(task_id) AS (
+         SELECT dependency.task_id
+         FROM generation_task_dependencies dependency
+         WHERE dependency.plan_id = ? AND dependency.dependency_task_id = ?
+         UNION
+         SELECT dependency.task_id
+         FROM generation_task_dependencies dependency
+         JOIN descendants ON descendants.task_id = dependency.dependency_task_id
+         WHERE dependency.plan_id = ?
+       )
+       SELECT task.id, task.status, task.current_attempt
+       FROM generation_tasks task
+       JOIN descendants ON descendants.task_id = task.id
+       WHERE task.plan_id = ? AND task.workspace_id = ?
+       ORDER BY task.ordinal ASC, task.id COLLATE BINARY ASC`,
+    ).all(root.planId, root.id, root.planId, root.planId, root.workspaceId) as Array<{
+      id: string;
+      status: GenerationTask["status"];
+      current_attempt: number;
+    }>;
+    const terminalStatuses = new Set<GenerationTask["status"]>([
+      "succeeded",
+      "failed",
+      "blocked",
+      "cancelled",
+    ]);
+    for (const row of rows) {
+      const taskId = requiredCell(row.id, "blocked Generation Task descendant id");
+      if (terminalStatuses.has(row.status)) continue;
+      const currentAttempt = boundarySafeInteger(
+        row.current_attempt,
+        "blocked Generation Task descendant current Attempt",
+      );
+      if (row.status === "running" || row.status === "candidate-ready"
+        || row.status === "cancel-requested") {
+        if (row.status !== "cancel-requested") {
+          const requestedAttempt = this.db.prepare(
+            `UPDATE generation_task_attempts SET status = 'cancel-requested'
+             WHERE task_id = ? AND attempt = ? AND status = ?`,
+          ).run(taskId, currentAttempt, row.status);
+          if (Number(requestedAttempt.changes) !== 1) {
+            throw new WorkspaceStoreCodecError("running descendant changed during failure propagation");
+          }
+          const requestedTask = this.db.prepare(
+            `UPDATE generation_tasks
+             SET status = 'cancel-requested', blocked_reason = ?, blocked_by_task_id = ?
+             WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = ?`,
+          ).run(
+            `Cancellation requested by failed prerequisite ${root.id}`,
+            root.id,
+            taskId,
+            root.planId,
+            root.workspaceId,
+            row.status,
+          );
+          if (Number(requestedTask.changes) !== 1) {
+            throw new WorkspaceStoreCodecError("running descendant Task changed during failure propagation");
+          }
+          this.appendGenerationPlanEventInTransaction({
+            planId: root.planId,
+            workspaceId: root.workspaceId,
+            taskId,
+            type: "task-cancel-requested",
+            payload: { attempt: currentAttempt, blockedByTaskId: root.id, reason: "prerequisite-failed" },
+          });
+        }
+        continue;
+      }
+      if (currentAttempt > 0) {
+        const attempt = this.readGenerationTaskAttemptInTransaction(taskId, currentAttempt);
+        if (attempt?.status === "queued") {
+          const cancelledAttempt = this.db.prepare(
+            `UPDATE generation_task_attempts
+             SET status = 'cancelled', blocked_reason = ?, failure_class = 'build-infrastructure',
+                 error_json = ?, finished_at = ?
+             WHERE task_id = ? AND attempt = ? AND status = 'queued'`,
+          ).run(
+            `Blocked by failed prerequisite ${root.id}`,
+            canonicalJsonText(error, "blocked Generation Task descendant error"),
+            now,
+            taskId,
+            currentAttempt,
+          );
+          if (Number(cancelledAttempt.changes) !== 1) {
+            throw new WorkspaceStoreCodecError("queued descendant Attempt changed during failure propagation");
+          }
+        }
+      }
+      const blockedReason = `Blocked by failed prerequisite ${root.id}`;
+      const blocked = this.db.prepare(
+        `UPDATE generation_tasks
+         SET status = 'blocked', blocked_reason = ?, blocked_by_task_id = ?,
+             pending_context_policy = NULL, failure_class = 'build-infrastructure', error_json = ?,
+             next_eligible_at = NULL, finished_at = ?
+         WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = ?`,
+      ).run(
+        blockedReason,
+        root.id,
+        canonicalJsonText(error, "blocked Generation Task descendant error"),
+        now,
+        taskId,
+        root.planId,
+        root.workspaceId,
+        row.status,
+      );
+      if (Number(blocked.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Generation Task descendant changed while becoming blocked");
+      }
+      this.appendGenerationPlanEventInTransaction({
+        planId: root.planId,
+        workspaceId: root.workspaceId,
+        taskId,
+        type: "task-blocked",
+        payload: { blockedByTaskId: root.id, reason: blockedReason },
+      });
+    }
+  }
+
+  private terminalizeFailedGenerationPlanIfSettledInTransaction(root: GenerationTask, now: number): void {
+    const nonterminal = this.db.prepare(
+      `SELECT COUNT(*) AS count FROM generation_tasks
+       WHERE plan_id = ? AND workspace_id = ?
+         AND status NOT IN ('succeeded','failed','blocked','cancelled')`,
+    ).get(root.planId, root.workspaceId) as { count: number };
+    if (boundarySafeInteger(nonterminal.count, "Generation Plan nonterminal Task count") !== 0) return;
+    const terminalized = this.db.prepare(
+      `UPDATE generation_plans SET status = 'failed', finished_at = ?
+       WHERE id = ? AND workspace_id = ? AND status IN ('queued','running')`,
+    ).run(now, root.planId, root.workspaceId);
+    if (Number(terminalized.changes) !== 1) {
+      throw new WorkspaceStoreCodecError("Generation Plan changed while terminalizing an expired Task");
+    }
+    this.appendGenerationPlanEventInTransaction({
+      planId: root.planId,
+      workspaceId: root.workspaceId,
+      taskId: null,
+      type: "plan-failed",
+      payload: { failedTaskId: root.id, failureClass: "build-infrastructure" },
+    });
+  }
+
   private generationTaskWriterClaimKeys(task: GenerationTask): string[] {
     const workspaceKey = generationClaimKeyId(task.workspaceId);
     if (task.target.type === "artifact") {
@@ -4980,7 +5562,7 @@ export class WorkspaceStore {
   ): void {
     const allowedStatuses: Record<GenerationTask["status"], readonly GenerationTaskAttempt["status"][]> = {
       "materialization-pending": ["failed", "retryable-failed", "needs-rebase"],
-      "retry-wait": ["failed", "retryable-failed", "needs-rebase"],
+      "retry-wait": ["queued", "failed", "retryable-failed", "needs-rebase"],
       "blocked-context": ["failed", "retryable-failed", "needs-rebase"],
       queued: ["queued"],
       running: ["running"],
@@ -4990,7 +5572,7 @@ export class WorkspaceStore {
       "cancel-requested": ["cancel-requested"],
       succeeded: ["succeeded"],
       failed: ["failed", "retryable-failed", "needs-rebase"],
-      blocked: [],
+      blocked: ["cancelled", "failed", "retryable-failed", "needs-rebase"],
       cancelled: ["cancelled"],
     };
     if (!allowedStatuses[task.status].includes(attempt.status)) {
@@ -5016,6 +5598,11 @@ export class WorkspaceStore {
       kernelRevisionId: attempt.kernelRevisionId,
       retryContextPolicy: attempt.retryContextPolicy,
       executionMode: attempt.executionMode,
+      ...(attempt.attemptOrigin === "materialized" ? {} : {
+        attemptOrigin: attempt.attemptOrigin,
+        predecessorAttempt: attempt.predecessorAttempt,
+        automaticRetryIndex: attempt.automaticRetryIndex,
+      }),
     };
     if (events.length !== 1 || !isDeepStrictEqual(events[0]?.payload, expectedPayload)) {
       throw new WorkspaceStoreCodecError(

@@ -195,6 +195,81 @@ test("additive migration restores Generation Plan execution tables and the const
   }
 });
 
+test("additive migration installs retry lineage after replaying the pre-lineage Attempt table", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE generation_task_attempts (
+        task_id TEXT NOT NULL,
+        plan_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        target_artifact_id TEXT,
+        target_track_id TEXT,
+        target_resource_id TEXT,
+        base_revision_id TEXT,
+        expected_snapshot_id TEXT NOT NULL,
+        context_pack_id TEXT,
+        kernel_revision_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        pinned_resource_revision_ids_json TEXT NOT NULL,
+        component_dependency_revision_ids_json TEXT NOT NULL,
+        materialization_sealed INTEGER NOT NULL DEFAULT 0,
+        retry_context_policy TEXT NOT NULL,
+        status TEXT NOT NULL,
+        blocked_reason TEXT,
+        failure_class TEXT,
+        error_json TEXT,
+        next_eligible_at INTEGER,
+        candidate_revision_id TEXT,
+        candidate_resource_revision_id TEXT,
+        candidate_evidence_json TEXT,
+        candidate_evidence_hash TEXT,
+        owner_id TEXT,
+        lease_token TEXT,
+        lease_expires_at INTEGER,
+        heartbeat_at INTEGER,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER,
+        PRIMARY KEY(task_id, attempt),
+        UNIQUE(task_id, attempt, workspace_id),
+        UNIQUE(task_id, attempt, plan_id, workspace_id)
+      );
+    `);
+
+    // Store replays idempotent DDL before additive ALTERs. No index or trigger
+    // in the replay may reference the new lineage columns until migration adds
+    // them to this pre-lineage table.
+    assert.doesNotThrow(() => db.exec(STORE_SCHEMA));
+    assert.doesNotThrow(() => migrateStoreSchema(db));
+
+    const attemptColumns = new Set(
+      (db.prepare("PRAGMA table_info(generation_task_attempts)").all() as Array<{ name: string }>).map(
+        ({ name }) => name,
+      ),
+    );
+    assert.deepEqual(
+      ["attempt_origin", "predecessor_attempt", "automatic_retry_index"].filter(
+        (column) => !attemptColumns.has(column),
+      ),
+      [],
+    );
+    assert.equal(
+      Number((db.prepare(
+        `SELECT COUNT(*) AS count FROM sqlite_master
+         WHERE type = 'index' AND name = 'idx_generation_task_attempt_retry_predecessor'`,
+      ).get() as { count: number }).count),
+      1,
+    );
+  } finally {
+    db.close();
+  }
+});
+
 function insertWorkspaceTask(
   db: DatabaseSync,
   fixture: PlanFixture,

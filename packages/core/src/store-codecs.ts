@@ -1375,7 +1375,8 @@ export function asGenerationTaskAttempt(
   generationAllowFields(row, [
     "task_id", "plan_id", "workspace_id", "attempt", "target_artifact_id", "target_track_id",
     "target_resource_id", "base_revision_id", "expected_snapshot_id", "context_pack_id", "kernel_revision_id",
-    "materialization_sealed", "execution_mode", "payload_json", "input_hash", "pinned_resource_revision_ids_json",
+    "materialization_sealed", "attempt_origin", "predecessor_attempt", "automatic_retry_index",
+    "execution_mode", "payload_json", "input_hash", "pinned_resource_revision_ids_json",
     "component_dependency_revision_ids_json", "retry_context_policy", "status", "blocked_reason",
     "failure_class", "error_json", "next_eligible_at", "candidate_revision_id",
     "candidate_resource_revision_id", "candidate_evidence_json", "candidate_evidence_hash", "owner_id",
@@ -1385,6 +1386,30 @@ export function asGenerationTaskAttempt(
   const planId = generationExactString(row.plan_id, "Generation Task Attempt Plan id");
   const workspaceId = generationExactString(row.workspace_id, "Generation Task Attempt Workspace id");
   const attemptNumber = generationSafeInteger(row.attempt, "Generation Task Attempt number", 1);
+  if (row.attempt_origin !== "materialized" && row.attempt_origin !== "same-input-retry"
+    && row.attempt_origin !== "publication-retry") {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt origin is unsupported");
+  }
+  const attemptOrigin = row.attempt_origin;
+  const predecessorAttempt = generationStoredNullableInteger(
+    row.predecessor_attempt,
+    "Generation Task Attempt predecessor number",
+  );
+  const automaticRetryIndex = generationSafeInteger(
+    row.automatic_retry_index,
+    "Generation Task Attempt automatic retry index",
+    0,
+  );
+  if ((attemptOrigin === "materialized" && (predecessorAttempt !== null || automaticRetryIndex !== 0))
+    || (attemptOrigin !== "materialized"
+      && (attemptNumber < 2
+        || predecessorAttempt !== attemptNumber - 1
+        || automaticRetryIndex < 1
+        || automaticRetryIndex > 3
+        || automaticRetryIndex > attemptNumber - 1))
+    || (attemptOrigin === "publication-retry" && row.execution_mode !== "publication-only")) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt lineage is incoherent");
+  }
   const expectedOwnership = { taskId, planId, workspaceId, attempt: attemptNumber };
   if (row.materialization_sealed !== 1) {
     throw new WorkspaceStoreCodecError("Generation Task Attempt materialization must be sealed");
@@ -1594,6 +1619,9 @@ export function asGenerationTaskAttempt(
     : generationCanonicalObjectText(row.error_json, "Generation Task Attempt error");
   return {
     ...input,
+    attemptOrigin,
+    predecessorAttempt,
+    automaticRetryIndex,
     status,
     blockedReason: generationStoredNullableString(row.blocked_reason, "Generation Task Attempt blocked reason"),
     failureClass: generationFailureClass(row.failure_class, "Generation Task Attempt failure class"),

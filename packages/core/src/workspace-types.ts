@@ -877,6 +877,7 @@ export type GenerationTaskAttemptStatus =
 
 export type GenerationTaskExecutionMode = "full" | "publication-only";
 export type GenerationTaskRetryContextPolicy = "same-context" | "latest-context";
+export type GenerationTaskAttemptOrigin = "materialized" | "same-input-retry" | "publication-retry";
 export type GenerationTaskCapacityClass = "agent" | "render-qa" | "image";
 export type GenerationTaskClaimKind = "capacity" | "writer";
 export type GenerationTaskCapacityClaimKey =
@@ -1084,6 +1085,9 @@ export interface HeartbeatGenerationTaskAttemptInput extends GenerationTaskAttem
 }
 
 export interface GenerationTaskAttempt extends GenerationTaskAttemptInput {
+  attemptOrigin: GenerationTaskAttemptOrigin;
+  predecessorAttempt: number | null;
+  automaticRetryIndex: number;
   status: GenerationTaskAttemptStatus;
   blockedReason: string | null;
   failureClass: GenerationTaskFailureClass | null;
@@ -1120,6 +1124,14 @@ export interface GenerationTaskAttemptClaim {
   attempt: GenerationTaskAttempt;
   lease: GenerationTaskAttemptLease;
   claims: GenerationTaskClaim[];
+}
+
+export interface GenerationTaskRecoverySummary {
+  planIds: string[];
+  retriedTaskIds: string[];
+  needsRebaseTaskIds: string[];
+  cancelledTaskIds: string[];
+  failedTaskIds: string[];
 }
 
 export type GenerationPlanEventType =

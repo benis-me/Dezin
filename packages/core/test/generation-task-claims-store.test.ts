@@ -324,7 +324,10 @@ function createClaimWorker(file: string, prefix: string) {
             message: error?.message ?? String(error),
           });
         }
-        setImmediate(() => store.close());
+        // The parent terminates both workers after it has observed both results.
+        // Closing DatabaseSync here can checkpoint while the peer is still
+        // contending for the same WAL, which makes this concurrency assertion
+        // intermittently exceed the test timeout under full-suite load.
       });
     }).catch((error) => parentPort.postMessage({
       kind: "boot-error",
@@ -350,8 +353,13 @@ test("two Store connections racing one queued Attempt produce exactly one durabl
   const first = createClaimWorker(file, "claim-race-a");
   const second = createClaimWorker(file, "claim-race-b");
   try {
-    assert.deepEqual((await waitForWorkerMessage(first)).kind, "ready");
-    assert.deepEqual((await waitForWorkerMessage(second)).kind, "ready");
+    // Subscribe before awaiting either worker. A fast second worker can emit
+    // `ready` while the first promise is pending, and Worker messages are not
+    // replayed to listeners attached afterward.
+    const firstReady = waitForWorkerMessage(first);
+    const secondReady = waitForWorkerMessage(second);
+    const readyMessages = await Promise.all([firstReady, secondReady]);
+    assert.deepEqual(readyMessages.map((message) => message.kind), ["ready", "ready"]);
     const input = {
       taskId: fixture.attempt.taskId,
       attempt: fixture.attempt.attempt,
