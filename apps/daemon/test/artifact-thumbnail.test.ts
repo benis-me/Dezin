@@ -6,7 +6,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { deflateSync } from "node:zlib";
 import { Store } from "../../../packages/core/src/index.ts";
-import { getOrCreateArtifactThumbnail } from "../src/artifact-thumbnail.ts";
+import {
+  createArtifactThumbnailConcurrencyLimiter,
+  getOrCreateArtifactThumbnail,
+} from "../src/artifact-thumbnail.ts";
 
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -762,66 +765,51 @@ test("streaming PNG validation accepts Adam7 and rejects an invalid scanline fil
   }
 });
 
-test("distinct cache-hit validations share a bounded global slot queue and queued aborts are prompt", async () => {
-  const fixture = createThumbnailFixture();
-  try {
-    const large = structuredPng(4_096, 4_096);
-    const states = ["validation-large-a", "validation-large-b", "validation-small"] as const;
-    for (const state of states) {
-      await getOrCreateArtifactThumbnail({
-        store: fixture.store,
-        dataDir: fixture.dataDir,
-        projectId: fixture.projectId,
-        artifactId: fixture.artifactId,
-        revisionId: fixture.revision.id,
-        requiredStateKey: state,
-      }, (target) => renderedPng(target, state === "validation-small" ? PNG : large));
-    }
-    const cachedInput = (state: typeof states[number], signal?: AbortSignal) => ({
-      store: fixture.store,
-      dataDir: fixture.dataDir,
-      projectId: fixture.projectId,
-      artifactId: fixture.artifactId,
-      revisionId: fixture.revision.id,
-      requiredStateKey: state,
-      ...(signal === undefined ? {} : { signal }),
-    });
-    const rendererMustNotRun = () => {
-      throw new Error("cache-hit renderer must not run");
-    };
-    const completions: string[] = [];
-    const first = getOrCreateArtifactThumbnail(
-      cachedInput("validation-large-a"),
-      rendererMustNotRun,
-    ).then((value) => { completions.push("large-a"); return value; });
-    const second = getOrCreateArtifactThumbnail(
-      cachedInput("validation-large-b"),
-      rendererMustNotRun,
-    ).then((value) => { completions.push("large-b"); return value; });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const third = getOrCreateArtifactThumbnail(
-      cachedInput("validation-small"),
-      rendererMustNotRun,
-    ).then((value) => { completions.push("small"); return value; });
-    await Promise.all([first, second, third]);
-    assert.notEqual(completions[0], "small", "a third validation must wait for a bounded global slot");
+test("thumbnail validation limiter bounds concurrent work and removes aborted waiters", async () => {
+  const limit = createArtifactThumbnailConcurrencyLimiter(2);
+  const releases: Array<() => void> = [];
+  let active = 0;
+  let maxActive = 0;
+  let started = 0;
+  let bothStarted!: () => void;
+  const ready = new Promise<void>((resolve) => { bothStarted = resolve; });
+  const hold = (name: string) => limit(async () => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    started += 1;
+    if (started === 2) bothStarted();
+    await new Promise<void>((resolve) => releases.push(resolve));
+    active -= 1;
+    return name;
+  });
 
-    const queuedController = new AbortController();
-    const blockers = [
-      getOrCreateArtifactThumbnail(cachedInput("validation-large-a"), rendererMustNotRun),
-      getOrCreateArtifactThumbnail(cachedInput("validation-large-b"), rendererMustNotRun),
-    ];
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const queued = getOrCreateArtifactThumbnail(
-      cachedInput("validation-small", queuedController.signal),
-      rendererMustNotRun,
-    );
+  const first = hold("first");
+  const second = hold("second");
+  await ready;
+  const queuedController = new AbortController();
+  let queuedStarted = false;
+  const queued = limit(async () => {
+    queuedStarted = true;
+    return "queued";
+  }, queuedController.signal);
+  try {
+    const firstTurn = await Promise.race([
+      queued.then(() => "queued" as const),
+      new Promise<"turn">((resolve) => setImmediate(() => resolve("turn"))),
+    ]);
+    assert.equal(firstTurn, "turn", "a third validation must wait while both slots are occupied");
+    assert.equal(queuedStarted, false);
+    assert.equal(maxActive, 2);
+
     queuedController.abort(new Error("queued validation cancelled"));
     await assert.rejects(queued, /queued validation cancelled/i);
-    await Promise.all(blockers);
   } finally {
-    fixture.close();
+    for (const release of releases) release();
+    await Promise.allSettled([first, second, queued]);
   }
+
+  const recovered = await limit(async () => "recovered");
+  assert.equal(recovered, "recovered", "aborting a waiter must not consume a validation slot");
 });
 
 test("PNG validation rejects missing palettes, split IDAT runs, and unknown critical chunks", async () => {

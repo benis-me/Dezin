@@ -159,14 +159,7 @@ interface DirectorySnapshot {
   ino: number;
 }
 
-interface RenderWaiter {
-  signal?: AbortSignal;
-  resolve: () => void;
-  reject: (reason: unknown) => void;
-  onAbort?: () => void;
-}
-
-interface ValidationWaiter {
+interface ConcurrencyWaiter {
   signal?: AbortSignal;
   resolve: () => void;
   reject: (reason: unknown) => void;
@@ -766,58 +759,68 @@ function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T
   });
 }
 
-let activeValidations = 0;
-const validationWaiters: ValidationWaiter[] = [];
+export type ArtifactThumbnailConcurrencyLimiter = <T>(
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+) => Promise<T>;
 
-function pumpValidationWaiters(): void {
-  while (activeValidations < MAX_VALIDATION_CONCURRENCY && validationWaiters.length > 0) {
-    const waiter = validationWaiters.shift()!;
-    if (waiter.signal?.aborted) {
-      waiter.reject(abortReason(waiter.signal));
-      continue;
+export function createArtifactThumbnailConcurrencyLimiter(
+  maxConcurrency: number,
+): ArtifactThumbnailConcurrencyLimiter {
+  if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1) {
+    throw new RangeError("thumbnail concurrency limit must be a positive safe integer");
+  }
+  let active = 0;
+  const waiters: ConcurrencyWaiter[] = [];
+
+  const pump = (): void => {
+    while (active < maxConcurrency && waiters.length > 0) {
+      const waiter = waiters.shift()!;
+      if (waiter.signal?.aborted) {
+        waiter.reject(abortReason(waiter.signal));
+        continue;
+      }
+      waiter.signal?.removeEventListener("abort", waiter.onAbort!);
+      active += 1;
+      waiter.resolve();
     }
-    waiter.signal?.removeEventListener("abort", waiter.onAbort!);
-    activeValidations += 1;
-    waiter.resolve();
-  }
-}
+  };
 
-async function acquireValidationSlot(signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  if (activeValidations < MAX_VALIDATION_CONCURRENCY) {
-    activeValidations += 1;
-    return;
-  }
-  await new Promise<void>((resolve, reject) => {
-    const waiter: ValidationWaiter = { signal, resolve, reject };
-    waiter.onAbort = () => {
-      const index = validationWaiters.indexOf(waiter);
-      if (index >= 0) validationWaiters.splice(index, 1);
-      reject(abortReason(signal!));
-    };
-    signal?.addEventListener("abort", waiter.onAbort, { once: true });
-    validationWaiters.push(waiter);
-    if (signal?.aborted) waiter.onAbort();
-  });
-}
-
-function releaseValidationSlot(): void {
-  activeValidations -= 1;
-  pumpValidationWaiters();
-}
-
-async function withValidationSlot<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  await acquireValidationSlot(signal);
-  try {
+  const acquire = async (signal?: AbortSignal): Promise<void> => {
     throwIfAborted(signal);
-    return await operation();
-  } finally {
-    releaseValidationSlot();
-  }
+    if (active < maxConcurrency) {
+      active += 1;
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const waiter: ConcurrencyWaiter = { signal, resolve, reject };
+      waiter.onAbort = () => {
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
+        reject(abortReason(signal!));
+      };
+      signal?.addEventListener("abort", waiter.onAbort, { once: true });
+      waiters.push(waiter);
+      if (signal?.aborted) waiter.onAbort();
+    });
+  };
+
+  return async <T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> => {
+    await acquire(signal);
+    try {
+      throwIfAborted(signal);
+      return await operation();
+    } finally {
+      active -= 1;
+      pump();
+    }
+  };
 }
+
+const withValidationSlot = createArtifactThumbnailConcurrencyLimiter(MAX_VALIDATION_CONCURRENCY);
 
 let activeRenders = 0;
-const renderWaiters: RenderWaiter[] = [];
+const renderWaiters: ConcurrencyWaiter[] = [];
 
 function pumpRenderWaiters(): void {
   while (activeRenders < MAX_RENDER_CONCURRENCY && renderWaiters.length > 0) {
@@ -839,7 +842,7 @@ async function acquireRenderSlot(signal?: AbortSignal): Promise<void> {
     return;
   }
   await new Promise<void>((resolve, reject) => {
-    const waiter: RenderWaiter = { signal, resolve, reject };
+    const waiter: ConcurrencyWaiter = { signal, resolve, reject };
     waiter.onAbort = () => {
       const index = renderWaiters.indexOf(waiter);
       if (index >= 0) renderWaiters.splice(index, 1);
