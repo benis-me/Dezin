@@ -3,7 +3,14 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { PreviewLeaseManager } from "./preview-lease.ts";
 
-export type RuntimeScope = { projectId: string; variantId?: string; runId?: string };
+export type RuntimeScope = {
+  projectId: string;
+  variantId?: string;
+  runId?: string;
+  artifactId?: string;
+  planId?: string;
+  taskId?: string;
+};
 
 export type RegisteredRun = RuntimeScope & {
   runId: string;
@@ -42,13 +49,19 @@ export class RuntimeScopeUnavailableError extends Error {
 function matchesScope(run: RuntimeScope, scope: RuntimeScope): boolean {
   return run.projectId === scope.projectId
     && (scope.variantId === undefined || run.variantId === scope.variantId)
-    && (scope.runId === undefined || run.runId === scope.runId);
+    && (scope.runId === undefined || run.runId === scope.runId)
+    && (scope.artifactId === undefined || run.artifactId === scope.artifactId)
+    && (scope.planId === undefined || run.planId === scope.planId)
+    && (scope.taskId === undefined || run.taskId === scope.taskId);
 }
 
 function matchesOperationScope(operation: RuntimeScope, scope: RuntimeScope): boolean {
   return operation.projectId === scope.projectId
     && (scope.variantId === undefined || operation.variantId === scope.variantId)
-    && (scope.runId === undefined || operation.runId === scope.runId);
+    && (scope.runId === undefined || operation.runId === scope.runId)
+    && (scope.artifactId === undefined || operation.artifactId === scope.artifactId)
+    && (scope.planId === undefined || operation.planId === scope.planId)
+    && (scope.taskId === undefined || operation.taskId === scope.taskId);
 }
 
 export class RuntimeSupervisor {

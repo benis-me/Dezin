@@ -58,6 +58,53 @@ test("RuntimeSupervisor cancels and waits for only the matching variant Runs", a
   store.close();
 });
 
+test("RuntimeSupervisor isolates Generation operations by Plan, Task, and Artifact scope", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-"));
+  const store = new Store(":memory:");
+  const supervisor = new RuntimeSupervisor({ dataDir, store });
+  const firstEntered = deferred();
+  const secondEntered = deferred();
+  let firstAborted = false;
+  let secondAborted = false;
+
+  const first = supervisor.trackOperation({
+    projectId: "project-1",
+    planId: "plan-1",
+    taskId: "task-a",
+    artifactId: "artifact-a",
+  }, async (signal) => {
+    firstEntered.resolve();
+    await new Promise<void>((resolve) => signal.addEventListener("abort", () => {
+      firstAborted = true;
+      resolve();
+    }, { once: true }));
+  });
+  const second = supervisor.trackOperation({
+    projectId: "project-1",
+    planId: "plan-1",
+    taskId: "task-b",
+    artifactId: "artifact-b",
+  }, async (signal) => {
+    secondEntered.resolve();
+    await new Promise<void>((resolve) => signal.addEventListener("abort", () => {
+      secondAborted = true;
+      resolve();
+    }, { once: true }));
+  });
+  await Promise.all([firstEntered.promise, secondEntered.promise]);
+
+  supervisor.cancelOperations({ projectId: "project-1", planId: "plan-1", taskId: "task-a" });
+  await first;
+  assert.equal(firstAborted, true);
+  assert.equal(secondAborted, false);
+
+  supervisor.cancelOperations({ projectId: "project-1", artifactId: "artifact-b" });
+  await second;
+  assert.equal(secondAborted, true);
+  await supervisor.shutdown();
+  store.close();
+});
+
 test("releaseVariant rejects new matching Runs before waiting for active settlement", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "dezin-runtime-supervisor-"));
   const store = new Store(":memory:");
