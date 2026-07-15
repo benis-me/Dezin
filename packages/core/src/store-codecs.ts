@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { types as nodeUtilTypes } from "node:util";
 import type {
   Artifact,
   Conversation,
@@ -20,8 +22,1252 @@ import type {
   RunStatus,
   Variant,
 } from "./types.ts";
+import {
+  compareBinary,
+  isWellFormedUtf16,
+  WorkspaceStoreCodecError,
+} from "./workspace-codecs.ts";
+import type {
+  ArtifactQualityProfile,
+  ComponentInstanceDependencyStatus,
+  DesignNodeLocator,
+  GenerationTaskAttempt,
+  GenerationTaskAttemptComponentPin,
+  GenerationTaskAttemptComponentPinInput,
+  GenerationTaskAttemptHashInput,
+  GenerationTaskAttemptInput,
+  GenerationTaskAttemptLease,
+  GenerationTaskAttemptResourcePin,
+  GenerationTaskAttemptResourcePinInput,
+  GenerationTaskAttemptStatus,
+  GenerationTaskCapacityClass,
+  GenerationTaskCandidateEvidenceHashInput,
+  GenerationTaskIntent,
+  GenerationTaskIntentInput,
+  GenerationTaskKind,
+  GenerationTask,
+  GenerationTaskDependency,
+  GenerationTaskFailureClass,
+  GenerationTaskResourceLimits,
+  GenerationTaskRetryContextPolicy,
+  GenerationTaskStatus,
+  GenerationTaskTarget,
+  GenerationPlanEvent,
+  GenerationPlanEventType,
+  ListGenerationPlanEventsInput,
+} from "./workspace-types.ts";
 
 export type Row = Record<string, unknown>;
+
+const GENERATION_TASK_KINDS = new Set<GenerationTaskKind>([
+  "resource",
+  "component",
+  "page",
+  "prototype-validation",
+  "checkpoint",
+  "propagation-candidate",
+  "propagation-publish",
+]);
+const GENERATION_CAPACITY_CLASSES = new Set<GenerationTaskCapacityClass>([
+  "agent",
+  "render-qa",
+  "image",
+]);
+const GENERATION_TASK_STATUSES = new Set<GenerationTaskStatus>([
+  "materialization-pending",
+  "retry-wait",
+  "blocked-context",
+  "queued",
+  "running",
+  "candidate-ready",
+  "needs-rebase",
+  "awaiting-context-refresh",
+  "cancel-requested",
+  "succeeded",
+  "failed",
+  "blocked",
+  "cancelled",
+]);
+const GENERATION_TASK_ATTEMPT_STATUSES = new Set<GenerationTaskAttemptStatus>([
+  "queued",
+  "running",
+  "cancel-requested",
+  "candidate-ready",
+  "succeeded",
+  "retryable-failed",
+  "failed",
+  "needs-rebase",
+  "cancelled",
+]);
+const GENERATION_FAILURE_CLASSES = new Set<GenerationTaskFailureClass>([
+  "context",
+  "adapter",
+  "storage",
+  "provider",
+  "agent-transport",
+  "build-infrastructure",
+  "design",
+  "build",
+  "qa",
+  "publication-conflict",
+  "cancelled",
+  "unknown",
+]);
+const GENERATION_PLAN_EVENT_TYPES = new Set<GenerationPlanEventType>([
+  "plan-queued",
+  "plan-compile-failed",
+  "task-materialization-failed",
+  "task-blocked-context",
+  "task-materialized",
+  "task-running",
+  "task-candidate-ready",
+  "task-needs-rebase",
+  "task-retry-wait",
+  "task-succeeded",
+  "task-failed",
+  "task-blocked",
+  "task-cancel-requested",
+  "task-cancelled",
+  "plan-succeeded",
+  "plan-failed",
+  "plan-cancelled",
+]);
+const GENERATION_JSON_MAX_DEPTH = 64;
+const GENERATION_JSON_MAX_NODES = 100_000;
+
+function generationRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || nodeUtilTypes.isProxy(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must be a non-proxy plain object`);
+  }
+  let prototype: object | null;
+  let keys: PropertyKey[];
+  try {
+    prototype = Object.getPrototypeOf(value);
+    keys = Reflect.ownKeys(value);
+  } catch {
+    throw new WorkspaceStoreCodecError(`${label} could not be inspected safely`);
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new WorkspaceStoreCodecError(`${label} must be a plain object`);
+  }
+  const output = Object.create(null) as Record<string, unknown>;
+  for (const key of keys) {
+    if (typeof key !== "string") throw new WorkspaceStoreCodecError(`${label} cannot contain symbol fields`);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      throw new WorkspaceStoreCodecError(`${label} fields must be enumerable data properties`);
+    }
+    output[key] = descriptor.value;
+  }
+  return output;
+}
+
+function generationArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value) || nodeUtilTypes.isProxy(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must be a non-proxy array`);
+  }
+  if (Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new WorkspaceStoreCodecError(`${label} must use the standard array prototype`);
+  }
+  const keys = Reflect.ownKeys(value);
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (!lengthDescriptor || !("value" in lengthDescriptor)
+    || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0) {
+    throw new WorkspaceStoreCodecError(`${label} has an invalid length`);
+  }
+  const length = lengthDescriptor.value as number;
+  for (const key of keys) {
+    if (typeof key !== "string") throw new WorkspaceStoreCodecError(`${label} cannot contain symbol fields`);
+    if (key === "length") continue;
+    const index = Number(key);
+    if (!Number.isSafeInteger(index) || index < 0 || String(index) !== key || index >= length) {
+      throw new WorkspaceStoreCodecError(`${label} has unexpected field ${key}`);
+    }
+  }
+  const output = new Array<unknown>(length);
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      throw new WorkspaceStoreCodecError(`${label} must contain dense enumerable data`);
+    }
+    output[index] = descriptor.value;
+  }
+  return output;
+}
+
+function generationAllowFields(input: Record<string, unknown>, fields: readonly string[], label: string): void {
+  const allowed = new Set(fields);
+  for (const field of Object.keys(input)) {
+    if (!allowed.has(field)) throw new WorkspaceStoreCodecError(`${label} contains unsupported field ${field}`);
+  }
+}
+
+function generationCanonicalString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !isWellFormedUtf16(value)) {
+    throw new WorkspaceStoreCodecError(`${label} must be a well-formed string`);
+  }
+  const normalized = value.trim();
+  if (!normalized) throw new WorkspaceStoreCodecError(`${label} must be non-empty`);
+  return normalized;
+}
+
+function generationExactString(value: unknown, label: string): string {
+  const normalized = generationCanonicalString(value, label);
+  if (normalized !== value) throw new WorkspaceStoreCodecError(`${label} must be canonical`);
+  return normalized;
+}
+
+function generationSafeInteger(value: unknown, label: string, minimum: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) {
+    throw new WorkspaceStoreCodecError(`${label} must be a safe integer >= ${minimum}`);
+  }
+  return value;
+}
+
+interface GenerationJsonState {
+  readonly ancestors: WeakSet<object>;
+  nodes: number;
+}
+
+function generationCanonicalJson(
+  value: unknown,
+  label: string,
+  state: GenerationJsonState = { ancestors: new WeakSet<object>(), nodes: 0 },
+  depth = 0,
+): unknown {
+  state.nodes += 1;
+  if (state.nodes > GENERATION_JSON_MAX_NODES || depth > GENERATION_JSON_MAX_DEPTH) {
+    throw new WorkspaceStoreCodecError(`${label} exceeds the JSON boundary budget`);
+  }
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (!isWellFormedUtf16(value)) throw new WorkspaceStoreCodecError(`${label} contains malformed Unicode`);
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new WorkspaceStoreCodecError(`${label} numbers must be finite`);
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (typeof value !== "object") throw new WorkspaceStoreCodecError(`${label} must contain only JSON values`);
+  if (nodeUtilTypes.isProxy(value)) throw new WorkspaceStoreCodecError(`${label} cannot contain proxies`);
+  if (state.ancestors.has(value)) throw new WorkspaceStoreCodecError(`${label} cannot contain cycles`);
+  state.ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return generationArray(value, label).map((entry, index) => (
+        generationCanonicalJson(entry, `${label}[${index}]`, state, depth + 1)
+      ));
+    }
+    const input = generationRecord(value, label);
+    const output: Record<string, unknown> = {};
+    const keys = Object.keys(input).sort(compareBinary);
+    for (const key of keys) {
+      if (!isWellFormedUtf16(key)) throw new WorkspaceStoreCodecError(`${label} contains malformed keys`);
+      if (key === "__proto__" || key === "prototype" || key === "constructor") {
+        throw new WorkspaceStoreCodecError(`${label} contains unsafe field ${key}`);
+      }
+      output[key] = generationCanonicalJson(input[key], `${label}.${key}`, state, depth + 1);
+    }
+    return output;
+  } finally {
+    state.ancestors.delete(value);
+  }
+}
+
+function generationCanonicalObject(value: unknown, label: string): Record<string, unknown> {
+  const normalized = generationCanonicalJson(value, label);
+  if (normalized === null || typeof normalized !== "object" || Array.isArray(normalized)) {
+    throw new WorkspaceStoreCodecError(`${label} must be a JSON object`);
+  }
+  return normalized as Record<string, unknown>;
+}
+
+function generationCanonicalJsonText(value: unknown, label: string): unknown {
+  if (typeof value !== "string") throw new WorkspaceStoreCodecError(`${label} must be JSON text`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    throw new WorkspaceStoreCodecError(`${label} must contain valid JSON`);
+  }
+  const canonical = generationCanonicalJson(parsed, label);
+  if (JSON.stringify(canonical) !== value) {
+    throw new WorkspaceStoreCodecError(`${label} must use canonical JSON encoding`);
+  }
+  return canonical;
+}
+
+function generationCanonicalObjectText(value: unknown, label: string): Record<string, unknown> {
+  const parsed = generationCanonicalJsonText(value, label);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new WorkspaceStoreCodecError(`${label} must contain a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function generationCanonicalArrayText(value: unknown, label: string): unknown[] {
+  const parsed = generationCanonicalJsonText(value, label);
+  if (!Array.isArray(parsed)) throw new WorkspaceStoreCodecError(`${label} must contain a JSON array`);
+  return parsed;
+}
+
+function generationUniqueStrings(value: unknown, label: string): string[] {
+  const normalized = generationArray(value, label).map((entry, index) => (
+    generationCanonicalString(entry, `${label}[${index}]`)
+  ));
+  normalized.sort(compareBinary);
+  for (let index = 1; index < normalized.length; index += 1) {
+    if (normalized[index] === normalized[index - 1]) {
+      throw new WorkspaceStoreCodecError(`${label} must not contain duplicates`);
+    }
+  }
+  return normalized;
+}
+
+function normalizeGenerationTaskTarget(value: unknown): GenerationTaskTarget {
+  const input = generationRecord(value, "Generation Task target");
+  if (input.type === "artifact") {
+    generationAllowFields(input, ["type", "workspaceId", "id", "trackId"], "Generation Task Artifact target");
+    return {
+      type: input.type,
+      workspaceId: generationCanonicalString(input.workspaceId, "Generation Task target Workspace id"),
+      id: generationCanonicalString(input.id, "Generation Task target Artifact id"),
+      trackId: generationCanonicalString(input.trackId, "Generation Task target Track id"),
+    };
+  }
+  if (input.type !== "workspace" && input.type !== "resource") {
+    throw new WorkspaceStoreCodecError("Generation Task target type is unsupported");
+  }
+  generationAllowFields(input, ["type", "workspaceId", "id"], `Generation Task ${input.type} target`);
+  return {
+    type: input.type,
+    workspaceId: generationCanonicalString(input.workspaceId, "Generation Task target Workspace id"),
+    id: generationCanonicalString(input.id, `Generation Task target ${input.type} id`),
+  };
+}
+
+function normalizeGenerationQaProfile(value: unknown): ArtifactQualityProfile {
+  const input = generationRecord(value, "Generation Task QA profile");
+  generationAllowFields(input, [
+    "requiredFrameIds",
+    "blockingSeverities",
+    "requireRuntimeChecks",
+    "requireVisualReview",
+  ], "Generation Task QA profile");
+  const blockingSeverities = generationUniqueStrings(input.blockingSeverities, "Generation Task blocking severities");
+  if (blockingSeverities.some((severity) => severity !== "P0" && severity !== "P1" && severity !== "P2")) {
+    throw new WorkspaceStoreCodecError("Generation Task blocking severity is unsupported");
+  }
+  if (typeof input.requireRuntimeChecks !== "boolean" || typeof input.requireVisualReview !== "boolean") {
+    throw new WorkspaceStoreCodecError("Generation Task QA requirements must be booleans");
+  }
+  return {
+    requiredFrameIds: generationUniqueStrings(input.requiredFrameIds, "Generation Task required Frame ids"),
+    blockingSeverities: blockingSeverities as ArtifactQualityProfile["blockingSeverities"],
+    requireRuntimeChecks: input.requireRuntimeChecks,
+    requireVisualReview: input.requireVisualReview,
+  };
+}
+
+function normalizeGenerationResourceLimits(value: unknown): GenerationTaskResourceLimits {
+  const input = generationRecord(value, "Generation Task resource limits");
+  generationAllowFields(input, [
+    "timeoutMs",
+    "maxAgentTurns",
+    "maxRepairRounds",
+    "maxOutputBytes",
+    "capacityClasses",
+  ], "Generation Task resource limits");
+  const capacityClasses = generationUniqueStrings(input.capacityClasses, "Generation Task capacity classes");
+  if (capacityClasses.some((entry) => !GENERATION_CAPACITY_CLASSES.has(entry as GenerationTaskCapacityClass))) {
+    throw new WorkspaceStoreCodecError("Generation Task capacity class is unsupported");
+  }
+  return {
+    timeoutMs: generationSafeInteger(input.timeoutMs, "Generation Task timeoutMs", 1),
+    maxAgentTurns: generationSafeInteger(input.maxAgentTurns, "Generation Task maxAgentTurns", 1),
+    maxRepairRounds: generationSafeInteger(input.maxRepairRounds, "Generation Task maxRepairRounds", 0),
+    maxOutputBytes: generationSafeInteger(input.maxOutputBytes, "Generation Task maxOutputBytes", 1),
+    capacityClasses: capacityClasses as GenerationTaskCapacityClass[],
+  };
+}
+
+function generationTaskKind(value: unknown): GenerationTaskKind {
+  if (typeof value !== "string" || !GENERATION_TASK_KINDS.has(value as GenerationTaskKind)) {
+    throw new WorkspaceStoreCodecError("Generation Task kind is unsupported");
+  }
+  return value as GenerationTaskKind;
+}
+
+function generationHash(domain: string, value: unknown): string {
+  return createHash("sha256")
+    .update(`dezin:${domain}:v1\0`)
+    .update(JSON.stringify(value))
+    .digest("hex");
+}
+
+function generationTaskIntentPayload(input: GenerationTaskIntentInput): Record<string, unknown> {
+  return {
+    id: input.id,
+    ordinal: input.ordinal,
+    workspaceId: input.workspaceId,
+    planId: input.planId,
+    kind: input.kind,
+    target: input.target,
+    dependencyIds: input.dependencyIds,
+    payload: input.payload,
+    capabilities: input.capabilities,
+    qaProfile: input.qaProfile,
+    resourceLimits: input.resourceLimits,
+  };
+}
+
+export function generationTaskIntentHash(input: GenerationTaskIntentInput): string {
+  return generationHash("generation-task-intent", generationTaskIntentPayload(input));
+}
+
+export function generationTaskIdempotencyKey(input: GenerationTaskIntentInput): string {
+  return `generation-task:${generationHash("generation-task-idempotency", {
+    workspaceId: input.workspaceId,
+    planId: input.planId,
+    taskId: input.id,
+    intentHash: generationTaskIntentHash(input),
+  })}`;
+}
+
+export function normalizeGenerationTaskIntent(value: unknown): GenerationTaskIntent {
+  const input = generationRecord(value, "Generation Task intent");
+  generationAllowFields(input, [
+    "id",
+    "ordinal",
+    "workspaceId",
+    "planId",
+    "kind",
+    "target",
+    "dependencyIds",
+    "payload",
+    "capabilities",
+    "qaProfile",
+    "resourceLimits",
+  ], "Generation Task intent");
+  const workspaceId = generationCanonicalString(input.workspaceId, "Generation Task Workspace id");
+  const target = normalizeGenerationTaskTarget(input.target);
+  if (target.workspaceId !== workspaceId) {
+    throw new WorkspaceStoreCodecError("Generation Task target Workspace does not match the task Workspace");
+  }
+  if (target.type === "workspace" && target.id !== workspaceId) {
+    throw new WorkspaceStoreCodecError("Generation Task Workspace target id must match the task Workspace");
+  }
+  const kind = generationTaskKind(input.kind);
+  if ((kind === "resource") !== (target.type === "resource")) {
+    throw new WorkspaceStoreCodecError("Resource Generation Tasks must target a Resource and only Resource Tasks may do so");
+  }
+  if ((kind === "component" || kind === "page" || kind === "propagation-candidate") !== (target.type === "artifact")) {
+    throw new WorkspaceStoreCodecError("Artifact Generation Task kind and target are inconsistent");
+  }
+  if ((kind === "prototype-validation" || kind === "checkpoint" || kind === "propagation-publish") !== (target.type === "workspace")) {
+    throw new WorkspaceStoreCodecError("Workspace Generation Task kind and target are inconsistent");
+  }
+  const normalized: GenerationTaskIntentInput = {
+    id: generationCanonicalString(input.id, "Generation Task id"),
+    ordinal: generationSafeInteger(input.ordinal, "Generation Task ordinal", 0),
+    workspaceId,
+    planId: generationCanonicalString(input.planId, "Generation Task Plan id"),
+    kind,
+    target,
+    dependencyIds: generationUniqueStrings(input.dependencyIds, "Generation Task dependencies"),
+    payload: generationCanonicalObject(input.payload, "Generation Task payload"),
+    capabilities: generationUniqueStrings(input.capabilities, "Generation Task capabilities"),
+    qaProfile: normalizeGenerationQaProfile(input.qaProfile),
+    resourceLimits: normalizeGenerationResourceLimits(input.resourceLimits),
+  };
+  if (normalized.dependencyIds.includes(normalized.id)) {
+    throw new WorkspaceStoreCodecError("Generation Task cannot depend on itself");
+  }
+  return {
+    ...normalized,
+    intentHash: generationTaskIntentHash(normalized),
+    idempotencyKey: generationTaskIdempotencyKey(normalized),
+  };
+}
+
+function generationNullableString(value: unknown, label: string): string | null {
+  if (value === null) return null;
+  return generationCanonicalString(value, label);
+}
+
+function normalizeGenerationDesignNodeLocator(value: unknown, label: string): DesignNodeLocator {
+  const input = generationRecord(value, label);
+  generationAllowFields(input, ["designNodeId", "sourcePath", "selector"], label);
+  const output: DesignNodeLocator = {
+    designNodeId: generationCanonicalString(input.designNodeId, `${label} designNodeId`),
+  };
+  if (Object.hasOwn(input, "sourcePath")) {
+    output.sourcePath = generationCanonicalString(input.sourcePath, `${label} sourcePath`);
+  }
+  if (Object.hasOwn(input, "selector")) {
+    output.selector = generationCanonicalString(input.selector, `${label} selector`);
+  }
+  return output;
+}
+
+function normalizeGenerationResourcePin(
+  value: unknown,
+  index: number,
+): GenerationTaskAttemptResourcePinInput {
+  const label = `Generation Task Attempt Resource pin at index ${index}`;
+  const input = generationRecord(value, label);
+  generationAllowFields(input, ["resourceId", "revisionId", "sourceTaskId"], label);
+  return {
+    resourceId: generationCanonicalString(input.resourceId, `${label} Resource id`),
+    revisionId: generationCanonicalString(input.revisionId, `${label} Revision id`),
+    sourceTaskId: generationNullableString(input.sourceTaskId, `${label} source Task id`),
+  };
+}
+
+function normalizeGenerationComponentPin(
+  value: unknown,
+  index: number,
+): GenerationTaskAttemptComponentPinInput {
+  const label = `Generation Task Attempt Component pin at index ${index}`;
+  const input = generationRecord(value, label);
+  generationAllowFields(input, [
+    "instanceId",
+    "ownerArtifactId",
+    "componentArtifactId",
+    "revisionId",
+    "sourceTaskId",
+    "variantKey",
+    "stateKey",
+    "sourceLocator",
+    "overrides",
+    "status",
+  ], label);
+  if (input.status !== "linked" && input.status !== "detached") {
+    throw new WorkspaceStoreCodecError(`${label} status is unsupported`);
+  }
+  return {
+    instanceId: generationCanonicalString(input.instanceId, `${label} instance id`),
+    ownerArtifactId: generationCanonicalString(input.ownerArtifactId, `${label} owner Artifact id`),
+    componentArtifactId: generationCanonicalString(input.componentArtifactId, `${label} Component Artifact id`),
+    revisionId: generationCanonicalString(input.revisionId, `${label} Component Revision id`),
+    sourceTaskId: generationNullableString(input.sourceTaskId, `${label} source Task id`),
+    variantKey: generationNullableString(input.variantKey, `${label} variant key`),
+    stateKey: generationNullableString(input.stateKey, `${label} state key`),
+    sourceLocator: normalizeGenerationDesignNodeLocator(input.sourceLocator, `${label} source locator`),
+    overrides: generationCanonicalObject(input.overrides, `${label} overrides`),
+    status: input.status as ComponentInstanceDependencyStatus,
+  };
+}
+
+function withCanonicalResourceOrdinals(
+  pins: GenerationTaskAttemptResourcePinInput[],
+): GenerationTaskAttemptResourcePin[] {
+  pins.sort((left, right) => compareBinary(left.resourceId, right.resourceId));
+  return pins.map((pin, ordinal) => {
+    if (ordinal > 0 && pin.resourceId === pins[ordinal - 1]?.resourceId) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt Resource pins must have unique Resource ids");
+    }
+    return { ordinal, ...pin };
+  });
+}
+
+function withCanonicalComponentOrdinals(
+  pins: GenerationTaskAttemptComponentPinInput[],
+): GenerationTaskAttemptComponentPin[] {
+  pins.sort((left, right) => compareBinary(left.instanceId, right.instanceId));
+  return pins.map((pin, ordinal) => {
+    if (ordinal > 0 && pin.instanceId === pins[ordinal - 1]?.instanceId) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt Component pins must have unique instance ids");
+    }
+    return { ordinal, ...pin, designNodeId: pin.sourceLocator.designNodeId };
+  });
+}
+
+function generationTaskAttemptHashPayload(input: GenerationTaskAttemptHashInput): Record<string, unknown> {
+  return {
+    taskId: input.taskId,
+    planId: input.planId,
+    workspaceId: input.workspaceId,
+    attempt: input.attempt,
+    target: input.target,
+    baseRevisionId: input.baseRevisionId,
+    expectedSnapshotId: input.expectedSnapshotId,
+    contextPackId: input.contextPackId,
+    kernelRevisionId: input.kernelRevisionId,
+    payload: input.payload,
+    resourcePins: input.resourcePins,
+    componentPins: input.componentPins,
+    retryContextPolicy: input.retryContextPolicy,
+    executionMode: input.executionMode,
+  };
+}
+
+export function generationTaskAttemptInputHash(
+  input: GenerationTaskAttemptHashInput | GenerationTaskAttemptInput,
+): string {
+  return generationHash("generation-task-attempt-input", generationTaskAttemptHashPayload(input));
+}
+
+function normalizeGenerationTaskCandidateEvidenceHashInput(
+  value: GenerationTaskCandidateEvidenceHashInput,
+): GenerationTaskCandidateEvidenceHashInput {
+  const input = generationRecord(value, "Generation Task candidate evidence hash input");
+  generationAllowFields(input, [
+    "taskId",
+    "planId",
+    "workspaceId",
+    "attempt",
+    "candidateRevisionId",
+    "candidateResourceRevisionId",
+    "candidateEvidence",
+  ], "Generation Task candidate evidence hash input");
+  const candidateRevisionId = generationNullableString(
+    input.candidateRevisionId,
+    "Generation Task candidate Revision id",
+  );
+  const candidateResourceRevisionId = generationNullableString(
+    input.candidateResourceRevisionId,
+    "Generation Task candidate Resource Revision id",
+  );
+  if ((candidateRevisionId === null) === (candidateResourceRevisionId === null)) {
+    throw new WorkspaceStoreCodecError("Generation Task candidate evidence must bind exactly one candidate Revision");
+  }
+  return {
+    taskId: generationCanonicalString(input.taskId, "Generation Task candidate evidence Task id"),
+    planId: generationCanonicalString(input.planId, "Generation Task candidate evidence Plan id"),
+    workspaceId: generationCanonicalString(input.workspaceId, "Generation Task candidate evidence Workspace id"),
+    attempt: generationSafeInteger(input.attempt, "Generation Task candidate evidence attempt", 1),
+    candidateRevisionId,
+    candidateResourceRevisionId,
+    candidateEvidence: generationCanonicalObject(
+      input.candidateEvidence,
+      "Generation Task candidate evidence",
+    ),
+  };
+}
+
+export function generationTaskCandidateEvidenceHash(
+  input: GenerationTaskCandidateEvidenceHashInput,
+): string {
+  return generationHash(
+    "generation-task-candidate-evidence",
+    normalizeGenerationTaskCandidateEvidenceHashInput(input),
+  );
+}
+
+export function normalizeGenerationTaskAttemptInput(value: unknown): GenerationTaskAttemptInput {
+  const input = generationRecord(value, "Generation Task Attempt input");
+  generationAllowFields(input, [
+    "taskId",
+    "planId",
+    "workspaceId",
+    "attempt",
+    "target",
+    "baseRevisionId",
+    "expectedSnapshotId",
+    "contextPackId",
+    "kernelRevisionId",
+    "payload",
+    "resourcePins",
+    "componentPins",
+    "retryContextPolicy",
+    "executionMode",
+  ], "Generation Task Attempt input");
+  const workspaceId = generationCanonicalString(input.workspaceId, "Generation Task Attempt Workspace id");
+  const target = normalizeGenerationTaskTarget(input.target);
+  if (target.workspaceId !== workspaceId) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt target Workspace does not match its Workspace");
+  }
+  if (target.type === "workspace" && target.id !== workspaceId) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt Workspace target id must match its Workspace");
+  }
+  if (input.retryContextPolicy !== "same-context" && input.retryContextPolicy !== "latest-context") {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt retry Context policy is unsupported");
+  }
+  if (input.executionMode !== "full" && input.executionMode !== "publication-only") {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt execution mode is unsupported");
+  }
+  const resourcePins = withCanonicalResourceOrdinals(
+    generationArray(input.resourcePins, "Generation Task Attempt Resource pins").map(normalizeGenerationResourcePin),
+  );
+  const componentPins = withCanonicalComponentOrdinals(
+    generationArray(input.componentPins, "Generation Task Attempt Component pins").map(normalizeGenerationComponentPin),
+  );
+  if (target.type !== "artifact" && componentPins.length > 0) {
+    throw new WorkspaceStoreCodecError("Only Artifact Generation Task Attempts may pin Component instances");
+  }
+  if (target.type === "artifact" && componentPins.some((pin) => pin.ownerArtifactId !== target.id)) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt Component pin owner does not match the target Artifact");
+  }
+  const normalized: GenerationTaskAttemptHashInput = {
+    taskId: generationCanonicalString(input.taskId, "Generation Task Attempt Task id"),
+    planId: generationCanonicalString(input.planId, "Generation Task Attempt Plan id"),
+    workspaceId,
+    attempt: generationSafeInteger(input.attempt, "Generation Task Attempt number", 1),
+    target,
+    baseRevisionId: generationNullableString(input.baseRevisionId, "Generation Task Attempt base Revision id"),
+    expectedSnapshotId: generationCanonicalString(input.expectedSnapshotId, "Generation Task Attempt expected Snapshot id"),
+    contextPackId: generationNullableString(input.contextPackId, "Generation Task Attempt Context Pack id"),
+    kernelRevisionId: generationCanonicalString(input.kernelRevisionId, "Generation Task Attempt Kernel Revision id"),
+    payload: generationCanonicalObject(input.payload, "Generation Task Attempt payload"),
+    resourcePins,
+    componentPins,
+    retryContextPolicy: input.retryContextPolicy,
+    executionMode: input.executionMode,
+  };
+  return { ...normalized, inputHash: generationTaskAttemptInputHash(normalized) };
+}
+
+export function normalizeGenerationTaskAttemptLease(value: unknown): GenerationTaskAttemptLease {
+  const input = generationRecord(value, "Generation Task Attempt lease");
+  generationAllowFields(input, [
+    "taskId",
+    "workspaceId",
+    "attempt",
+    "ownerId",
+    "leaseToken",
+  ], "Generation Task Attempt lease");
+  return {
+    taskId: generationCanonicalString(input.taskId, "Generation Task Attempt lease task id"),
+    workspaceId: generationCanonicalString(input.workspaceId, "Generation Task Attempt lease Workspace id"),
+    attempt: generationSafeInteger(input.attempt, "Generation Task Attempt lease attempt", 1),
+    ownerId: generationCanonicalString(input.ownerId, "Generation Task Attempt lease owner id"),
+    leaseToken: generationCanonicalString(input.leaseToken, "Generation Task Attempt lease token"),
+  };
+}
+
+function generationStoredNullableString(value: unknown, label: string): string | null {
+  return value === null ? null : generationExactString(value, label);
+}
+
+function generationStoredNullableInteger(value: unknown, label: string): number | null {
+  return value === null ? null : generationSafeInteger(value, label, 0);
+}
+
+function generationFailureClass(value: unknown, label: string): GenerationTaskFailureClass | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || !GENERATION_FAILURE_CLASSES.has(value as GenerationTaskFailureClass)) {
+    throw new WorkspaceStoreCodecError(`${label} is unsupported`);
+  }
+  return value as GenerationTaskFailureClass;
+}
+
+function generationPendingContextPolicy(value: unknown): GenerationTaskRetryContextPolicy | null {
+  if (value === null) return null;
+  if (value !== "same-context" && value !== "latest-context") {
+    throw new WorkspaceStoreCodecError("Generation Task pending Context policy is unsupported");
+  }
+  return value;
+}
+
+function generationTaskTargetFromRow(row: Record<string, unknown>): GenerationTaskTarget {
+  const workspaceId = generationExactString(row.workspace_id, "Generation Task Workspace id");
+  const targetId = generationExactString(row.target_id, "Generation Task target id");
+  const targetArtifactId = generationStoredNullableString(row.target_artifact_id, "Generation Task target Artifact id");
+  const targetTrackId = generationStoredNullableString(row.target_track_id, "Generation Task target Track id");
+  const targetResourceId = generationStoredNullableString(row.target_resource_id, "Generation Task target Resource id");
+  if (row.target_type === "artifact") {
+    if (targetArtifactId !== targetId || targetTrackId === null || targetResourceId !== null) {
+      throw new WorkspaceStoreCodecError("Generation Task Artifact target columns are inconsistent");
+    }
+    return { type: "artifact", workspaceId, id: targetId, trackId: targetTrackId };
+  }
+  if (row.target_type === "resource") {
+    if (targetResourceId !== targetId || targetArtifactId !== null || targetTrackId !== null) {
+      throw new WorkspaceStoreCodecError("Generation Task Resource target columns are inconsistent");
+    }
+    return { type: "resource", workspaceId, id: targetId };
+  }
+  if (row.target_type !== "workspace") {
+    throw new WorkspaceStoreCodecError("Generation Task target type is unsupported");
+  }
+  if (targetId !== workspaceId || targetArtifactId !== null || targetTrackId !== null || targetResourceId !== null) {
+    throw new WorkspaceStoreCodecError("Generation Task Workspace target columns are inconsistent");
+  }
+  return { type: "workspace", workspaceId, id: targetId };
+}
+
+function asGenerationTaskDependencyRow(
+  value: unknown,
+  expected: { planId: string; workspaceId: string; taskId: string; ordinal: number },
+): GenerationTaskDependency {
+  const label = `Generation Task dependency at ordinal ${expected.ordinal}`;
+  const row = generationRecord(value, label);
+  generationAllowFields(row, ["plan_id", "workspace_id", "task_id", "dependency_task_id", "ordinal"], label);
+  const result: GenerationTaskDependency = {
+    planId: generationExactString(row.plan_id, `${label} Plan id`),
+    taskId: generationExactString(row.task_id, `${label} Task id`),
+    dependencyTaskId: generationExactString(row.dependency_task_id, `${label} dependency Task id`),
+    ordinal: generationSafeInteger(row.ordinal, `${label} ordinal`, 0),
+  };
+  const workspaceId = generationExactString(row.workspace_id, `${label} Workspace id`);
+  if (result.planId !== expected.planId || result.taskId !== expected.taskId || workspaceId !== expected.workspaceId) {
+    throw new WorkspaceStoreCodecError(`${label} ownership does not match its Generation Task`);
+  }
+  if (result.ordinal !== expected.ordinal) {
+    throw new WorkspaceStoreCodecError("Generation Task dependencies must have canonical ordinals");
+  }
+  if (result.dependencyTaskId === result.taskId) {
+    throw new WorkspaceStoreCodecError("Generation Task cannot depend on itself");
+  }
+  return result;
+}
+
+export function asGenerationTask(rowValue: Row, dependencyRowsValue: readonly Row[]): GenerationTask {
+  const row = generationRecord(rowValue, "Generation Task row");
+  generationAllowFields(row, [
+    "id", "ordinal", "workspace_id", "plan_id", "kind", "target_type", "target_id",
+    "target_artifact_id", "target_track_id", "target_resource_id", "payload_json", "intent_hash",
+    "capabilities_json", "qa_profile_json", "resource_limits_json", "idempotency_key", "status",
+    "blocked_reason", "blocked_by_task_id", "pending_context_policy", "current_attempt",
+    "materialization_failures", "failure_class", "error_json", "next_eligible_at", "result_revision_id",
+    "result_resource_revision_id", "result_snapshot_id", "created_at", "finished_at",
+  ], "Generation Task row");
+  const id = generationExactString(row.id, "Generation Task id");
+  const workspaceId = generationExactString(row.workspace_id, "Generation Task Workspace id");
+  const planId = generationExactString(row.plan_id, "Generation Task Plan id");
+  const dependencyRows = generationArray(dependencyRowsValue, "Generation Task dependency rows");
+  const dependencies = dependencyRows.map((dependency, ordinal) => asGenerationTaskDependencyRow(
+    dependency,
+    { planId, workspaceId, taskId: id, ordinal },
+  ));
+  const dependencyIds = dependencies.map((dependency) => dependency.dependencyTaskId);
+  const sortedDependencyIds = [...dependencyIds].sort(compareBinary);
+  if (dependencyIds.some((dependencyId, index) => dependencyId !== sortedDependencyIds[index])) {
+    throw new WorkspaceStoreCodecError("Generation Task dependencies must use canonical binary order");
+  }
+  const intent = normalizeGenerationTaskIntent({
+    id,
+    ordinal: generationSafeInteger(row.ordinal, "Generation Task ordinal", 0),
+    workspaceId,
+    planId,
+    kind: row.kind,
+    target: generationTaskTargetFromRow(row),
+    dependencyIds,
+    payload: generationCanonicalObjectText(row.payload_json, "Generation Task payload"),
+    capabilities: generationCanonicalArrayText(row.capabilities_json, "Generation Task capabilities"),
+    qaProfile: generationCanonicalObjectText(row.qa_profile_json, "Generation Task QA profile"),
+    resourceLimits: generationCanonicalObjectText(row.resource_limits_json, "Generation Task resource limits"),
+  });
+  if (generationExactString(row.intent_hash, "Generation Task intent hash") !== intent.intentHash) {
+    throw new WorkspaceStoreCodecError("Generation Task intent hash does not match its immutable intent");
+  }
+  if (generationExactString(row.idempotency_key, "Generation Task idempotency key") !== intent.idempotencyKey) {
+    throw new WorkspaceStoreCodecError("Generation Task idempotency key does not match its immutable intent");
+  }
+  if (typeof row.status !== "string" || !GENERATION_TASK_STATUSES.has(row.status as GenerationTaskStatus)) {
+    throw new WorkspaceStoreCodecError("Generation Task status is unsupported");
+  }
+  const blockedByTaskId = generationStoredNullableString(row.blocked_by_task_id, "Generation Task blocking Task id");
+  if (blockedByTaskId === id) throw new WorkspaceStoreCodecError("Generation Task cannot be blocked by itself");
+  const error = row.error_json === null
+    ? null
+    : generationCanonicalObjectText(row.error_json, "Generation Task error");
+  return {
+    ...intent,
+    status: row.status as GenerationTaskStatus,
+    blockedReason: generationStoredNullableString(row.blocked_reason, "Generation Task blocked reason"),
+    blockedByTaskId,
+    pendingContextPolicy: generationPendingContextPolicy(row.pending_context_policy),
+    currentAttempt: generationSafeInteger(row.current_attempt, "Generation Task current attempt", 0),
+    materializationFailures: generationSafeInteger(
+      row.materialization_failures,
+      "Generation Task materialization failures",
+      0,
+    ),
+    failureClass: generationFailureClass(row.failure_class, "Generation Task failure class"),
+    error,
+    nextEligibleAt: generationStoredNullableInteger(row.next_eligible_at, "Generation Task next eligible at"),
+    resultRevisionId: generationStoredNullableString(row.result_revision_id, "Generation Task result Revision id"),
+    resultResourceRevisionId: generationStoredNullableString(
+      row.result_resource_revision_id,
+      "Generation Task result Resource Revision id",
+    ),
+    resultSnapshotId: generationStoredNullableString(row.result_snapshot_id, "Generation Task result Snapshot id"),
+    createdAt: generationSafeInteger(row.created_at, "Generation Task created at", 0),
+    finishedAt: generationStoredNullableInteger(row.finished_at, "Generation Task finished at"),
+  };
+}
+
+function generationTaskAttemptTargetFromRow(row: Record<string, unknown>): GenerationTaskTarget {
+  const workspaceId = generationExactString(row.workspace_id, "Generation Task Attempt Workspace id");
+  const artifactId = generationStoredNullableString(
+    row.target_artifact_id,
+    "Generation Task Attempt target Artifact id",
+  );
+  const trackId = generationStoredNullableString(
+    row.target_track_id,
+    "Generation Task Attempt target Track id",
+  );
+  const resourceId = generationStoredNullableString(
+    row.target_resource_id,
+    "Generation Task Attempt target Resource id",
+  );
+  if (artifactId !== null || trackId !== null) {
+    if (artifactId === null || trackId === null || resourceId !== null) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt target columns are inconsistent");
+    }
+    return { type: "artifact", workspaceId, id: artifactId, trackId };
+  }
+  if (resourceId !== null) return { type: "resource", workspaceId, id: resourceId };
+  return { type: "workspace", workspaceId, id: workspaceId };
+}
+
+function asGenerationTaskAttemptResourcePinRow(
+  value: unknown,
+  expected: { taskId: string; planId: string; workspaceId: string; attempt: number; ordinal: number },
+): GenerationTaskAttemptResourcePin {
+  const label = `Generation Task Attempt Resource pin at ordinal ${expected.ordinal}`;
+  const row = generationRecord(value, label);
+  generationAllowFields(row, [
+    "task_id", "plan_id", "attempt", "workspace_id", "ordinal", "resource_id", "revision_id", "source_task_id",
+  ], label);
+  const ownership = {
+    taskId: generationExactString(row.task_id, `${label} Task id`),
+    planId: generationExactString(row.plan_id, `${label} Plan id`),
+    workspaceId: generationExactString(row.workspace_id, `${label} Workspace id`),
+    attempt: generationSafeInteger(row.attempt, `${label} attempt`, 1),
+  };
+  if (ownership.taskId !== expected.taskId || ownership.planId !== expected.planId
+    || ownership.workspaceId !== expected.workspaceId || ownership.attempt !== expected.attempt) {
+    throw new WorkspaceStoreCodecError(`${label} ownership does not match its Generation Task Attempt`);
+  }
+  const ordinal = generationSafeInteger(row.ordinal, `${label} ordinal`, 0);
+  if (ordinal !== expected.ordinal) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt Resource pins must have contiguous ordinals");
+  }
+  return {
+    ordinal,
+    resourceId: generationExactString(row.resource_id, `${label} Resource id`),
+    revisionId: generationExactString(row.revision_id, `${label} Revision id`),
+    sourceTaskId: generationStoredNullableString(row.source_task_id, `${label} source Task id`),
+  };
+}
+
+function asGenerationTaskAttemptComponentPinRow(
+  value: unknown,
+  expected: { taskId: string; planId: string; workspaceId: string; attempt: number; ordinal: number },
+): GenerationTaskAttemptComponentPin {
+  const label = `Generation Task Attempt Component pin at ordinal ${expected.ordinal}`;
+  const row = generationRecord(value, label);
+  generationAllowFields(row, [
+    "task_id", "plan_id", "attempt", "workspace_id", "ordinal", "instance_id", "owner_artifact_id",
+    "component_artifact_id", "revision_id", "source_task_id", "variant_key", "state_key", "design_node_id",
+    "source_locator_json", "overrides_json", "status",
+  ], label);
+  const ownership = {
+    taskId: generationExactString(row.task_id, `${label} Task id`),
+    planId: generationExactString(row.plan_id, `${label} Plan id`),
+    workspaceId: generationExactString(row.workspace_id, `${label} Workspace id`),
+    attempt: generationSafeInteger(row.attempt, `${label} attempt`, 1),
+  };
+  if (ownership.taskId !== expected.taskId || ownership.planId !== expected.planId
+    || ownership.workspaceId !== expected.workspaceId || ownership.attempt !== expected.attempt) {
+    throw new WorkspaceStoreCodecError(`${label} ownership does not match its Generation Task Attempt`);
+  }
+  const ordinal = generationSafeInteger(row.ordinal, `${label} ordinal`, 0);
+  if (ordinal !== expected.ordinal) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt Component pins must have contiguous ordinals");
+  }
+  const sourceLocator = normalizeGenerationDesignNodeLocator(
+    generationCanonicalObjectText(row.source_locator_json, `${label} source locator`),
+    `${label} source locator`,
+  );
+  const designNodeId = generationExactString(row.design_node_id, `${label} design node id`);
+  if (sourceLocator.designNodeId !== designNodeId) {
+    throw new WorkspaceStoreCodecError(`${label} design node id does not match its source locator`);
+  }
+  const normalized = normalizeGenerationComponentPin({
+    instanceId: generationExactString(row.instance_id, `${label} instance id`),
+    ownerArtifactId: generationExactString(row.owner_artifact_id, `${label} owner Artifact id`),
+    componentArtifactId: generationExactString(
+      row.component_artifact_id,
+      `${label} Component Artifact id`,
+    ),
+    revisionId: generationExactString(row.revision_id, `${label} Component Revision id`),
+    sourceTaskId: generationStoredNullableString(row.source_task_id, `${label} source Task id`),
+    variantKey: generationStoredNullableString(row.variant_key, `${label} variant key`),
+    stateKey: generationStoredNullableString(row.state_key, `${label} state key`),
+    sourceLocator,
+    overrides: generationCanonicalObjectText(row.overrides_json, `${label} overrides`),
+    status: row.status,
+  }, ordinal);
+  return { ordinal, ...normalized, designNodeId };
+}
+
+function generationRevisionSummary(value: unknown, label: string): string[] {
+  return generationCanonicalArrayText(value, label).map((entry, index) => (
+    generationExactString(entry, `${label}[${index}]`)
+  ));
+}
+
+function generationEqualStringArrays(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+export function asGenerationTaskAttempt(
+  rowValue: Row,
+  resourcePinRowsValue: readonly Row[],
+  componentPinRowsValue: readonly Row[],
+): GenerationTaskAttempt {
+  const row = generationRecord(rowValue, "Generation Task Attempt row");
+  generationAllowFields(row, [
+    "task_id", "plan_id", "workspace_id", "attempt", "target_artifact_id", "target_track_id",
+    "target_resource_id", "base_revision_id", "expected_snapshot_id", "context_pack_id", "kernel_revision_id",
+    "execution_mode", "payload_json", "input_hash", "pinned_resource_revision_ids_json",
+    "component_dependency_revision_ids_json", "retry_context_policy", "status", "blocked_reason",
+    "failure_class", "error_json", "next_eligible_at", "candidate_revision_id",
+    "candidate_resource_revision_id", "candidate_evidence_json", "candidate_evidence_hash", "owner_id",
+    "lease_token", "lease_expires_at", "heartbeat_at", "created_at", "started_at", "finished_at",
+  ], "Generation Task Attempt row");
+  const taskId = generationExactString(row.task_id, "Generation Task Attempt Task id");
+  const planId = generationExactString(row.plan_id, "Generation Task Attempt Plan id");
+  const workspaceId = generationExactString(row.workspace_id, "Generation Task Attempt Workspace id");
+  const attemptNumber = generationSafeInteger(row.attempt, "Generation Task Attempt number", 1);
+  const expectedOwnership = { taskId, planId, workspaceId, attempt: attemptNumber };
+  const resourcePinRows = generationArray(
+    resourcePinRowsValue,
+    "Generation Task Attempt Resource pin rows",
+  );
+  const resourcePins = resourcePinRows.map((pin, ordinal) => asGenerationTaskAttemptResourcePinRow(
+    pin,
+    { ...expectedOwnership, ordinal },
+  ));
+  const componentPinRows = generationArray(
+    componentPinRowsValue,
+    "Generation Task Attempt Component pin rows",
+  );
+  const componentPins = componentPinRows.map((pin, ordinal) => asGenerationTaskAttemptComponentPinRow(
+    pin,
+    { ...expectedOwnership, ordinal },
+  ));
+  for (let ordinal = 1; ordinal < resourcePins.length; ordinal += 1) {
+    if (compareBinary(resourcePins[ordinal - 1]!.resourceId, resourcePins[ordinal]!.resourceId) >= 0) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt Resource pins must use unique canonical binary order");
+    }
+  }
+  for (let ordinal = 1; ordinal < componentPins.length; ordinal += 1) {
+    if (compareBinary(componentPins[ordinal - 1]!.instanceId, componentPins[ordinal]!.instanceId) >= 0) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt Component pins must use unique canonical binary order");
+    }
+  }
+  const storedResourceRevisionIds = generationRevisionSummary(
+    row.pinned_resource_revision_ids_json,
+    "Generation Task Attempt Resource revision summary",
+  );
+  if (!generationEqualStringArrays(storedResourceRevisionIds, resourcePins.map((pin) => pin.revisionId))) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt Resource revision summary does not match its pins");
+  }
+  const storedComponentRevisionIds = generationRevisionSummary(
+    row.component_dependency_revision_ids_json,
+    "Generation Task Attempt Component revision summary",
+  );
+  if (!generationEqualStringArrays(storedComponentRevisionIds, componentPins.map((pin) => pin.revisionId))) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt Component revision summary does not match its pins");
+  }
+  const target = generationTaskAttemptTargetFromRow(row);
+  const input = normalizeGenerationTaskAttemptInput({
+    taskId,
+    planId,
+    workspaceId,
+    attempt: attemptNumber,
+    target,
+    baseRevisionId: generationStoredNullableString(
+      row.base_revision_id,
+      "Generation Task Attempt base Revision id",
+    ),
+    expectedSnapshotId: generationExactString(
+      row.expected_snapshot_id,
+      "Generation Task Attempt expected Snapshot id",
+    ),
+    contextPackId: generationStoredNullableString(
+      row.context_pack_id,
+      "Generation Task Attempt Context Pack id",
+    ),
+    kernelRevisionId: generationExactString(
+      row.kernel_revision_id,
+      "Generation Task Attempt Kernel Revision id",
+    ),
+    payload: generationCanonicalObjectText(row.payload_json, "Generation Task Attempt payload"),
+    resourcePins: resourcePins.map(({ ordinal: _ordinal, ...pin }) => pin),
+    componentPins: componentPins.map(({ ordinal: _ordinal, designNodeId: _designNodeId, ...pin }) => pin),
+    retryContextPolicy: row.retry_context_policy,
+    executionMode: row.execution_mode,
+  });
+  if (generationExactString(row.input_hash, "Generation Task Attempt input hash") !== input.inputHash) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt input hash does not match its immutable input");
+  }
+  if (typeof row.status !== "string"
+    || !GENERATION_TASK_ATTEMPT_STATUSES.has(row.status as GenerationTaskAttemptStatus)) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt status is unsupported");
+  }
+  const status = row.status as GenerationTaskAttemptStatus;
+  const candidateRevisionId = generationStoredNullableString(
+    row.candidate_revision_id,
+    "Generation Task Attempt candidate Revision id",
+  );
+  const candidateResourceRevisionId = generationStoredNullableString(
+    row.candidate_resource_revision_id,
+    "Generation Task Attempt candidate Resource Revision id",
+  );
+  const candidateEvidenceHash = generationStoredNullableString(
+    row.candidate_evidence_hash,
+    "Generation Task Attempt candidate evidence hash",
+  );
+  let candidateEvidence: Record<string, unknown> | null = null;
+  const hasCandidateOutput = candidateRevisionId !== null || candidateResourceRevisionId !== null
+    || row.candidate_evidence_json !== null || candidateEvidenceHash !== null;
+  if (hasCandidateOutput) {
+    if ((candidateRevisionId === null) === (candidateResourceRevisionId === null)
+      || row.candidate_evidence_json === null || candidateEvidenceHash === null) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt candidate columns are inconsistent");
+    }
+    if ((candidateRevisionId !== null && target.type !== "artifact")
+      || (candidateResourceRevisionId !== null && target.type !== "resource")) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt candidate does not match its target");
+    }
+    candidateEvidence = generationCanonicalObjectText(
+      row.candidate_evidence_json,
+      "Generation Task Attempt candidate evidence",
+    );
+    const expectedEvidenceHash = generationTaskCandidateEvidenceHash({
+      taskId,
+      planId,
+      workspaceId,
+      attempt: attemptNumber,
+      candidateRevisionId,
+      candidateResourceRevisionId,
+      candidateEvidence,
+    });
+    if (candidateEvidenceHash !== expectedEvidenceHash) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt candidate evidence hash does not match its output");
+    }
+  }
+  if (status === "candidate-ready" && !hasCandidateOutput) {
+    throw new WorkspaceStoreCodecError("A candidate-ready Generation Task Attempt must retain candidate evidence");
+  }
+  const ownerId = generationStoredNullableString(row.owner_id, "Generation Task Attempt lease owner id");
+  const leaseToken = generationStoredNullableString(row.lease_token, "Generation Task Attempt lease token");
+  const leaseExpiresAt = generationStoredNullableInteger(
+    row.lease_expires_at,
+    "Generation Task Attempt lease expires at",
+  );
+  const heartbeatAt = generationStoredNullableInteger(row.heartbeat_at, "Generation Task Attempt heartbeat at");
+  let lease: GenerationTaskAttemptLease | null = null;
+  if (ownerId === null && leaseToken === null && leaseExpiresAt === null) {
+    if (heartbeatAt !== null) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt lease columns are inconsistent");
+    }
+  } else {
+    if (ownerId === null || leaseToken === null || leaseExpiresAt === null) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt lease columns are inconsistent");
+    }
+    lease = normalizeGenerationTaskAttemptLease({
+      taskId,
+      workspaceId,
+      attempt: attemptNumber,
+      ownerId,
+      leaseToken,
+    });
+  }
+  const requiresLiveLease = status === "running" || status === "cancel-requested" || status === "candidate-ready";
+  if (requiresLiveLease !== (lease !== null)) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt lease does not match its execution status");
+  }
+  const createdAt = generationSafeInteger(row.created_at, "Generation Task Attempt created at", 0);
+  const startedAt = generationStoredNullableInteger(row.started_at, "Generation Task Attempt started at");
+  const finishedAt = generationStoredNullableInteger(row.finished_at, "Generation Task Attempt finished at");
+  if (startedAt !== null && startedAt < createdAt) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt started before it was created");
+  }
+  if (finishedAt !== null && finishedAt < (startedAt ?? createdAt)) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt finished before it started");
+  }
+  if (heartbeatAt !== null && (heartbeatAt < (startedAt ?? createdAt) || heartbeatAt > leaseExpiresAt!)) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt heartbeat is outside its lease interval");
+  }
+  if (leaseExpiresAt !== null && leaseExpiresAt < createdAt) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt lease expired before the Attempt was created");
+  }
+  const requiresStartedAt = status === "running" || status === "cancel-requested" || status === "candidate-ready"
+    || status === "succeeded" || status === "retryable-failed" || status === "failed" || status === "needs-rebase";
+  if (requiresStartedAt && startedAt === null) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt execution status requires started_at");
+  }
+  if (status === "queued" && startedAt !== null) {
+    throw new WorkspaceStoreCodecError("A queued Generation Task Attempt cannot have started_at");
+  }
+  const isFinished = status === "succeeded" || status === "retryable-failed" || status === "failed"
+    || status === "needs-rebase" || status === "cancelled";
+  if (isFinished !== (finishedAt !== null)) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt finished_at does not match its status");
+  }
+  const nextEligibleAt = generationStoredNullableInteger(
+    row.next_eligible_at,
+    "Generation Task Attempt next eligible at",
+  );
+  if ((status === "retryable-failed") !== (nextEligibleAt !== null)) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt next eligible time does not match its status");
+  }
+  const error = row.error_json === null
+    ? null
+    : generationCanonicalObjectText(row.error_json, "Generation Task Attempt error");
+  return {
+    ...input,
+    status,
+    blockedReason: generationStoredNullableString(row.blocked_reason, "Generation Task Attempt blocked reason"),
+    failureClass: generationFailureClass(row.failure_class, "Generation Task Attempt failure class"),
+    error,
+    nextEligibleAt,
+    candidateRevisionId,
+    candidateResourceRevisionId,
+    candidateEvidence,
+    candidateEvidenceHash,
+    lease,
+    leaseExpiresAt,
+    heartbeatAt,
+    createdAt,
+    startedAt,
+    finishedAt,
+  };
+}
+
+export function normalizeListGenerationPlanEventsInput(value: unknown): ListGenerationPlanEventsInput {
+  const input = generationRecord(value, "list Generation Plan events input");
+  generationAllowFields(input, ["after", "limit"], "list Generation Plan events input");
+  const limit = generationSafeInteger(input.limit, "Generation Plan event limit", 1);
+  if (limit > 1_000) throw new WorkspaceStoreCodecError("Generation Plan event limit must not exceed 1000");
+  return {
+    after: generationSafeInteger(input.after, "Generation Plan event cursor", 0),
+    limit,
+  };
+}
+
+export function asGenerationPlanEvent(rowValue: Row): GenerationPlanEvent {
+  const row = generationRecord(rowValue, "Generation Plan event row");
+  generationAllowFields(row, [
+    "plan_id", "workspace_id", "sequence", "task_id", "type", "payload_json", "created_at",
+  ], "Generation Plan event row");
+  if (typeof row.type !== "string" || !GENERATION_PLAN_EVENT_TYPES.has(row.type as GenerationPlanEventType)) {
+    throw new WorkspaceStoreCodecError("Generation Plan event type is unsupported");
+  }
+  const taskId = generationStoredNullableString(row.task_id, "Generation Plan event Task id");
+  if (row.type.startsWith("plan-") && taskId !== null) {
+    throw new WorkspaceStoreCodecError("Generation Plan events cannot name a Task");
+  }
+  if (row.type.startsWith("task-") && taskId === null) {
+    throw new WorkspaceStoreCodecError("Generation Task events must name a Task");
+  }
+  generationExactString(row.workspace_id, "Generation Plan event Workspace id");
+  return {
+    planId: generationExactString(row.plan_id, "Generation Plan event Plan id"),
+    sequence: generationSafeInteger(row.sequence, "Generation Plan event sequence", 1),
+    taskId,
+    type: row.type as GenerationPlanEventType,
+    payload: generationCanonicalObjectText(row.payload_json, "Generation Plan event payload"),
+    createdAt: generationSafeInteger(row.created_at, "Generation Plan event created at", 0),
+  };
+}
 
 export function asProject(r: Row): Project {
   return {

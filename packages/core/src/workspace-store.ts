@@ -20,10 +20,15 @@ import type {
   CreateArtifactRevisionInput,
   CreateKernelRevisionInput,
   GenerationPlan,
+  GenerationPlanDetail,
+  GenerationPlanEvent,
+  GenerationTask,
+  GenerationTaskDependency,
   KernelImpactAnalysis,
   KernelPublicationExpectation,
   LegacyWorkspaceFacts,
   LegacyWorkspaceSeed,
+  ListGenerationPlanEventsInput,
   NewWorkspaceNode,
   ProjectWorkspace,
   PersistContextPackInput,
@@ -56,6 +61,11 @@ import type {
   UpdateResourceForProjectInput,
   UpdateResourceForProjectResult,
 } from "./workspace-types.ts";
+import {
+  assertAcyclicTaskGraph,
+  compileGenerationPlan,
+  GenerationPlanCompileError,
+} from "./generation-plan.ts";
 import {
   applyWorkspaceGraphCommands,
   normalizeWorkspaceGraphCommands,
@@ -105,7 +115,13 @@ import {
   type WorkspaceProposalRecord,
   type WorkspaceSnapshotRecord,
 } from "./workspace-codecs.ts";
-import type { Row } from "./store-codecs.ts";
+import {
+  asGenerationPlanEvent,
+  asGenerationTask,
+  normalizeGenerationTaskIntent,
+  normalizeListGenerationPlanEventsInput,
+  type Row,
+} from "./store-codecs.ts";
 
 const DEFAULT_KERNEL_PAYLOAD = {
   tokens: {},
@@ -1144,6 +1160,42 @@ export class WorkspaceProposalConflictError extends WorkspaceRevisionConflictErr
     this.proposalId = proposal.id;
     this.proposalRevision = proposal.revision;
     this.summary = summary;
+  }
+}
+
+export class GenerationPlanNotFoundError extends Error {
+  readonly planId: string;
+
+  constructor(planId: string) {
+    super(`Generation Plan not found: ${planId}`);
+    this.name = "GenerationPlanNotFoundError";
+    this.planId = planId;
+  }
+}
+
+export class GenerationPlanOwnershipError extends Error {
+  readonly planId: string;
+  readonly expectedProjectId: string;
+  readonly actualProjectId: string;
+
+  constructor(planId: string, expectedProjectId: string, actualProjectId: string) {
+    super(`Generation Plan ${planId} belongs to another Project`);
+    this.name = "GenerationPlanOwnershipError";
+    this.planId = planId;
+    this.expectedProjectId = expectedProjectId;
+    this.actualProjectId = actualProjectId;
+  }
+}
+
+export class GenerationPlanStateConflictError extends Error {
+  readonly planId: string;
+  readonly status: GenerationPlan["status"];
+
+  constructor(planId: string, status: GenerationPlan["status"]) {
+    super(`Generation Plan ${planId} is ${status}, expected approved`);
+    this.name = "GenerationPlanStateConflictError";
+    this.planId = planId;
+    this.status = status;
   }
 }
 
@@ -2276,17 +2328,230 @@ export class WorkspaceStore {
   }
 
   getGenerationPlan(planId: string): GenerationPlan | null {
-    const row = this.db.prepare("SELECT * FROM generation_plans WHERE id = ?").get(planId) as Row | undefined;
-    return row ? asGenerationPlan(row) : null;
+    return this.transactionRead(() => {
+      const row = this.db.prepare(
+        `SELECT plan.id, workspace.project_id
+         FROM generation_plans plan
+         JOIN project_workspaces workspace ON workspace.id = plan.workspace_id
+         WHERE plan.id = ?`,
+      ).get(planId) as { id: string; project_id: string } | undefined;
+      return row ? this.readGenerationPlanDetailForProject(row.project_id, row.id).plan : null;
+    });
+  }
+
+  getGenerationPlanForProject(projectId: string, planId: string): GenerationPlan {
+    return this.transactionRead(() => this.readGenerationPlanDetailForProject(projectId, planId).plan);
+  }
+
+  getGenerationPlanDetailForProject(projectId: string, planId: string): GenerationPlanDetail {
+    return this.transactionRead(() => this.readGenerationPlanDetailForProject(projectId, planId));
+  }
+
+  compileApprovedGenerationPlanForProject(projectId: string, planId: string): GenerationPlanDetail {
+    try {
+      return this.transactionImmediate(() => {
+        const shell = this.requireGenerationPlanForProject(projectId, planId);
+        if (shell.constructionSealed) {
+          if (shell.status === "approved" || shell.status === "compile-failed") {
+            throw new WorkspaceStoreCodecError(
+              `Generation Plan ${shell.id} construction seal is incoherent with status ${shell.status}`,
+            );
+          }
+          return this.readGenerationPlanDetailForProject(projectId, planId);
+        }
+        if (shell.status !== "approved") {
+          throw new GenerationPlanStateConflictError(shell.id, shell.status);
+        }
+        const proposal = this.requireProposalForProject(projectId, shell.proposalId);
+        this.validateGenerationPlanShellSnapshotInTransaction(shell, proposal);
+        const compiled = compileGenerationPlan({ shell, proposal });
+        this.ensureGenerationComponentInstanceIdentitiesInTransaction(proposal);
+        const insertTask = this.db.prepare(
+        `INSERT INTO generation_tasks (
+           id, ordinal, workspace_id, plan_id, kind, target_type, target_id,
+           target_artifact_id, target_track_id, target_resource_id,
+           payload_json, intent_hash, capabilities_json, qa_profile_json, resource_limits_json,
+           idempotency_key, status, blocked_reason, blocked_by_task_id, pending_context_policy,
+           current_attempt, materialization_failures, failure_class, error_json, next_eligible_at,
+           result_revision_id, result_resource_revision_id, result_snapshot_id, created_at, finished_at
+         ) VALUES (
+           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+           'materialization-pending', NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL
+         )`,
+        );
+        const createdAt = this.clock.now();
+        for (const taskValue of compiled.tasks) {
+          const { intentHash, idempotencyKey, ...intentInput } = taskValue;
+          const task = normalizeGenerationTaskIntent(intentInput);
+          if (task.intentHash !== intentHash || task.idempotencyKey !== idempotencyKey) {
+            throw new WorkspaceStoreCodecError("compiled Generation Task derived identity is inconsistent");
+          }
+          if (task.planId !== shell.id || task.workspaceId !== shell.workspaceId) {
+            throw new WorkspaceStoreCodecError("compiled Generation Task ownership does not match its Plan shell");
+          }
+          insertTask.run(
+          task.id,
+          task.ordinal,
+          task.workspaceId,
+          task.planId,
+          task.kind,
+          task.target.type,
+          task.target.id,
+          task.target.type === "artifact" ? task.target.id : null,
+          task.target.type === "artifact" ? task.target.trackId : null,
+          task.target.type === "resource" ? task.target.id : null,
+          canonicalJsonText(task.payload, "Generation Task payload"),
+          task.intentHash,
+          canonicalJsonText(task.capabilities, "Generation Task capabilities"),
+          canonicalJsonText(task.qaProfile, "Generation Task QA profile"),
+          canonicalJsonText(task.resourceLimits, "Generation Task resource limits"),
+          task.idempotencyKey,
+          createdAt,
+          );
+        }
+        const insertDependency = this.db.prepare(
+        `INSERT INTO generation_task_dependencies (
+           plan_id, workspace_id, task_id, dependency_task_id, ordinal
+         ) VALUES (?, ?, ?, ?, ?)`,
+        );
+        for (const dependency of compiled.dependencies) {
+          insertDependency.run(
+          dependency.planId,
+          shell.workspaceId,
+          dependency.taskId,
+          dependency.dependencyTaskId,
+          dependency.ordinal,
+          );
+        }
+        const sealed = this.db.prepare(
+        `UPDATE generation_plans
+         SET status = 'queued', construction_sealed = 1
+         WHERE id = ? AND workspace_id = ? AND status = 'approved' AND construction_sealed = 0`,
+        ).run(shell.id, shell.workspaceId);
+        if (Number(sealed.changes) !== 1) {
+          const actual = this.requireGenerationPlanForProject(projectId, planId);
+          throw new GenerationPlanStateConflictError(actual.id, actual.status);
+        }
+        this.appendGenerationPlanEventInTransaction({
+          planId: shell.id,
+          workspaceId: shell.workspaceId,
+          taskId: null,
+          type: "plan-queued",
+          payload: { taskCount: compiled.tasks.length, dependencyCount: compiled.dependencies.length },
+        });
+        return this.readGenerationPlanDetailForProject(projectId, planId);
+      });
+    } catch (error) {
+      if (!(error instanceof GenerationPlanCompileError)) throw error;
+      const current = this.getGenerationPlan(planId);
+      if (current?.status === "approved" && !current.constructionSealed) {
+        try {
+          this.markGenerationPlanCompileFailedIfApprovedForProject(projectId, planId, {
+            code: error.code,
+            message: error.message,
+            details: error.details,
+          });
+        } catch (persistenceError) {
+          throw new AggregateError(
+            [error, persistenceError],
+            `Generation Plan ${planId} compilation failed and its terminal state could not be persisted`,
+            { cause: error },
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  markGenerationPlanCompileFailedIfApprovedForProject(
+    projectId: string,
+    planId: string,
+    unsafeError: Record<string, unknown>,
+  ): GenerationPlan {
+    const error = boundaryJsonObject(unsafeError, "Generation Plan compile error");
+    return this.transactionImmediate(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      if (plan.status === "compile-failed" && !plan.constructionSealed
+        && plan.compileError !== null && isDeepStrictEqual(plan.compileError, error)) {
+        return plan;
+      }
+      if (plan.status !== "approved" || plan.constructionSealed) {
+        throw new GenerationPlanStateConflictError(plan.id, plan.status);
+      }
+      const finishedAt = this.clock.now();
+      const moved = this.db.prepare(
+        `UPDATE generation_plans
+         SET status = 'compile-failed', compile_error_json = ?, finished_at = ?
+         WHERE id = ? AND workspace_id = ? AND status = 'approved' AND construction_sealed = 0`,
+      ).run(
+        canonicalJsonText(error, "Generation Plan compile error"),
+        finishedAt,
+        plan.id,
+        plan.workspaceId,
+      );
+      if (Number(moved.changes) !== 1) {
+        const actual = this.requireGenerationPlanForProject(projectId, planId);
+        throw new GenerationPlanStateConflictError(actual.id, actual.status);
+      }
+      this.appendGenerationPlanEventInTransaction({
+        planId: plan.id,
+        workspaceId: plan.workspaceId,
+        taskId: null,
+        type: "plan-compile-failed",
+        payload: error,
+      });
+      return this.requireGenerationPlanForProject(projectId, planId);
+    });
+  }
+
+  listGenerationPlanEventsForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: ListGenerationPlanEventsInput,
+  ): GenerationPlanEvent[] {
+    const input = normalizeListGenerationPlanEventsInput(unsafeInput);
+    return this.transactionRead(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      const summary = this.db.prepare(
+        `SELECT COUNT(*) AS count, MIN(sequence) AS first_sequence, MAX(sequence) AS last_sequence
+         FROM generation_plan_events WHERE plan_id = ? AND workspace_id = ?`,
+      ).get(plan.id, plan.workspaceId) as {
+        count: number;
+        first_sequence: number | null;
+        last_sequence: number | null;
+      };
+      const count = boundarySafeInteger(summary.count, "Generation Plan event count");
+      if ((count === 0 && (summary.first_sequence !== null || summary.last_sequence !== null))
+        || (count > 0 && (summary.first_sequence !== 1 || summary.last_sequence !== count))) {
+        throw new WorkspaceStoreCodecError(`Generation Plan ${plan.id} event sequence is not contiguous`);
+      }
+      if (input.after >= count) return [];
+      const rows = this.db.prepare(
+        `SELECT * FROM generation_plan_events
+         WHERE plan_id = ? AND workspace_id = ? AND sequence > ?
+         ORDER BY sequence ASC LIMIT ?`,
+      ).all(plan.id, plan.workspaceId, input.after, input.limit) as Row[];
+      const events = rows.map(asGenerationPlanEvent);
+      for (let index = 0; index < events.length; index += 1) {
+        const event = events[index]!;
+        if (event.planId !== plan.id || event.sequence !== input.after + index + 1) {
+          throw new WorkspaceStoreCodecError("Generation Plan event page is not a contiguous owned cursor slice");
+        }
+      }
+      return events;
+    });
   }
 
   listGenerationPlans(projectId: string): GenerationPlan[] {
-    const workspace = this.getWorkspace(projectId);
-    if (!workspace) return [];
-    return (this.db.prepare(
-      `SELECT * FROM generation_plans
-       WHERE workspace_id = ? ORDER BY created_at ASC, id COLLATE BINARY ASC`,
-    ).all(workspace.id) as Row[]).map(asGenerationPlan);
+    return this.transactionRead(() => {
+      const workspace = this.getWorkspace(projectId);
+      if (!workspace) return [];
+      const rows = this.db.prepare(
+        `SELECT id FROM generation_plans
+         WHERE workspace_id = ? ORDER BY created_at ASC, id COLLATE BINARY ASC`,
+      ).all(workspace.id) as Array<{ id: string }>;
+      return rows.map((row) => this.readGenerationPlanDetailForProject(projectId, row.id).plan);
+    });
   }
 
   getArtifact(artifactId: string): WorkspaceArtifactRecord | null {
@@ -3194,6 +3459,387 @@ export class WorkspaceStore {
       throw new WorkspaceProposalOwnershipError(proposalId, projectId, actualProjectId);
     }
     return this.decodeProposalRow(row);
+  }
+
+  private readGenerationPlanDetailForProject(projectId: string, planId: string): GenerationPlanDetail {
+    const plan = this.requireGenerationPlanForProject(projectId, planId);
+    const taskRows = this.db.prepare(
+      `SELECT * FROM generation_tasks
+       WHERE plan_id = ? AND workspace_id = ?
+       ORDER BY ordinal ASC`,
+    ).all(plan.id, plan.workspaceId) as Row[];
+    const dependencyRows = this.db.prepare(
+      `SELECT * FROM generation_task_dependencies
+       WHERE plan_id = ? AND workspace_id = ?
+       ORDER BY task_id COLLATE BINARY ASC, ordinal ASC`,
+    ).all(plan.id, plan.workspaceId) as Row[];
+    const events = (this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND workspace_id = ?
+       ORDER BY sequence ASC`,
+    ).all(plan.id, plan.workspaceId) as Row[]).map(asGenerationPlanEvent);
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index]!;
+      if (event.planId !== plan.id || event.sequence !== index + 1) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Plan ${plan.id} event history is not a contiguous owned sequence`,
+        );
+      }
+    }
+    if (!plan.constructionSealed) {
+      if (taskRows.length !== 0 || dependencyRows.length !== 0) {
+        throw new WorkspaceStoreCodecError(
+          `unsealed Generation Plan ${plan.id} cannot expose partially constructed Tasks`,
+        );
+      }
+      if (plan.status !== "approved" && plan.status !== "compile-failed") {
+        throw new WorkspaceStoreCodecError(
+          `unsealed Generation Plan ${plan.id} has invalid status ${plan.status}`,
+        );
+      }
+      if (plan.status === "approved") {
+        if (plan.compileError !== null || plan.finishedAt !== null || events.length !== 0) {
+          throw new WorkspaceStoreCodecError(
+            `approved Generation Plan ${plan.id} cannot expose terminal compilation state`,
+          );
+        }
+      } else {
+        const event = events[0];
+        if (plan.compileError === null || plan.finishedAt === null || events.length !== 1
+          || event?.type !== "plan-compile-failed"
+          || event.taskId !== null
+          || !isDeepStrictEqual(event.payload, plan.compileError)) {
+          throw new WorkspaceStoreCodecError(
+            `compile-failed Generation Plan ${plan.id} does not match its terminal event`,
+          );
+        }
+      }
+      return { plan, tasks: [], dependencies: [] };
+    }
+    if (plan.status === "approved" || plan.status === "compile-failed" || taskRows.length === 0) {
+      throw new WorkspaceStoreCodecError(
+        `sealed Generation Plan ${plan.id} has an invalid construction state`,
+      );
+    }
+    const dependenciesByTask = new Map<string, Row[]>();
+    for (const row of dependencyRows) {
+      const taskId = requiredCell(row.task_id, "Generation Task dependency Task id");
+      const rows = dependenciesByTask.get(taskId) ?? [];
+      rows.push(row);
+      dependenciesByTask.set(taskId, rows);
+    }
+    const tasks = taskRows.map((row, ordinal) => {
+      const taskId = requiredCell(row.id, "Generation Task id");
+      const task = asGenerationTask(row, dependenciesByTask.get(taskId) ?? []);
+      if (task.ordinal !== ordinal || task.planId !== plan.id || task.workspaceId !== plan.workspaceId) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Plan ${plan.id} Tasks do not have contiguous owned ordinals`,
+        );
+      }
+      return task;
+    });
+    const taskIds = new Set(tasks.map((task) => task.id));
+    const dependencies: GenerationTaskDependency[] = tasks.flatMap((task) => task.dependencyIds.map(
+      (dependencyTaskId, ordinal) => {
+        if (!taskIds.has(dependencyTaskId)) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id} depends on Task ${dependencyTaskId} outside its Plan`,
+          );
+        }
+        return { planId: plan.id, taskId: task.id, dependencyTaskId, ordinal };
+      },
+    ));
+    if (dependencies.length !== dependencyRows.length) {
+      throw new WorkspaceStoreCodecError(`Generation Plan ${plan.id} dependency rows are not fully owned by its Tasks`);
+    }
+    assertAcyclicTaskGraph(tasks);
+    this.assertGenerationPlanExecutionSummary(plan, tasks, events);
+    return { plan, tasks, dependencies };
+  }
+
+  private assertGenerationPlanExecutionSummary(
+    plan: GenerationPlan,
+    tasks: readonly GenerationTask[],
+    events: readonly GenerationPlanEvent[],
+  ): void {
+    const first = events[0];
+    const queuedEvents = events.filter((event) => event.type === "plan-queued");
+    const dependencyCount = tasks.reduce((count, task) => count + task.dependencyIds.length, 0);
+    if (first?.type !== "plan-queued" || first.taskId !== null
+      || queuedEvents.length !== 1
+      || !isDeepStrictEqual(first.payload, { taskCount: tasks.length, dependencyCount })) {
+      throw new WorkspaceStoreCodecError(
+        `sealed Generation Plan ${plan.id} must begin with its exact durable queue event`,
+      );
+    }
+    if (plan.compileError !== null) {
+      throw new WorkspaceStoreCodecError(`sealed Generation Plan ${plan.id} cannot retain a compile error`);
+    }
+    const terminalEvents = events.filter((event) => event.type === "plan-succeeded"
+      || event.type === "plan-failed"
+      || event.type === "plan-cancelled"
+      || event.type === "plan-compile-failed");
+    const terminalStatuses = new Set(["succeeded", "failed", "cancelled"]);
+    if (!terminalStatuses.has(plan.status)) {
+      if (plan.finishedAt !== null || terminalEvents.length !== 0) {
+        throw new WorkspaceStoreCodecError(
+          `non-terminal Generation Plan ${plan.id} cannot expose terminal execution history`,
+        );
+      }
+      return;
+    }
+    const expectedEventType = plan.status === "succeeded"
+      ? "plan-succeeded"
+      : plan.status === "failed"
+        ? "plan-failed"
+        : "plan-cancelled";
+    const last = events.at(-1);
+    if (plan.finishedAt === null || terminalEvents.length !== 1
+      || last?.type !== expectedEventType || last.taskId !== null) {
+      throw new WorkspaceStoreCodecError(
+        `terminal Generation Plan ${plan.id} does not match its final durable event`,
+      );
+    }
+    const terminalTaskStatuses = new Set(["succeeded", "failed", "blocked", "cancelled"]);
+    if (tasks.some((task) => !terminalTaskStatuses.has(task.status))) {
+      throw new WorkspaceStoreCodecError(
+        `terminal Generation Plan ${plan.id} retains a non-terminal Task`,
+      );
+    }
+    if (plan.status === "succeeded" && tasks.some((task) => task.status !== "succeeded")) {
+      throw new WorkspaceStoreCodecError(
+        `succeeded Generation Plan ${plan.id} retains an unsuccessful Task`,
+      );
+    }
+    if (plan.status === "failed" && !tasks.some((task) => task.status === "failed" || task.status === "blocked")) {
+      throw new WorkspaceStoreCodecError(
+        `failed Generation Plan ${plan.id} has no failed or blocked Task`,
+      );
+    }
+    if (plan.status === "cancelled" && !tasks.some((task) => task.status === "cancelled")) {
+      throw new WorkspaceStoreCodecError(
+        `cancelled Generation Plan ${plan.id} has no cancelled Task`,
+      );
+    }
+  }
+
+  private validateGenerationPlanShellSnapshotInTransaction(
+    shell: GenerationPlan,
+    proposal: WorkspaceProposalRecord,
+  ): void {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Plan shell Snapshot validation requires a transaction");
+    }
+    const snapshot = this.requireSnapshot(shell.workspaceId, shell.baseSnapshotId);
+    if (proposal.operations.length === 0) {
+      if (snapshot.id !== proposal.baseSnapshotId) {
+        throw new GenerationPlanCompileError(
+          "proposal-base-mismatch",
+          `Generation Plan ${shell.id} does not reuse the no-op Proposal base Snapshot`,
+          { planId: shell.id, expectedSnapshotId: proposal.baseSnapshotId, actualSnapshotId: snapshot.id },
+        );
+      }
+      return;
+    }
+    const proposalBase = this.requireSnapshot(proposal.workspaceId, proposal.baseSnapshotId);
+    let expectedGraph: WorkspaceGraph;
+    try {
+      expectedGraph = applyWorkspaceGraphCommands(proposal.baseGraph, proposal.operations);
+    } catch (error) {
+      throw new GenerationPlanCompileError(
+        "invalid-reference",
+        `Generation Plan ${shell.id} cannot reproduce its approved Proposal graph`,
+        { planId: shell.id, reason: error instanceof Error ? error.message : String(error) },
+      );
+    }
+    const provenance = snapshot.provenance;
+    if (snapshot.workspaceId !== proposal.workspaceId
+      || snapshot.parentSnapshotId !== proposal.baseSnapshotId
+      || snapshot.graphRevision !== expectedGraph.revision
+      || snapshot.kernelRevisionId !== proposalBase.kernelRevisionId
+      || !graphsAreSemanticallyEqual(snapshot.graph, expectedGraph)
+      || provenance.kind !== "proposal-approval"
+      || provenance.proposalId !== proposal.id
+      || provenance.proposalRevision !== proposal.revision
+      || provenance.planId !== shell.id) {
+      throw new GenerationPlanCompileError(
+        "proposal-base-mismatch",
+        `Generation Plan ${shell.id} post-approval Snapshot does not match its immutable Proposal`,
+        { planId: shell.id, snapshotId: snapshot.id, proposalId: proposal.id },
+      );
+    }
+  }
+
+  private ensureGenerationComponentInstanceIdentitiesInTransaction(
+    proposal: WorkspaceProposalRecord,
+  ): void {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Component Instance identity synchronization requires a transaction");
+    }
+    if (proposal.generation.kind !== "workspace-generation") {
+      throw new GenerationPlanCompileError(
+        "unsupported-proposal",
+        "Generation Component Instance identities require a workspace-generation Proposal",
+        { proposalId: proposal.id, kind: proposal.generation.kind },
+      );
+    }
+    const artifactPlanKindById = new Map(
+      proposal.generation.artifactPlans.map((plan) => [plan.artifactId, plan.kind] as const),
+    );
+    const artifactRow = this.db.prepare(
+      `SELECT workspace_id, kind, archived_at
+       FROM workspace_artifacts WHERE id = ?`,
+    );
+    const instanceRow = this.db.prepare(
+      `SELECT workspace_id, owner_artifact_id, component_artifact_id
+       FROM component_instances WHERE id = ?`,
+    );
+    const insertInstance = this.db.prepare(
+      `INSERT INTO component_instances
+         (id, workspace_id, owner_artifact_id, component_artifact_id, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    const dependencies = proposal.generation.dependencyPlans
+      .filter((dependency) => dependency.kind === "component-instance")
+      .sort((left, right) => compareBinary(left.instanceId, right.instanceId));
+    for (const dependency of dependencies) {
+      const owner = artifactRow.get(dependency.ownerArtifactId) as {
+        workspace_id: string;
+        kind: string;
+        archived_at: number | null;
+      } | undefined;
+      const plannedOwnerKind = artifactPlanKindById.get(dependency.ownerArtifactId);
+      if (!owner
+        || owner.workspace_id !== proposal.workspaceId
+        || owner.archived_at !== null
+        || (owner.kind !== "page" && owner.kind !== "component")
+        || plannedOwnerKind !== owner.kind) {
+        throw new GenerationPlanCompileError(
+          "invalid-reference",
+          `generation dependency owner ${dependency.ownerArtifactId} is not an active same-Workspace ${plannedOwnerKind ?? "Artifact"}`,
+          { ownerArtifactId: dependency.ownerArtifactId, instanceId: dependency.instanceId },
+        );
+      }
+      const component = artifactRow.get(dependency.componentArtifactId) as {
+        workspace_id: string;
+        kind: string;
+        archived_at: number | null;
+      } | undefined;
+      if (!component
+        || component.workspace_id !== proposal.workspaceId
+        || component.kind !== "component"
+        || component.archived_at !== null) {
+        throw new GenerationPlanCompileError(
+          "invalid-reference",
+          `generation dependency Component ${dependency.componentArtifactId} is not an active same-Workspace Component`,
+          { componentArtifactId: dependency.componentArtifactId, instanceId: dependency.instanceId },
+        );
+      }
+      const existing = instanceRow.get(dependency.instanceId) as {
+        workspace_id: string;
+        owner_artifact_id: string;
+        component_artifact_id: string;
+      } | undefined;
+      if (existing) {
+        if (existing.workspace_id !== proposal.workspaceId
+          || existing.owner_artifact_id !== dependency.ownerArtifactId
+          || existing.component_artifact_id !== dependency.componentArtifactId) {
+          throw new GenerationPlanCompileError(
+            "invalid-reference",
+            `Component Instance ${dependency.instanceId} identity collision`,
+            { instanceId: dependency.instanceId },
+          );
+        }
+        continue;
+      }
+      insertInstance.run(
+        dependency.instanceId,
+        proposal.workspaceId,
+        dependency.ownerArtifactId,
+        dependency.componentArtifactId,
+        this.clock.now(),
+      );
+    }
+  }
+
+  private appendGenerationPlanEventInTransaction(input: {
+    planId: string;
+    workspaceId: string;
+    taskId: string | null;
+    type: GenerationPlanEvent["type"];
+    payload: Record<string, unknown>;
+  }): GenerationPlanEvent {
+    if (!this.db.isTransaction) throw new Error("Generation Plan event append requires a transaction");
+    const planRow = this.db.prepare(
+      "SELECT workspace_id FROM generation_plans WHERE id = ?",
+    ).get(input.planId) as { workspace_id: unknown } | undefined;
+    if (!planRow || planRow.workspace_id !== input.workspaceId) {
+      throw new WorkspaceStoreCodecError("Generation Plan event ownership does not match its Plan");
+    }
+    const isTaskEvent = input.type.startsWith("task-");
+    if (isTaskEvent !== (input.taskId !== null)) {
+      throw new WorkspaceStoreCodecError("Generation Plan event Task ownership does not match its type");
+    }
+    if (input.taskId !== null) {
+      const task = this.db.prepare(
+        `SELECT 1 FROM generation_tasks
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?`,
+      ).get(input.taskId, input.planId, input.workspaceId);
+      if (!task) throw new WorkspaceStoreCodecError("Generation Plan event Task belongs to another Plan");
+    }
+    const summary = this.db.prepare(
+      `SELECT COUNT(*) AS count, MIN(sequence) AS first_sequence, MAX(sequence) AS last_sequence
+       FROM generation_plan_events WHERE plan_id = ? AND workspace_id = ?`,
+    ).get(input.planId, input.workspaceId) as {
+      count: number;
+      first_sequence: number | null;
+      last_sequence: number | null;
+    };
+    const count = boundarySafeInteger(summary.count, "Generation Plan event count");
+    if ((count === 0 && (summary.first_sequence !== null || summary.last_sequence !== null))
+      || (count > 0 && (summary.first_sequence !== 1 || summary.last_sequence !== count))) {
+      throw new WorkspaceStoreCodecError(`Generation Plan ${input.planId} event sequence is not contiguous`);
+    }
+    if (count >= Number.MAX_SAFE_INTEGER) {
+      throw new WorkspaceStoreCodecError(`Generation Plan ${input.planId} event sequence is exhausted`);
+    }
+    const sequence = count + 1;
+    const payload = boundaryJsonObject(input.payload, "Generation Plan event payload");
+    const createdAt = this.clock.now();
+    this.db.prepare(
+      `INSERT INTO generation_plan_events (
+         plan_id, workspace_id, sequence, task_id, type, payload_json, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.planId,
+      input.workspaceId,
+      sequence,
+      input.taskId,
+      input.type,
+      canonicalJsonText(payload, "Generation Plan event payload"),
+      createdAt,
+    );
+    const row = this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND workspace_id = ? AND sequence = ?`,
+    ).get(input.planId, input.workspaceId, sequence) as Row | undefined;
+    if (!row) throw new WorkspaceStoreCodecError("Generation Plan event was not durably appended");
+    return asGenerationPlanEvent(row);
+  }
+
+  private requireGenerationPlanForProject(projectId: string, planId: string): GenerationPlan {
+    const row = this.db.prepare(
+      `SELECT plan.*, workspace.project_id
+       FROM generation_plans plan
+       JOIN project_workspaces workspace ON workspace.id = plan.workspace_id
+       WHERE plan.id = ?`,
+    ).get(planId) as Row | undefined;
+    if (!row) throw new GenerationPlanNotFoundError(planId);
+    const actualProjectId = requiredCell(row.project_id, "Generation Plan Project id");
+    if (actualProjectId !== projectId) {
+      throw new GenerationPlanOwnershipError(planId, projectId, actualProjectId);
+    }
+    return asGenerationPlan(row);
   }
 
   private requireDraftProposal(projectId: string | null, proposalId: string): WorkspaceProposalRecord {

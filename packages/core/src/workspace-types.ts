@@ -829,9 +829,267 @@ export interface GenerationPlan {
   proposalRevision: number;
   baseSnapshotId: string;
   status: GenerationPlanStatus;
+  constructionSealed: boolean;
   compileError: Record<string, unknown> | null;
   createdAt: number;
   finishedAt: number | null;
+}
+
+export type GenerationTaskKind =
+  | "resource"
+  | "component"
+  | "page"
+  | "prototype-validation"
+  | "checkpoint"
+  | "propagation-candidate"
+  | "propagation-publish";
+
+export type GenerationTaskTarget =
+  | { type: "workspace"; workspaceId: string; id: string }
+  | { type: "artifact"; workspaceId: string; id: string; trackId: string }
+  | { type: "resource"; workspaceId: string; id: string };
+
+export type GenerationTaskStatus =
+  | "materialization-pending"
+  | "retry-wait"
+  | "blocked-context"
+  | "queued"
+  | "running"
+  | "candidate-ready"
+  | "needs-rebase"
+  | "awaiting-context-refresh"
+  | "cancel-requested"
+  | "succeeded"
+  | "failed"
+  | "blocked"
+  | "cancelled";
+
+export type GenerationTaskAttemptStatus =
+  | "queued"
+  | "running"
+  | "cancel-requested"
+  | "candidate-ready"
+  | "succeeded"
+  | "retryable-failed"
+  | "failed"
+  | "needs-rebase"
+  | "cancelled";
+
+export type GenerationTaskExecutionMode = "full" | "publication-only";
+export type GenerationTaskRetryContextPolicy = "same-context" | "latest-context";
+export type GenerationTaskCapacityClass = "agent" | "render-qa" | "image";
+export type GenerationTaskClaimKind = "capacity" | "writer";
+
+export type GenerationTaskFailureClass =
+  | "context"
+  | "adapter"
+  | "storage"
+  | "provider"
+  | "agent-transport"
+  | "build-infrastructure"
+  | "design"
+  | "build"
+  | "qa"
+  | "publication-conflict"
+  | "cancelled"
+  | "unknown";
+
+export interface GenerationTaskResourceLimits {
+  timeoutMs: number;
+  maxAgentTurns: number;
+  maxRepairRounds: number;
+  maxOutputBytes: number;
+  capacityClasses: GenerationTaskCapacityClass[];
+}
+
+export interface GenerationTaskIntentInput {
+  id: string;
+  ordinal: number;
+  workspaceId: string;
+  planId: string;
+  kind: GenerationTaskKind;
+  target: GenerationTaskTarget;
+  dependencyIds: string[];
+  payload: Record<string, unknown>;
+  capabilities: string[];
+  qaProfile: ArtifactQualityProfile;
+  resourceLimits: GenerationTaskResourceLimits;
+}
+
+export interface GenerationTaskIntent extends GenerationTaskIntentInput {
+  /** Hash of the complete canonical, immutable task intent. */
+  intentHash: string;
+  /** Stable retry-independent key for this Plan task identity and intent. */
+  idempotencyKey: string;
+}
+
+export interface GenerationTask extends GenerationTaskIntent {
+  status: GenerationTaskStatus;
+  blockedReason: string | null;
+  blockedByTaskId: string | null;
+  pendingContextPolicy: GenerationTaskRetryContextPolicy | null;
+  currentAttempt: number;
+  materializationFailures: number;
+  failureClass: GenerationTaskFailureClass | null;
+  error: Record<string, unknown> | null;
+  nextEligibleAt: number | null;
+  resultRevisionId: string | null;
+  resultResourceRevisionId: string | null;
+  resultSnapshotId: string | null;
+  createdAt: number;
+  finishedAt: number | null;
+}
+
+export interface GenerationTaskDependency {
+  planId: string;
+  taskId: string;
+  dependencyTaskId: string;
+  ordinal: number;
+}
+
+export interface GenerationTaskAttemptResourcePinInput {
+  resourceId: string;
+  revisionId: string;
+  sourceTaskId: string | null;
+}
+
+export interface GenerationTaskAttemptResourcePin extends GenerationTaskAttemptResourcePinInput {
+  ordinal: number;
+}
+
+export interface GenerationTaskAttemptComponentPinInput {
+  instanceId: string;
+  ownerArtifactId: string;
+  componentArtifactId: string;
+  revisionId: string;
+  sourceTaskId: string | null;
+  variantKey: string | null;
+  stateKey: string | null;
+  sourceLocator: DesignNodeLocator;
+  overrides: Record<string, unknown>;
+  status: ComponentInstanceDependencyStatus;
+}
+
+export interface GenerationTaskAttemptComponentPin extends GenerationTaskAttemptComponentPinInput {
+  ordinal: number;
+  designNodeId: string;
+}
+
+export interface CreateGenerationTaskAttemptInput {
+  taskId: string;
+  planId: string;
+  workspaceId: string;
+  attempt: number;
+  target: GenerationTaskTarget;
+  baseRevisionId: string | null;
+  expectedSnapshotId: string;
+  contextPackId: string | null;
+  kernelRevisionId: string;
+  payload: Record<string, unknown>;
+  resourcePins: GenerationTaskAttemptResourcePinInput[];
+  componentPins: GenerationTaskAttemptComponentPinInput[];
+  retryContextPolicy: GenerationTaskRetryContextPolicy;
+  executionMode: GenerationTaskExecutionMode;
+}
+
+export interface GenerationTaskAttemptInput extends Omit<CreateGenerationTaskAttemptInput, "resourcePins" | "componentPins"> {
+  resourcePins: GenerationTaskAttemptResourcePin[];
+  componentPins: GenerationTaskAttemptComponentPin[];
+  inputHash: string;
+}
+
+export type GenerationTaskAttemptHashInput = Omit<GenerationTaskAttemptInput, "inputHash">;
+
+export interface GenerationTaskCandidateEvidenceHashInput {
+  taskId: string;
+  planId: string;
+  workspaceId: string;
+  attempt: number;
+  candidateRevisionId: string | null;
+  candidateResourceRevisionId: string | null;
+  candidateEvidence: Record<string, unknown>;
+}
+
+export interface GenerationTaskAttemptLease {
+  taskId: string;
+  workspaceId: string;
+  attempt: number;
+  ownerId: string;
+  leaseToken: string;
+}
+
+export interface GenerationTaskAttempt extends GenerationTaskAttemptInput {
+  status: GenerationTaskAttemptStatus;
+  blockedReason: string | null;
+  failureClass: GenerationTaskFailureClass | null;
+  error: Record<string, unknown> | null;
+  nextEligibleAt: number | null;
+  candidateRevisionId: string | null;
+  candidateResourceRevisionId: string | null;
+  candidateEvidence: Record<string, unknown> | null;
+  candidateEvidenceHash: string | null;
+  lease: GenerationTaskAttemptLease | null;
+  leaseExpiresAt: number | null;
+  heartbeatAt: number | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+}
+
+export interface GenerationTaskClaim extends GenerationTaskAttemptLease {
+  claimKey: string;
+  claimKind: GenerationTaskClaimKind;
+  leaseExpiresAt: number;
+  createdAt: number;
+}
+
+export type GenerationPlanEventType =
+  | "plan-queued"
+  | "plan-compile-failed"
+  | "task-materialization-failed"
+  | "task-blocked-context"
+  | "task-materialized"
+  | "task-running"
+  | "task-candidate-ready"
+  | "task-needs-rebase"
+  | "task-retry-wait"
+  | "task-succeeded"
+  | "task-failed"
+  | "task-blocked"
+  | "task-cancel-requested"
+  | "task-cancelled"
+  | "plan-succeeded"
+  | "plan-failed"
+  | "plan-cancelled";
+
+export interface GenerationPlanEvent {
+  planId: string;
+  sequence: number;
+  taskId: string | null;
+  type: GenerationPlanEventType;
+  payload: Record<string, unknown>;
+  createdAt: number;
+}
+
+export interface ListGenerationPlanEventsInput {
+  after: number;
+  limit: number;
+}
+
+export interface GenerationPlanGraph {
+  id: string;
+  workspaceId: string;
+  proposalId: string;
+  proposalRevision: number;
+  baseSnapshotId: string;
+  tasks: GenerationTaskIntent[];
+  dependencies: GenerationTaskDependency[];
+}
+
+export interface GenerationPlanDetail {
+  plan: GenerationPlan;
+  tasks: GenerationTask[];
+  dependencies: GenerationTaskDependency[];
 }
 
 export interface ApprovedProposalResult {

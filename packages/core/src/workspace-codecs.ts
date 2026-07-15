@@ -1750,19 +1750,36 @@ export function asGenerationPlan(row: Row): GenerationPlanRecord {
     && row.status !== "requires-new-impact" && row.status !== "cancelled") {
     throw new WorkspaceStoreCodecError("Generation Plan status is unsupported");
   }
-  return {
+  if (row.construction_sealed !== 0 && row.construction_sealed !== 1) {
+    throw new WorkspaceStoreCodecError("Generation Plan construction-sealed marker must be zero or one");
+  }
+  const plan: GenerationPlanRecord = {
     id: requiredString(row.id, "Generation Plan id"),
     workspaceId: requiredString(row.workspace_id, "Generation Plan Workspace id"),
     proposalId: requiredString(row.proposal_id, "Generation Plan Proposal id"),
     proposalRevision: positiveInteger(row.proposal_revision, "Generation Plan Proposal revision"),
     baseSnapshotId: requiredString(row.base_snapshot_id, "Generation Plan base Snapshot id"),
     status: row.status,
+    constructionSealed: row.construction_sealed === 1,
     compileError: row.compile_error_json == null
       ? null
       : jsonObject(row.compile_error_json, "Generation Plan compile error"),
     createdAt: timestamp(row.created_at, "Generation Plan created_at"),
     finishedAt: row.finished_at == null ? null : timestamp(row.finished_at, "Generation Plan finished_at"),
   };
+  const isCompileFailure = plan.status === "compile-failed";
+  const isTerminalExecution = plan.status === "succeeded"
+    || plan.status === "failed"
+    || plan.status === "cancelled";
+  const shouldBeSealed = plan.status !== "approved" && !isCompileFailure;
+  if (plan.constructionSealed !== shouldBeSealed
+    || (isCompileFailure ? plan.compileError === null : plan.compileError !== null)
+    || ((isCompileFailure || isTerminalExecution) ? plan.finishedAt === null : plan.finishedAt !== null)) {
+    throw new WorkspaceStoreCodecError(
+      `Generation Plan ${plan.id} status does not match its durable construction and terminal fields`,
+    );
+  }
+  return plan;
 }
 
 function optionalStoredString(value: Record<string, unknown>, field: string, label: string): string | undefined {
