@@ -9,6 +9,7 @@ const GENERATION_TABLES = [
   "generation_tasks",
   "generation_task_dependencies",
   "generation_task_attempts",
+  "generation_task_attempt_dependency_outputs",
   "generation_task_attempt_resource_pins",
   "generation_task_attempt_component_pins",
   "generation_task_materialization_failures",
@@ -63,12 +64,34 @@ test("fresh schema installs the normalized Generation Plan execution model", () 
 
     const attemptColumns = new Map(
       (db.prepare("PRAGMA table_info(generation_task_attempts)").all() as Array<{
+        dflt_value: string | null;
         name: string;
         notnull: number;
-      }>).map(({ name, notnull }) => [name, notnull]),
+      }>).map(({ name, notnull, dflt_value }) => [name, { dflt_value, notnull }]),
     );
-    assert.equal(attemptColumns.get("context_pack_id"), 0);
+    assert.equal(attemptColumns.get("context_pack_id")?.notnull, 0);
     assert.equal(attemptColumns.has("candidate_evidence_hash"), true);
+    assert.deepEqual(attemptColumns.get("materialization_sealed"), { dflt_value: "0", notnull: 1 });
+
+    const dependencyOutputColumns = new Set(
+      (db.prepare("PRAGMA table_info(generation_task_attempt_dependency_outputs)").all() as Array<{
+        name: string;
+      }>).map(({ name }) => name),
+    );
+    assert.deepEqual(
+      [
+        "task_id",
+        "plan_id",
+        "attempt",
+        "workspace_id",
+        "ordinal",
+        "dependency_task_id",
+        "result_revision_id",
+        "result_resource_revision_id",
+        "result_snapshot_id",
+      ].filter((column) => !dependencyOutputColumns.has(column)),
+      [],
+    );
 
     const resourcePinColumns = new Set(
       (db.prepare("PRAGMA table_info(generation_task_attempt_resource_pins)").all() as Array<{ name: string }>).map(
@@ -133,22 +156,14 @@ function createPlanFixture(store: Store, suffix: string): PlanFixture {
 test("additive migration restores Generation Plan execution tables and the construction seal", () => {
   const db = openFreshDatabase();
   try {
+    const triggerNames = db.prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'trigger' AND (name LIKE 'generation_%' OR name LIKE 'generation\_%' ESCAPE '\\')`,
+    ).all() as Array<{ name: string }>;
+    for (const { name } of triggerNames) db.exec(`DROP TRIGGER "${name}"`);
     db.exec(`
-      DROP TRIGGER generation_plan_construction_seal_guard;
-      DROP TRIGGER generation_plan_execution_requires_seal;
-      DROP TRIGGER generation_plan_initial_state_guard;
-      DROP TRIGGER generation_plan_status_transition_guard;
-      DROP TRIGGER generation_plan_terminal_state_guard;
-      DROP TRIGGER generation_run_insert_ownership;
-      DROP TRIGGER generation_run_update_immutable;
-      DROP TABLE generation_task_claims;
-      DROP TABLE generation_task_attempt_component_pins;
-      DROP TABLE generation_task_attempt_resource_pins;
-      DROP TABLE generation_task_materialization_failures;
-      DROP TABLE generation_plan_events;
-      DROP TABLE generation_task_attempts;
-      DROP TABLE generation_task_dependencies;
-      DROP TABLE generation_tasks;
+      DROP TABLE generation_task_attempt_dependency_outputs;
+      ALTER TABLE generation_task_attempts DROP COLUMN materialization_sealed;
       ALTER TABLE generation_plans DROP COLUMN construction_sealed;
     `);
 
@@ -163,6 +178,12 @@ test("additive migration restores Generation Plan execution tables and the const
       (db.prepare("PRAGMA table_info(generation_plans)").all() as Array<{ name: string }>).map(({ name }) => name),
     );
     assert.ok(columns.has("construction_sealed"));
+    const attemptColumns = new Set(
+      (db.prepare("PRAGMA table_info(generation_task_attempts)").all() as Array<{ name: string }>).map(
+        ({ name }) => name,
+      ),
+    );
+    assert.ok(attemptColumns.has("materialization_sealed"));
     assert.equal(
       (db.prepare(
         "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name = 'generation_task_intent_update_immutable'",
@@ -199,6 +220,48 @@ function insertWorkspaceTask(
   );
 }
 
+function insertTaskAttempt(
+  db: DatabaseSync,
+  fixture: PlanFixture,
+  input: {
+    baseRevisionId?: string | null;
+    componentRevisionIds?: string[];
+    contextPackId?: string | null;
+    expectedSnapshotId?: string;
+    kernelRevisionId?: string;
+    resourceRevisionIds?: string[];
+    targetArtifactId?: string | null;
+    targetResourceId?: string | null;
+    targetTrackId?: string | null;
+    taskId: string;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO generation_task_attempts (
+       task_id, plan_id, workspace_id, attempt, target_artifact_id, target_track_id,
+       target_resource_id, base_revision_id, expected_snapshot_id, context_pack_id,
+       kernel_revision_id, execution_mode, payload_json, input_hash,
+       pinned_resource_revision_ids_json, component_dependency_revision_ids_json,
+       retry_context_policy, status, created_at
+     ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'full', '{}', ?, ?, ?,
+       'same-context', 'queued', 50)`,
+  ).run(
+    input.taskId,
+    fixture.planId,
+    fixture.workspaceId,
+    input.targetArtifactId ?? null,
+    input.targetTrackId ?? null,
+    input.targetResourceId ?? null,
+    input.baseRevisionId ?? null,
+    input.expectedSnapshotId ?? fixture.snapshotId,
+    input.contextPackId ?? null,
+    input.kernelRevisionId ?? fixture.kernelRevisionId,
+    `input-${input.taskId}`,
+    JSON.stringify(input.resourceRevisionIds ?? []),
+    JSON.stringify(input.componentRevisionIds ?? []),
+  );
+}
+
 test("construction seal freezes task intent and append-only Plan history", () => {
   const store = new Store();
   try {
@@ -210,6 +273,16 @@ test("construction seal freezes task intent and append-only Plan history", () =>
          (plan_id, workspace_id, task_id, dependency_task_id, ordinal)
        VALUES (?, ?, 'checkpoint-sealed', 'validate-sealed', 0)`,
     ).run(fixture.planId, fixture.workspaceId);
+
+    assert.throws(
+      () => store.db.prepare(
+        `INSERT INTO generation_task_materialization_failures (
+           task_id, plan_id, workspace_id, sequence, failure_class, error_json,
+           next_eligible_at, created_at
+         ) VALUES ('validate-sealed', ?, ?, 1, 'context', '{}', NULL, 29)`,
+      ).run(fixture.planId, fixture.workspaceId),
+      /materialization|plan|state|sealed/i,
+    );
 
     store.db.prepare("UPDATE generation_plans SET construction_sealed = 1 WHERE id = ?").run(fixture.planId);
     store.db.prepare("UPDATE generation_plans SET status = 'queued' WHERE id = ?").run(fixture.planId);
@@ -266,6 +339,232 @@ test("construction seal freezes task intent and append-only Plan history", () =>
   }
 });
 
+test("attempt sealing advances current only after the exact succeeded dependency outputs are frozen", () => {
+  const store = new Store();
+  try {
+    const fixture = createPlanFixture(store, "dependency-output");
+    insertWorkspaceTask(store.db, fixture, { id: "checkpoint-source", kind: "checkpoint", ordinal: 0 });
+    insertWorkspaceTask(store.db, fixture, { id: "checkpoint-dependent", kind: "checkpoint", ordinal: 1 });
+    store.db.prepare(
+      `INSERT INTO generation_task_dependencies
+         (plan_id, workspace_id, task_id, dependency_task_id, ordinal)
+       VALUES (?, ?, 'checkpoint-dependent', 'checkpoint-source', 0)`,
+    ).run(fixture.planId, fixture.workspaceId);
+    store.db.prepare("UPDATE generation_plans SET construction_sealed = 1, status = 'queued' WHERE id = ?")
+      .run(fixture.planId);
+
+    insertTaskAttempt(store.db, fixture, { taskId: "checkpoint-source" });
+    assert.equal(
+      (store.db.prepare("SELECT current_attempt FROM generation_tasks WHERE id = 'checkpoint-source'").get() as {
+        current_attempt: number;
+      }).current_attempt,
+      0,
+    );
+    store.db.prepare(
+      `UPDATE generation_task_attempts SET materialization_sealed = 1
+       WHERE task_id = 'checkpoint-source' AND attempt = 1`,
+    ).run();
+    insertTaskAttempt(store.db, fixture, { taskId: "checkpoint-dependent" });
+
+    assert.throws(
+      () => store.db.prepare(
+        `INSERT INTO generation_task_attempt_dependency_outputs (
+           task_id, plan_id, attempt, workspace_id, ordinal, dependency_task_id,
+           result_revision_id, result_resource_revision_id, result_snapshot_id
+         ) VALUES ('checkpoint-dependent', ?, 1, ?, 0, 'checkpoint-source', NULL, NULL, NULL)`,
+      ).run(fixture.planId, fixture.workspaceId),
+      /dependency|succeeded|result|materialization/i,
+    );
+    assert.throws(
+      () => store.db.prepare(
+        `UPDATE generation_task_attempts SET materialization_sealed = 1
+         WHERE task_id = 'checkpoint-dependent' AND attempt = 1`,
+      ).run(),
+      /dependency|materialization|seal/i,
+    );
+
+    store.db.prepare(
+      `UPDATE generation_task_attempts
+       SET status = 'succeeded', finished_at = 60
+       WHERE task_id = 'checkpoint-source' AND attempt = 1`,
+    ).run();
+    store.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'succeeded', result_snapshot_id = ?, finished_at = 60
+       WHERE id = 'checkpoint-source'`,
+    ).run(fixture.snapshotId);
+    assert.throws(
+      () => store.db.prepare(
+        `INSERT INTO generation_task_attempt_dependency_outputs (
+           task_id, plan_id, attempt, workspace_id, ordinal, dependency_task_id,
+           result_revision_id, result_resource_revision_id, result_snapshot_id
+         ) VALUES ('checkpoint-dependent', ?, 1, ?, 0, 'checkpoint-source', NULL, NULL, NULL)`,
+      ).run(fixture.planId, fixture.workspaceId),
+      /dependency|succeeded|result|materialization/i,
+    );
+    store.db.prepare(
+      `INSERT INTO generation_task_attempt_dependency_outputs (
+         task_id, plan_id, attempt, workspace_id, ordinal, dependency_task_id,
+         result_revision_id, result_resource_revision_id, result_snapshot_id
+       ) VALUES ('checkpoint-dependent', ?, 1, ?, 0, 'checkpoint-source', NULL, NULL, ?)`,
+    ).run(fixture.planId, fixture.workspaceId, fixture.snapshotId);
+    assert.equal(
+      (store.db.prepare("SELECT current_attempt FROM generation_tasks WHERE id = 'checkpoint-dependent'").get() as {
+        current_attempt: number;
+      }).current_attempt,
+      0,
+    );
+    store.db.prepare(
+      `UPDATE generation_task_attempts SET materialization_sealed = 1
+       WHERE task_id = 'checkpoint-dependent' AND attempt = 1`,
+    ).run();
+    assert.equal(
+      (store.db.prepare("SELECT current_attempt FROM generation_tasks WHERE id = 'checkpoint-dependent'").get() as {
+        current_attempt: number;
+      }).current_attempt,
+      1,
+    );
+    assert.throws(
+      () => store.db.prepare(
+        `DELETE FROM generation_task_attempt_dependency_outputs
+         WHERE task_id = 'checkpoint-dependent' AND attempt = 1`,
+      ).run(),
+      /dependency|immutable|seal/i,
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("attempt construction rejects inactive Snapshots and incorrect Context target, intent, or non-agent use", () => {
+  const store = new Store();
+  try {
+    const fixture = createPlanFixture(store, "attempt-context");
+    insertWorkspaceTask(store.db, fixture, { id: "validate-context", kind: "prototype-validation", ordinal: 0 });
+    store.db.prepare(
+      `INSERT INTO resources (
+         id, workspace_id, kind, title, head_revision_id, default_pin_policy,
+         archived_at, created_at, updated_at
+       ) VALUES ('resource-context', ?, 'research', 'Context research', NULL,
+         'follow-head', NULL, 20, 20)`,
+    ).run(fixture.workspaceId);
+    store.db.prepare(
+      `INSERT INTO generation_tasks (
+         id, workspace_id, plan_id, ordinal, kind, target_type, target_id,
+         target_artifact_id, target_track_id, target_resource_id,
+         payload_json, intent_hash, capabilities_json, qa_profile_json, resource_limits_json,
+         idempotency_key, status, created_at
+       ) VALUES ('resource-task-context', ?, ?, 1, 'resource', 'resource', 'resource-context',
+         NULL, NULL, 'resource-context', '{}', 'resource-context-intent', '[]', '{}', '{}',
+         'resource-context-idempotency', 'materialization-pending', 21)`,
+    ).run(fixture.workspaceId, fixture.planId);
+    store.db.prepare(
+      `INSERT INTO context_packs (
+         id, workspace_id, scope_type, scope_id, graph_revision, intent, message_checksum,
+         manifest_path, token_estimate, omissions_json, hash, created_at, sealed
+       ) VALUES
+         ('pack-context-correct', ?, 'resource', 'resource-context', 0, 'generate', 'message-correct',
+           'pack-context-correct.json', 0, '[]', 'pack-context-correct-hash', 22, 0),
+         ('pack-context-target', ?, 'workspace', ?, 0, 'generate', 'message-target',
+           'pack-context-target.json', 0, '[]', 'pack-context-target-hash', 22, 0),
+         ('pack-context-intent', ?, 'resource', 'resource-context', 0, 'edit', 'message-intent',
+           'pack-context-intent.json', 0, '[]', 'pack-context-intent-hash', 22, 0)`,
+    ).run(fixture.workspaceId, fixture.workspaceId, fixture.workspaceId, fixture.workspaceId);
+    store.db.prepare(
+      `UPDATE context_packs SET sealed = 1
+       WHERE id IN ('pack-context-correct', 'pack-context-target', 'pack-context-intent')`,
+    ).run();
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES ('snapshot-context-inactive', ?, 2, ?, 0, ?, 'inactive-test', '{}', NULL, 23, 1)`,
+    ).run(fixture.workspaceId, fixture.snapshotId, fixture.kernelRevisionId);
+    store.db.prepare("UPDATE generation_plans SET construction_sealed = 1, status = 'queued' WHERE id = ?")
+      .run(fixture.planId);
+
+    assert.throws(
+      () => insertTaskAttempt(store.db, fixture, {
+        contextPackId: "pack-context-correct",
+        expectedSnapshotId: "snapshot-context-inactive",
+        targetResourceId: "resource-context",
+        taskId: "resource-task-context",
+      }),
+      /active|snapshot|input|ownership/i,
+    );
+    assert.throws(
+      () => insertTaskAttempt(store.db, fixture, {
+        contextPackId: "pack-context-target",
+        targetResourceId: "resource-context",
+        taskId: "resource-task-context",
+      }),
+      /context|target|input|ownership/i,
+    );
+    assert.throws(
+      () => insertTaskAttempt(store.db, fixture, {
+        contextPackId: "pack-context-intent",
+        targetResourceId: "resource-context",
+        taskId: "resource-task-context",
+      }),
+      /context|intent|input|ownership/i,
+    );
+    assert.throws(
+      () => insertTaskAttempt(store.db, fixture, {
+        contextPackId: "pack-context-target",
+        taskId: "validate-context",
+      }),
+      /context|non-agent|input|ownership/i,
+    );
+
+    insertTaskAttempt(store.db, fixture, {
+      contextPackId: "pack-context-correct",
+      targetResourceId: "resource-context",
+      taskId: "resource-task-context",
+    });
+    assert.throws(
+      () => store.db.prepare(
+        `INSERT INTO generation_task_materialization_failures (
+           task_id, plan_id, workspace_id, sequence, failure_class, error_json,
+           next_eligible_at, created_at
+         ) VALUES ('resource-task-context', ?, ?, 1, 'storage', '{}', 1000, 60)`,
+      ).run(fixture.planId, fixture.workspaceId),
+      /materialization|attempt|state|sealed/i,
+    );
+    store.db.prepare(
+      `INSERT INTO workspace_graph_revisions
+         (workspace_id, revision, nodes_json, edges_json, checksum, created_at)
+       SELECT workspace_id, 1, nodes_json, edges_json, 'context-next-graph', 61
+       FROM workspace_graph_revisions WHERE workspace_id = ? AND revision = 0`,
+    ).run(fixture.workspaceId);
+    store.db.prepare(
+      `INSERT INTO workspace_snapshots (
+         id, workspace_id, sequence, parent_snapshot_id, graph_revision, kernel_revision_id,
+         reason, provenance_json, created_by_run_id, created_at, sealed
+       ) VALUES ('snapshot-context-next', ?, 3, ?, 1, ?, 'advance-test', '{}', NULL, 62, 1)`,
+    ).run(fixture.workspaceId, fixture.snapshotId, fixture.kernelRevisionId);
+    store.db.prepare(
+      `UPDATE project_workspaces
+       SET active_snapshot_id = 'snapshot-context-next', graph_revision = 1
+       WHERE id = ?`,
+    ).run(fixture.workspaceId);
+    assert.throws(
+      () => store.db.prepare(
+        `UPDATE generation_task_attempts SET materialization_sealed = 1
+         WHERE task_id = 'resource-task-context' AND attempt = 1`,
+      ).run(),
+      /active|snapshot|materialization|seal/i,
+    );
+    assert.equal(
+      (store.db.prepare("SELECT current_attempt FROM generation_tasks WHERE id = 'resource-task-context'").get() as {
+        current_attempt: number;
+      }).current_attempt,
+      0,
+    );
+  } finally {
+    store.close();
+  }
+});
+
 test("attempt input ownership, current pointer, and candidate evidence are database-enforced", () => {
   const store = new Store();
   try {
@@ -299,9 +598,9 @@ test("attempt input ownership, current pointer, and candidate evidence are datab
       `INSERT INTO context_packs (
          id, workspace_id, scope_type, scope_id, graph_revision, intent, message_checksum,
          manifest_path, token_estimate, omissions_json, hash, created_at, sealed
-       ) VALUES ('pack-attempt', ?, 'workspace', ?, 0, 'generate', 'message-checksum',
+       ) VALUES ('pack-attempt', ?, 'resource', 'resource-attempt', 0, 'generate', 'message-checksum',
          'pack-attempt.json', 0, '[]', 'pack-hash-attempt', 23, 0)`,
-    ).run(fixture.workspaceId, fixture.workspaceId);
+    ).run(fixture.workspaceId);
     store.db.prepare("UPDATE context_packs SET sealed = 1 WHERE id = 'pack-attempt'").run();
     store.db.prepare("UPDATE generation_plans SET construction_sealed = 1, status = 'queued' WHERE id = ?")
       .run(fixture.planId);
@@ -349,6 +648,16 @@ test("attempt input ownership, current pointer, and candidate evidence are datab
       (store.db.prepare("SELECT current_attempt FROM generation_tasks WHERE id = 'validate-attempt'").get() as {
         current_attempt: number;
       }).current_attempt,
+      0,
+    );
+    store.db.prepare(
+      `UPDATE generation_task_attempts SET materialization_sealed = 1
+       WHERE task_id = 'validate-attempt' AND attempt = 1`,
+    ).run();
+    assert.equal(
+      (store.db.prepare("SELECT current_attempt FROM generation_tasks WHERE id = 'validate-attempt'").get() as {
+        current_attempt: number;
+      }).current_attempt,
       1,
     );
     assert.throws(
@@ -371,6 +680,44 @@ test("attempt input ownership, current pointer, and candidate evidence are datab
          'resource-revision-attempt', ?, 'pack-attempt', ?, 'full', '{}', 'resource-input',
          '["resource-revision-attempt"]', '[]', 'same-context', 'queued', 25)`,
     ).run(fixture.planId, fixture.workspaceId, fixture.snapshotId, fixture.kernelRevisionId);
+    assert.equal(
+      (store.db.prepare(
+        "SELECT current_attempt FROM generation_tasks WHERE id = 'resource-task-attempt'",
+      ).get() as { current_attempt: number }).current_attempt,
+      0,
+    );
+    assert.throws(
+      () => store.db.prepare(
+        `UPDATE generation_task_attempts SET materialization_sealed = 1
+         WHERE task_id = 'resource-task-attempt' AND attempt = 1`,
+      ).run(),
+      /materialization|pin|summary|seal/i,
+    );
+    store.db.prepare(
+      `INSERT INTO generation_task_attempt_resource_pins (
+         task_id, plan_id, attempt, workspace_id, ordinal, resource_id, revision_id, source_task_id
+       ) VALUES ('resource-task-attempt', ?, 1, ?, 0, 'resource-attempt',
+         'resource-revision-attempt', NULL)`,
+    ).run(fixture.planId, fixture.workspaceId);
+    store.db.prepare(
+      `UPDATE generation_task_attempts SET materialization_sealed = 1
+       WHERE task_id = 'resource-task-attempt' AND attempt = 1`,
+    ).run();
+    assert.equal(
+      (store.db.prepare(
+        "SELECT current_attempt FROM generation_tasks WHERE id = 'resource-task-attempt'",
+      ).get() as { current_attempt: number }).current_attempt,
+      1,
+    );
+    assert.throws(
+      () => store.db.prepare(
+        `INSERT INTO generation_task_attempt_resource_pins (
+           task_id, plan_id, attempt, workspace_id, ordinal, resource_id, revision_id, source_task_id
+         ) VALUES ('resource-task-attempt', ?, 1, ?, 1, 'resource-attempt',
+           'resource-revision-attempt', NULL)`,
+      ).run(fixture.planId, fixture.workspaceId),
+      /materialization|immutable|seal/i,
+    );
     store.db.prepare(
       `UPDATE generation_task_attempts
        SET candidate_resource_revision_id = 'resource-revision-attempt',
@@ -385,6 +732,26 @@ test("attempt input ownership, current pointer, and candidate evidence are datab
          WHERE task_id = 'resource-task-attempt' AND attempt = 1`,
       ).run(),
       /write-once/i,
+    );
+    store.db.prepare(
+      `UPDATE generation_task_attempts SET status = 'succeeded', finished_at = 70
+       WHERE task_id = 'resource-task-attempt' AND attempt = 1`,
+    ).run();
+    store.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'succeeded', result_resource_revision_id = 'resource-revision-attempt',
+           result_snapshot_id = ?, finished_at = 70
+       WHERE id = 'resource-task-attempt'`,
+    ).run(fixture.snapshotId);
+    assert.deepEqual(
+      { ...store.db.prepare(
+        `SELECT result_resource_revision_id, result_snapshot_id
+         FROM generation_tasks WHERE id = 'resource-task-attempt'`,
+      ).get() },
+      {
+        result_resource_revision_id: "resource-revision-attempt",
+        result_snapshot_id: fixture.snapshotId,
+      },
     );
   } finally {
     store.close();

@@ -894,6 +894,22 @@ export type GenerationTaskFailureClass =
   | "cancelled"
   | "unknown";
 
+export interface RecordGenerationTaskMaterializationFailureInput {
+  taskId: string;
+  expectedFailureCount: number;
+  failureClass: GenerationTaskFailureClass;
+  error: Record<string, unknown>;
+  nextEligibleAt: number | null;
+}
+
+export interface GenerationTaskMaterializationFailure
+  extends Omit<RecordGenerationTaskMaterializationFailureInput, "expectedFailureCount"> {
+  planId: string;
+  workspaceId: string;
+  sequence: number;
+  createdAt: number;
+}
+
 export interface GenerationTaskResourceLimits {
   timeoutMs: number;
   maxAgentTurns: number;
@@ -947,6 +963,17 @@ export interface GenerationTaskDependency {
   ordinal: number;
 }
 
+export interface GenerationTaskAttemptDependencyOutputInput {
+  taskId: string;
+  resultRevisionId: string | null;
+  resultResourceRevisionId: string | null;
+  resultSnapshotId: string | null;
+}
+
+export interface GenerationTaskAttemptDependencyOutput extends GenerationTaskAttemptDependencyOutputInput {
+  ordinal: number;
+}
+
 export interface GenerationTaskAttemptResourcePinInput {
   resourceId: string;
   revisionId: string;
@@ -986,13 +1013,23 @@ export interface CreateGenerationTaskAttemptInput {
   contextPackId: string | null;
   kernelRevisionId: string;
   payload: Record<string, unknown>;
+  dependencyOutputs: GenerationTaskAttemptDependencyOutputInput[];
   resourcePins: GenerationTaskAttemptResourcePinInput[];
   componentPins: GenerationTaskAttemptComponentPinInput[];
   retryContextPolicy: GenerationTaskRetryContextPolicy;
   executionMode: GenerationTaskExecutionMode;
 }
 
-export interface GenerationTaskAttemptInput extends Omit<CreateGenerationTaskAttemptInput, "resourcePins" | "componentPins"> {
+export type GenerationTaskMaterializationObservation = Omit<
+  CreateGenerationTaskAttemptInput,
+  "contextPackId" | "retryContextPolicy" | "executionMode"
+>;
+
+export interface GenerationTaskAttemptInput extends Omit<
+  CreateGenerationTaskAttemptInput,
+  "dependencyOutputs" | "resourcePins" | "componentPins"
+> {
+  dependencyOutputs: GenerationTaskAttemptDependencyOutput[];
   resourcePins: GenerationTaskAttemptResourcePin[];
   componentPins: GenerationTaskAttemptComponentPin[];
   inputHash: string;

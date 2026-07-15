@@ -13,6 +13,7 @@ import type {
   ContextPackItemUsage,
   ContextPackTarget,
   ContextTrustLevel,
+  CreateGenerationTaskAttemptInput,
   CreateResourceForProjectInput,
   CreateResourceForProjectResult,
   CreateResourceRevisionCandidateInput,
@@ -23,7 +24,15 @@ import type {
   GenerationPlanDetail,
   GenerationPlanEvent,
   GenerationTask,
+  GenerationTaskAttempt,
+  GenerationTaskAttemptComponentPinInput,
+  GenerationTaskAttemptDependencyOutputInput,
+  GenerationTaskAttemptInput,
+  GenerationTaskAttemptResourcePinInput,
   GenerationTaskDependency,
+  GenerationTaskExecutionMode,
+  GenerationTaskMaterializationObservation,
+  GenerationTaskMaterializationFailure,
   KernelImpactAnalysis,
   KernelPublicationExpectation,
   LegacyWorkspaceFacts,
@@ -34,6 +43,7 @@ import type {
   PersistContextPackInput,
   PersistContextPackItemInput,
   RecordContextPackItemUsageInput,
+  RecordGenerationTaskMaterializationFailureInput,
   ResolvedContextItem,
   ResolvedContextKind,
   Resource,
@@ -54,6 +64,7 @@ import type {
   WorkspaceProposal,
   WorkspaceProposalApprovalMode,
   WorkspaceProposalReview,
+  WorkspaceGenerationPayload,
   WorkspaceResourceNode,
   WorkspaceSnapshotProvenance,
   WorkspaceSnapshotPublicationInput,
@@ -116,9 +127,13 @@ import {
   type WorkspaceSnapshotRecord,
 } from "./workspace-codecs.ts";
 import {
+  asGenerationTaskAttempt,
   asGenerationPlanEvent,
   asGenerationTask,
+  asGenerationTaskMaterializationFailure,
+  normalizeGenerationTaskAttemptInput,
   normalizeGenerationTaskIntent,
+  normalizeRecordGenerationTaskMaterializationFailureInput,
   normalizeListGenerationPlanEventsInput,
   type Row,
 } from "./store-codecs.ts";
@@ -1196,6 +1211,26 @@ export class GenerationPlanStateConflictError extends Error {
     this.name = "GenerationPlanStateConflictError";
     this.planId = planId;
     this.status = status;
+  }
+}
+
+export class GenerationTaskNotFoundError extends Error {
+  readonly taskId: string;
+
+  constructor(taskId: string) {
+    super(`Generation Task not found: ${taskId}`);
+    this.name = "GenerationTaskNotFoundError";
+    this.taskId = taskId;
+  }
+}
+
+export class GenerationTaskMaterializationConflictError extends Error {
+  readonly taskId: string;
+
+  constructor(taskId: string, message: string) {
+    super(`Generation Task ${taskId} materialization conflict: ${message}`);
+    this.name = "GenerationTaskMaterializationConflictError";
+    this.taskId = taskId;
   }
 }
 
@@ -2554,6 +2589,509 @@ export class WorkspaceStore {
     });
   }
 
+  listGenerationTaskIdsReadyForMaterializationForProject(
+    projectId: string,
+    planId: string,
+  ): string[] {
+    return this.transactionRead(() => {
+      const detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      if (!detail.plan.constructionSealed
+        || (detail.plan.status !== "queued" && detail.plan.status !== "running")) {
+        return [];
+      }
+      const now = this.clock.now();
+      const taskById = new Map(detail.tasks.map((task) => [task.id, task]));
+      return detail.tasks
+        .filter((task) => this.generationTaskCanMaterialize(task, taskById, now))
+        .slice(0, 100)
+        .map((task) => task.id);
+    });
+  }
+
+  observeGenerationTaskMaterializationForProject(
+    projectId: string,
+    planId: string,
+    taskId: string,
+  ): GenerationTaskMaterializationObservation {
+    return this.transactionRead(() => this.observeGenerationTaskMaterializationInTransaction(
+      projectId,
+      planId,
+      taskId,
+    ));
+  }
+
+  createGenerationTaskAttemptForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: CreateGenerationTaskAttemptInput,
+  ): GenerationTaskAttempt {
+    const input = normalizeGenerationTaskAttemptInput(unsafeInput);
+    if (input.planId !== planId) {
+      throw new GenerationTaskMaterializationConflictError(input.taskId, "Plan identity does not match the route");
+    }
+    return this.transactionImmediate(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      if (plan.workspaceId !== input.workspaceId) {
+        throw new GenerationTaskMaterializationConflictError(input.taskId, "Workspace identity does not match its Plan");
+      }
+      const existing = this.readGenerationTaskAttemptInTransaction(
+        input.taskId,
+        input.attempt,
+      );
+      if (existing !== null) {
+        if (!this.generationTaskAttemptInputMatches(existing, input)) {
+          throw new GenerationTaskMaterializationConflictError(
+            input.taskId,
+            `Attempt ${input.attempt} already exists with different immutable input`,
+          );
+        }
+        this.assertGenerationTaskMaterializedEventInTransaction(existing);
+        return existing;
+      }
+
+      const observation = this.observeGenerationTaskMaterializationInTransaction(
+        projectId,
+        planId,
+        input.taskId,
+      );
+      if (!this.generationTaskAttemptMatchesObservation(input, observation)) {
+        throw new GenerationTaskMaterializationConflictError(
+          input.taskId,
+          "the observed Snapshot, base, dependency outputs, or pins are stale",
+        );
+      }
+      const detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      const task = detail.tasks.find((candidate) => candidate.id === input.taskId);
+      if (!task) throw new GenerationTaskNotFoundError(input.taskId);
+      const expectedPolicy = task.pendingContextPolicy ?? "same-context";
+      const expectedMode = this.generationTaskMaterializationExecutionModeInTransaction(task);
+      if (input.retryContextPolicy !== expectedPolicy || input.executionMode !== expectedMode) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          `expected ${expectedPolicy}/${expectedMode} retry execution policy`,
+        );
+      }
+      this.validateGenerationTaskAttemptContextInTransaction(task, input);
+
+      const createdAt = this.clock.now();
+      this.db.prepare(
+        `INSERT INTO generation_task_attempts (
+           task_id, plan_id, workspace_id, attempt, target_artifact_id, target_track_id,
+           target_resource_id, base_revision_id, expected_snapshot_id, context_pack_id,
+           kernel_revision_id, execution_mode, payload_json, input_hash,
+           pinned_resource_revision_ids_json, component_dependency_revision_ids_json,
+           retry_context_policy, status, materialization_sealed, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?)`,
+      ).run(
+        input.taskId,
+        input.planId,
+        input.workspaceId,
+        input.attempt,
+        input.target.type === "artifact" ? input.target.id : null,
+        input.target.type === "artifact" ? input.target.trackId : null,
+        input.target.type === "resource" ? input.target.id : null,
+        input.baseRevisionId,
+        input.expectedSnapshotId,
+        input.contextPackId,
+        input.kernelRevisionId,
+        input.executionMode,
+        canonicalJsonText(input.payload, "Generation Task Attempt payload"),
+        input.inputHash,
+        canonicalJsonText(
+          input.resourcePins.map((pin) => pin.revisionId),
+          "Generation Task Attempt Resource revision summary",
+        ),
+        canonicalJsonText(
+          input.componentPins.map((pin) => pin.revisionId),
+          "Generation Task Attempt Component revision summary",
+        ),
+        input.retryContextPolicy,
+        createdAt,
+      );
+      const insertDependencyOutput = this.db.prepare(
+         `INSERT INTO generation_task_attempt_dependency_outputs (
+           task_id, plan_id, attempt, workspace_id, ordinal, dependency_task_id,
+           result_revision_id, result_resource_revision_id, result_snapshot_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const output of input.dependencyOutputs) {
+        insertDependencyOutput.run(
+          input.taskId,
+          input.planId,
+          input.attempt,
+          input.workspaceId,
+          output.ordinal,
+          output.taskId,
+          output.resultRevisionId,
+          output.resultResourceRevisionId,
+          output.resultSnapshotId,
+        );
+      }
+      const insertResourcePin = this.db.prepare(
+        `INSERT INTO generation_task_attempt_resource_pins (
+           task_id, plan_id, attempt, workspace_id, ordinal, resource_id, revision_id, source_task_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const pin of input.resourcePins) {
+        insertResourcePin.run(
+          input.taskId,
+          input.planId,
+          input.attempt,
+          input.workspaceId,
+          pin.ordinal,
+          pin.resourceId,
+          pin.revisionId,
+          pin.sourceTaskId,
+        );
+      }
+      const insertComponentPin = this.db.prepare(
+        `INSERT INTO generation_task_attempt_component_pins (
+           task_id, plan_id, attempt, workspace_id, ordinal, instance_id, owner_artifact_id,
+           component_artifact_id, revision_id, source_task_id, variant_key, state_key,
+           design_node_id, source_locator_json, overrides_json, status
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const pin of input.componentPins) {
+        insertComponentPin.run(
+          input.taskId,
+          input.planId,
+          input.attempt,
+          input.workspaceId,
+          pin.ordinal,
+          pin.instanceId,
+          pin.ownerArtifactId,
+          pin.componentArtifactId,
+          pin.revisionId,
+          pin.sourceTaskId,
+          pin.variantKey,
+          pin.stateKey,
+          pin.designNodeId,
+          canonicalJsonText(pin.sourceLocator, "Generation Task Attempt Component source locator"),
+          canonicalJsonText(pin.overrides, "Generation Task Attempt Component overrides"),
+          pin.status,
+        );
+      }
+      const sealed = this.db.prepare(
+        `UPDATE generation_task_attempts SET materialization_sealed = 1
+         WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+           AND materialization_sealed = 0`,
+      ).run(input.taskId, input.planId, input.workspaceId, input.attempt);
+      if (Number(sealed.changes) !== 1) {
+        throw new GenerationTaskMaterializationConflictError(task.id, "Attempt input could not be sealed");
+      }
+      const queued = this.db.prepare(
+        `UPDATE generation_tasks
+         SET status = 'queued', blocked_reason = NULL, blocked_by_task_id = NULL,
+             pending_context_policy = NULL, failure_class = NULL, error_json = NULL,
+             next_eligible_at = NULL, finished_at = NULL
+         WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = ? AND current_attempt = ?`,
+      ).run(task.id, plan.id, plan.workspaceId, task.status, input.attempt);
+      if (Number(queued.changes) !== 1) {
+        throw new GenerationTaskMaterializationConflictError(task.id, "Task state changed before queueing");
+      }
+      this.appendGenerationPlanEventInTransaction({
+        planId: plan.id,
+        workspaceId: plan.workspaceId,
+        taskId: task.id,
+        type: "task-materialized",
+        payload: {
+          attempt: input.attempt,
+          inputHash: input.inputHash,
+          expectedSnapshotId: input.expectedSnapshotId,
+          baseRevisionId: input.baseRevisionId,
+          contextPackId: input.contextPackId,
+          kernelRevisionId: input.kernelRevisionId,
+          retryContextPolicy: input.retryContextPolicy,
+          executionMode: input.executionMode,
+        },
+      });
+      const attempt = this.readGenerationTaskAttemptInTransaction(input.taskId, input.attempt);
+      if (attempt === null || !this.generationTaskAttemptInputMatches(attempt, input)) {
+        throw new WorkspaceStoreCodecError("Generation Task Attempt did not round-trip its immutable input");
+      }
+      return attempt;
+    });
+  }
+
+  getGenerationTaskAttemptForProject(
+    projectId: string,
+    planId: string,
+    taskId: string,
+    attempt: number,
+  ): GenerationTaskAttempt | null {
+    if (!Number.isSafeInteger(attempt) || attempt <= 0) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt number must be a positive safe integer");
+    }
+    return this.transactionRead(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      const owned = this.db.prepare(
+        `SELECT 1 FROM generation_tasks
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?`,
+      ).get(taskId, plan.id, plan.workspaceId);
+      if (!owned) throw new GenerationTaskNotFoundError(taskId);
+      const materialized = this.readGenerationTaskAttemptInTransaction(taskId, attempt);
+      if (materialized !== null) this.assertGenerationTaskMaterializedEventInTransaction(materialized);
+      return materialized;
+    });
+  }
+
+  recordGenerationTaskMaterializationFailureForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: RecordGenerationTaskMaterializationFailureInput,
+  ): GenerationTaskMaterializationFailure {
+    const input = normalizeRecordGenerationTaskMaterializationFailureInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      const taskById = new Map(detail.tasks.map((task) => [task.id, task]));
+      const task = taskById.get(input.taskId);
+      if (!task) throw new GenerationTaskNotFoundError(input.taskId);
+      if (task.materializationFailures > input.expectedFailureCount) {
+        const existing = this.readGenerationTaskMaterializationFailureInTransaction(
+          task.id,
+          input.expectedFailureCount + 1,
+        );
+        if (existing === null
+          || existing.failureClass !== input.failureClass
+          || !isDeepStrictEqual(existing.error, input.error)
+          || (input.nextEligibleAt !== null && existing.nextEligibleAt !== input.nextEligibleAt)) {
+          throw new GenerationTaskMaterializationConflictError(
+            task.id,
+            "the expected materialization failure was already recorded with different immutable input",
+          );
+        }
+        this.assertGenerationTaskMaterializationFailureEventsInTransaction(existing);
+        return existing;
+      }
+      if (task.materializationFailures !== input.expectedFailureCount) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          `expected ${input.expectedFailureCount} prior materialization failures, found ${task.materializationFailures}`,
+        );
+      }
+      if (!detail.plan.constructionSealed
+        || (detail.plan.status !== "queued" && detail.plan.status !== "running")) {
+        throw new GenerationPlanStateConflictError(detail.plan.id, detail.plan.status);
+      }
+      const now = this.clock.now();
+      if (!this.generationTaskCanMaterialize(task, taskById, now)) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "a materialization failure can only be recorded for currently ready work",
+        );
+      }
+      if (input.expectedFailureCount >= Number.MAX_SAFE_INTEGER) {
+        throw new GenerationTaskMaterializationConflictError(task.id, "failure sequence is exhausted");
+      }
+      const sequence = input.expectedFailureCount + 1;
+      const transient = input.failureClass === "adapter"
+        || input.failureClass === "storage"
+        || input.failureClass === "provider"
+        || input.failureClass === "agent-transport"
+        || input.failureClass === "build-infrastructure";
+      const retryDelays = [1_000, 4_000, 16_000] as const;
+      const retryDelay = transient ? retryDelays[sequence - 1] ?? null : null;
+      const nextEligibleAt = retryDelay === null ? null : now + retryDelay;
+      if (input.nextEligibleAt !== null && input.nextEligibleAt !== nextEligibleAt) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          `next eligible time must use the exact ${retryDelay ?? 0}ms materialization backoff`,
+        );
+      }
+      const status = input.failureClass === "context"
+        ? "blocked-context"
+        : nextEligibleAt !== null
+          ? "retry-wait"
+          : "failed";
+      this.db.prepare(
+        `INSERT INTO generation_task_materialization_failures (
+           task_id, plan_id, workspace_id, sequence, failure_class,
+           error_json, next_eligible_at, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        task.id,
+        task.planId,
+        task.workspaceId,
+        sequence,
+        input.failureClass,
+        canonicalJsonText(input.error, "Generation Task materialization failure error"),
+        nextEligibleAt,
+        now,
+      );
+      const moved = this.db.prepare(
+        `UPDATE generation_tasks
+         SET status = ?, blocked_reason = ?, blocked_by_task_id = NULL,
+             pending_context_policy = ?, failure_class = ?, error_json = ?,
+             next_eligible_at = ?, finished_at = ?
+         WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = ?
+           AND materialization_failures = ?`,
+      ).run(
+        status,
+        status === "blocked-context"
+          ? (typeof input.error.message === "string" ? input.error.message : "Required Context is unavailable")
+          : null,
+        status === "blocked-context" ? "latest-context" : null,
+        input.failureClass,
+        canonicalJsonText(input.error, "Generation Task materialization failure error"),
+        nextEligibleAt,
+        status === "failed" ? now : null,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        task.status,
+        sequence,
+      );
+      if (Number(moved.changes) !== 1) {
+        throw new GenerationTaskMaterializationConflictError(task.id, "Task changed while recording its failure");
+      }
+      const eventPayload = {
+        sequence,
+        failureClass: input.failureClass,
+        error: input.error,
+        nextEligibleAt,
+        status,
+      };
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: "task-materialization-failed",
+        payload: eventPayload,
+      });
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: status === "blocked-context"
+          ? "task-blocked-context"
+          : status === "retry-wait"
+            ? "task-retry-wait"
+            : "task-failed",
+        payload: eventPayload,
+      });
+      if (status === "failed") {
+        const blockedTaskIds = new Set([task.id]);
+        let discoveredDescendant = true;
+        while (discoveredDescendant) {
+          discoveredDescendant = false;
+          for (const candidate of detail.tasks) {
+            if (blockedTaskIds.has(candidate.id)
+              || !candidate.dependencyIds.some((dependencyId) => blockedTaskIds.has(dependencyId))) {
+              continue;
+            }
+            blockedTaskIds.add(candidate.id);
+            discoveredDescendant = true;
+          }
+        }
+        for (const candidate of detail.tasks) {
+          if (candidate.id === task.id || !blockedTaskIds.has(candidate.id)) {
+            continue;
+          }
+          if (candidate.status === "succeeded" || candidate.status === "failed"
+            || candidate.status === "blocked" || candidate.status === "cancelled") {
+            continue;
+          }
+          if (candidate.currentAttempt !== 0) {
+            throw new GenerationTaskMaterializationConflictError(
+              candidate.id,
+              "a materialization-failed prerequisite cannot block a descendant that already has an Attempt",
+            );
+          }
+          const blockedReason = `Blocked by failed prerequisite ${task.id}`;
+          const blocked = this.db.prepare(
+            `UPDATE generation_tasks
+             SET status = 'blocked', blocked_reason = ?, blocked_by_task_id = ?,
+                 pending_context_policy = NULL, failure_class = ?, error_json = ?,
+                 next_eligible_at = NULL, finished_at = ?
+             WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = ? AND current_attempt = 0`,
+          ).run(
+            blockedReason,
+            task.id,
+            input.failureClass,
+            canonicalJsonText(input.error, "Generation Task materialization failure error"),
+            now,
+            candidate.id,
+            candidate.planId,
+            candidate.workspaceId,
+            candidate.status,
+          );
+          if (Number(blocked.changes) !== 1) {
+            throw new GenerationTaskMaterializationConflictError(
+              candidate.id,
+              "descendant changed while propagating a terminal materialization failure",
+            );
+          }
+          this.appendGenerationPlanEventInTransaction({
+            planId: candidate.planId,
+            workspaceId: candidate.workspaceId,
+            taskId: candidate.id,
+            type: "task-blocked",
+            payload: { blockedByTaskId: task.id, reason: blockedReason },
+          });
+        }
+        const nonterminal = this.db.prepare(
+          `SELECT COUNT(*) AS count FROM generation_tasks
+           WHERE plan_id = ? AND workspace_id = ?
+             AND status NOT IN ('succeeded','failed','blocked','cancelled')`,
+        ).get(task.planId, task.workspaceId) as { count: number };
+        if (boundarySafeInteger(nonterminal.count, "Generation Plan nonterminal Task count") === 0) {
+          const terminalized = this.db.prepare(
+            `UPDATE generation_plans SET status = 'failed', finished_at = ?
+             WHERE id = ? AND workspace_id = ? AND status IN ('queued','running')`,
+          ).run(now, task.planId, task.workspaceId);
+          if (Number(terminalized.changes) !== 1) {
+            throw new GenerationTaskMaterializationConflictError(
+              task.id,
+              "Plan changed while terminalizing its materialization failure",
+            );
+          }
+          this.appendGenerationPlanEventInTransaction({
+            planId: task.planId,
+            workspaceId: task.workspaceId,
+            taskId: null,
+            type: "plan-failed",
+            payload: { failedTaskId: task.id, failureClass: input.failureClass },
+          });
+        }
+      }
+      const row = this.db.prepare(
+        `SELECT * FROM generation_task_materialization_failures
+         WHERE task_id = ? AND sequence = ?`,
+      ).get(task.id, sequence) as Row | undefined;
+      if (!row) throw new WorkspaceStoreCodecError("Generation Task materialization failure was not persisted");
+      const failure = asGenerationTaskMaterializationFailure(row, sequence);
+      this.assertGenerationTaskMaterializationFailureEventsInTransaction(failure);
+      return failure;
+    });
+  }
+
+  listGenerationTaskMaterializationFailuresForProject(
+    projectId: string,
+    planId: string,
+    taskId: string,
+  ): GenerationTaskMaterializationFailure[] {
+    return this.transactionRead(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      const task = this.db.prepare(
+        `SELECT materialization_failures FROM generation_tasks
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?`,
+      ).get(taskId, plan.id, plan.workspaceId) as { materialization_failures: number } | undefined;
+      if (!task) throw new GenerationTaskNotFoundError(taskId);
+      const rows = this.db.prepare(
+        `SELECT * FROM generation_task_materialization_failures
+         WHERE task_id = ? AND plan_id = ? AND workspace_id = ?
+         ORDER BY sequence ASC`,
+      ).all(taskId, plan.id, plan.workspaceId) as Row[];
+      const failures = rows.map((row, index) => asGenerationTaskMaterializationFailure(row, index + 1));
+      if (failures.length !== task.materialization_failures) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${taskId} materialization failure count does not match its history`,
+        );
+      }
+      return failures;
+    });
+  }
+
   getArtifact(artifactId: string): WorkspaceArtifactRecord | null {
     const row = this.db.prepare("SELECT * FROM workspace_artifacts WHERE id = ?").get(artifactId) as Row | undefined;
     return row ? asWorkspaceArtifact(row) : null;
@@ -3552,9 +4090,499 @@ export class WorkspaceStore {
     if (dependencies.length !== dependencyRows.length) {
       throw new WorkspaceStoreCodecError(`Generation Plan ${plan.id} dependency rows are not fully owned by its Tasks`);
     }
+    const attemptRequiredStatuses = new Set([
+      "queued",
+      "running",
+      "candidate-ready",
+      "needs-rebase",
+      "cancel-requested",
+      "succeeded",
+    ]);
+    for (const task of tasks) {
+      if (task.currentAttempt === 0) {
+        if (attemptRequiredStatuses.has(task.status)) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id} status ${task.status} requires an immutable current Attempt`,
+          );
+        }
+        continue;
+      }
+      const attempt = this.readGenerationTaskAttemptInTransaction(task.id, task.currentAttempt);
+      if (attempt === null || attempt.planId !== plan.id || attempt.workspaceId !== plan.workspaceId) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id} current Attempt pointer is not an exact owned materialization`,
+        );
+      }
+      this.assertGenerationTaskAttemptStatusCoherence(task, attempt);
+      this.assertGenerationTaskMaterializedEventInTransaction(attempt);
+    }
     assertAcyclicTaskGraph(tasks);
     this.assertGenerationPlanExecutionSummary(plan, tasks, events);
     return { plan, tasks, dependencies };
+  }
+
+  private generationTaskCanMaterialize(
+    task: GenerationTask,
+    taskById: ReadonlyMap<string, GenerationTask>,
+    now: number,
+  ): boolean {
+    const stateIsReady = task.status === "materialization-pending"
+      || task.status === "awaiting-context-refresh"
+      || task.status === "needs-rebase"
+      || (task.status === "retry-wait" && task.nextEligibleAt !== null && task.nextEligibleAt <= now);
+    return stateIsReady
+      && task.currentAttempt < Number.MAX_SAFE_INTEGER
+      && task.dependencyIds.every((dependencyId) => taskById.get(dependencyId)?.status === "succeeded");
+  }
+
+  private generationTaskMaterializationExecutionModeInTransaction(
+    task: GenerationTask,
+  ): GenerationTaskExecutionMode {
+    if (task.status === "needs-rebase") return "publication-only";
+    if (task.status === "retry-wait" && task.currentAttempt > 0 && task.materializationFailures > 0) {
+      const currentAttempt = this.readGenerationTaskAttemptInTransaction(task.id, task.currentAttempt);
+      if (currentAttempt?.status === "needs-rebase") return "publication-only";
+    }
+    return "full";
+  }
+
+  private observeGenerationTaskMaterializationInTransaction(
+    projectId: string,
+    planId: string,
+    taskId: string,
+  ): GenerationTaskMaterializationObservation {
+    const detail = this.readGenerationPlanDetailForProject(projectId, planId);
+    if (!detail.plan.constructionSealed
+      || (detail.plan.status !== "queued" && detail.plan.status !== "running")) {
+      throw new GenerationPlanStateConflictError(detail.plan.id, detail.plan.status);
+    }
+    const taskById = new Map(detail.tasks.map((task) => [task.id, task]));
+    const task = taskById.get(taskId);
+    if (!task) throw new GenerationTaskNotFoundError(taskId);
+    if (!this.generationTaskCanMaterialize(task, taskById, this.clock.now())) {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        "Task is not ready because its state, backoff, or dependencies have not succeeded",
+      );
+    }
+    const workspace = this.requireWorkspaceById(detail.plan.workspaceId);
+    const snapshot = this.requireSnapshot(workspace.id, workspace.activeSnapshotId);
+    if (snapshot.graphRevision !== workspace.graphRevision
+      || snapshot.kernelRevisionId !== workspace.activeKernelRevisionId) {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        "active Snapshot does not match the active graph and Kernel",
+      );
+    }
+    const proposal = this.requireProposalForProject(projectId, detail.plan.proposalId);
+    if (proposal.revision !== detail.plan.proposalRevision
+      || proposal.generation.kind !== "workspace-generation") {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        "approved Proposal revision no longer matches the Plan",
+      );
+    }
+    const generation = proposal.generation as WorkspaceGenerationPayload;
+    const dependencyTasks = task.dependencyIds.map((dependencyId) => {
+      const dependency = taskById.get(dependencyId);
+      if (!dependency || dependency.status !== "succeeded") {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          `dependency ${dependencyId} has not succeeded`,
+        );
+      }
+      return dependency;
+    });
+    const dependencyOutputs: GenerationTaskAttemptDependencyOutputInput[] = dependencyTasks.map((dependency) => ({
+      taskId: dependency.id,
+      resultRevisionId: dependency.resultRevisionId,
+      resultResourceRevisionId: dependency.resultResourceRevisionId,
+      resultSnapshotId: dependency.resultSnapshotId,
+    }));
+
+    let baseRevisionId: string | null = null;
+    if (task.target.type === "artifact") {
+      if (snapshot.artifactTracks[task.target.id] !== task.target.trackId
+        || !Object.hasOwn(snapshot.artifactRevisions, task.target.id)) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "active Snapshot does not contain the exact target Artifact Track",
+        );
+      }
+      baseRevisionId = snapshot.artifactRevisions[task.target.id] ?? null;
+      const artifactPlan = generation.artifactPlans.find((plan) => plan.artifactId === task.target.id);
+      if (!artifactPlan || artifactPlan.trackId !== task.target.trackId || artifactPlan.kind !== task.kind) {
+        throw new GenerationTaskMaterializationConflictError(task.id, "target Artifact is absent from the approved Plan");
+      }
+      if (task.currentAttempt === 0 && artifactPlan.baseRevisionId !== baseRevisionId) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "target Artifact Head changed after approval",
+        );
+      }
+    } else if (task.target.type === "resource") {
+      baseRevisionId = snapshot.resourceRevisions[task.target.id] ?? null;
+      const operation = generation.resourceOperations.find((candidate) => candidate.resourceId === task.target.id);
+      if (!operation || operation.revisionPolicy.kind !== "generate") {
+        throw new GenerationTaskMaterializationConflictError(task.id, "target Resource is absent from the approved Plan");
+      }
+      if ((operation.operation === "create") !== (baseRevisionId === null)) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "target Resource base does not match the approved create or revise operation",
+        );
+      }
+      if (task.currentAttempt === 0) {
+        const approvedSnapshot = this.requireSnapshot(workspace.id, detail.plan.baseSnapshotId);
+        const approvedBaseRevisionId = approvedSnapshot.resourceRevisions[task.target.id] ?? null;
+        if (baseRevisionId !== approvedBaseRevisionId) {
+          throw new GenerationTaskMaterializationConflictError(
+            task.id,
+            "target Resource Head changed after approval",
+          );
+        }
+      }
+    }
+
+    const resourcePins: GenerationTaskAttemptResourcePinInput[] = [];
+    const componentPins: GenerationTaskAttemptComponentPinInput[] = [];
+    if (task.target.type === "artifact") {
+      const dependencies = generation.dependencyPlans
+        .filter((dependency) => dependency.ownerArtifactId === task.target.id)
+        .sort((left, right) => compareBinary(
+          left.kind === "resource" ? `resource:${left.resourceId}` : `component:${left.instanceId}`,
+          right.kind === "resource" ? `resource:${right.resourceId}` : `component:${right.instanceId}`,
+        ));
+      for (const dependency of dependencies) {
+        if (dependency.kind === "resource") {
+          const operation = generation.resourceOperations.find(
+            (candidate) => candidate.resourceId === dependency.resourceId,
+          );
+          if (!operation) {
+            throw new GenerationTaskMaterializationConflictError(
+              task.id,
+              `Resource dependency ${dependency.resourceId} has no approved operation`,
+            );
+          }
+          let revisionId: string | null = null;
+          let sourceTaskId: string | null = null;
+          if (operation.revisionPolicy.kind === "generate") {
+            const source = dependencyTasks.find((candidate) => candidate.target.type === "resource"
+              && candidate.target.id === dependency.resourceId);
+            revisionId = source?.resultResourceRevisionId ?? null;
+            sourceTaskId = source?.id ?? null;
+          } else if (operation.revisionPolicy.kind === "exact") {
+            revisionId = operation.revisionPolicy.resourceRevisionId;
+          } else {
+            revisionId = snapshot.resourceRevisions[dependency.resourceId] ?? null;
+          }
+          if (revisionId === null) {
+            throw new GenerationTaskMaterializationConflictError(
+              task.id,
+              `Resource dependency ${dependency.resourceId} has no exact Revision result`,
+            );
+          }
+          const revision = this.requireResourceRevision(revisionId);
+          if (revision.workspaceId !== workspace.id || revision.resourceId !== dependency.resourceId) {
+            throw new GenerationTaskMaterializationConflictError(
+              task.id,
+              `Resource dependency ${dependency.resourceId} Revision belongs to another target`,
+            );
+          }
+          resourcePins.push({ resourceId: dependency.resourceId, revisionId, sourceTaskId });
+          continue;
+        }
+        let revisionId = dependency.componentRevisionId;
+        let sourceTaskId: string | null = null;
+        if (revisionId === null) {
+          const source = dependencyTasks.find((candidate) => candidate.target.type === "artifact"
+            && candidate.target.id === dependency.componentArtifactId
+            && candidate.kind === "component");
+          revisionId = source?.resultRevisionId ?? null;
+          sourceTaskId = source?.id ?? null;
+        }
+        if (revisionId === null) {
+          throw new GenerationTaskMaterializationConflictError(
+            task.id,
+            `Component dependency ${dependency.componentArtifactId} has no exact Revision result`,
+          );
+        }
+        const revision = this.requireArtifactRevision(revisionId);
+        const identity = this.db.prepare(
+          `SELECT 1 FROM component_instances
+           WHERE id = ? AND workspace_id = ? AND owner_artifact_id = ? AND component_artifact_id = ?`,
+        ).get(
+          dependency.instanceId,
+          workspace.id,
+          dependency.ownerArtifactId,
+          dependency.componentArtifactId,
+        );
+        if (!identity || revision.workspaceId !== workspace.id
+          || revision.artifactId !== dependency.componentArtifactId) {
+          throw new GenerationTaskMaterializationConflictError(
+            task.id,
+            `Component dependency ${dependency.instanceId} identity or Revision is invalid`,
+          );
+        }
+        componentPins.push({
+          instanceId: dependency.instanceId,
+          ownerArtifactId: dependency.ownerArtifactId,
+          componentArtifactId: dependency.componentArtifactId,
+          revisionId,
+          sourceTaskId,
+          variantKey: dependency.variantKey ?? null,
+          stateKey: dependency.stateKey ?? null,
+          sourceLocator: dependency.sourceLocator,
+          overrides: dependency.overrides,
+          status: dependency.status,
+        });
+      }
+    }
+    return {
+      taskId: task.id,
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      attempt: task.currentAttempt + 1,
+      target: task.target,
+      baseRevisionId,
+      expectedSnapshotId: snapshot.id,
+      kernelRevisionId: snapshot.kernelRevisionId,
+      payload: task.payload,
+      dependencyOutputs,
+      resourcePins,
+      componentPins,
+    };
+  }
+
+  private validateGenerationTaskAttemptContextInTransaction(
+    task: GenerationTask,
+    input: GenerationTaskAttemptInput,
+  ): void {
+    const agentTask = task.kind === "resource" || task.kind === "component"
+      || task.kind === "page" || task.kind === "propagation-candidate";
+    if (!agentTask) {
+      if (input.contextPackId !== null) {
+        throw new GenerationTaskMaterializationConflictError(task.id, "non-Agent Task cannot bind a Context Pack");
+      }
+      return;
+    }
+    if (input.contextPackId === null) {
+      throw new GenerationTaskMaterializationConflictError(task.id, "Agent Task requires a Context Pack");
+    }
+    const pack = this.getContextPack(task.workspaceId, input.contextPackId);
+    const expectedTarget: ContextPackTarget = { type: task.target.type, id: task.target.id };
+    const snapshot = this.requireSnapshot(task.workspaceId, input.expectedSnapshotId);
+    if (!pack || pack.workspaceId !== task.workspaceId
+      || pack.graphRevision !== snapshot.graphRevision
+      || !isDeepStrictEqual(pack.target, expectedTarget)) {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        "Context Pack is missing, stale, or scoped to another target",
+      );
+    }
+    if (pack.intent !== "generate") {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        "Generation Task Attempt Context Pack intent must be generate",
+      );
+    }
+    const providedKernelIds = new Set(pack.items
+      .filter((item) => item.provided && item.kernelRevisionId !== null)
+      .map((item) => item.kernelRevisionId!));
+    const providedArtifactRevisionIds = new Set(pack.items
+      .filter((item) => item.provided && item.artifactRevisionId !== null)
+      .map((item) => item.artifactRevisionId!));
+    const providedResourceRevisionIds = new Set(pack.items
+      .filter((item) => item.provided && item.resourceRevisionId !== null)
+      .map((item) => item.resourceRevisionId!));
+    const requiredArtifactRevisionIds = new Set(input.componentPins.map((pin) => pin.revisionId));
+    const requiredResourceRevisionIds = new Set(input.resourcePins.map((pin) => pin.revisionId));
+    if (input.baseRevisionId !== null) {
+      if (task.target.type === "artifact") requiredArtifactRevisionIds.add(input.baseRevisionId);
+      if (task.target.type === "resource") requiredResourceRevisionIds.add(input.baseRevisionId);
+    }
+    if (!providedKernelIds.has(input.kernelRevisionId)
+      || [...requiredArtifactRevisionIds].some((revisionId) => !providedArtifactRevisionIds.has(revisionId))
+      || [...requiredResourceRevisionIds].some((revisionId) => !providedResourceRevisionIds.has(revisionId))) {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        "Context Pack omits a required Kernel, base, Resource, or Component Revision",
+      );
+    }
+  }
+
+  private generationTaskAttemptMatchesObservation(
+    input: GenerationTaskAttemptInput,
+    observation: GenerationTaskMaterializationObservation,
+  ): boolean {
+    return input.taskId === observation.taskId
+      && input.planId === observation.planId
+      && input.workspaceId === observation.workspaceId
+      && input.attempt === observation.attempt
+      && isDeepStrictEqual(input.target, observation.target)
+      && input.baseRevisionId === observation.baseRevisionId
+      && input.expectedSnapshotId === observation.expectedSnapshotId
+      && input.kernelRevisionId === observation.kernelRevisionId
+      && isDeepStrictEqual(input.payload, observation.payload)
+      && isDeepStrictEqual(
+        input.dependencyOutputs.map(({ ordinal: _ordinal, ...output }) => output),
+        observation.dependencyOutputs,
+      )
+      && isDeepStrictEqual(
+        input.resourcePins.map(({ ordinal: _ordinal, ...pin }) => pin),
+        observation.resourcePins,
+      )
+      && isDeepStrictEqual(
+        input.componentPins.map(({ ordinal: _ordinal, designNodeId: _designNodeId, ...pin }) => pin),
+        observation.componentPins,
+      );
+  }
+
+  private generationTaskAttemptInputMatches(
+    attempt: GenerationTaskAttempt,
+    input: GenerationTaskAttemptInput,
+  ): boolean {
+    return attempt.inputHash === input.inputHash
+      && attempt.taskId === input.taskId
+      && attempt.planId === input.planId
+      && attempt.workspaceId === input.workspaceId
+      && attempt.attempt === input.attempt
+      && isDeepStrictEqual(attempt.target, input.target)
+      && attempt.baseRevisionId === input.baseRevisionId
+      && attempt.expectedSnapshotId === input.expectedSnapshotId
+      && attempt.contextPackId === input.contextPackId
+      && attempt.kernelRevisionId === input.kernelRevisionId
+      && isDeepStrictEqual(attempt.payload, input.payload)
+      && isDeepStrictEqual(attempt.dependencyOutputs, input.dependencyOutputs)
+      && isDeepStrictEqual(attempt.resourcePins, input.resourcePins)
+      && isDeepStrictEqual(attempt.componentPins, input.componentPins)
+      && attempt.retryContextPolicy === input.retryContextPolicy
+      && attempt.executionMode === input.executionMode;
+  }
+
+  private readGenerationTaskAttemptInTransaction(
+    taskId: string,
+    attempt: number,
+  ): GenerationTaskAttempt | null {
+    const row = this.db.prepare(
+      `SELECT * FROM generation_task_attempts WHERE task_id = ? AND attempt = ?`,
+    ).get(taskId, attempt) as Row | undefined;
+    if (!row) return null;
+    const resourcePins = this.db.prepare(
+      `SELECT * FROM generation_task_attempt_resource_pins
+       WHERE task_id = ? AND attempt = ? ORDER BY ordinal ASC`,
+    ).all(taskId, attempt) as Row[];
+    const componentPins = this.db.prepare(
+      `SELECT * FROM generation_task_attempt_component_pins
+       WHERE task_id = ? AND attempt = ? ORDER BY ordinal ASC`,
+    ).all(taskId, attempt) as Row[];
+    const dependencyOutputs = this.db.prepare(
+      `SELECT * FROM generation_task_attempt_dependency_outputs
+       WHERE task_id = ? AND attempt = ? ORDER BY ordinal ASC`,
+    ).all(taskId, attempt) as Row[];
+    return asGenerationTaskAttempt(row, dependencyOutputs, resourcePins, componentPins);
+  }
+
+  private readGenerationTaskMaterializationFailureInTransaction(
+    taskId: string,
+    sequence: number,
+  ): GenerationTaskMaterializationFailure | null {
+    if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
+    const row = this.db.prepare(
+      `SELECT * FROM generation_task_materialization_failures
+       WHERE task_id = ? AND sequence = ?`,
+    ).get(taskId, sequence) as Row | undefined;
+    return row ? asGenerationTaskMaterializationFailure(row, sequence) : null;
+  }
+
+  private assertGenerationTaskAttemptStatusCoherence(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+  ): void {
+    const exactStatus = task.status === "queued"
+      || task.status === "running"
+      || task.status === "candidate-ready"
+      || task.status === "needs-rebase"
+      || task.status === "cancel-requested"
+      || task.status === "succeeded"
+      || task.status === "cancelled"
+      ? task.status
+      : null;
+    const materializationFailureRetainsRebaseAttempt = task.materializationFailures > 0
+      && attempt.status === "needs-rebase";
+    const retryOrFailureStatusMatches = task.status === "retry-wait"
+      ? attempt.status === "retryable-failed" || materializationFailureRetainsRebaseAttempt
+      : task.status === "failed"
+        ? attempt.status === "failed" || attempt.status === "retryable-failed"
+          || materializationFailureRetainsRebaseAttempt
+        : true;
+    if ((exactStatus !== null && attempt.status !== exactStatus) || !retryOrFailureStatusMatches) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id} status ${task.status} does not match current Attempt ${attempt.attempt} status ${attempt.status}`,
+      );
+    }
+  }
+
+  private assertGenerationTaskMaterializedEventInTransaction(attempt: GenerationTaskAttempt): void {
+    const events = (this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND task_id = ? AND type = 'task-materialized'
+       ORDER BY sequence ASC`,
+    ).all(attempt.planId, attempt.taskId) as Row[]).map(asGenerationPlanEvent)
+      .filter((event) => event.payload.attempt === attempt.attempt);
+    const expectedPayload = {
+      attempt: attempt.attempt,
+      inputHash: attempt.inputHash,
+      expectedSnapshotId: attempt.expectedSnapshotId,
+      baseRevisionId: attempt.baseRevisionId,
+      contextPackId: attempt.contextPackId,
+      kernelRevisionId: attempt.kernelRevisionId,
+      retryContextPolicy: attempt.retryContextPolicy,
+      executionMode: attempt.executionMode,
+    };
+    if (events.length !== 1 || !isDeepStrictEqual(events[0]?.payload, expectedPayload)) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task Attempt ${attempt.taskId}/${attempt.attempt} does not match one materialized event`,
+      );
+    }
+  }
+
+  private assertGenerationTaskMaterializationFailureEventsInTransaction(
+    failure: GenerationTaskMaterializationFailure,
+  ): void {
+    const status = failure.failureClass === "context"
+      ? "blocked-context"
+      : failure.nextEligibleAt === null
+        ? "failed"
+        : "retry-wait";
+    const stateEventType = status === "blocked-context"
+      ? "task-blocked-context"
+      : status === "retry-wait"
+        ? "task-retry-wait"
+        : "task-failed";
+    const expectedPayload = {
+      sequence: failure.sequence,
+      failureClass: failure.failureClass,
+      error: failure.error,
+      nextEligibleAt: failure.nextEligibleAt,
+      status,
+    };
+    const events = (this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND task_id = ?
+         AND type IN ('task-materialization-failed', ?)
+       ORDER BY sequence ASC`,
+    ).all(failure.planId, failure.taskId, stateEventType) as Row[])
+      .map(asGenerationPlanEvent)
+      .filter((event) => event.payload.sequence === failure.sequence);
+    if (events.length !== 2
+      || events[0]?.type !== "task-materialization-failed"
+      || events[1]?.type !== stateEventType
+      || events.some((event) => !isDeepStrictEqual(event.payload, expectedPayload))) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task materialization failure ${failure.taskId}/${failure.sequence} does not match its durable events`,
+      );
+    }
   }
 
   private assertGenerationPlanExecutionSummary(

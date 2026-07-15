@@ -69,9 +69,8 @@ CREATE TABLE IF NOT EXISTS generation_tasks (
       AND target_artifact_id IS NULL AND target_track_id IS NULL AND target_resource_id IS NULL)
   ),
   CHECK(
-    (CASE WHEN result_revision_id IS NOT NULL THEN 1 ELSE 0 END) +
-    (CASE WHEN result_resource_revision_id IS NOT NULL THEN 1 ELSE 0 END) +
-    (CASE WHEN result_snapshot_id IS NOT NULL THEN 1 ELSE 0 END) <= 1
+    (result_revision_id IS NULL OR target_artifact_id IS NOT NULL)
+    AND (result_resource_revision_id IS NULL OR target_resource_id IS NOT NULL)
   ),
   CHECK(json_valid(payload_json) = 1 AND json_type(payload_json) = 'object'),
   CHECK(json_valid(capabilities_json) = 1 AND json_type(capabilities_json) = 'array'),
@@ -119,6 +118,7 @@ CREATE TABLE IF NOT EXISTS generation_task_attempts (
   input_hash TEXT NOT NULL,
   pinned_resource_revision_ids_json TEXT NOT NULL,
   component_dependency_revision_ids_json TEXT NOT NULL,
+  materialization_sealed INTEGER NOT NULL DEFAULT 0 CHECK(materialization_sealed IN (0, 1)),
   retry_context_policy TEXT NOT NULL CHECK(retry_context_policy IN ('same-context','latest-context')),
   status TEXT NOT NULL CHECK(status IN (
     'queued','running','cancel-requested','candidate-ready','succeeded','retryable-failed',
@@ -186,6 +186,31 @@ CREATE TABLE IF NOT EXISTS generation_task_attempts (
   PRIMARY KEY(task_id, attempt),
   UNIQUE(task_id, attempt, workspace_id),
   UNIQUE(task_id, attempt, plan_id, workspace_id)
+);
+CREATE TABLE IF NOT EXISTS generation_task_attempt_dependency_outputs (
+  task_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  workspace_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal <= 9007199254740991),
+  dependency_task_id TEXT NOT NULL,
+  result_revision_id TEXT,
+  result_resource_revision_id TEXT,
+  result_snapshot_id TEXT,
+  FOREIGN KEY(task_id, attempt, plan_id, workspace_id)
+    REFERENCES generation_task_attempts(task_id, attempt, plan_id, workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY(task_id, dependency_task_id)
+    REFERENCES generation_task_dependencies(task_id, dependency_task_id),
+  FOREIGN KEY(dependency_task_id, plan_id, workspace_id)
+    REFERENCES generation_tasks(id, plan_id, workspace_id),
+  FOREIGN KEY(result_revision_id, workspace_id)
+    REFERENCES artifact_revisions(id, workspace_id),
+  FOREIGN KEY(result_resource_revision_id, workspace_id)
+    REFERENCES resource_revisions(id, workspace_id),
+  FOREIGN KEY(result_snapshot_id, workspace_id)
+    REFERENCES workspace_snapshots(id, workspace_id),
+  PRIMARY KEY(task_id, attempt, dependency_task_id),
+  UNIQUE(task_id, attempt, ordinal)
 );
 CREATE TABLE IF NOT EXISTS generation_task_attempt_resource_pins (
   task_id TEXT NOT NULL,
@@ -298,6 +323,8 @@ CREATE INDEX IF NOT EXISTS idx_generation_task_dependencies_dependency
   ON generation_task_dependencies(dependency_task_id, task_id);
 CREATE INDEX IF NOT EXISTS idx_generation_task_attempts_status
   ON generation_task_attempts(workspace_id, status, next_eligible_at, task_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_generation_attempt_dependency_outputs_source
+  ON generation_task_attempt_dependency_outputs(dependency_task_id, task_id, attempt);
 CREATE INDEX IF NOT EXISTS idx_generation_attempt_resource_pins_revision
   ON generation_task_attempt_resource_pins(revision_id, workspace_id);
 CREATE INDEX IF NOT EXISTS idx_generation_attempt_component_pins_revision
@@ -327,10 +354,14 @@ DROP TRIGGER IF EXISTS generation_task_dependency_delete_history_guard;
 DROP TRIGGER IF EXISTS generation_task_current_attempt_guard;
 DROP TRIGGER IF EXISTS generation_task_result_write_once;
 DROP TRIGGER IF EXISTS generation_task_attempt_insert_guard;
+DROP TRIGGER IF EXISTS generation_task_attempt_materialization_seal_guard;
 DROP TRIGGER IF EXISTS generation_task_attempt_advance_current;
 DROP TRIGGER IF EXISTS generation_task_attempt_input_update_immutable;
 DROP TRIGGER IF EXISTS generation_task_attempt_candidate_write_once;
 DROP TRIGGER IF EXISTS generation_task_attempt_delete_history_guard;
+DROP TRIGGER IF EXISTS generation_attempt_dependency_output_insert_guard;
+DROP TRIGGER IF EXISTS generation_attempt_dependency_output_update_immutable;
+DROP TRIGGER IF EXISTS generation_attempt_dependency_output_delete_history_guard;
 DROP TRIGGER IF EXISTS generation_attempt_resource_pin_insert_guard;
 DROP TRIGGER IF EXISTS generation_attempt_resource_pin_update_immutable;
 DROP TRIGGER IF EXISTS generation_attempt_resource_pin_delete_history_guard;
@@ -522,6 +553,7 @@ WHEN NEW.current_attempt <> OLD.current_attempt AND (
     WHERE attempt.task_id = OLD.id
       AND attempt.workspace_id = OLD.workspace_id
       AND attempt.attempt = NEW.current_attempt
+      AND attempt.materialization_sealed = 1
   )
 )
 BEGIN SELECT RAISE(ABORT, 'Generation Task current attempt must advance to its exact successor'); END;
@@ -536,24 +568,27 @@ BEGIN SELECT RAISE(ABORT, 'Generation Task result is write-once'); END;
 
 CREATE TRIGGER generation_task_attempt_insert_guard
 BEFORE INSERT ON generation_task_attempts
-WHEN NEW.status <> 'queued'
+WHEN NEW.materialization_sealed <> 0
+  OR NEW.status <> 'queued'
   OR NOT EXISTS (
     SELECT 1 FROM generation_tasks task
     JOIN generation_plans plan
       ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+    JOIN project_workspaces workspace
+      ON workspace.id = task.workspace_id
+    JOIN workspace_snapshots snapshot
+      ON snapshot.id = NEW.expected_snapshot_id
+     AND snapshot.workspace_id = NEW.workspace_id
     WHERE task.id = NEW.task_id
       AND task.plan_id = NEW.plan_id
       AND task.workspace_id = NEW.workspace_id
       AND plan.construction_sealed = 1
       AND plan.status IN ('queued','running')
+      AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
       AND NEW.attempt = task.current_attempt + 1
-      AND EXISTS (
-        SELECT 1 FROM workspace_snapshots snapshot
-        WHERE snapshot.id = NEW.expected_snapshot_id
-          AND snapshot.workspace_id = NEW.workspace_id
-          AND snapshot.sealed = 1
-          AND snapshot.kernel_revision_id = NEW.kernel_revision_id
-      )
+      AND workspace.active_snapshot_id = NEW.expected_snapshot_id
+      AND snapshot.sealed = 1
+      AND snapshot.kernel_revision_id = NEW.kernel_revision_id
       AND task.target_artifact_id IS NEW.target_artifact_id
       AND task.target_track_id IS NEW.target_track_id
       AND task.target_resource_id IS NEW.target_resource_id
@@ -579,25 +614,178 @@ WHEN NEW.status <> 'queued'
         ))
       )
       AND (
-        (task.kind IN ('resource','component','page','propagation-candidate')
-          AND NEW.context_pack_id IS NOT NULL) OR
-        task.kind IN ('prototype-validation','checkpoint','propagation-publish')
+        (task.kind = 'resource' AND EXISTS (
+          SELECT 1 FROM context_packs pack
+          WHERE pack.id = NEW.context_pack_id
+            AND pack.workspace_id = NEW.workspace_id
+            AND pack.scope_type = 'resource'
+            AND pack.scope_id = task.target_resource_id
+            AND pack.graph_revision = snapshot.graph_revision
+            AND pack.intent = 'generate'
+            AND pack.sealed = 1
+        )) OR
+        (task.kind IN ('component','page','propagation-candidate') AND EXISTS (
+          SELECT 1 FROM context_packs pack
+          WHERE pack.id = NEW.context_pack_id
+            AND pack.workspace_id = NEW.workspace_id
+            AND pack.scope_type = 'artifact'
+            AND pack.scope_id = task.target_artifact_id
+            AND pack.graph_revision = snapshot.graph_revision
+            AND pack.intent = 'generate'
+            AND pack.sealed = 1
+        )) OR
+        (task.kind IN ('prototype-validation','checkpoint','propagation-publish')
+          AND NEW.context_pack_id IS NULL)
       )
   )
-  OR (NEW.context_pack_id IS NOT NULL AND NOT EXISTS (
-    SELECT 1 FROM context_packs pack
+BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt input or target ownership is invalid'); END;
+
+CREATE TRIGGER generation_task_attempt_materialization_seal_guard
+BEFORE UPDATE OF materialization_sealed ON generation_task_attempts
+WHEN NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
+  OLD.materialization_sealed = 0
+  AND NEW.materialization_sealed = 1
+  AND OLD.status = 'queued'
+  AND NEW.status = 'queued'
+  AND EXISTS (
+    SELECT 1 FROM generation_tasks task
+    JOIN generation_plans plan
+      ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+    JOIN project_workspaces workspace
+      ON workspace.id = task.workspace_id
     JOIN workspace_snapshots snapshot
       ON snapshot.id = NEW.expected_snapshot_id
      AND snapshot.workspace_id = NEW.workspace_id
-    WHERE pack.id = NEW.context_pack_id
-      AND pack.workspace_id = NEW.workspace_id
-      AND pack.graph_revision = snapshot.graph_revision
-      AND pack.sealed = 1
-  ))
-BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt input or target ownership is invalid'); END;
+    WHERE task.id = NEW.task_id
+      AND task.plan_id = NEW.plan_id
+      AND task.workspace_id = NEW.workspace_id
+      AND plan.construction_sealed = 1
+      AND plan.status IN ('queued','running')
+      AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
+      AND NEW.attempt = task.current_attempt + 1
+      AND workspace.active_snapshot_id = NEW.expected_snapshot_id
+      AND snapshot.sealed = 1
+      AND snapshot.kernel_revision_id = NEW.kernel_revision_id
+      AND (
+        (task.kind = 'resource' AND EXISTS (
+          SELECT 1 FROM context_packs pack
+          WHERE pack.id = NEW.context_pack_id
+            AND pack.workspace_id = NEW.workspace_id
+            AND pack.scope_type = 'resource'
+            AND pack.scope_id = task.target_resource_id
+            AND pack.graph_revision = snapshot.graph_revision
+            AND pack.intent = 'generate'
+            AND pack.sealed = 1
+        )) OR
+        (task.kind IN ('component','page','propagation-candidate') AND EXISTS (
+          SELECT 1 FROM context_packs pack
+          WHERE pack.id = NEW.context_pack_id
+            AND pack.workspace_id = NEW.workspace_id
+            AND pack.scope_type = 'artifact'
+            AND pack.scope_id = task.target_artifact_id
+            AND pack.graph_revision = snapshot.graph_revision
+            AND pack.intent = 'generate'
+            AND pack.sealed = 1
+        )) OR
+        (task.kind IN ('prototype-validation','checkpoint','propagation-publish')
+          AND NEW.context_pack_id IS NULL)
+      )
+  )
+  AND (
+    SELECT COUNT(*) FROM generation_task_attempt_resource_pins pin
+    WHERE pin.task_id = NEW.task_id AND pin.attempt = NEW.attempt
+  ) = (
+    SELECT COALESCE(MAX(pin.ordinal), -1) + 1
+    FROM generation_task_attempt_resource_pins pin
+    WHERE pin.task_id = NEW.task_id AND pin.attempt = NEW.attempt
+  )
+  AND json_array_length(NEW.pinned_resource_revision_ids_json) = (
+    SELECT COUNT(*) FROM generation_task_attempt_resource_pins pin
+    WHERE pin.task_id = NEW.task_id AND pin.attempt = NEW.attempt
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM json_each(NEW.pinned_resource_revision_ids_json) summary
+    LEFT JOIN generation_task_attempt_resource_pins pin
+      ON pin.task_id = NEW.task_id
+     AND pin.attempt = NEW.attempt
+     AND pin.ordinal = CAST(summary.key AS INTEGER)
+    WHERE summary.type <> 'text'
+      OR pin.revision_id IS NULL
+      OR summary.value IS NOT pin.revision_id
+  )
+  AND (
+    SELECT COUNT(*) FROM generation_task_attempt_component_pins pin
+    WHERE pin.task_id = NEW.task_id AND pin.attempt = NEW.attempt
+  ) = (
+    SELECT COALESCE(MAX(pin.ordinal), -1) + 1
+    FROM generation_task_attempt_component_pins pin
+    WHERE pin.task_id = NEW.task_id AND pin.attempt = NEW.attempt
+  )
+  AND json_array_length(NEW.component_dependency_revision_ids_json) = (
+    SELECT COUNT(*) FROM generation_task_attempt_component_pins pin
+    WHERE pin.task_id = NEW.task_id AND pin.attempt = NEW.attempt
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM json_each(NEW.component_dependency_revision_ids_json) summary
+    LEFT JOIN generation_task_attempt_component_pins pin
+      ON pin.task_id = NEW.task_id
+     AND pin.attempt = NEW.attempt
+     AND pin.ordinal = CAST(summary.key AS INTEGER)
+    WHERE summary.type <> 'text'
+      OR pin.revision_id IS NULL
+      OR summary.value IS NOT pin.revision_id
+  )
+  AND (
+    SELECT COUNT(*) FROM generation_task_dependencies dependency
+    WHERE dependency.task_id = NEW.task_id
+  ) = (
+    SELECT COUNT(*) FROM generation_task_attempt_dependency_outputs output
+    WHERE output.task_id = NEW.task_id AND output.attempt = NEW.attempt
+  )
+  AND (
+    SELECT COUNT(*) FROM generation_task_attempt_dependency_outputs output
+    WHERE output.task_id = NEW.task_id AND output.attempt = NEW.attempt
+  ) = (
+    SELECT COALESCE(MAX(output.ordinal), -1) + 1
+    FROM generation_task_attempt_dependency_outputs output
+    WHERE output.task_id = NEW.task_id AND output.attempt = NEW.attempt
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM generation_task_dependencies dependency
+    LEFT JOIN generation_task_attempt_dependency_outputs output
+      ON output.task_id = dependency.task_id
+     AND output.attempt = NEW.attempt
+     AND output.dependency_task_id = dependency.dependency_task_id
+    LEFT JOIN generation_tasks source
+      ON source.id = dependency.dependency_task_id
+     AND source.plan_id = dependency.plan_id
+     AND source.workspace_id = dependency.workspace_id
+    LEFT JOIN generation_task_attempts source_attempt
+      ON source_attempt.task_id = source.id
+     AND source_attempt.plan_id = source.plan_id
+     AND source_attempt.workspace_id = source.workspace_id
+     AND source_attempt.attempt = source.current_attempt
+    WHERE dependency.task_id = NEW.task_id
+      AND dependency.plan_id = NEW.plan_id
+      AND dependency.workspace_id = NEW.workspace_id
+      AND (
+        output.dependency_task_id IS NULL
+        OR output.ordinal <> dependency.ordinal
+        OR source.status IS NOT 'succeeded'
+        OR source_attempt.materialization_sealed IS NOT 1
+        OR source_attempt.status IS NOT 'succeeded'
+        OR output.result_revision_id IS NOT source.result_revision_id
+        OR output.result_resource_revision_id IS NOT source.result_resource_revision_id
+        OR output.result_snapshot_id IS NOT source.result_snapshot_id
+      )
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt materialization seal is incomplete or stale'); END;
 
 CREATE TRIGGER generation_task_attempt_advance_current
-AFTER INSERT ON generation_task_attempts
+AFTER UPDATE OF materialization_sealed ON generation_task_attempts
+WHEN OLD.materialization_sealed = 0 AND NEW.materialization_sealed = 1
 BEGIN
   UPDATE generation_tasks
   SET current_attempt = NEW.attempt
@@ -630,6 +818,64 @@ BEFORE DELETE ON generation_task_attempts
 WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
 BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt history is immutable'); END;
 
+CREATE TRIGGER generation_attempt_dependency_output_insert_guard
+BEFORE INSERT ON generation_task_attempt_dependency_outputs
+WHEN NEW.ordinal <> COALESCE((
+    SELECT MAX(output.ordinal) + 1 FROM generation_task_attempt_dependency_outputs output
+    WHERE output.task_id = NEW.task_id AND output.attempt = NEW.attempt
+  ), 0)
+  OR NOT EXISTS (
+    SELECT 1 FROM generation_task_attempts attempt
+    JOIN generation_tasks task
+      ON task.id = attempt.task_id AND task.workspace_id = attempt.workspace_id
+    JOIN generation_plans plan
+      ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+    WHERE attempt.task_id = NEW.task_id
+      AND attempt.attempt = NEW.attempt
+      AND attempt.plan_id = NEW.plan_id
+      AND attempt.workspace_id = NEW.workspace_id
+      AND attempt.status = 'queued'
+      AND attempt.materialization_sealed = 0
+      AND task.current_attempt + 1 = attempt.attempt
+      AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
+      AND plan.construction_sealed = 1
+      AND plan.status IN ('queued','running')
+  )
+  OR NOT EXISTS (
+    SELECT 1
+    FROM generation_task_dependencies dependency
+    JOIN generation_tasks source
+      ON source.id = dependency.dependency_task_id
+     AND source.plan_id = dependency.plan_id
+     AND source.workspace_id = dependency.workspace_id
+    JOIN generation_task_attempts source_attempt
+      ON source_attempt.task_id = source.id
+     AND source_attempt.plan_id = source.plan_id
+     AND source_attempt.workspace_id = source.workspace_id
+     AND source_attempt.attempt = source.current_attempt
+    WHERE dependency.task_id = NEW.task_id
+      AND dependency.plan_id = NEW.plan_id
+      AND dependency.workspace_id = NEW.workspace_id
+      AND dependency.dependency_task_id = NEW.dependency_task_id
+      AND dependency.ordinal = NEW.ordinal
+      AND source.status = 'succeeded'
+      AND source_attempt.materialization_sealed = 1
+      AND source_attempt.status = 'succeeded'
+      AND NEW.result_revision_id IS source.result_revision_id
+      AND NEW.result_resource_revision_id IS source.result_resource_revision_id
+      AND NEW.result_snapshot_id IS source.result_snapshot_id
+  )
+BEGIN SELECT RAISE(ABORT, 'Generation Task dependency output must freeze an exact succeeded predecessor result'); END;
+
+CREATE TRIGGER generation_attempt_dependency_output_update_immutable
+BEFORE UPDATE ON generation_task_attempt_dependency_outputs
+BEGIN SELECT RAISE(ABORT, 'Generation Task dependency outputs are immutable'); END;
+
+CREATE TRIGGER generation_attempt_dependency_output_delete_history_guard
+BEFORE DELETE ON generation_task_attempt_dependency_outputs
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Generation Task dependency outputs are immutable'); END;
+
 CREATE TRIGGER generation_attempt_resource_pin_insert_guard
 BEFORE INSERT ON generation_task_attempt_resource_pins
 WHEN NEW.ordinal <> COALESCE((
@@ -645,10 +891,11 @@ WHEN NEW.ordinal <> COALESCE((
       AND attempt.plan_id = NEW.plan_id
       AND attempt.workspace_id = NEW.workspace_id
       AND attempt.status = 'queued'
-      AND task.current_attempt = attempt.attempt
+      AND attempt.materialization_sealed = 0
+      AND task.current_attempt + 1 = attempt.attempt
       AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
   )
-BEGIN SELECT RAISE(ABORT, 'Generation Task Resource pins must be constructed contiguously before queueing'); END;
+BEGIN SELECT RAISE(ABORT, 'Generation Task Resource pins must be constructed contiguously before materialization seal'); END;
 
 CREATE TRIGGER generation_attempt_resource_pin_update_immutable
 BEFORE UPDATE ON generation_task_attempt_resource_pins
@@ -674,10 +921,11 @@ WHEN NEW.ordinal <> COALESCE((
       AND attempt.plan_id = NEW.plan_id
       AND attempt.workspace_id = NEW.workspace_id
       AND attempt.status = 'queued'
-      AND task.current_attempt = attempt.attempt
+      AND attempt.materialization_sealed = 0
+      AND task.current_attempt + 1 = attempt.attempt
       AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
   )
-BEGIN SELECT RAISE(ABORT, 'Generation Task Component pins must be constructed contiguously before queueing'); END;
+BEGIN SELECT RAISE(ABORT, 'Generation Task Component pins must be constructed contiguously before materialization seal'); END;
 
 CREATE TRIGGER generation_attempt_component_pin_update_immutable
 BEFORE UPDATE ON generation_task_attempt_component_pins
@@ -694,7 +942,25 @@ WHEN NEW.sequence <> COALESCE((
     SELECT MAX(failure.sequence) + 1 FROM generation_task_materialization_failures failure
     WHERE failure.task_id = NEW.task_id
   ), 1)
-BEGIN SELECT RAISE(ABORT, 'Generation Task materialization failures are append-only and contiguous'); END;
+  OR NOT EXISTS (
+    SELECT 1 FROM generation_tasks task
+    JOIN generation_plans plan
+      ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+    WHERE task.id = NEW.task_id
+      AND task.plan_id = NEW.plan_id
+      AND task.workspace_id = NEW.workspace_id
+      AND task.status IN ('materialization-pending','retry-wait','awaiting-context-refresh','needs-rebase')
+      AND plan.construction_sealed = 1
+      AND plan.status IN ('queued','running')
+      AND NOT EXISTS (
+        SELECT 1 FROM generation_task_attempts attempt
+        WHERE attempt.task_id = task.id
+          AND attempt.plan_id = task.plan_id
+          AND attempt.workspace_id = task.workspace_id
+          AND attempt.materialization_sealed = 0
+      )
+  )
+BEGIN SELECT RAISE(ABORT, 'Generation Task materialization failure ownership, state, or sequence is invalid'); END;
 
 CREATE TRIGGER generation_materialization_failure_advance_count
 AFTER INSERT ON generation_task_materialization_failures
@@ -2916,6 +3182,11 @@ export function migrateStoreSchema(db: DatabaseSync): void {
     "generation_plans",
     "construction_sealed",
     "construction_sealed INTEGER NOT NULL DEFAULT 0 CHECK(construction_sealed IN (0, 1))",
+  );
+  ensureColumn(
+    "generation_task_attempts",
+    "materialization_sealed",
+    "materialization_sealed INTEGER NOT NULL DEFAULT 0 CHECK(materialization_sealed IN (0, 1))",
   );
   db.exec(TASK12_GENERATION_TABLE_SCHEMA);
   db.exec(TASK12_GENERATION_TRIGGER_SCHEMA);

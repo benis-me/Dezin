@@ -94,6 +94,8 @@ export type {
   GenerationTaskIntent,
   GenerationTaskIntentInput,
   GenerationTaskKind,
+  GenerationTaskMaterializationFailure,
+  GenerationTaskMaterializationObservation,
   GenerationTaskResourceLimits,
   GenerationTaskRetryContextPolicy,
   GenerationTaskStatus,
@@ -102,6 +104,8 @@ export type {
   GenerationTaskAttempt,
   GenerationTaskAttemptComponentPin,
   GenerationTaskAttemptComponentPinInput,
+  GenerationTaskAttemptDependencyOutput,
+  GenerationTaskAttemptDependencyOutputInput,
   GenerationTaskAttemptHashInput,
   GenerationTaskAttemptInput,
   GenerationTaskAttemptLease,
@@ -132,6 +136,7 @@ export type {
   PersistContextPackInput,
   PersistContextPackItemInput,
   RecordContextPackItemUsageInput,
+  RecordGenerationTaskMaterializationFailureInput,
   SharedDesignKernelRevision,
   WorkspaceArtifactNode,
   WorkspaceEdge,
@@ -206,6 +211,7 @@ export {
   type WorkspacePointerKind,
 } from "./workspace-store.ts";
 export {
+  asGenerationTaskMaterializationFailure,
   asGenerationTaskAttempt,
   asGenerationTask,
   asGenerationPlanEvent,
@@ -217,6 +223,7 @@ export {
   normalizeGenerationTaskAttemptLease,
   normalizeGenerationTaskIntent,
   normalizeListGenerationPlanEventsInput,
+  normalizeRecordGenerationTaskMaterializationFailureInput,
 } from "./store-codecs.ts";
 export {
   assertAcyclicTaskGraph,

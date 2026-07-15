@@ -30,6 +30,26 @@ function attemptInput(overrides: Record<string, unknown> = {}): Record<string, u
     contextPackId: "context-pack-1",
     kernelRevisionId: "kernel-1",
     payload: { operation: "revise" },
+    dependencyOutputs: [
+      {
+        taskId: "task-validation-z",
+        resultRevisionId: null,
+        resultResourceRevisionId: null,
+        resultSnapshotId: "snapshot-validation-z",
+      },
+      {
+        taskId: "task-component-z",
+        resultRevisionId: "component-revision-z",
+        resultResourceRevisionId: null,
+        resultSnapshotId: null,
+      },
+      {
+        taskId: "task-resource-z",
+        resultRevisionId: null,
+        resultResourceRevisionId: "resource-revision-z",
+        resultSnapshotId: null,
+      },
+    ],
     resourcePins: [
       { resourceId: "resource-z", revisionId: "resource-revision-z", sourceTaskId: "task-resource-z" },
       { resourceId: "resource-a", revisionId: "resource-revision-a", sourceTaskId: null },
@@ -233,9 +253,32 @@ test("Generation Task Attempt lease fences require the exact immutable tuple", (
   }), /lease token/);
 });
 
-test("Generation Task Attempt input canonicalizes exact Resource and Component pins", () => {
+test("Generation Task Attempt input canonicalizes exact dependency outputs, Resource pins, and Component pins", () => {
   const normalized = normalizeGenerationTaskAttemptInput(attemptInput());
 
+  assert.deepEqual(normalized.dependencyOutputs, [
+    {
+      ordinal: 0,
+      taskId: "task-component-z",
+      resultRevisionId: "component-revision-z",
+      resultResourceRevisionId: null,
+      resultSnapshotId: null,
+    },
+    {
+      ordinal: 1,
+      taskId: "task-resource-z",
+      resultRevisionId: null,
+      resultResourceRevisionId: "resource-revision-z",
+      resultSnapshotId: null,
+    },
+    {
+      ordinal: 2,
+      taskId: "task-validation-z",
+      resultRevisionId: null,
+      resultResourceRevisionId: null,
+      resultSnapshotId: "snapshot-validation-z",
+    },
+  ]);
   assert.deepEqual(normalized.resourcePins, [
     { ordinal: 0, resourceId: "resource-a", revisionId: "resource-revision-a", sourceTaskId: null },
     { ordinal: 1, resourceId: "resource-z", revisionId: "resource-revision-z", sourceTaskId: "task-resource-z" },
@@ -252,6 +295,67 @@ test("Generation Task Attempt input canonicalizes exact Resource and Component p
     normalized.inputHash,
     normalizeGenerationTaskAttemptInput(attemptInput({ planId: "plan-2" })).inputHash,
   );
+  assert.notEqual(
+    normalized.inputHash,
+    normalizeGenerationTaskAttemptInput(attemptInput({
+      dependencyOutputs: [
+        {
+          taskId: "task-component-z",
+          resultRevisionId: "component-revision-rebased",
+          resultResourceRevisionId: null,
+          resultSnapshotId: null,
+        },
+      ],
+    })).inputHash,
+  );
+  const revisionAndSnapshot = normalizeGenerationTaskAttemptInput(attemptInput({
+    dependencyOutputs: [
+      {
+        taskId: "task-artifact-with-snapshot",
+        resultRevisionId: "artifact-revision",
+        resultResourceRevisionId: null,
+        resultSnapshotId: "artifact-result-snapshot",
+      },
+      {
+        taskId: "task-resource-with-snapshot",
+        resultRevisionId: null,
+        resultResourceRevisionId: "resource-revision",
+        resultSnapshotId: "resource-result-snapshot",
+      },
+    ],
+  }));
+  assert.deepEqual(revisionAndSnapshot.dependencyOutputs, [
+    {
+      ordinal: 0,
+      taskId: "task-artifact-with-snapshot",
+      resultRevisionId: "artifact-revision",
+      resultResourceRevisionId: null,
+      resultSnapshotId: "artifact-result-snapshot",
+    },
+    {
+      ordinal: 1,
+      taskId: "task-resource-with-snapshot",
+      resultRevisionId: null,
+      resultResourceRevisionId: "resource-revision",
+      resultSnapshotId: "resource-result-snapshot",
+    },
+  ]);
+  assert.throws(() => normalizeGenerationTaskAttemptInput(attemptInput({
+    dependencyOutputs: [
+      {
+        taskId: "task-duplicate",
+        resultRevisionId: null,
+        resultResourceRevisionId: null,
+        resultSnapshotId: null,
+      },
+      {
+        taskId: "task-duplicate",
+        resultRevisionId: null,
+        resultResourceRevisionId: null,
+        resultSnapshotId: null,
+      },
+    ],
+  })), /unique Task ids/i);
 });
 
 function durableAttemptFixture() {
@@ -279,6 +383,7 @@ function durableAttemptFixture() {
     expected_snapshot_id: input.expectedSnapshotId,
     context_pack_id: input.contextPackId,
     kernel_revision_id: input.kernelRevisionId,
+    materialization_sealed: 1,
     execution_mode: input.executionMode,
     payload_json: JSON.stringify(input.payload),
     input_hash: input.inputHash,
@@ -302,6 +407,17 @@ function durableAttemptFixture() {
     started_at: 110,
     finished_at: null,
   };
+  const dependencyOutputRows = input.dependencyOutputs.map((output) => ({
+    task_id: input.taskId,
+    plan_id: input.planId,
+    attempt: input.attempt,
+    workspace_id: input.workspaceId,
+    ordinal: output.ordinal,
+    dependency_task_id: output.taskId,
+    result_revision_id: output.resultRevisionId,
+    result_resource_revision_id: output.resultResourceRevisionId,
+    result_snapshot_id: output.resultSnapshotId,
+  }));
   const resourcePinRows = input.resourcePins.map((pin) => ({
     task_id: input.taskId,
     plan_id: input.planId,
@@ -330,14 +446,28 @@ function durableAttemptFixture() {
     overrides_json: JSON.stringify(pin.overrides),
     status: pin.status,
   }));
-  return { input, candidateEvidence, candidateEvidenceHash, row, resourcePinRows, componentPinRows };
+  return {
+    input,
+    candidateEvidence,
+    candidateEvidenceHash,
+    row,
+    dependencyOutputRows,
+    resourcePinRows,
+    componentPinRows,
+  };
 }
 
 test("Generation Task Attempt row codec reconstructs immutable input, pins, candidate evidence, and leases", () => {
   const fixture = durableAttemptFixture();
-  const attempt = asGenerationTaskAttempt(fixture.row, fixture.resourcePinRows, fixture.componentPinRows);
+  const attempt = asGenerationTaskAttempt(
+    fixture.row,
+    fixture.dependencyOutputRows,
+    fixture.resourcePinRows,
+    fixture.componentPinRows,
+  );
   assert.equal(attempt.planId, fixture.input.planId);
   assert.equal(attempt.inputHash, fixture.input.inputHash);
+  assert.deepEqual(attempt.dependencyOutputs, fixture.input.dependencyOutputs);
   assert.deepEqual(attempt.resourcePins, fixture.input.resourcePins);
   assert.deepEqual(attempt.componentPins, fixture.input.componentPins);
   assert.deepEqual(attempt.candidateEvidence, fixture.candidateEvidence);
@@ -356,7 +486,7 @@ test("Generation Task Attempt row codec reconstructs immutable input, pins, cand
     candidate_revision_id: null,
     candidate_evidence_json: null,
     candidate_evidence_hash: null,
-  }, fixture.resourcePinRows, fixture.componentPinRows);
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows);
   assert.deepEqual(running.lease, {
     taskId: fixture.input.taskId,
     workspaceId: fixture.input.workspaceId,
@@ -372,38 +502,50 @@ test("Generation Task Attempt row codec fails closed on corrupted durable bounda
   const fixture = durableAttemptFixture();
   assert.throws(() => asGenerationTaskAttempt(
     fixture.row,
+    fixture.dependencyOutputRows.map((output) => ({ ...output, ordinal: 1 })),
+    fixture.resourcePinRows,
+    fixture.componentPinRows,
+  ), /Dependency outputs must have contiguous ordinals/);
+  assert.throws(() => asGenerationTaskAttempt(
+    fixture.row,
+    fixture.dependencyOutputRows,
     fixture.resourcePinRows.map((pin) => ({ ...pin, ordinal: 1 })),
     fixture.componentPinRows,
   ), /Resource pins must have contiguous ordinals/);
   assert.throws(() => asGenerationTaskAttempt(
     fixture.row,
+    fixture.dependencyOutputRows,
     fixture.resourcePinRows,
     fixture.componentPinRows.map((pin) => ({ ...pin, plan_id: "plan-foreign" })),
   ), /ownership does not match/);
   assert.throws(() => asGenerationTaskAttempt({
     ...fixture.row,
     pinned_resource_revision_ids_json: "[]",
-  }, fixture.resourcePinRows, fixture.componentPinRows), /Resource revision summary/);
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /Resource revision summary/);
   assert.throws(() => asGenerationTaskAttempt({
     ...fixture.row,
     payload_json: "{\"operation\": \"revise\"}",
-  }, fixture.resourcePinRows, fixture.componentPinRows), /canonical JSON encoding/);
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /canonical JSON encoding/);
   assert.throws(() => asGenerationTaskAttempt({
     ...fixture.row,
     input_hash: "0".repeat(64),
-  }, fixture.resourcePinRows, fixture.componentPinRows), /input hash does not match/);
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /input hash does not match/);
   assert.throws(() => asGenerationTaskAttempt({
     ...fixture.row,
     candidate_evidence_hash: "0".repeat(64),
-  }, fixture.resourcePinRows, fixture.componentPinRows), /candidate evidence hash does not match/);
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /candidate evidence hash does not match/);
   assert.throws(() => asGenerationTaskAttempt({
     ...fixture.row,
     lease_token: null,
-  }, fixture.resourcePinRows, fixture.componentPinRows), /lease columns are inconsistent/);
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /lease columns are inconsistent/);
   assert.throws(() => asGenerationTaskAttempt({
     ...fixture.row,
     status: "invented",
-  }, fixture.resourcePinRows, fixture.componentPinRows), /status is unsupported/);
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /status is unsupported/);
+  assert.throws(() => asGenerationTaskAttempt({
+    ...fixture.row,
+    materialization_sealed: 0,
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /materialization must be sealed/i);
 });
 
 test("Generation Plan event codecs enforce the exhaustive task/plan event boundary", () => {
