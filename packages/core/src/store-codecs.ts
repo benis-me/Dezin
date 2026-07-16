@@ -42,6 +42,8 @@ import type {
   GenerationTaskAttemptResourcePin,
   GenerationTaskAttemptResourcePinInput,
   GenerationTaskAttemptStatus,
+  GenerationTaskArtifactCandidateInput,
+  GenerationTaskResourceCandidateInput,
   GenerationTaskCapacityClass,
   GenerationTaskCapacityClaimKey,
   GenerationTaskCandidateEvidenceHashInput,
@@ -54,6 +56,8 @@ import type {
   GenerationTask,
   GenerationTaskDependency,
   GenerationTaskFailureClass,
+  CompleteGenerationTaskValidationInput,
+  FinishGenerationTaskAttemptFailureInput,
   GenerationTaskResourceLimits,
   GenerationTaskRetryContextPolicy,
   GenerationTaskStatus,
@@ -64,6 +68,10 @@ import type {
   GenerationPlanEventType,
   ListGenerationPlanEventsInput,
   RecordGenerationTaskMaterializationFailureInput,
+  PublishGenerationTaskCandidateInput,
+  PublishGenerationPlanCheckpointInput,
+  AnyStageGenerationTaskCandidateInput,
+  StageGenerationTaskCandidateInput,
   TryClaimGenerationTaskAttemptInput,
 } from "./workspace-types.ts";
 
@@ -229,6 +237,14 @@ function generationCanonicalString(value: unknown, label: string): string {
   const normalized = value.trim();
   if (!normalized) throw new WorkspaceStoreCodecError(`${label} must be non-empty`);
   return normalized;
+}
+
+function generationGitObjectId(value: unknown, label: string): string {
+  const objectId = generationExactString(value, label);
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(objectId)) {
+    throw new WorkspaceStoreCodecError(`${label} must be a lowercase 40- or 64-character git object id`);
+  }
+  return objectId;
 }
 
 function generationExactString(value: unknown, label: string): string {
@@ -801,6 +817,232 @@ export function normalizeGenerationTaskAttemptLease(value: unknown): GenerationT
     ownerId: generationCanonicalString(input.ownerId, "Generation Task Attempt lease owner id"),
     leaseToken: generationCanonicalString(input.leaseToken, "Generation Task Attempt lease token"),
   };
+}
+
+export function normalizeFinishGenerationTaskAttemptFailureInput(
+  value: unknown,
+): FinishGenerationTaskAttemptFailureInput {
+  const input = generationRecord(value, "Finish Generation Task Attempt failure input");
+  generationAllowFields(input, ["lease", "failure"], "Finish Generation Task Attempt failure input");
+  const failure = generationRecord(input.failure, "Generation Task execution failure");
+  generationAllowFields(failure, ["failureClass", "error"], "Generation Task execution failure");
+  return {
+    lease: normalizeGenerationTaskAttemptLease(input.lease),
+    failure: {
+      failureClass: generationRequiredFailureClass(
+        failure.failureClass,
+        "Generation Task execution failure class",
+      ),
+      error: generationCanonicalObject(failure.error, "Generation Task execution failure error"),
+    },
+  };
+}
+
+function normalizeGenerationValidationRevisionIds(value: unknown, label: string): string[] {
+  const ids = generationArray(value, label).map((entry, index) => (
+    generationExactString(entry, `${label}[${index}]`)
+  ));
+  const sorted = [...ids].sort(compareBinary);
+  if (new Set(ids).size !== ids.length) {
+    throw new WorkspaceStoreCodecError(`${label} must be unique`);
+  }
+  return sorted;
+}
+
+export function normalizeCompleteGenerationTaskValidationInput(
+  value: unknown,
+): CompleteGenerationTaskValidationInput {
+  const input = generationRecord(value, "complete Generation Task validation input");
+  generationAllowFields(
+    input,
+    ["lease", "validation"],
+    "complete Generation Task validation input",
+  );
+  const validation = generationRecord(input.validation, "Generation Task validation result");
+  generationAllowFields(validation, [
+    "snapshotId",
+    "graphRevision",
+    "artifactRevisionIds",
+    "resourceRevisionIds",
+    "evidence",
+  ], "Generation Task validation result");
+  return {
+    lease: normalizeGenerationTaskAttemptLease(input.lease),
+    validation: {
+      snapshotId: generationExactString(
+        validation.snapshotId,
+        "Generation Task validation Snapshot id",
+      ),
+      graphRevision: generationSafeInteger(
+        validation.graphRevision,
+        "Generation Task validation graph revision",
+        0,
+      ),
+      artifactRevisionIds: normalizeGenerationValidationRevisionIds(
+        validation.artifactRevisionIds,
+        "Generation Task validation Artifact Revision ids",
+      ),
+      resourceRevisionIds: normalizeGenerationValidationRevisionIds(
+        validation.resourceRevisionIds,
+        "Generation Task validation Resource Revision ids",
+      ),
+      evidence: generationCanonicalObject(
+        validation.evidence,
+        "Generation Task validation evidence",
+      ),
+    },
+  };
+}
+
+export function normalizePublishGenerationPlanCheckpointInput(
+  value: unknown,
+): PublishGenerationPlanCheckpointInput {
+  const input = generationRecord(value, "Publish Generation Plan checkpoint input");
+  generationAllowFields(input, ["lease"], "Publish Generation Plan checkpoint input");
+  return { lease: normalizeGenerationTaskAttemptLease(input.lease) };
+}
+
+function normalizeGenerationTaskArtifactCandidateInput(
+  value: unknown,
+): GenerationTaskArtifactCandidateInput {
+  const input = generationRecord(value, "Generation Task Artifact candidate");
+  generationAllowFields(input, [
+    "kind",
+    "sourceCommitHash",
+    "sourceTreeHash",
+    "renderSpec",
+    "quality",
+  ], "Generation Task Artifact candidate");
+  if (input.kind !== "artifact") {
+    throw new WorkspaceStoreCodecError("Generation Task candidate kind is unsupported");
+  }
+  return {
+    kind: input.kind,
+    sourceCommitHash: generationGitObjectId(
+      input.sourceCommitHash,
+      "Generation Task Artifact candidate source commit hash",
+    ),
+    sourceTreeHash: generationGitObjectId(
+      input.sourceTreeHash,
+      "Generation Task Artifact candidate source tree hash",
+    ),
+    renderSpec: generationCanonicalObject(
+      input.renderSpec,
+      "Generation Task Artifact candidate render spec",
+    ),
+    quality: generationCanonicalObject(
+      input.quality,
+      "Generation Task Artifact candidate quality",
+    ),
+  };
+}
+
+function normalizeGenerationTaskResourceCandidateInput(
+  value: unknown,
+): GenerationTaskResourceCandidateInput {
+  const input = generationRecord(value, "Generation Task Resource candidate");
+  generationAllowFields(input, ["kind", "resourceId", "revision"], "Generation Task Resource candidate");
+  if (input.kind !== "resource") {
+    throw new WorkspaceStoreCodecError("Generation Task candidate kind is unsupported");
+  }
+  const revision = generationRecord(input.revision, "Generation Task Resource candidate Revision");
+  generationAllowFields(revision, [
+    "revisionId",
+    "parentRevisionId",
+    "manifestPath",
+    "summary",
+    "metadata",
+    "checksum",
+    "provenance",
+    "createdByRunId",
+  ], "Generation Task Resource candidate Revision");
+  const provenance = generationCanonicalObject(
+    revision.provenance,
+    "Generation Task Resource candidate provenance",
+  );
+  if (Object.hasOwn(provenance, "generationTask")) {
+    throw new WorkspaceStoreCodecError(
+      "Generation Task Resource candidate provenance contains reserved field generationTask",
+    );
+  }
+  const candidateChecksum = generationExactString(
+    revision.checksum,
+    "Generation Task Resource candidate checksum",
+  );
+  if (!/^[0-9a-f]{64}$/.test(candidateChecksum)) {
+    throw new WorkspaceStoreCodecError(
+      "Generation Task Resource candidate checksum must be a lowercase SHA-256 digest",
+    );
+  }
+  if (revision.createdByRunId !== undefined && revision.createdByRunId !== null) {
+    throw new WorkspaceStoreCodecError(
+      "Generation Task Resource candidate cannot claim a legacy Run",
+    );
+  }
+  return {
+    kind: input.kind,
+    resourceId: generationExactString(input.resourceId, "Generation Task Resource candidate Resource id"),
+    revision: {
+      revisionId: generationExactString(
+        revision.revisionId,
+        "Generation Task Resource candidate Revision id",
+      ),
+      parentRevisionId: revision.parentRevisionId === null
+        ? null
+        : generationExactString(
+          revision.parentRevisionId,
+          "Generation Task Resource candidate parent Revision id",
+        ),
+      manifestPath: generationExactString(
+        revision.manifestPath,
+        "Generation Task Resource candidate manifest path",
+      ),
+      summary: generationCanonicalString(
+        revision.summary,
+        "Generation Task Resource candidate summary",
+      ),
+      metadata: generationCanonicalObject(
+        revision.metadata,
+        "Generation Task Resource candidate metadata",
+      ),
+      checksum: candidateChecksum,
+      provenance,
+      createdByRunId: null,
+    },
+  };
+}
+
+export function normalizeStageGenerationTaskCandidateInput(
+  value: unknown,
+): AnyStageGenerationTaskCandidateInput {
+  const input = generationRecord(value, "stage Generation Task candidate input");
+  generationAllowFields(
+    input,
+    ["lease", "candidate", "evidence"],
+    "stage Generation Task candidate input",
+  );
+  const lease = normalizeGenerationTaskAttemptLease(input.lease);
+  const evidence = generationCanonicalObject(input.evidence, "Generation Task candidate evidence");
+  if (generationRecord(input.candidate, "Generation Task candidate").kind === "resource") {
+    return {
+      lease,
+      candidate: normalizeGenerationTaskResourceCandidateInput(input.candidate),
+      evidence,
+    };
+  }
+  return {
+    lease,
+    candidate: normalizeGenerationTaskArtifactCandidateInput(input.candidate),
+    evidence,
+  };
+}
+
+export function normalizePublishGenerationTaskCandidateInput(
+  value: unknown,
+): PublishGenerationTaskCandidateInput {
+  const input = generationRecord(value, "publish Generation Task candidate input");
+  generationAllowFields(input, ["lease"], "publish Generation Task candidate input");
+  return { lease: normalizeGenerationTaskAttemptLease(input.lease) };
 }
 
 function generationLeaseMs(value: unknown, label: string): number {

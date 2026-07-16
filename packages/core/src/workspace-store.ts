@@ -34,6 +34,10 @@ import type {
   GenerationTaskDependency,
   GenerationTaskExecutionLease,
   GenerationTaskExecutionMode,
+  GenerationTaskFailureClass,
+  CompleteGenerationTaskValidationInput,
+  GenerationTaskValidationRecord,
+  FinishGenerationTaskAttemptFailureInput,
   GenerationTaskMaterializationObservation,
   GenerationTaskMaterializationFailure,
   GenerationTaskRecoverySummary,
@@ -58,6 +62,12 @@ import type {
   ResourcePublicationExpectation,
   ResourceRevision,
   SharedDesignKernelRevision,
+  PublishGenerationTaskCandidateInput,
+  PublishGenerationPlanCheckpointInput,
+  AnyStageGenerationTaskCandidateInput,
+  StageGenerationTaskCandidateInput,
+  StageGenerationTaskArtifactCandidateInput,
+  StageGenerationTaskResourceCandidateInput,
   WorkspaceArtifactNode,
   WorkspaceGraph,
   WorkspaceGraphCommand,
@@ -84,6 +94,11 @@ import {
   compileGenerationPlan,
   GenerationPlanCompileError,
 } from "./generation-plan.ts";
+import { validateGenerationTaskArtifactQualityGate } from "./generation-task-quality.ts";
+import {
+  buildGenerationTaskPrototypeValidationResult,
+  GenerationTaskPrototypeValidationError,
+} from "./generation-task-validation.ts";
 import {
   applyWorkspaceGraphCommands,
   normalizeWorkspaceGraphCommands,
@@ -142,7 +157,12 @@ import {
   generationTaskCandidateEvidenceHash,
   normalizeGenerationTaskAttemptInput,
   normalizeGenerationTaskAttemptLease,
+  normalizeCompleteGenerationTaskValidationInput,
+  normalizeFinishGenerationTaskAttemptFailureInput,
   normalizeHeartbeatGenerationTaskAttemptInput,
+  normalizePublishGenerationTaskCandidateInput,
+  normalizePublishGenerationPlanCheckpointInput,
+  normalizeStageGenerationTaskCandidateInput,
   normalizeGenerationTaskIntent,
   normalizeRecordGenerationTaskMaterializationFailureInput,
   normalizeListGenerationPlanEventsInput,
@@ -171,6 +191,120 @@ const GENERATION_TASK_CAPACITY_LIMITS = {
   "render-qa": 2,
   image: 2,
 } as const;
+const GENERATION_TASK_VALIDATION_EVIDENCE_MAX_BYTES = 1024 * 1024;
+
+export interface StageGenerationTaskCandidateResult {
+  attempt: GenerationTaskAttempt;
+  artifactRevision: ArtifactRevisionRecord;
+  resourceRevision: null;
+}
+
+export interface StageGenerationTaskResourceCandidateResult {
+  attempt: GenerationTaskAttempt;
+  artifactRevision: null;
+  resourceRevision: ResourceRevision;
+}
+
+export type AnyStageGenerationTaskCandidateResult =
+  | StageGenerationTaskCandidateResult
+  | StageGenerationTaskResourceCandidateResult;
+
+export type GenerationTaskPublicationConflict = {
+  pointer: "artifact-head" | "resource-head" | "active-snapshot";
+  expectedId: string | null;
+  actualId: string | null;
+};
+
+export type PublishGenerationTaskCandidateResult =
+  | {
+      status: "succeeded";
+      task: GenerationTask;
+      attempt: GenerationTaskAttempt;
+      artifactRevision: ArtifactRevisionRecord;
+      resourceRevision: null;
+      snapshot: WorkspaceSnapshotRecord;
+      conflict: null;
+    }
+  | {
+      status: "needs-rebase";
+      task: GenerationTask;
+      attempt: GenerationTaskAttempt;
+      artifactRevision: ArtifactRevisionRecord;
+      resourceRevision: null;
+      snapshot: null;
+      conflict: GenerationTaskPublicationConflict;
+    };
+
+export type PublishGenerationTaskResourceCandidateResult =
+  | {
+      status: "succeeded";
+      task: GenerationTask;
+      attempt: GenerationTaskAttempt;
+      artifactRevision: null;
+      resourceRevision: ResourceRevision;
+      snapshot: WorkspaceSnapshotRecord;
+      conflict: null;
+    }
+  | {
+      status: "needs-rebase";
+      task: GenerationTask;
+      attempt: GenerationTaskAttempt;
+      artifactRevision: null;
+      resourceRevision: ResourceRevision;
+      snapshot: null;
+      conflict: GenerationTaskPublicationConflict;
+    };
+
+export type AnyPublishGenerationTaskCandidateResult =
+  | PublishGenerationTaskCandidateResult
+  | PublishGenerationTaskResourceCandidateResult;
+
+export type FinishGenerationTaskAttemptResult =
+  | {
+      status: "retry-wait";
+      sourceAttempt: GenerationTaskAttempt;
+      successorAttempt: GenerationTaskAttempt;
+      nextEligibleAt: number;
+    }
+  | {
+      status: "failed";
+      sourceAttempt: GenerationTaskAttempt;
+      successorAttempt: null;
+      nextEligibleAt: null;
+    };
+
+export interface CompleteGenerationTaskValidationResult {
+  status: "succeeded";
+  task: GenerationTask;
+  attempt: GenerationTaskAttempt;
+  snapshot: WorkspaceSnapshotRecord;
+  validation: GenerationTaskValidationRecord;
+  evidenceHash: string;
+}
+
+export type GenerationPlanCheckpointConflict = {
+  pointer: "active-snapshot";
+  expectedId: string;
+  actualId: string;
+};
+
+export type PublishGenerationPlanCheckpointResult =
+  | {
+      status: "succeeded";
+      task: GenerationTask;
+      attempt: GenerationTaskAttempt;
+      plan: GenerationPlan;
+      snapshot: WorkspaceSnapshotRecord;
+      conflict: null;
+    }
+  | {
+      status: "needs-rebase";
+      task: GenerationTask;
+      attempt: GenerationTaskAttempt;
+      plan: GenerationPlan;
+      snapshot: null;
+      conflict: GenerationPlanCheckpointConflict;
+    };
 
 function checksum(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -1811,9 +1945,24 @@ export class WorkspaceStore {
     unsafeInput: CreateResourceRevisionCandidateInput,
   ): ResourceRevision {
     const input = normalizeCreateResourceRevisionCandidateInput(unsafeInput);
-    return this.transactionImmediate(() => {
-      const resource = this.requireResourceForProject(projectId, resourceId);
-      if (resource.archivedAt !== null) throw new WorkspaceGraphValidationError(`Resource ${resource.id} is archived`);
+    return this.transactionImmediate(() => this.createResourceRevisionInTransaction(
+      projectId,
+      resourceId,
+      input,
+      { requireCurrentHead: true },
+    ));
+  }
+
+  private createResourceRevisionInTransaction(
+    projectId: string,
+    resourceId: string,
+    input: CreateResourceRevisionCandidateInput,
+    options: { requireCurrentHead: boolean },
+  ): ResourceRevision {
+    if (!this.db.isTransaction) throw new Error("Resource Revision creation requires a transaction");
+    const resource = this.requireResourceForProject(projectId, resourceId);
+    if (resource.archivedAt !== null) throw new WorkspaceGraphValidationError(`Resource ${resource.id} is archived`);
+    if (options.requireCurrentHead) {
       this.guardPointer({
         pointer: "resource-head",
         workspaceId: resource.workspaceId,
@@ -1821,37 +1970,44 @@ export class WorkspaceStore {
         expectedId: input.parentRevisionId,
         actualId: resource.headRevisionId,
       });
-      if (this.db.prepare("SELECT 1 FROM resource_revisions WHERE id = ?").get(input.revisionId)) {
-        throw new WorkspaceGraphValidationError(`Resource Revision identity collision: ${input.revisionId}`);
+    } else if (input.parentRevisionId !== null) {
+      const parent = this.requireResourceRevision(input.parentRevisionId);
+      if (parent.workspaceId !== resource.workspaceId || parent.resourceId !== resource.id) {
+        throw new WorkspaceGraphValidationError(
+          "Resource Revision parent belongs to another Resource or Workspace",
+        );
       }
-      this.validateRunOwnership(resource.workspaceId, input.createdByRunId ?? null, "Resource Revision");
-      const sequence = this.nextSafeSequence(
-        "resource_revisions",
-        "resource_id",
-        resource.id,
-        "Resource Revision",
-      );
-      this.db.prepare(
-        `INSERT INTO resource_revisions (
-           id, workspace_id, resource_id, sequence, parent_revision_id, manifest_path, summary,
-           metadata_json, checksum, provenance_json, created_by_run_id, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        input.revisionId,
-        resource.workspaceId,
-        resource.id,
-        sequence,
-        input.parentRevisionId,
-        input.manifestPath,
-        input.summary,
-        canonicalJsonText(input.metadata, "Resource Revision metadata"),
-        input.checksum,
-        canonicalJsonText(input.provenance, "Resource Revision provenance"),
-        input.createdByRunId ?? null,
-        this.clock.now(),
-      );
-      return this.requireResourceRevision(input.revisionId);
-    });
+    }
+    if (this.db.prepare("SELECT 1 FROM resource_revisions WHERE id = ?").get(input.revisionId)) {
+      throw new WorkspaceGraphValidationError(`Resource Revision identity collision: ${input.revisionId}`);
+    }
+    this.validateRunOwnership(resource.workspaceId, input.createdByRunId ?? null, "Resource Revision");
+    const sequence = this.nextSafeSequence(
+      "resource_revisions",
+      "resource_id",
+      resource.id,
+      "Resource Revision",
+    );
+    this.db.prepare(
+      `INSERT INTO resource_revisions (
+         id, workspace_id, resource_id, sequence, parent_revision_id, manifest_path, summary,
+         metadata_json, checksum, provenance_json, created_by_run_id, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.revisionId,
+      resource.workspaceId,
+      resource.id,
+      sequence,
+      input.parentRevisionId,
+      input.manifestPath,
+      input.summary,
+      canonicalJsonText(input.metadata, "Resource Revision metadata"),
+      input.checksum,
+      canonicalJsonText(input.provenance, "Resource Revision provenance"),
+      input.createdByRunId ?? null,
+      this.clock.now(),
+    );
+    return this.requireResourceRevision(input.revisionId);
   }
 
   publishResourceRevisionForProject(
@@ -1861,95 +2017,108 @@ export class WorkspaceStore {
     unsafeExpected: ResourcePublicationExpectation,
   ): WorkspaceSnapshotRecord {
     const expected = normalizeResourcePublicationExpectation(unsafeExpected);
-    return this.transactionImmediate(() => {
-      const resource = this.requireResourceForProject(projectId, resourceId);
-      if (resource.archivedAt !== null) throw new WorkspaceGraphValidationError(`Resource ${resource.id} is archived`);
-      const revision = this.requireResourceRevision(revisionId);
-      if (revision.workspaceId !== resource.workspaceId || revision.resourceId !== resource.id) {
-        throw new WorkspaceGraphValidationError("Resource Revision belongs to another Resource or Workspace");
-      }
-      this.guardPointer({
+    return this.transactionImmediate(() => this.publishResourceRevisionInTransaction(
+      projectId,
+      resourceId,
+      revisionId,
+      expected,
+    ));
+  }
+
+  private publishResourceRevisionInTransaction(
+    projectId: string,
+    resourceId: string,
+    revisionId: string,
+    expected: ResourcePublicationExpectation,
+  ): WorkspaceSnapshotRecord {
+    if (!this.db.isTransaction) throw new Error("Resource publication requires a transaction");
+    const resource = this.requireResourceForProject(projectId, resourceId);
+    if (resource.archivedAt !== null) throw new WorkspaceGraphValidationError(`Resource ${resource.id} is archived`);
+    const revision = this.requireResourceRevision(revisionId);
+    if (revision.workspaceId !== resource.workspaceId || revision.resourceId !== resource.id) {
+      throw new WorkspaceGraphValidationError("Resource Revision belongs to another Resource or Workspace");
+    }
+    this.guardPointer({
+      pointer: "resource-head",
+      workspaceId: resource.workspaceId,
+      ownerId: resource.id,
+      expectedId: expected.expectedHeadRevisionId,
+      actualId: resource.headRevisionId,
+    });
+    if (revision.parentRevisionId !== expected.expectedHeadRevisionId) {
+      throw new WorkspaceGraphValidationError("Resource Revision parent does not match the expected Head");
+    }
+    if (expected.runId !== undefined && expected.runId !== revision.createdByRunId) {
+      throw new WorkspaceGraphValidationError("Resource publication Run does not match candidate provenance");
+    }
+    const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
+    this.guardPointer({
+      pointer: "active-snapshot",
+      workspaceId: workspace.id,
+      ownerId: workspace.id,
+      expectedId: expected.expectedSnapshotId,
+      actualId: workspace.activeSnapshotId,
+    });
+    const parent = this.requireSnapshot(workspace.id, expected.expectedSnapshotId);
+    const parentPin = parent.resourceRevisions[resource.id] ?? null;
+    if (parentPin !== expected.expectedHeadRevisionId) {
+      throw new WorkspaceGraphValidationError("Resource Head and base Snapshot pin are incoherent");
+    }
+    const graphNode = parent.graph.nodes.find(
+      (node) => node.kind === "resource" && node.resourceId === resource.id,
+    );
+    if (!graphNode) throw new WorkspaceGraphValidationError("Resource publication requires an active graph node");
+    const movedHead = this.db.prepare(
+      `UPDATE resources SET head_revision_id = ?, updated_at = ?
+       WHERE id = ? AND workspace_id = ? AND head_revision_id IS ? AND archived_at IS NULL`,
+    ).run(revision.id, this.clock.now(), resource.id, workspace.id, expected.expectedHeadRevisionId);
+    if (Number(movedHead.changes) !== 1) {
+      const actual = this.requireResourceForProject(projectId, resourceId);
+      throw new WorkspacePointerConflictError({
         pointer: "resource-head",
-        workspaceId: resource.workspaceId,
+        workspaceId: workspace.id,
         ownerId: resource.id,
         expectedId: expected.expectedHeadRevisionId,
-        actualId: resource.headRevisionId,
+        actualId: actual.headRevisionId,
       });
-      if (revision.parentRevisionId !== expected.expectedHeadRevisionId) {
-        throw new WorkspaceGraphValidationError("Resource Revision parent does not match the expected Head");
-      }
-      if (expected.runId !== undefined && expected.runId !== revision.createdByRunId) {
-        throw new WorkspaceGraphValidationError("Resource publication Run does not match candidate provenance");
-      }
-      const workspace = requireWorkspace(this.getWorkspace(projectId), projectId);
-      this.guardPointer({
+    }
+    const provenance: Extract<WorkspaceSnapshotProvenance, { kind: "resource-publication" }> = {
+      kind: "resource-publication",
+      resourceRevisionId: revision.id,
+      ...(revision.createdByRunId === null ? {} : { runId: revision.createdByRunId }),
+      ...(expected.planId === undefined ? {} : { planId: expected.planId }),
+      ...(expected.taskId === undefined ? {} : { taskId: expected.taskId }),
+    };
+    const snapshot = this.createSnapshotInTransaction(workspace.id, {
+      expectedSnapshotId: expected.expectedSnapshotId,
+      graphRevision: workspace.graphRevision,
+      reason: expected.reason,
+      provenance,
+      resourceOverrides: [{ resourceId: resource.id, revisionId: revision.id }],
+      createdByRunId: revision.createdByRunId,
+    });
+    const movedSnapshot = this.db.prepare(
+      `UPDATE project_workspaces SET active_snapshot_id = ?, updated_at = ?
+       WHERE id = ? AND active_snapshot_id = ? AND graph_revision = ? AND active_kernel_revision_id = ?`,
+    ).run(
+      snapshot.id,
+      this.clock.now(),
+      workspace.id,
+      expected.expectedSnapshotId,
+      workspace.graphRevision,
+      workspace.activeKernelRevisionId,
+    );
+    if (Number(movedSnapshot.changes) !== 1) {
+      const actual = this.requireWorkspaceById(workspace.id);
+      throw new WorkspacePointerConflictError({
         pointer: "active-snapshot",
         workspaceId: workspace.id,
         ownerId: workspace.id,
         expectedId: expected.expectedSnapshotId,
-        actualId: workspace.activeSnapshotId,
+        actualId: actual.activeSnapshotId,
       });
-      const parent = this.requireSnapshot(workspace.id, expected.expectedSnapshotId);
-      const parentPin = parent.resourceRevisions[resource.id] ?? null;
-      if (parentPin !== expected.expectedHeadRevisionId) {
-        throw new WorkspaceGraphValidationError("Resource Head and base Snapshot pin are incoherent");
-      }
-      const graphNode = parent.graph.nodes.find(
-        (node) => node.kind === "resource" && node.resourceId === resource.id,
-      );
-      if (!graphNode) throw new WorkspaceGraphValidationError("Resource publication requires an active graph node");
-      const movedHead = this.db.prepare(
-        `UPDATE resources SET head_revision_id = ?, updated_at = ?
-         WHERE id = ? AND workspace_id = ? AND head_revision_id IS ? AND archived_at IS NULL`,
-      ).run(revision.id, this.clock.now(), resource.id, workspace.id, expected.expectedHeadRevisionId);
-      if (Number(movedHead.changes) !== 1) {
-        const actual = this.requireResourceForProject(projectId, resourceId);
-        throw new WorkspacePointerConflictError({
-          pointer: "resource-head",
-          workspaceId: workspace.id,
-          ownerId: resource.id,
-          expectedId: expected.expectedHeadRevisionId,
-          actualId: actual.headRevisionId,
-        });
-      }
-      const provenance: Extract<WorkspaceSnapshotProvenance, { kind: "resource-publication" }> = {
-        kind: "resource-publication",
-        resourceRevisionId: revision.id,
-        ...(revision.createdByRunId === null ? {} : { runId: revision.createdByRunId }),
-        ...(expected.planId === undefined ? {} : { planId: expected.planId }),
-        ...(expected.taskId === undefined ? {} : { taskId: expected.taskId }),
-      };
-      const snapshot = this.createSnapshotInTransaction(workspace.id, {
-        expectedSnapshotId: expected.expectedSnapshotId,
-        graphRevision: workspace.graphRevision,
-        reason: expected.reason,
-        provenance,
-        resourceOverrides: [{ resourceId: resource.id, revisionId: revision.id }],
-        createdByRunId: revision.createdByRunId,
-      });
-      const movedSnapshot = this.db.prepare(
-        `UPDATE project_workspaces SET active_snapshot_id = ?, updated_at = ?
-         WHERE id = ? AND active_snapshot_id = ? AND graph_revision = ? AND active_kernel_revision_id = ?`,
-      ).run(
-        snapshot.id,
-        this.clock.now(),
-        workspace.id,
-        expected.expectedSnapshotId,
-        workspace.graphRevision,
-        workspace.activeKernelRevisionId,
-      );
-      if (Number(movedSnapshot.changes) !== 1) {
-        const actual = this.requireWorkspaceById(workspace.id);
-        throw new WorkspacePointerConflictError({
-          pointer: "active-snapshot",
-          workspaceId: workspace.id,
-          ownerId: workspace.id,
-          expectedId: expected.expectedSnapshotId,
-          actualId: actual.activeSnapshotId,
-        });
-      }
-      return snapshot;
-    });
+    }
+    return snapshot;
   }
 
   persistContextPack(unsafeInput: PersistContextPackInput): ContextPack {
@@ -2898,6 +3067,13 @@ export class WorkspaceStore {
         || live.claims.some((claim) => claim.leaseExpiresAt <= now)) {
         throw new GenerationTaskLeaseFenceError(input.taskId, input.attempt, "Claim lease is stale or expired");
       }
+      if (attempt.status === "cancel-requested") {
+        // Cancellation must be observable without extending the lease. The
+        // scheduler aborts its executor from this returned state, while crashy
+        // or non-cooperative workers naturally become recoverable at the
+        // original expiry boundary.
+        return this.readGenerationTaskAttemptClaimInTransaction(task, input.attempt);
+      }
       if (now < live.heartbeatAt) {
         throw new GenerationTaskLeaseFenceError(input.taskId, input.attempt, "Heartbeat time moved backwards");
       }
@@ -2946,6 +3122,1007 @@ export class WorkspaceStore {
         throw new WorkspaceStoreCodecError("Generation Task heartbeat lost its Attempt fence");
       }
       return this.readGenerationTaskAttemptClaimInTransaction(task, input.attempt);
+    });
+  }
+
+  stageGenerationTaskCandidateForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: StageGenerationTaskCandidateInput,
+  ): StageGenerationTaskCandidateResult;
+  stageGenerationTaskCandidateForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: StageGenerationTaskResourceCandidateInput,
+  ): StageGenerationTaskResourceCandidateResult;
+  stageGenerationTaskCandidateForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: AnyStageGenerationTaskCandidateInput,
+  ): AnyStageGenerationTaskCandidateResult {
+    const input = normalizeStageGenerationTaskCandidateInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      const task = this.readGenerationTaskForExecutionInTransaction(input.lease.taskId);
+      if (!task || task.planId !== plan.id || task.workspaceId !== plan.workspaceId
+        || task.workspaceId !== input.lease.workspaceId
+        || task.currentAttempt !== input.lease.attempt) {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Task identity is stale",
+        );
+      }
+      const attempt = this.readGenerationTaskAttemptInTransaction(task.id, input.lease.attempt);
+      const now = this.clock.now();
+      if (!attempt || !attempt.lease
+        || attempt.lease.ownerId !== input.lease.ownerId
+        || attempt.lease.leaseToken !== input.lease.leaseToken
+        || attempt.leaseExpiresAt === null
+        || attempt.leaseExpiresAt <= now
+        || (attempt.status !== "running" && attempt.status !== "candidate-ready")) {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Attempt lease is stale, expired, or cannot stage a candidate",
+        );
+      }
+      const live = this.readGenerationTaskExecutionLeaseInTransaction(task, input.lease.attempt);
+      if (live.ownerId !== input.lease.ownerId
+        || live.leaseToken !== input.lease.leaseToken
+        || live.claims.some((claim) => claim.leaseExpiresAt <= now)) {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Claim lease is stale or expired",
+        );
+      }
+      if (plan.status !== "running"
+        || (task.status !== "running" && task.status !== "candidate-ready")
+        || !isDeepStrictEqual(task.target, attempt.target)) {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Task execution state is stale",
+        );
+      }
+      if (attempt.status === "candidate-ready") {
+        if (task.status !== "candidate-ready") {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${attempt.attempt} candidate state is internally inconsistent`,
+          );
+        }
+        return input.candidate.kind === "artifact"
+          ? this.replayStagedArtifactCandidateInTransaction(task, attempt, {
+            ...input,
+            candidate: input.candidate,
+          })
+          : this.replayStagedResourceCandidateInTransaction(task, attempt, {
+            ...input,
+            candidate: input.candidate,
+          });
+      }
+      if (task.status !== "running") {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Task cannot stage a candidate from its current state",
+        );
+      }
+      if (attempt.candidateRevisionId !== null
+        || attempt.candidateResourceRevisionId !== null
+        || attempt.candidateEvidence !== null
+        || attempt.candidateEvidenceHash !== null) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} running Attempt already retains candidate output`,
+        );
+      }
+      let artifactRevision: ArtifactRevisionRecord | null = null;
+      let resourceRevision: ResourceRevision | null = null;
+      if (input.candidate.kind === "artifact") {
+        if (attempt.target.type !== "artifact") {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${attempt.attempt} does not target an Artifact`,
+          );
+        }
+        validateGenerationTaskArtifactQualityGate({
+          qaProfile: task.qaProfile,
+          plannedFrames: attempt.payload.responsiveFrames ?? [],
+          renderSpec: input.candidate.renderSpec,
+          quality: input.candidate.quality,
+          evidence: input.evidence,
+        });
+        const contextPackHash = this.generationTaskAttemptContextPackHashInTransaction(attempt);
+        artifactRevision = this.createArtifactRevisionInTransaction(
+          {
+            artifactId: attempt.target.id,
+            trackId: attempt.target.trackId,
+            parentRevisionId: attempt.baseRevisionId,
+            sourceCommitHash: input.candidate.sourceCommitHash,
+            sourceTreeHash: input.candidate.sourceTreeHash,
+            kernelRevisionId: attempt.kernelRevisionId,
+            renderSpec: input.candidate.renderSpec,
+            quality: input.candidate.quality,
+            contextPackHash,
+            dependencies: attempt.componentPins.map((pin) => ({
+              instanceId: pin.instanceId,
+              componentArtifactId: pin.componentArtifactId,
+              componentRevisionId: pin.revisionId,
+              ...(pin.variantKey === null ? {} : { variantKey: pin.variantKey }),
+              ...(pin.stateKey === null ? {} : { stateKey: pin.stateKey }),
+              sourceLocator: pin.sourceLocator,
+              overrides: pin.overrides,
+              status: pin.status,
+            })),
+            resourcePins: attempt.resourcePins.map((pin) => ({
+              resourceId: pin.resourceId,
+              resourceRevisionId: pin.revisionId,
+            })),
+          },
+          { requireCurrentHead: false },
+        );
+      } else {
+        if (attempt.target.type !== "resource" || task.kind !== "resource") {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${attempt.attempt} does not target a Resource`,
+          );
+        }
+        if (input.candidate.resourceId !== attempt.target.id) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${attempt.attempt} Resource candidate target is stale`,
+          );
+        }
+        if (input.candidate.revision.parentRevisionId !== attempt.baseRevisionId) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${attempt.attempt} Resource candidate parent does not match its base`,
+          );
+        }
+        const revisionInput = normalizeCreateResourceRevisionCandidateInput({
+          ...input.candidate.revision,
+          provenance: {
+            ...input.candidate.revision.provenance,
+            generationTask: this.generationTaskResourceCandidateProvenanceInTransaction(attempt),
+          },
+          createdByRunId: null,
+        });
+        resourceRevision = this.createResourceRevisionInTransaction(
+          projectId,
+          attempt.target.id,
+          revisionInput,
+          { requireCurrentHead: false },
+        );
+      }
+      const evidenceHash = generationTaskCandidateEvidenceHash({
+        taskId: task.id,
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        attempt: attempt.attempt,
+        candidateRevisionId: artifactRevision?.id ?? null,
+        candidateResourceRevisionId: resourceRevision?.id ?? null,
+        candidateEvidence: input.evidence,
+      });
+      const stagedAttempt = this.db.prepare(
+        `UPDATE generation_task_attempts
+         SET status = 'candidate-ready', candidate_revision_id = ?,
+             candidate_resource_revision_id = ?, candidate_evidence_json = ?,
+             candidate_evidence_hash = ?
+         WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+           AND status = 'running' AND candidate_revision_id IS NULL
+           AND candidate_resource_revision_id IS NULL AND candidate_evidence_json IS NULL
+           AND candidate_evidence_hash IS NULL AND owner_id = ? AND lease_token = ?
+           AND lease_expires_at = ? AND lease_expires_at > ?`,
+      ).run(
+        artifactRevision?.id ?? null,
+        resourceRevision?.id ?? null,
+        canonicalJsonText(input.evidence, "Generation Task candidate evidence"),
+        evidenceHash,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        attempt.attempt,
+        input.lease.ownerId,
+        input.lease.leaseToken,
+        live.leaseExpiresAt,
+        now,
+      );
+      if (Number(stagedAttempt.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Attempt changed while staging its candidate",
+        );
+      }
+      const stagedTask = this.db.prepare(
+        `UPDATE generation_tasks SET status = 'candidate-ready'
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?
+           AND current_attempt = ? AND status = 'running'`,
+      ).run(task.id, task.planId, task.workspaceId, attempt.attempt);
+      if (Number(stagedTask.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Task changed while staging its candidate",
+        );
+      }
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: "task-candidate-ready",
+        payload: {
+          attempt: attempt.attempt,
+          candidateRevisionId: artifactRevision?.id ?? null,
+          candidateResourceRevisionId: resourceRevision?.id ?? null,
+          candidateEvidenceHash: evidenceHash,
+        },
+      });
+      const resultAttempt = this.readGenerationTaskAttemptInTransaction(task.id, attempt.attempt);
+      if (!resultAttempt || resultAttempt.status !== "candidate-ready") {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} candidate was not durably staged`,
+        );
+      }
+      this.assertGenerationTaskCandidateReadyEventInTransaction(resultAttempt);
+      return artifactRevision === null
+        ? { attempt: resultAttempt, artifactRevision: null, resourceRevision: resourceRevision! }
+        : { attempt: resultAttempt, artifactRevision, resourceRevision: null };
+    });
+  }
+
+  publishGenerationTaskCandidateForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: PublishGenerationTaskCandidateInput,
+  ): PublishGenerationTaskCandidateResult;
+  publishGenerationTaskCandidateForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: PublishGenerationTaskCandidateInput,
+  ): AnyPublishGenerationTaskCandidateResult {
+    const input = normalizePublishGenerationTaskCandidateInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      const task = this.readGenerationTaskForExecutionInTransaction(input.lease.taskId);
+      if (!task || task.planId !== plan.id || task.workspaceId !== plan.workspaceId
+        || task.workspaceId !== input.lease.workspaceId
+        || task.currentAttempt !== input.lease.attempt) {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Task identity is stale",
+        );
+      }
+      const attempt = this.readGenerationTaskAttemptInTransaction(task.id, input.lease.attempt);
+      if (!attempt || !isDeepStrictEqual(task.target, attempt.target)) {
+        throw new GenerationTaskLeaseFenceError(task.id, input.lease.attempt, "Attempt identity is stale");
+      }
+      const replay = this.replayGenerationTaskCandidatePublicationInTransaction(
+        task,
+        attempt,
+        input.lease,
+      );
+      if (replay !== null) return replay;
+
+      const now = boundarySafeInteger(this.clock.now(), "Generation Task candidate publication time");
+      const expectedPublicationStatus = attempt.executionMode === "publication-only"
+        ? "running"
+        : "candidate-ready";
+      const publicationStateIsLive = task.status === expectedPublicationStatus
+        && attempt.status === expectedPublicationStatus
+        && (attempt.executionMode === "full"
+          || attempt.attemptOrigin === "publication-retry");
+      if (plan.status !== "running" || !publicationStateIsLive || !attempt.lease
+        || attempt.lease.ownerId !== input.lease.ownerId
+        || attempt.lease.leaseToken !== input.lease.leaseToken
+        || attempt.leaseExpiresAt === null || attempt.leaseExpiresAt <= now) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Candidate publication lease is stale, expired, or not ready",
+        );
+      }
+      const live = this.readGenerationTaskExecutionLeaseInTransaction(task, attempt.attempt);
+      if (live.ownerId !== input.lease.ownerId || live.leaseToken !== input.lease.leaseToken
+        || live.claims.some((claim) => claim.leaseExpiresAt <= now)) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Candidate publication claims are stale or expired",
+        );
+      }
+      const workspace = this.requireWorkspaceById(task.workspaceId);
+      if (attempt.target.type === "artifact") {
+        const artifactRevision = this.requireRecordedArtifactCandidateInTransaction(task, attempt);
+        const track = this.requireTrack(artifactRevision.trackId);
+        const conflict = track.headRevisionId !== attempt.baseRevisionId
+          ? {
+              pointer: "artifact-head" as const,
+              expectedId: attempt.baseRevisionId,
+              actualId: track.headRevisionId,
+            }
+          : workspace.activeSnapshotId !== attempt.expectedSnapshotId
+            ? {
+                pointer: "active-snapshot" as const,
+                expectedId: attempt.expectedSnapshotId,
+                actualId: workspace.activeSnapshotId,
+              }
+            : null;
+        if (conflict !== null) {
+          return this.transitionGenerationTaskCandidateNeedsRebaseInTransaction({
+            task,
+            attempt,
+            artifactRevision,
+            live,
+            conflict,
+            now,
+          });
+        }
+        const snapshot = this.publishArtifactRevisionInTransaction(
+          artifactRevision.id,
+          {
+            expectedHeadRevisionId: attempt.baseRevisionId,
+            expectedSnapshotId: attempt.expectedSnapshotId,
+          },
+          { planId: task.planId, taskId: task.id },
+        );
+        return this.completeGenerationTaskCandidatePublicationInTransaction({
+          task,
+          attempt,
+          artifactRevision,
+          snapshot,
+          live,
+          now,
+        });
+      }
+      if (attempt.target.type !== "resource") {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} has no publishable candidate target`,
+        );
+      }
+      const resourceRevision = this.requireRecordedResourceCandidateInTransaction(task, attempt);
+      const resource = this.requireResourceForProject(projectId, attempt.target.id);
+      const conflict = resource.headRevisionId !== attempt.baseRevisionId
+        ? {
+            pointer: "resource-head" as const,
+            expectedId: attempt.baseRevisionId,
+            actualId: resource.headRevisionId,
+          }
+        : workspace.activeSnapshotId !== attempt.expectedSnapshotId
+          ? {
+              pointer: "active-snapshot" as const,
+              expectedId: attempt.expectedSnapshotId,
+              actualId: workspace.activeSnapshotId,
+            }
+          : null;
+      if (conflict !== null) {
+        return this.transitionGenerationTaskResourceCandidateNeedsRebaseInTransaction({
+          task,
+          attempt,
+          resourceRevision,
+          live,
+          conflict,
+          now,
+        });
+      }
+      const snapshot = this.publishResourceRevisionInTransaction(
+        projectId,
+        attempt.target.id,
+        resourceRevision.id,
+        {
+          expectedHeadRevisionId: attempt.baseRevisionId,
+          expectedSnapshotId: attempt.expectedSnapshotId,
+          reason: "resource-published",
+          planId: task.planId,
+          taskId: task.id,
+        },
+      );
+      return this.completeGenerationTaskResourceCandidatePublicationInTransaction({
+        task,
+        attempt,
+        resourceRevision,
+        snapshot,
+        live,
+        now,
+      });
+    });
+  }
+
+  completeGenerationTaskValidationForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: CompleteGenerationTaskValidationInput,
+  ): CompleteGenerationTaskValidationResult {
+    const input = normalizeCompleteGenerationTaskValidationInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      const task = this.readGenerationTaskForExecutionInTransaction(input.lease.taskId);
+      if (!task || task.planId !== plan.id || task.workspaceId !== plan.workspaceId
+        || task.workspaceId !== input.lease.workspaceId
+        || task.currentAttempt !== input.lease.attempt) {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Validation Task identity is stale",
+        );
+      }
+      const attempt = this.readGenerationTaskAttemptInTransaction(task.id, input.lease.attempt);
+      if (!attempt || attempt.planId !== task.planId || attempt.workspaceId !== task.workspaceId) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          input.lease.attempt,
+          "Validation Attempt identity is stale",
+        );
+      }
+      const evidenceHash = this.generationTaskValidationEvidenceHash(
+        task,
+        attempt.attempt,
+        input.validation,
+      );
+      const validationFenceHash = this.generationTaskValidationFenceHash(
+        input.lease,
+        evidenceHash,
+      );
+      if (task.status === "succeeded" && attempt.status === "succeeded") {
+        return this.readGenerationTaskValidationOutcomeInTransaction({
+          taskId: task.id,
+          attempt: attempt.attempt,
+          validationFenceHash,
+        });
+      }
+
+      const now = boundarySafeInteger(this.clock.now(), "Generation Task validation completion time");
+      if (plan.status !== "running" || task.kind !== "prototype-validation"
+        || task.target.type !== "workspace" || task.target.id !== task.workspaceId
+        || attempt.target.type !== "workspace" || !isDeepStrictEqual(task.target, attempt.target)
+        || task.status !== "running" || attempt.status !== "running"
+        || attempt.executionMode !== "full" || attempt.contextPackId !== null
+        || attempt.candidateRevisionId !== null || attempt.candidateResourceRevisionId !== null
+        || attempt.candidateEvidence !== null || attempt.candidateEvidenceHash !== null
+        || !attempt.lease || attempt.lease.ownerId !== input.lease.ownerId
+        || attempt.lease.leaseToken !== input.lease.leaseToken
+        || attempt.leaseExpiresAt === null || attempt.leaseExpiresAt <= now) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Validation completion lease is stale, expired, or not running",
+        );
+      }
+      const live = this.readGenerationTaskExecutionLeaseInTransaction(task, attempt.attempt);
+      if (live.ownerId !== input.lease.ownerId || live.leaseToken !== input.lease.leaseToken
+        || live.claims.some((claim) => claim.leaseExpiresAt <= now)) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Validation completion claims are stale or expired",
+        );
+      }
+      this.validateGenerationTaskValidationResultInTransaction(task, attempt, input.validation);
+      const snapshot = this.requireSnapshot(task.workspaceId, input.validation.snapshotId);
+      const recordedValidation = this.db.prepare(
+        `INSERT INTO generation_task_validation_results (
+           task_id, plan_id, workspace_id, attempt, snapshot_id, graph_revision,
+           artifact_revision_ids_json, resource_revision_ids_json, evidence_json,
+           evidence_hash, validation_fence_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        task.id,
+        task.planId,
+        task.workspaceId,
+        attempt.attempt,
+        snapshot.id,
+        input.validation.graphRevision,
+        canonicalJsonText(
+          input.validation.artifactRevisionIds,
+          "Generation Task validation Artifact Revision ids",
+        ),
+        canonicalJsonText(
+          input.validation.resourceRevisionIds,
+          "Generation Task validation Resource Revision ids",
+        ),
+        canonicalJsonText(input.validation.evidence, "Generation Task validation evidence"),
+        evidenceHash,
+        validationFenceHash,
+        now,
+      );
+      if (Number(recordedValidation.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Generation Task validation result was not recorded");
+      }
+      const finishedAttempt = this.db.prepare(
+        `UPDATE generation_task_attempts
+         SET status = 'succeeded', blocked_reason = NULL, failure_class = NULL, error_json = NULL,
+             next_eligible_at = NULL, owner_id = NULL, lease_token = NULL,
+             lease_expires_at = NULL, heartbeat_at = NULL, finished_at = ?
+         WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+           AND status = 'running' AND execution_mode = 'full'
+           AND candidate_revision_id IS NULL AND candidate_resource_revision_id IS NULL
+           AND candidate_evidence_json IS NULL AND candidate_evidence_hash IS NULL
+           AND owner_id = ? AND lease_token = ? AND lease_expires_at = ?
+           AND lease_expires_at > ?`,
+      ).run(
+        now,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        attempt.attempt,
+        live.ownerId,
+        live.leaseToken,
+        live.leaseExpiresAt,
+        now,
+      );
+      if (Number(finishedAttempt.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Validation Attempt changed while completing",
+        );
+      }
+      const finishedTask = this.db.prepare(
+        `UPDATE generation_tasks
+         SET status = 'succeeded', blocked_reason = NULL, blocked_by_task_id = NULL,
+             pending_context_policy = NULL, failure_class = NULL, error_json = NULL,
+             next_eligible_at = NULL, result_revision_id = NULL,
+             result_resource_revision_id = NULL, result_snapshot_id = ?, finished_at = ?
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?
+           AND current_attempt = ? AND status = 'running'
+           AND result_revision_id IS NULL AND result_resource_revision_id IS NULL
+           AND result_snapshot_id IS NULL`,
+      ).run(
+        snapshot.id,
+        now,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        attempt.attempt,
+      );
+      if (Number(finishedTask.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Validation Task changed while completing",
+        );
+      }
+      this.releaseExactGenerationTaskClaimsInTransaction(task, attempt.attempt, live);
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: "task-succeeded",
+        payload: {
+          attempt: attempt.attempt,
+          resultRevisionId: null,
+          resultResourceRevisionId: null,
+          resultSnapshotId: snapshot.id,
+          validatedGraphRevision: input.validation.graphRevision,
+          validationEvidenceHash: evidenceHash,
+          validationFenceHash,
+        },
+      });
+      this.terminalizeFailedGenerationPlanIfSettledInTransaction(task, now);
+      return this.readGenerationTaskValidationOutcomeInTransaction({
+        taskId: task.id,
+        attempt: attempt.attempt,
+        validationFenceHash,
+      });
+    });
+  }
+
+  publishGenerationPlanCheckpointForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: PublishGenerationPlanCheckpointInput,
+  ): PublishGenerationPlanCheckpointResult {
+    const input = normalizePublishGenerationPlanCheckpointInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      const task = this.readGenerationTaskForExecutionInTransaction(input.lease.taskId);
+      if (!task || task.planId !== plan.id || task.workspaceId !== plan.workspaceId
+        || task.workspaceId !== input.lease.workspaceId) {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Checkpoint Task identity is stale",
+        );
+      }
+      const attempt = this.readGenerationTaskAttemptInTransaction(task.id, input.lease.attempt);
+      if (!attempt || attempt.planId !== task.planId || attempt.workspaceId !== task.workspaceId) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          input.lease.attempt,
+          "Checkpoint Attempt identity is stale",
+        );
+      }
+      const publicationFenceHash = this.generationTaskPublicationFenceHash(input.lease);
+      const replay = this.replayGenerationPlanCheckpointPublicationInTransaction({
+        plan,
+        task,
+        attempt,
+        publicationFenceHash,
+      });
+      if (replay !== null) return replay;
+
+      const now = boundarySafeInteger(this.clock.now(), "Generation Plan checkpoint publication time");
+      if (plan.status !== "running" || task.kind !== "checkpoint"
+        || task.target.type !== "workspace" || task.target.id !== task.workspaceId
+        || task.currentAttempt !== attempt.attempt || task.status !== "running"
+        || attempt.status !== "running" || attempt.executionMode !== "full"
+        || attempt.contextPackId !== null
+        || attempt.candidateRevisionId !== null || attempt.candidateResourceRevisionId !== null
+        || attempt.candidateEvidence !== null || attempt.candidateEvidenceHash !== null
+        || !isDeepStrictEqual(task.target, attempt.target)
+        || !attempt.lease || attempt.lease.ownerId !== input.lease.ownerId
+        || attempt.lease.leaseToken !== input.lease.leaseToken
+        || attempt.leaseExpiresAt === null || attempt.leaseExpiresAt <= now) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Checkpoint publication lease is stale, expired, or not ready",
+        );
+      }
+      const live = this.readGenerationTaskExecutionLeaseInTransaction(task, attempt.attempt);
+      if (live.ownerId !== input.lease.ownerId || live.leaseToken !== input.lease.leaseToken
+        || live.claims.some((claim) => claim.leaseExpiresAt <= now)) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Checkpoint publication claim is stale or expired",
+        );
+      }
+      const validationAuthority = this.requireGenerationPlanCheckpointValidationAuthorityInTransaction(
+        task,
+        attempt,
+      );
+      const workspace = this.requireWorkspaceById(task.workspaceId);
+      const parent = this.requireSnapshot(workspace.id, workspace.activeSnapshotId);
+      if (parent.graphRevision !== workspace.graphRevision
+        || parent.kernelRevisionId !== workspace.activeKernelRevisionId) {
+        throw new WorkspaceStoreCodecError(
+          "Checkpoint parent does not match the active Workspace graph and Kernel pointers",
+        );
+      }
+      if (!this.isCheckpointSnapshotSemanticallyEquivalent(
+        validationAuthority.snapshot,
+        parent,
+      )) {
+        return this.transitionGenerationPlanCheckpointNeedsRebaseInTransaction({
+          plan,
+          task,
+          attempt,
+          live,
+          validation: validationAuthority,
+          conflict: {
+            pointer: "active-snapshot",
+            expectedId: validationAuthority.snapshot.id,
+            actualId: parent.id,
+          },
+          now,
+        });
+      }
+      const snapshot = this.createSnapshotInTransaction(workspace.id, {
+        expectedSnapshotId: parent.id,
+        graphRevision: workspace.graphRevision,
+        reason: "plan-checkpoint",
+        provenance: {
+          kind: "plan-checkpoint",
+          proposalId: plan.proposalId,
+          planId: plan.id,
+          checkpointId: task.id,
+          validatedSnapshotId: validationAuthority.snapshot.id,
+          validationEvidenceHash: validationAuthority.evidenceHash,
+        },
+      });
+      const movedWorkspace = this.db.prepare(
+        `UPDATE project_workspaces SET active_snapshot_id = ?, updated_at = ?
+         WHERE id = ? AND active_snapshot_id = ? AND graph_revision = ?
+           AND active_kernel_revision_id = ?`,
+      ).run(
+        snapshot.id,
+        now,
+        workspace.id,
+        parent.id,
+        workspace.graphRevision,
+        workspace.activeKernelRevisionId,
+      );
+      if (Number(movedWorkspace.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          attempt.attempt,
+          "Workspace changed while publishing its checkpoint",
+        );
+      }
+      const finishedAttempt = this.db.prepare(
+        `UPDATE generation_task_attempts
+         SET status = 'succeeded', blocked_reason = NULL, failure_class = NULL, error_json = NULL,
+             next_eligible_at = NULL, owner_id = NULL, lease_token = NULL,
+             lease_expires_at = NULL, heartbeat_at = NULL, finished_at = ?
+         WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+           AND status = 'running' AND execution_mode = 'full'
+           AND candidate_revision_id IS NULL AND candidate_resource_revision_id IS NULL
+           AND candidate_evidence_json IS NULL AND candidate_evidence_hash IS NULL
+           AND owner_id = ? AND lease_token = ? AND lease_expires_at = ?
+           AND lease_expires_at > ?`,
+      ).run(
+        now,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        attempt.attempt,
+        live.ownerId,
+        live.leaseToken,
+        live.leaseExpiresAt,
+        now,
+      );
+      if (Number(finishedAttempt.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Checkpoint Attempt changed");
+      }
+      const finishedTask = this.db.prepare(
+        `UPDATE generation_tasks
+         SET status = 'succeeded', blocked_reason = NULL, blocked_by_task_id = NULL,
+             pending_context_policy = NULL, failure_class = NULL, error_json = NULL,
+             next_eligible_at = NULL, result_revision_id = NULL,
+             result_resource_revision_id = NULL, result_snapshot_id = ?, finished_at = ?
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?
+           AND current_attempt = ? AND status = 'running'
+           AND result_revision_id IS NULL AND result_resource_revision_id IS NULL
+           AND result_snapshot_id IS NULL`,
+      ).run(
+        snapshot.id,
+        now,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        attempt.attempt,
+      );
+      if (Number(finishedTask.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Checkpoint Task changed");
+      }
+      this.releaseExactGenerationTaskClaimsInTransaction(task, attempt.attempt, live);
+      const finishedPlan = this.db.prepare(
+        `UPDATE generation_plans SET status = 'succeeded', finished_at = ?
+         WHERE id = ? AND workspace_id = ? AND status = 'running'`,
+      ).run(now, plan.id, plan.workspaceId);
+      if (Number(finishedPlan.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Generation Plan changed while publishing its checkpoint");
+      }
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: "task-succeeded",
+        payload: {
+          attempt: attempt.attempt,
+          resultRevisionId: null,
+          resultResourceRevisionId: null,
+          resultSnapshotId: snapshot.id,
+          validatedSnapshotId: validationAuthority.snapshot.id,
+          validationEvidenceHash: validationAuthority.evidenceHash,
+          publicationFenceHash,
+        },
+      });
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: null,
+        type: "plan-succeeded",
+        payload: {
+          checkpointId: task.id,
+          resultSnapshotId: snapshot.id,
+          validatedSnapshotId: validationAuthority.snapshot.id,
+          validationEvidenceHash: validationAuthority.evidenceHash,
+        },
+      });
+      return this.readGenerationPlanCheckpointPublicationOutcomeInTransaction({
+        taskId: task.id,
+        attempt: attempt.attempt,
+        publicationFenceHash,
+      });
+    });
+  }
+
+  finishGenerationTaskAttemptForProject(
+    projectId: string,
+    planId: string,
+    unsafeInput: FinishGenerationTaskAttemptFailureInput,
+  ): FinishGenerationTaskAttemptResult {
+    const input = normalizeFinishGenerationTaskAttemptFailureInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const plan = this.requireGenerationPlanForProject(projectId, planId);
+      const task = this.readGenerationTaskForExecutionInTransaction(input.lease.taskId);
+      if (!task || task.planId !== plan.id || task.workspaceId !== plan.workspaceId
+        || task.workspaceId !== input.lease.workspaceId) {
+        throw new GenerationTaskLeaseFenceError(
+          input.lease.taskId,
+          input.lease.attempt,
+          "Task identity is stale",
+        );
+      }
+      const source = this.readGenerationTaskAttemptInTransaction(task.id, input.lease.attempt);
+      if (!source || source.planId !== task.planId || source.workspaceId !== task.workspaceId) {
+        throw new GenerationTaskLeaseFenceError(task.id, input.lease.attempt, "Attempt identity is stale");
+      }
+      const failureFenceHash = checksum(canonicalJsonText({
+        lease: input.lease,
+        failure: input.failure,
+      }, "Generation Task execution failure fence"));
+      const replay = this.replayGenerationTaskAttemptFailureInTransaction({
+        task,
+        source,
+        failure: input.failure,
+        failureFenceHash,
+      });
+      if (replay !== null) return replay;
+
+      const now = boundarySafeInteger(this.clock.now(), "Generation Task execution failure time");
+      if ((plan.status !== "queued" && plan.status !== "running")
+        || task.currentAttempt !== source.attempt
+        || task.status !== "running"
+        || source.status !== "running"
+        || !isDeepStrictEqual(task.target, source.target)
+        || !source.lease
+        || source.lease.ownerId !== input.lease.ownerId
+        || source.lease.leaseToken !== input.lease.leaseToken
+        || source.leaseExpiresAt === null
+        || source.leaseExpiresAt <= now) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          source.attempt,
+          "Attempt failure lease is stale, expired, or not running",
+        );
+      }
+      const live = this.readGenerationTaskExecutionLeaseInTransaction(task, source.attempt);
+      if (live.ownerId !== input.lease.ownerId || live.leaseToken !== input.lease.leaseToken
+        || live.claims.some((claim) => claim.leaseExpiresAt <= now)) {
+        throw new GenerationTaskLeaseFenceError(
+          task.id,
+          source.attempt,
+          "Attempt failure claims are stale or expired",
+        );
+      }
+
+      const transient = input.failure.failureClass === "adapter"
+        || input.failure.failureClass === "storage"
+        || input.failure.failureClass === "provider"
+        || input.failure.failureClass === "agent-transport"
+        || input.failure.failureClass === "build-infrastructure";
+      const retryDelay = transient
+        ? ([1_000, 4_000, 16_000] as const)[source.automaticRetryIndex] ?? null
+        : null;
+      const nextEligibleAt = retryDelay === null ? null : now + retryDelay;
+      if (nextEligibleAt !== null && !Number.isSafeInteger(nextEligibleAt)) {
+        throw new WorkspaceStoreCodecError("Generation Task execution failure backoff is exhausted");
+      }
+      const sourceStatus = nextEligibleAt === null ? "failed" : "retryable-failed";
+      const errorJson = canonicalJsonText(input.failure.error, "Generation Task execution failure error");
+      const finishedSource = this.db.prepare(
+        `UPDATE generation_task_attempts
+         SET status = ?, blocked_reason = NULL, failure_class = ?, error_json = ?,
+             next_eligible_at = ?, owner_id = NULL, lease_token = NULL,
+             lease_expires_at = NULL, heartbeat_at = NULL, finished_at = ?
+         WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+           AND status = 'running' AND owner_id = ? AND lease_token = ?
+           AND lease_expires_at = ? AND lease_expires_at > ?`,
+      ).run(
+        sourceStatus,
+        input.failure.failureClass,
+        errorJson,
+        nextEligibleAt,
+        now,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        source.attempt,
+        live.ownerId,
+        live.leaseToken,
+        live.leaseExpiresAt,
+        now,
+      );
+      if (Number(finishedSource.changes) !== 1) {
+        throw new GenerationTaskLeaseFenceError(task.id, source.attempt, "Attempt changed while failing");
+      }
+      this.releaseExactGenerationTaskClaimsInTransaction(task, source.attempt, live);
+      const terminalSource = this.readGenerationTaskAttemptInTransaction(task.id, source.attempt);
+      if (!terminalSource || terminalSource.status !== sourceStatus) {
+        throw new WorkspaceStoreCodecError("Generation Task failed Attempt did not round-trip");
+      }
+
+      if (nextEligibleAt !== null) {
+        const stagedTask = this.db.prepare(
+          `UPDATE generation_tasks
+           SET status = 'retry-wait', blocked_reason = NULL, blocked_by_task_id = NULL,
+               pending_context_policy = NULL, failure_class = ?, error_json = ?,
+               next_eligible_at = ?, finished_at = NULL
+           WHERE id = ? AND plan_id = ? AND workspace_id = ?
+             AND current_attempt = ? AND status = 'running'`,
+        ).run(
+          input.failure.failureClass,
+          errorJson,
+          nextEligibleAt,
+          task.id,
+          task.planId,
+          task.workspaceId,
+          source.attempt,
+        );
+        if (Number(stagedTask.changes) !== 1) {
+          throw new WorkspaceStoreCodecError("Generation Task changed while scheduling its failure retry");
+        }
+        const successor = this.appendExactGenerationTaskRetrySuccessorInTransaction({
+          task,
+          source: terminalSource,
+          createdAt: now,
+          publicationRetry: false,
+        });
+        this.appendGenerationPlanEventInTransaction({
+          planId: task.planId,
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          type: "task-retry-wait",
+          payload: {
+            sourceAttempt: source.attempt,
+            successorAttempt: successor.attempt,
+            failureClass: input.failure.failureClass,
+            error: input.failure.error,
+            retryOrdinal: successor.automaticRetryIndex,
+            nextEligibleAt,
+            reason: "execution-failed",
+            executionMode: successor.executionMode,
+            failureFenceHash,
+          },
+        });
+        return {
+          status: "retry-wait",
+          sourceAttempt: terminalSource,
+          successorAttempt: successor,
+          nextEligibleAt,
+        };
+      }
+
+      const failedTask = this.db.prepare(
+        `UPDATE generation_tasks
+         SET status = 'failed', blocked_reason = NULL, blocked_by_task_id = NULL,
+             pending_context_policy = NULL, failure_class = ?, error_json = ?,
+             next_eligible_at = NULL, finished_at = ?
+         WHERE id = ? AND plan_id = ? AND workspace_id = ?
+           AND current_attempt = ? AND status = 'running'`,
+      ).run(
+        input.failure.failureClass,
+        errorJson,
+        now,
+        task.id,
+        task.planId,
+        task.workspaceId,
+        source.attempt,
+      );
+      if (Number(failedTask.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Generation Task changed while terminalizing its failure");
+      }
+      this.appendGenerationPlanEventInTransaction({
+        planId: task.planId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        type: "task-failed",
+        payload: {
+          attempt: source.attempt,
+          failureClass: input.failure.failureClass,
+          error: input.failure.error,
+          retryExhausted: transient,
+          failureFenceHash,
+        },
+      });
+      this.blockGenerationTaskDescendantsInTransaction(
+        task,
+        input.failure.failureClass,
+        input.failure.error,
+        now,
+      );
+      this.terminalizeFailedGenerationPlanIfSettledInTransaction(
+        task,
+        now,
+      );
+      return {
+        status: "failed",
+        sourceAttempt: terminalSource,
+        successorAttempt: null,
+        nextEligibleAt: null,
+      };
     });
   }
 
@@ -3035,6 +4212,18 @@ export class WorkspaceStore {
         const nextEligibleAt = shouldRetry ? now + retryDelay : null;
         if (nextEligibleAt !== null && !Number.isSafeInteger(nextEligibleAt)) {
           throw new WorkspaceStoreCodecError("Generation Task recovery backoff is exhausted");
+        }
+        const failedPrerequisite = sourceStatus === "cancelled" && task.blockedByTaskId !== null
+          ? this.readGenerationTaskForExecutionInTransaction(task.blockedByTaskId)
+          : null;
+        if (task.blockedByTaskId !== null && (!failedPrerequisite
+          || failedPrerequisite.planId !== task.planId
+          || failedPrerequisite.workspaceId !== task.workspaceId
+          || failedPrerequisite.status !== "failed"
+          || failedPrerequisite.failureClass === null)) {
+          throw new WorkspaceStoreCodecError(
+            "cancel-requested Generation Task does not retain its failed prerequisite",
+          );
         }
         const finishedSource = this.db.prepare(
           `UPDATE generation_task_attempts
@@ -3156,7 +4345,7 @@ export class WorkspaceStore {
         const terminalTaskStatus = sourceStatus === "cancelled" ? "cancelled" : "failed";
         const movedTask = this.db.prepare(
           `UPDATE generation_tasks
-           SET status = ?, blocked_reason = ?, blocked_by_task_id = NULL,
+           SET status = ?, blocked_reason = ?, blocked_by_task_id = ?,
                pending_context_policy = NULL, failure_class = ?, error_json = ?,
                next_eligible_at = NULL, finished_at = ?
            WHERE id = ? AND plan_id = ? AND workspace_id = ?
@@ -3164,6 +4353,7 @@ export class WorkspaceStore {
         ).run(
           terminalTaskStatus,
           terminalTaskStatus === "cancelled" ? "Cancelled after its execution lease expired" : null,
+          terminalTaskStatus === "cancelled" ? task.blockedByTaskId : null,
           terminalTaskStatus === "cancelled" ? "cancelled" : "build-infrastructure",
           canonicalJsonText(error, "Generation Task lease expiry error"),
           now,
@@ -3190,10 +4380,22 @@ export class WorkspaceStore {
         });
         if (terminalTaskStatus === "cancelled") {
           summary.cancelledTaskIds.push(task.id);
+          this.terminalizeFailedGenerationPlanIfSettledInTransaction(
+            failedPrerequisite ?? task,
+            now,
+          );
         } else {
           summary.failedTaskIds.push(task.id);
-          this.blockGenerationTaskDescendantsInTransaction(task, error, now);
-          this.terminalizeFailedGenerationPlanIfSettledInTransaction(task, now);
+          this.blockGenerationTaskDescendantsInTransaction(
+            task,
+            "build-infrastructure",
+            error,
+            now,
+          );
+          this.terminalizeFailedGenerationPlanIfSettledInTransaction(
+            task,
+            now,
+          );
         }
       }
       summary.planIds = [...recoveredPlanIds].sort(compareBinary);
@@ -3429,6 +4631,31 @@ export class WorkspaceStore {
       const materialized = this.readGenerationTaskAttemptInTransaction(taskId, attempt);
       if (materialized !== null) this.assertGenerationTaskMaterializedEventInTransaction(materialized);
       return materialized;
+    });
+  }
+
+  getGenerationTaskValidationResultForProject(
+    projectId: string,
+    planId: string,
+    taskId: string,
+    attempt: number,
+  ): GenerationTaskValidationRecord | null {
+    if (!Number.isSafeInteger(attempt) || attempt <= 0) {
+      throw new WorkspaceStoreCodecError("Generation Task validation Attempt number must be positive");
+    }
+    return this.transactionRead(() => {
+      const detail = this.readGenerationPlanDetailForProject(projectId, planId);
+      if (!detail.tasks.some((task) => task.id === taskId)) {
+        throw new GenerationTaskNotFoundError(taskId);
+      }
+      const validation = this.readGenerationTaskValidationRecordInTransaction(taskId, attempt);
+      return validation === null
+        ? null
+        : this.readGenerationTaskValidationOutcomeInTransaction({
+          taskId,
+          attempt,
+          validationFenceHash: validation.validationFenceHash,
+        }).validation;
     });
   }
 
@@ -3762,7 +4989,14 @@ export class WorkspaceStore {
 
   createArtifactRevision(unsafeInput: CreateArtifactRevisionInput): ArtifactRevisionRecord {
     const input = normalizeCreateArtifactRevisionInput(unsafeInput);
-    return this.transactionImmediate(() => {
+    return this.transactionImmediate(() => this.createArtifactRevisionInTransaction(input));
+  }
+
+  private createArtifactRevisionInTransaction(
+    input: CreateArtifactRevisionInput,
+    policy: { requireCurrentHead: boolean } = { requireCurrentHead: true },
+  ): ArtifactRevisionRecord {
+      if (!this.db.isTransaction) throw new Error("Artifact Revision creation requires a transaction");
       const artifact = this.requireArtifact(input.artifactId);
       const track = this.requireTrack(input.trackId);
       if (artifact.archivedAt !== null) throw new WorkspaceGraphValidationError(`Artifact ${artifact.id} is archived`);
@@ -3772,13 +5006,24 @@ export class WorkspaceStore {
       if (artifact.activeTrackId !== track.id || track.artifactId !== artifact.id) {
         throw new WorkspaceGraphValidationError(`Artifact Revision must target Artifact ${artifact.id}'s active Track`);
       }
-      this.guardPointer({
-        pointer: "artifact-head",
-        workspaceId: artifact.workspaceId,
-        ownerId: track.id,
-        expectedId: input.parentRevisionId,
-        actualId: track.headRevisionId,
-      });
+      if (policy.requireCurrentHead) {
+        this.guardPointer({
+          pointer: "artifact-head",
+          workspaceId: artifact.workspaceId,
+          ownerId: track.id,
+          expectedId: input.parentRevisionId,
+          actualId: track.headRevisionId,
+        });
+      } else if (input.parentRevisionId !== null) {
+        const parent = this.requireArtifactRevision(input.parentRevisionId);
+        if (parent.workspaceId !== artifact.workspaceId
+          || parent.artifactId !== artifact.id
+          || parent.trackId !== track.id) {
+          throw new WorkspaceGraphValidationError(
+            "A detached Artifact candidate parent must be a sealed Revision on the same Workspace Artifact Track",
+          );
+        }
+      }
       const kernel = this.requireKernelRevision(input.kernelRevisionId);
       if (kernel.workspaceId !== artifact.workspaceId) {
         throw new WorkspaceGraphValidationError("Artifact Revision Kernel belongs to another Workspace");
@@ -3874,7 +5119,6 @@ export class WorkspaceStore {
         throw new WorkspaceGraphValidationError(`Artifact Revision ${revisionId} could not be sealed`);
       }
       return this.requireArtifactRevision(revisionId);
-    });
   }
 
   publishArtifactRevision(
@@ -3882,7 +5126,15 @@ export class WorkspaceStore {
     unsafeExpected: ArtifactPublicationExpectation,
   ): WorkspaceSnapshotRecord {
     const expected = normalizeArtifactPublicationExpectation(unsafeExpected);
-    return this.transactionImmediate(() => {
+    return this.transactionImmediate(() => this.publishArtifactRevisionInTransaction(revisionId, expected));
+  }
+
+  private publishArtifactRevisionInTransaction(
+    revisionId: string,
+    expected: ArtifactPublicationExpectation,
+    attribution: { planId?: string; taskId?: string } = {},
+  ): WorkspaceSnapshotRecord {
+      if (!this.db.isTransaction) throw new Error("Artifact Revision publication requires a transaction");
       const revision = this.requireArtifactRevision(revisionId);
       const artifact = this.requireArtifact(revision.artifactId);
       const track = this.requireTrack(revision.trackId);
@@ -3949,6 +5201,7 @@ export class WorkspaceStore {
           kind: "artifact-publication",
           revisionId: revision.id,
           ...(revision.producedByRunId === null ? {} : { runId: revision.producedByRunId }),
+          ...attribution,
         },
         artifactOverrides: [{
           artifactId: revision.artifactId,
@@ -3980,7 +5233,6 @@ export class WorkspaceStore {
         });
       }
       return snapshot;
-    });
   }
 
   createKernelRevision(unsafeInput: CreateKernelRevisionInput): SharedDesignKernelRevision {
@@ -5253,8 +6505,75 @@ export class WorkspaceStore {
     return successor;
   }
 
+  private replayGenerationTaskAttemptFailureInTransaction(input: {
+    task: GenerationTask;
+    source: GenerationTaskAttempt;
+    failure: FinishGenerationTaskAttemptFailureInput["failure"];
+    failureFenceHash: string;
+  }): FinishGenerationTaskAttemptResult | null {
+    if (!this.db.isTransaction) throw new Error("Generation Task failure replay requires a transaction");
+    const rows = this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND workspace_id = ? AND task_id = ?
+         AND type IN ('task-retry-wait','task-failed')
+       ORDER BY sequence ASC`,
+    ).all(input.task.planId, input.task.workspaceId, input.task.id) as Row[];
+    const events = rows.map(asGenerationPlanEvent).filter((event) => (
+      (event.type === "task-retry-wait" && event.payload.sourceAttempt === input.source.attempt)
+      || (event.type === "task-failed" && event.payload.attempt === input.source.attempt)
+    ));
+    if (events.length === 0) return null;
+    if (events.length !== 1) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${input.task.id}/${input.source.attempt} has ambiguous failure outcomes`,
+      );
+    }
+    const event = events[0]!;
+    if (event.payload.failureFenceHash !== input.failureFenceHash
+      || event.payload.failureClass !== input.failure.failureClass
+      || !isDeepStrictEqual(event.payload.error, input.failure.error)
+      || input.source.failureClass !== input.failure.failureClass
+      || !isDeepStrictEqual(input.source.error, input.failure.error)) {
+      throw new GenerationTaskLeaseFenceError(
+        input.task.id,
+        input.source.attempt,
+        "Attempt failure was already recorded under another fence",
+      );
+    }
+    if (event.type === "task-failed") {
+      if (input.source.status !== "failed" || input.source.nextEligibleAt !== null) {
+        throw new WorkspaceStoreCodecError("Generation Task terminal failure replay is internally inconsistent");
+      }
+      return {
+        status: "failed",
+        sourceAttempt: input.source,
+        successorAttempt: null,
+        nextEligibleAt: null,
+      };
+    }
+    if (input.source.status !== "retryable-failed" || input.source.nextEligibleAt === null
+      || !Number.isSafeInteger(event.payload.successorAttempt)) {
+      throw new WorkspaceStoreCodecError("Generation Task retry failure replay is internally inconsistent");
+    }
+    const successor = this.readGenerationTaskAttemptInTransaction(
+      input.task.id,
+      event.payload.successorAttempt as number,
+    );
+    if (!successor || successor.predecessorAttempt !== input.source.attempt
+      || successor.attemptOrigin !== "same-input-retry") {
+      throw new WorkspaceStoreCodecError("Generation Task failure retry successor is missing or incoherent");
+    }
+    return {
+      status: "retry-wait",
+      sourceAttempt: input.source,
+      successorAttempt: successor,
+      nextEligibleAt: input.source.nextEligibleAt,
+    };
+  }
+
   private blockGenerationTaskDescendantsInTransaction(
     root: GenerationTask,
+    failureClass: GenerationTaskFailureClass,
     error: Record<string, unknown>,
     now: number,
   ): void {
@@ -5351,12 +6670,13 @@ export class WorkspaceStore {
       const blocked = this.db.prepare(
         `UPDATE generation_tasks
          SET status = 'blocked', blocked_reason = ?, blocked_by_task_id = ?,
-             pending_context_policy = NULL, failure_class = 'build-infrastructure', error_json = ?,
+             pending_context_policy = NULL, failure_class = ?, error_json = ?,
              next_eligible_at = NULL, finished_at = ?
          WHERE id = ? AND plan_id = ? AND workspace_id = ? AND status = ?`,
       ).run(
         blockedReason,
         root.id,
+        failureClass,
         canonicalJsonText(error, "blocked Generation Task descendant error"),
         now,
         taskId,
@@ -5377,13 +6697,29 @@ export class WorkspaceStore {
     }
   }
 
-  private terminalizeFailedGenerationPlanIfSettledInTransaction(root: GenerationTask, now: number): void {
+  private terminalizeFailedGenerationPlanIfSettledInTransaction(
+    settledTask: GenerationTask,
+    now: number,
+  ): void {
     const nonterminal = this.db.prepare(
       `SELECT COUNT(*) AS count FROM generation_tasks
        WHERE plan_id = ? AND workspace_id = ?
          AND status NOT IN ('succeeded','failed','blocked','cancelled')`,
-    ).get(root.planId, root.workspaceId) as { count: number };
+    ).get(settledTask.planId, settledTask.workspaceId) as { count: number };
     if (boundarySafeInteger(nonterminal.count, "Generation Plan nonterminal Task count") !== 0) return;
+    const failedRow = this.db.prepare(
+      `SELECT id FROM generation_tasks
+       WHERE plan_id = ? AND workspace_id = ? AND status = 'failed'
+       ORDER BY ordinal ASC, id COLLATE BINARY ASC LIMIT 1`,
+    ).get(settledTask.planId, settledTask.workspaceId) as { id: string } | undefined;
+    if (!failedRow) return;
+    const root = this.readGenerationTaskForExecutionInTransaction(
+      requiredCell(failedRow.id, "failed Generation Task id"),
+    );
+    if (!root || root.planId !== settledTask.planId || root.workspaceId !== settledTask.workspaceId
+      || root.status !== "failed" || root.failureClass === null) {
+      throw new WorkspaceStoreCodecError("Generation Plan failed root is internally inconsistent");
+    }
     const terminalized = this.db.prepare(
       `UPDATE generation_plans SET status = 'failed', finished_at = ?
        WHERE id = ? AND workspace_id = ? AND status IN ('queued','running')`,
@@ -5396,7 +6732,7 @@ export class WorkspaceStore {
       workspaceId: root.workspaceId,
       taskId: null,
       type: "plan-failed",
-      payload: { failedTaskId: root.id, failureClass: "build-infrastructure" },
+      payload: { failedTaskId: root.id, failureClass: root.failureClass },
     });
   }
 
@@ -5509,6 +6845,7 @@ export class WorkspaceStore {
       );
     }
     return {
+      task,
       attempt,
       lease: {
         taskId: executionLease.taskId,
@@ -5578,6 +6915,1497 @@ export class WorkspaceStore {
     if (!allowedStatuses[task.status].includes(attempt.status)) {
       throw new WorkspaceStoreCodecError(
         `Generation Task ${task.id} status ${task.status} does not match current Attempt ${attempt.attempt} status ${attempt.status}`,
+      );
+    }
+  }
+
+  private generationTaskAttemptContextPackHashInTransaction(
+    attempt: GenerationTaskAttempt,
+  ): string | null {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task candidate Context Pack lookup requires a transaction");
+    }
+    if (attempt.contextPackId === null) return null;
+    const pack = this.getContextPack(attempt.workspaceId, attempt.contextPackId);
+    if (!pack) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${attempt.taskId}/${attempt.attempt} Context Pack is not resolvable`,
+      );
+    }
+    return pack.hash;
+  }
+
+  private generationTaskResourceCandidateProvenanceInTransaction(
+    attempt: GenerationTaskAttempt,
+  ): Record<string, unknown> {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task Resource provenance requires a transaction");
+    }
+    return {
+      kind: "generation-task-candidate",
+      workspaceId: attempt.workspaceId,
+      planId: attempt.planId,
+      taskId: attempt.taskId,
+      attempt: attempt.attempt,
+      inputHash: attempt.inputHash,
+      contextPackId: attempt.contextPackId,
+      contextPackHash: this.generationTaskAttemptContextPackHashInTransaction(attempt),
+      kernelRevisionId: attempt.kernelRevisionId,
+    };
+  }
+
+  private replayStagedArtifactCandidateInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+    input: StageGenerationTaskArtifactCandidateInput,
+  ): StageGenerationTaskCandidateResult {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task candidate replay requires a transaction");
+    }
+    const artifactRevision = this.requireRecordedArtifactCandidateInTransaction(task, attempt);
+    const candidateMatches = artifactRevision.sourceCommitHash === input.candidate.sourceCommitHash
+      && artifactRevision.sourceTreeHash === input.candidate.sourceTreeHash
+      && isDeepStrictEqual(artifactRevision.renderSpec, input.candidate.renderSpec)
+      && isDeepStrictEqual(artifactRevision.quality, input.candidate.quality)
+      && isDeepStrictEqual(attempt.candidateEvidence, input.evidence);
+    if (!candidateMatches) {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        `Attempt ${attempt.attempt} candidate already exists with different immutable input`,
+      );
+    }
+    return { attempt, artifactRevision, resourceRevision: null };
+  }
+
+  private replayStagedResourceCandidateInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+    input: StageGenerationTaskResourceCandidateInput,
+  ): StageGenerationTaskResourceCandidateResult {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task Resource candidate replay requires a transaction");
+    }
+    const resourceRevision = this.requireRecordedResourceCandidateInTransaction(task, attempt);
+    const { generationTask: _generationTask, ...adapterProvenance } = resourceRevision.provenance;
+    const candidateMatches = input.candidate.resourceId === resourceRevision.resourceId
+      && input.candidate.revision.revisionId === resourceRevision.id
+      && input.candidate.revision.parentRevisionId === resourceRevision.parentRevisionId
+      && input.candidate.revision.manifestPath === resourceRevision.manifestPath
+      && input.candidate.revision.summary === resourceRevision.summary
+      && isDeepStrictEqual(input.candidate.revision.metadata, resourceRevision.metadata)
+      && input.candidate.revision.checksum === resourceRevision.checksum
+      && isDeepStrictEqual(input.candidate.revision.provenance, adapterProvenance)
+      && (input.candidate.revision.createdByRunId ?? null) === resourceRevision.createdByRunId
+      && isDeepStrictEqual(attempt.candidateEvidence, input.evidence);
+    if (!candidateMatches) {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        `Attempt ${attempt.attempt} candidate already exists with different immutable input`,
+      );
+    }
+    return { attempt, artifactRevision: null, resourceRevision };
+  }
+
+  private requireRecordedArtifactCandidateInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+  ): ArtifactRevisionRecord {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task recorded candidate validation requires a transaction");
+    }
+    if (task.target.type !== "artifact" || attempt.target.type !== "artifact"
+      || attempt.candidateRevisionId === null
+      || attempt.candidateResourceRevisionId !== null
+      || attempt.candidateEvidence === null
+      || attempt.candidateEvidenceHash === null) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} does not retain a coherent Artifact candidate`,
+      );
+    }
+    const artifactRevision = this.requireArtifactRevision(attempt.candidateRevisionId);
+    const contextPackHash = this.generationTaskAttemptContextPackHashInTransaction(attempt);
+    const dependencies = this.listArtifactRevisionDependencies(artifactRevision.id);
+    const resourcePins = this.listArtifactRevisionResourcePins(artifactRevision.id);
+    const expectedDependencies: ArtifactRevisionDependencyRecord[] = attempt.componentPins.map((pin) => ({
+      workspaceId: attempt.workspaceId,
+      ownerArtifactId: attempt.target.id,
+      revisionId: artifactRevision.id,
+      instanceId: pin.instanceId,
+      componentArtifactId: pin.componentArtifactId,
+      componentRevisionId: pin.revisionId,
+      variantKey: pin.variantKey,
+      stateKey: pin.stateKey,
+      sourceLocator: pin.sourceLocator,
+      overrides: pin.overrides,
+      status: pin.status,
+    }));
+    const expectedResourcePins: ArtifactRevisionResourcePinRecord[] = attempt.resourcePins.map((pin) => ({
+      workspaceId: attempt.workspaceId,
+      ownerArtifactId: attempt.target.id,
+      revisionId: artifactRevision.id,
+      resourceId: pin.resourceId,
+      resourceRevisionId: pin.revisionId,
+    }));
+    if (artifactRevision.workspaceId !== attempt.workspaceId
+      || artifactRevision.artifactId !== attempt.target.id
+      || artifactRevision.trackId !== attempt.target.trackId
+      || artifactRevision.parentRevisionId !== attempt.baseRevisionId
+      || artifactRevision.kernelRevisionId !== attempt.kernelRevisionId
+      || artifactRevision.contextPackHash !== contextPackHash
+      || artifactRevision.producedByRunId !== null
+      || artifactRevision.legacyRunId !== null
+      || !isDeepStrictEqual(dependencies, expectedDependencies)
+      || !isDeepStrictEqual(resourcePins, expectedResourcePins)) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} recorded Artifact candidate is not derived from its immutable input`,
+      );
+    }
+    const evidenceHash = generationTaskCandidateEvidenceHash({
+      taskId: task.id,
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      attempt: attempt.attempt,
+      candidateRevisionId: artifactRevision.id,
+      candidateResourceRevisionId: null,
+      candidateEvidence: attempt.candidateEvidence,
+    });
+    if (attempt.candidateEvidenceHash !== evidenceHash) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} candidate evidence hash is inconsistent`,
+      );
+    }
+    validateGenerationTaskArtifactQualityGate({
+      qaProfile: task.qaProfile,
+      plannedFrames: attempt.payload.responsiveFrames ?? [],
+      renderSpec: artifactRevision.renderSpec,
+      quality: artifactRevision.quality,
+      evidence: attempt.candidateEvidence,
+    });
+    this.generationTaskCandidateSourceAttemptInTransaction(attempt);
+    return artifactRevision;
+  }
+
+  private requireRecordedResourceCandidateInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+  ): ResourceRevision {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task recorded Resource candidate validation requires a transaction");
+    }
+    if (task.kind !== "resource" || task.target.type !== "resource" || attempt.target.type !== "resource"
+      || attempt.candidateRevisionId !== null
+      || attempt.candidateResourceRevisionId === null
+      || attempt.candidateEvidence === null
+      || attempt.candidateEvidenceHash === null) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} does not retain a coherent Resource candidate`,
+      );
+    }
+    const resourceRevision = this.requireResourceRevision(attempt.candidateResourceRevisionId);
+    const source = this.generationTaskCandidateSourceAttemptInTransaction(attempt);
+    const expectedGenerationProvenance = this.generationTaskResourceCandidateProvenanceInTransaction(source);
+    if (resourceRevision.workspaceId !== attempt.workspaceId
+      || resourceRevision.resourceId !== attempt.target.id
+      || resourceRevision.parentRevisionId !== attempt.baseRevisionId
+      || resourceRevision.createdByRunId !== null
+      || !isDeepStrictEqual(resourceRevision.provenance.generationTask, expectedGenerationProvenance)) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} recorded Resource candidate is not derived from its immutable input`,
+      );
+    }
+    const evidenceHash = generationTaskCandidateEvidenceHash({
+      taskId: task.id,
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      attempt: attempt.attempt,
+      candidateRevisionId: null,
+      candidateResourceRevisionId: resourceRevision.id,
+      candidateEvidence: attempt.candidateEvidence,
+    });
+    if (attempt.candidateEvidenceHash !== evidenceHash) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} candidate evidence hash is inconsistent`,
+      );
+    }
+    return resourceRevision;
+  }
+
+  private generationTaskCandidateSourceAttemptInTransaction(
+    attempt: GenerationTaskAttempt,
+  ): GenerationTaskAttempt {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task candidate provenance validation requires a transaction");
+    }
+    let source = attempt;
+    const visited = new Set<number>();
+    while (source.executionMode === "publication-only") {
+      if (visited.has(source.attempt)
+        || source.attemptOrigin !== "publication-retry"
+        || source.predecessorAttempt !== source.attempt - 1) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task Attempt ${source.taskId}/${source.attempt} publication lineage is incoherent`,
+        );
+      }
+      visited.add(source.attempt);
+      this.assertGenerationTaskMaterializedEventInTransaction(source);
+      const predecessor = this.readGenerationTaskAttemptInTransaction(
+        source.taskId,
+        source.predecessorAttempt,
+      );
+      if (!predecessor
+        || predecessor.planId !== source.planId
+        || predecessor.workspaceId !== source.workspaceId
+        || predecessor.status !== "needs-rebase"
+        || predecessor.lease !== null
+        || predecessor.finishedAt === null
+        || source.automaticRetryIndex !== predecessor.automaticRetryIndex + 1
+        || source.inputHash === predecessor.inputHash
+        || !isDeepStrictEqual(source.target, predecessor.target)
+        || source.baseRevisionId !== predecessor.baseRevisionId
+        || source.expectedSnapshotId !== predecessor.expectedSnapshotId
+        || source.contextPackId !== predecessor.contextPackId
+        || source.kernelRevisionId !== predecessor.kernelRevisionId
+        || !isDeepStrictEqual(source.payload, predecessor.payload)
+        || !isDeepStrictEqual(source.dependencyOutputs, predecessor.dependencyOutputs)
+        || !isDeepStrictEqual(source.resourcePins, predecessor.resourcePins)
+        || !isDeepStrictEqual(source.componentPins, predecessor.componentPins)
+        || source.retryContextPolicy !== predecessor.retryContextPolicy
+        || source.candidateRevisionId !== predecessor.candidateRevisionId
+        || source.candidateResourceRevisionId !== predecessor.candidateResourceRevisionId
+        || !isDeepStrictEqual(source.candidateEvidence, predecessor.candidateEvidence)) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task Attempt ${source.taskId}/${source.attempt} does not preserve its publication predecessor`,
+        );
+      }
+      source = predecessor;
+    }
+    if (source.executionMode !== "full"
+      || source.candidateRevisionId !== attempt.candidateRevisionId
+      || source.candidateResourceRevisionId !== attempt.candidateResourceRevisionId
+      || !isDeepStrictEqual(source.candidateEvidence, attempt.candidateEvidence)) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task Attempt ${attempt.taskId}/${attempt.attempt} has no full-execution candidate source`,
+      );
+    }
+    this.assertGenerationTaskCandidateReadyEventInTransaction(source);
+    return source;
+  }
+
+  private generationTaskPublicationFenceHash(lease: GenerationTaskAttemptLease): string {
+    return checksum([
+      "dezin-generation-task-publication-fence-v1",
+      lease.taskId,
+      lease.workspaceId,
+      String(lease.attempt),
+      lease.ownerId,
+      lease.leaseToken,
+    ].join("\0"));
+  }
+
+  private generationTaskValidationEvidenceHash(
+    task: GenerationTask,
+    attempt: number,
+    validation: CompleteGenerationTaskValidationInput["validation"],
+  ): string {
+    return checksum(canonicalJsonText({
+      protocol: "dezin-generation-task-validation-evidence-v1",
+      taskId: task.id,
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      attempt,
+      validation,
+    }, "Generation Task validation evidence hash input"));
+  }
+
+  private generationTaskValidationFenceHash(
+    lease: GenerationTaskAttemptLease,
+    evidenceHash: string,
+  ): string {
+    return checksum(canonicalJsonText({
+      protocol: "dezin-generation-task-validation-fence-v1",
+      lease,
+      evidenceHash,
+    }, "Generation Task validation fence input"));
+  }
+
+  private validateGenerationTaskValidationResultInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+    validation: CompleteGenerationTaskValidationInput["validation"],
+  ): void {
+    if (!this.db.isTransaction) throw new Error("Generation Task validation requires a transaction");
+    const evidenceBytes = Buffer.byteLength(
+      canonicalJsonText(validation.evidence, "Generation Task validation evidence"),
+      "utf8",
+    );
+    if (evidenceBytes > Math.min(
+      task.resourceLimits.maxOutputBytes,
+      GENERATION_TASK_VALIDATION_EVIDENCE_MAX_BYTES,
+    )) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} validation evidence exceeds its output budget`,
+      );
+    }
+    const snapshot = this.requireSnapshot(task.workspaceId, attempt.expectedSnapshotId);
+    const artifactRevisions = attempt.dependencyOutputs.flatMap((output) => (
+      output.resultRevisionId === null ? [] : [this.requireArtifactRevision(output.resultRevisionId)]
+    ));
+    const resourceRevisions = attempt.dependencyOutputs.flatMap((output) => (
+      output.resultResourceRevisionId === null
+        ? []
+        : [this.requireResourceRevision(output.resultResourceRevisionId)]
+    ));
+    let expected: CompleteGenerationTaskValidationInput["validation"];
+    try {
+      expected = buildGenerationTaskPrototypeValidationResult({
+        task,
+        attempt,
+        snapshot,
+        artifactRevisions,
+        resourceRevisions,
+      });
+    } catch (error) {
+      if (error instanceof GenerationTaskPrototypeValidationError) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} validation input is invalid: ${error.message}`,
+        );
+      }
+      throw error;
+    }
+    if (!isDeepStrictEqual(validation, expected)) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} validation result diverges from its immutable input`,
+      );
+    }
+  }
+
+  private readGenerationTaskValidationRecordInTransaction(
+    taskId: string,
+    attempt: number,
+  ): GenerationTaskValidationRecord | null {
+    const row = this.db.prepare(
+      `SELECT * FROM generation_task_validation_results
+       WHERE task_id = ? AND attempt = ?`,
+    ).get(taskId, attempt) as Row | undefined;
+    if (!row) return null;
+    const planId = requiredCell(row.plan_id, "Generation Task validation Plan id");
+    const workspaceId = requiredCell(row.workspace_id, "Generation Task validation Workspace id");
+    const snapshotId = requiredCell(row.snapshot_id, "Generation Task validation Snapshot id");
+    const artifactRevisionIdsJson = requiredCell(
+      row.artifact_revision_ids_json,
+      "Generation Task validation Artifact Revision ids",
+    );
+    const resourceRevisionIdsJson = requiredCell(
+      row.resource_revision_ids_json,
+      "Generation Task validation Resource Revision ids",
+    );
+    const evidenceJson = requiredCell(row.evidence_json, "Generation Task validation evidence");
+    const validation = normalizeCompleteGenerationTaskValidationInput({
+      lease: {
+        taskId,
+        workspaceId,
+        attempt,
+        ownerId: "validation-record-read",
+        leaseToken: "validation-record-read",
+      },
+      validation: {
+        snapshotId,
+        graphRevision: row.graph_revision,
+        artifactRevisionIds: parseJsonCell(
+          artifactRevisionIdsJson,
+          "Generation Task validation Artifact Revision ids",
+        ),
+        resourceRevisionIds: parseJsonCell(
+          resourceRevisionIdsJson,
+          "Generation Task validation Resource Revision ids",
+        ),
+        evidence: parseJsonCell(evidenceJson, "Generation Task validation evidence"),
+      },
+    }).validation;
+    if (artifactRevisionIdsJson !== canonicalJsonText(
+      validation.artifactRevisionIds,
+      "Generation Task validation Artifact Revision ids",
+    ) || resourceRevisionIdsJson !== canonicalJsonText(
+      validation.resourceRevisionIds,
+      "Generation Task validation Resource Revision ids",
+    ) || evidenceJson !== canonicalJsonText(
+      validation.evidence,
+      "Generation Task validation evidence",
+    )) {
+      throw new WorkspaceStoreCodecError("Generation Task validation record is not canonical");
+    }
+    const evidenceHash = requiredCell(row.evidence_hash, "Generation Task validation evidence hash");
+    const validationFenceHash = requiredCell(
+      row.validation_fence_hash,
+      "Generation Task validation fence hash",
+    );
+    if (!/^[0-9a-f]{64}$/.test(evidenceHash) || !/^[0-9a-f]{64}$/.test(validationFenceHash)) {
+      throw new WorkspaceStoreCodecError("Generation Task validation hashes are invalid");
+    }
+    return {
+      taskId: requiredCell(row.task_id, "Generation Task validation Task id"),
+      planId,
+      workspaceId,
+      attempt: boundarySafeInteger(row.attempt, "Generation Task validation Attempt", 1),
+      snapshotId: validation.snapshotId,
+      graphRevision: validation.graphRevision,
+      artifactRevisionIds: validation.artifactRevisionIds,
+      resourceRevisionIds: validation.resourceRevisionIds,
+      evidence: validation.evidence,
+      evidenceHash,
+      validationFenceHash,
+      createdAt: boundarySafeInteger(row.created_at, "Generation Task validation creation time"),
+    };
+  }
+
+  private readGenerationTaskValidationOutcomeInTransaction(input: {
+    taskId: string;
+    attempt: number;
+    validationFenceHash: string;
+  }): CompleteGenerationTaskValidationResult {
+    if (!this.db.isTransaction) throw new Error("Generation Task validation outcome requires a transaction");
+    const task = this.readGenerationTaskForExecutionInTransaction(input.taskId);
+    const attempt = this.readGenerationTaskAttemptInTransaction(input.taskId, input.attempt);
+    if (!task || !attempt || task.kind !== "prototype-validation"
+      || task.target.type !== "workspace" || attempt.target.type !== "workspace"
+      || !isDeepStrictEqual(task.target, attempt.target)
+      || task.currentAttempt !== attempt.attempt
+      || task.status !== "succeeded" || attempt.status !== "succeeded"
+      || attempt.executionMode !== "full" || attempt.contextPackId !== null
+      || attempt.lease !== null || attempt.leaseExpiresAt !== null || attempt.heartbeatAt !== null
+      || attempt.finishedAt === null || task.finishedAt !== attempt.finishedAt
+      || task.failureClass !== null || task.error !== null
+      || attempt.failureClass !== null || attempt.error !== null
+      || attempt.candidateRevisionId !== null || attempt.candidateResourceRevisionId !== null
+      || attempt.candidateEvidence !== null || attempt.candidateEvidenceHash !== null
+      || task.resultRevisionId !== null || task.resultResourceRevisionId !== null
+      || task.resultSnapshotId === null || task.resultSnapshotId !== attempt.expectedSnapshotId) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${input.taskId}/${input.attempt} validation outcome is internally inconsistent`,
+      );
+    }
+    this.assertGenerationTaskMaterializedEventInTransaction(attempt);
+    const eventRows = this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND workspace_id = ? AND task_id = ? AND type = 'task-succeeded'
+       ORDER BY sequence ASC`,
+    ).all(task.planId, task.workspaceId, task.id) as Row[];
+    const events = eventRows.map(asGenerationPlanEvent)
+      .filter((event) => event.payload.attempt === attempt.attempt);
+    if (events.length !== 1) {
+      throw new WorkspaceStoreCodecError("Generation Task validation terminal event is missing or ambiguous");
+    }
+    const event = events[0]!;
+    const validation = this.readGenerationTaskValidationRecordInTransaction(
+      task.id,
+      attempt.attempt,
+    );
+    if (!validation) {
+      throw new WorkspaceStoreCodecError("Generation Task validation result record is missing");
+    }
+    if (event.payload.validationFenceHash !== input.validationFenceHash
+      || validation.validationFenceHash !== input.validationFenceHash) {
+      throw new GenerationTaskLeaseFenceError(
+        task.id,
+        attempt.attempt,
+        "Validation replay lease or result is stale",
+      );
+    }
+    const validationResult: CompleteGenerationTaskValidationInput["validation"] = {
+      snapshotId: validation.snapshotId,
+      graphRevision: validation.graphRevision,
+      artifactRevisionIds: validation.artifactRevisionIds,
+      resourceRevisionIds: validation.resourceRevisionIds,
+      evidence: validation.evidence,
+    };
+    this.validateGenerationTaskValidationResultInTransaction(task, attempt, validationResult);
+    const evidenceHash = this.generationTaskValidationEvidenceHash(
+      task,
+      attempt.attempt,
+      validationResult,
+    );
+    const snapshot = this.requireSnapshot(task.workspaceId, validation.snapshotId);
+    if (validation.taskId !== task.id || validation.planId !== task.planId
+      || validation.workspaceId !== task.workspaceId || validation.attempt !== attempt.attempt
+      || validation.createdAt !== attempt.finishedAt || validation.evidenceHash !== evidenceHash) {
+      throw new WorkspaceStoreCodecError("Generation Task validation result record is inconsistent");
+    }
+    if (!isDeepStrictEqual(event.payload, {
+      attempt: attempt.attempt,
+      resultRevisionId: null,
+      resultResourceRevisionId: null,
+      resultSnapshotId: snapshot.id,
+      validatedGraphRevision: validation.graphRevision,
+      validationEvidenceHash: evidenceHash,
+      validationFenceHash: input.validationFenceHash,
+    })) {
+      throw new WorkspaceStoreCodecError("Generation Task validation terminal event is inconsistent");
+    }
+    return {
+      status: "succeeded",
+      task,
+      attempt,
+      snapshot,
+      validation,
+      evidenceHash,
+    };
+  }
+
+  private replayGenerationPlanCheckpointPublicationInTransaction(input: {
+    plan: GenerationPlan;
+    task: GenerationTask;
+    attempt: GenerationTaskAttempt;
+    publicationFenceHash: string;
+  }): PublishGenerationPlanCheckpointResult | null {
+    const succeeded = input.plan.status === "succeeded"
+      && input.task.status === "succeeded"
+      && input.attempt.status === "succeeded";
+    const needsRebase = input.plan.status === "running"
+      && input.task.status === "needs-rebase"
+      && input.attempt.status === "needs-rebase";
+    if (!succeeded && !needsRebase) return null;
+    return this.readGenerationPlanCheckpointPublicationOutcomeInTransaction({
+      taskId: input.task.id,
+      attempt: input.attempt.attempt,
+      publicationFenceHash: input.publicationFenceHash,
+    });
+  }
+
+  private requireGenerationPlanCheckpointValidationAuthorityInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+  ): CompleteGenerationTaskValidationResult {
+    if (!this.db.isTransaction) throw new Error("Checkpoint validation authority requires a transaction");
+    if (task.kind !== "checkpoint" || task.dependencyIds.length !== 1
+      || attempt.dependencyOutputs.length !== 1) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} checkpoint requires one exact validation dependency`,
+      );
+    }
+    const dependencyId = task.dependencyIds[0]!;
+    const output = attempt.dependencyOutputs[0]!;
+    if (output.taskId !== dependencyId || output.resultRevisionId !== null
+      || output.resultResourceRevisionId !== null || output.resultSnapshotId === null) {
+      throw new WorkspaceStoreCodecError("Checkpoint validation dependency output is inconsistent");
+    }
+    const validationTask = this.readGenerationTaskForExecutionInTransaction(dependencyId);
+    if (!validationTask || validationTask.planId !== task.planId
+      || validationTask.workspaceId !== task.workspaceId
+      || validationTask.kind !== "prototype-validation") {
+      throw new WorkspaceStoreCodecError("Checkpoint validation dependency Task is missing or invalid");
+    }
+    const validationAttempt = this.readGenerationTaskAttemptInTransaction(
+      validationTask.id,
+      validationTask.currentAttempt,
+    );
+    if (!validationAttempt) {
+      throw new WorkspaceStoreCodecError("Checkpoint validation dependency Attempt is missing");
+    }
+    const record = this.readGenerationTaskValidationRecordInTransaction(
+      validationTask.id,
+      validationAttempt.attempt,
+    );
+    if (!record) {
+      throw new WorkspaceStoreCodecError("Checkpoint validation dependency result is missing");
+    }
+    const outcome = this.readGenerationTaskValidationOutcomeInTransaction({
+      taskId: validationTask.id,
+      attempt: validationAttempt.attempt,
+      validationFenceHash: record.validationFenceHash,
+    });
+    if (outcome.snapshot.id !== output.resultSnapshotId
+      || outcome.snapshot.id !== attempt.expectedSnapshotId
+      || outcome.snapshot.kernelRevisionId !== attempt.kernelRevisionId
+      || outcome.validation.evidenceHash !== outcome.evidenceHash) {
+      throw new WorkspaceStoreCodecError("Checkpoint validation dependency authority is inconsistent");
+    }
+    return outcome;
+  }
+
+  private isCheckpointSnapshotSemanticallyEquivalent(
+    validated: WorkspaceSnapshotRecord,
+    candidate: WorkspaceSnapshotRecord,
+  ): boolean {
+    const semanticGraph = (snapshot: WorkspaceSnapshotRecord) => ({
+      workspaceId: snapshot.graph.workspaceId,
+      nodes: snapshot.graph.nodes.map(({ name: _name, ...identity }) => identity),
+      edges: snapshot.graph.edges,
+    });
+    return validated.workspaceId === candidate.workspaceId
+      && validated.kernelRevisionId === candidate.kernelRevisionId
+      && isDeepStrictEqual(validated.artifactTracks, candidate.artifactTracks)
+      && isDeepStrictEqual(validated.artifactRevisions, candidate.artifactRevisions)
+      && isDeepStrictEqual(validated.resourceRevisions, candidate.resourceRevisions)
+      && isDeepStrictEqual(semanticGraph(validated), semanticGraph(candidate));
+  }
+
+  private transitionGenerationPlanCheckpointNeedsRebaseInTransaction(input: {
+    plan: GenerationPlan;
+    task: GenerationTask;
+    attempt: GenerationTaskAttempt;
+    live: GenerationTaskExecutionLease;
+    validation: CompleteGenerationTaskValidationResult;
+    conflict: GenerationPlanCheckpointConflict;
+    now: number;
+  }): PublishGenerationPlanCheckpointResult {
+    if (!this.db.isTransaction) throw new Error("Checkpoint publication conflict requires a transaction");
+    const { plan, task, attempt, live, validation, conflict, now } = input;
+    if (plan.id !== task.planId || plan.workspaceId !== task.workspaceId || plan.status !== "running") {
+      throw new WorkspaceStoreCodecError("Checkpoint Plan changed during rebase disposition");
+    }
+    const publicationFenceHash = this.generationTaskPublicationFenceHash({
+      taskId: task.id,
+      workspaceId: task.workspaceId,
+      attempt: attempt.attempt,
+      ownerId: live.ownerId,
+      leaseToken: live.leaseToken,
+    });
+    const error = {
+      code: "generation-plan-checkpoint-validation-drift",
+      pointer: conflict.pointer,
+      expectedId: conflict.expectedId,
+      actualId: conflict.actualId,
+      validatedSnapshotId: validation.snapshot.id,
+      validationEvidenceHash: validation.evidenceHash,
+    };
+    const errorJson = canonicalJsonText(error, "Generation Plan checkpoint validation drift");
+    const finishedAttempt = this.db.prepare(
+      `UPDATE generation_task_attempts
+       SET status = 'needs-rebase', blocked_reason = NULL,
+           failure_class = 'publication-conflict', error_json = ?, next_eligible_at = NULL,
+           owner_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+           heartbeat_at = NULL, finished_at = ?
+       WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+         AND status = 'running' AND execution_mode = 'full'
+         AND candidate_revision_id IS NULL AND candidate_resource_revision_id IS NULL
+         AND candidate_evidence_json IS NULL AND candidate_evidence_hash IS NULL
+         AND owner_id = ? AND lease_token = ? AND lease_expires_at = ? AND lease_expires_at > ?`,
+    ).run(
+      errorJson,
+      now,
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attempt.attempt,
+      live.ownerId,
+      live.leaseToken,
+      live.leaseExpiresAt,
+      now,
+    );
+    if (Number(finishedAttempt.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Checkpoint Attempt changed during rebase disposition");
+    }
+    const stagedTask = this.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'needs-rebase', blocked_reason = NULL, blocked_by_task_id = NULL,
+           pending_context_policy = NULL, failure_class = 'publication-conflict', error_json = ?,
+           next_eligible_at = NULL, finished_at = NULL
+       WHERE id = ? AND plan_id = ? AND workspace_id = ?
+         AND current_attempt = ? AND status = 'running'
+         AND result_revision_id IS NULL AND result_resource_revision_id IS NULL
+         AND result_snapshot_id IS NULL`,
+    ).run(errorJson, task.id, task.planId, task.workspaceId, attempt.attempt);
+    if (Number(stagedTask.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Checkpoint Task changed during rebase disposition");
+    }
+    this.releaseExactGenerationTaskClaimsInTransaction(task, attempt.attempt, live);
+    this.appendGenerationPlanEventInTransaction({
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      type: "task-needs-rebase",
+      payload: {
+        attempt: attempt.attempt,
+        pointer: conflict.pointer,
+        expectedId: conflict.expectedId,
+        actualId: conflict.actualId,
+        validatedSnapshotId: validation.snapshot.id,
+        validationEvidenceHash: validation.evidenceHash,
+        publicationFenceHash,
+      },
+    });
+    return this.readGenerationPlanCheckpointPublicationOutcomeInTransaction({
+      taskId: task.id,
+      attempt: attempt.attempt,
+      publicationFenceHash,
+    });
+  }
+
+  private readGenerationPlanCheckpointPublicationOutcomeInTransaction(input: {
+    taskId: string;
+    attempt: number;
+    publicationFenceHash: string;
+  }): PublishGenerationPlanCheckpointResult {
+    if (!this.db.isTransaction) throw new Error("Generation Plan checkpoint outcome requires a transaction");
+    const task = this.readGenerationTaskForExecutionInTransaction(input.taskId);
+    const attempt = this.readGenerationTaskAttemptInTransaction(input.taskId, input.attempt);
+    if (!task || !attempt || task.kind !== "checkpoint" || task.target.type !== "workspace"
+      || attempt.target.type !== "workspace" || !isDeepStrictEqual(task.target, attempt.target)
+      || task.currentAttempt !== input.attempt || attempt.executionMode !== "full"
+      || attempt.lease !== null || attempt.leaseExpiresAt !== null || attempt.heartbeatAt !== null
+      || attempt.finishedAt === null
+      || attempt.candidateRevisionId !== null || attempt.candidateResourceRevisionId !== null
+      || attempt.candidateEvidence !== null || attempt.candidateEvidenceHash !== null
+      || task.resultRevisionId !== null || task.resultResourceRevisionId !== null
+      || task.planId !== attempt.planId || task.workspaceId !== attempt.workspaceId) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${input.taskId}/${input.attempt} checkpoint outcome is internally inconsistent`,
+      );
+    }
+    const planRow = this.db.prepare(
+      "SELECT * FROM generation_plans WHERE id = ? AND workspace_id = ?",
+    ).get(task.planId, task.workspaceId) as Row | undefined;
+    if (!planRow) throw new WorkspaceStoreCodecError("Checkpoint Generation Plan disappeared");
+    const plan = asGenerationPlan(planRow);
+    const validationAuthority = this.requireGenerationPlanCheckpointValidationAuthorityInTransaction(
+      task,
+      attempt,
+    );
+    if (task.status === "needs-rebase" && attempt.status === "needs-rebase") {
+      const error = attempt.error;
+      const conflict = error?.pointer === "active-snapshot"
+        && typeof error.expectedId === "string" && typeof error.actualId === "string"
+        ? {
+            pointer: error.pointer,
+            expectedId: error.expectedId,
+            actualId: error.actualId,
+          } satisfies GenerationPlanCheckpointConflict
+        : null;
+      const events = (this.db.prepare(
+        `SELECT * FROM generation_plan_events
+         WHERE plan_id = ? AND workspace_id = ? AND task_id = ? AND type = 'task-needs-rebase'
+         ORDER BY sequence ASC`,
+      ).all(task.planId, task.workspaceId, task.id) as Row[]).map(asGenerationPlanEvent)
+        .filter((event) => event.payload.attempt === attempt.attempt);
+      if (conflict === null || plan.status !== "running" || plan.finishedAt !== null
+        || task.finishedAt !== null || task.failureClass !== "publication-conflict"
+        || attempt.failureClass !== "publication-conflict" || !isDeepStrictEqual(task.error, error)
+        || task.resultSnapshotId !== null || events.length !== 1
+        || !isDeepStrictEqual(error, {
+          code: "generation-plan-checkpoint-validation-drift",
+          pointer: conflict.pointer,
+          expectedId: conflict.expectedId,
+          actualId: conflict.actualId,
+          validatedSnapshotId: validationAuthority.snapshot.id,
+          validationEvidenceHash: validationAuthority.evidenceHash,
+        })
+        || !isDeepStrictEqual(events[0]?.payload, {
+          attempt: attempt.attempt,
+          pointer: conflict.pointer,
+          expectedId: conflict.expectedId,
+          actualId: conflict.actualId,
+          validatedSnapshotId: validationAuthority.snapshot.id,
+          validationEvidenceHash: validationAuthority.evidenceHash,
+          publicationFenceHash: input.publicationFenceHash,
+        })) {
+        throw new WorkspaceStoreCodecError("Generation Plan checkpoint rebase outcome is inconsistent");
+      }
+      return {
+        status: "needs-rebase",
+        task,
+        attempt,
+        plan,
+        snapshot: null,
+        conflict,
+      };
+    }
+    if (task.status !== "succeeded" || attempt.status !== "succeeded"
+      || task.resultSnapshotId === null || task.finishedAt !== attempt.finishedAt
+      || task.failureClass !== null || task.error !== null
+      || attempt.failureClass !== null || attempt.error !== null) {
+      throw new WorkspaceStoreCodecError("Generation Plan checkpoint terminal status is inconsistent");
+    }
+    if (plan.status !== "succeeded" || plan.finishedAt !== attempt.finishedAt) {
+      throw new WorkspaceStoreCodecError("Checkpoint Generation Plan terminal state is inconsistent");
+    }
+    const snapshot = this.requireSnapshot(task.workspaceId, task.resultSnapshotId);
+    if (snapshot.parentSnapshotId === null) {
+      throw new WorkspaceStoreCodecError("Checkpoint Snapshot must have an immutable parent");
+    }
+    const parent = this.requireSnapshot(task.workspaceId, snapshot.parentSnapshotId);
+    const workspace = this.requireWorkspaceById(task.workspaceId);
+    if (workspace.activeSnapshotId !== snapshot.id
+      || snapshot.sequence !== parent.sequence + 1
+      || snapshot.reason !== "plan-checkpoint"
+      || snapshot.createdByRunId !== null
+      || !isDeepStrictEqual(snapshot.provenance, {
+        kind: "plan-checkpoint",
+        proposalId: plan.proposalId,
+        planId: plan.id,
+        checkpointId: task.id,
+        validatedSnapshotId: validationAuthority.snapshot.id,
+        validationEvidenceHash: validationAuthority.evidenceHash,
+      })
+      || snapshot.graphRevision !== parent.graphRevision
+      || snapshot.kernelRevisionId !== parent.kernelRevisionId
+      || !isDeepStrictEqual(snapshot.graph, parent.graph)
+      || !isDeepStrictEqual(snapshot.artifactTracks, parent.artifactTracks)
+      || !isDeepStrictEqual(snapshot.artifactRevisions, parent.artifactRevisions)
+      || !isDeepStrictEqual(snapshot.resourceRevisions, parent.resourceRevisions)) {
+      throw new WorkspaceStoreCodecError("Generation Plan checkpoint Snapshot is not an exact active child");
+    }
+    const taskEventRows = this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND workspace_id = ? AND task_id = ? AND type = 'task-succeeded'
+       ORDER BY sequence ASC`,
+    ).all(task.planId, task.workspaceId, task.id) as Row[];
+    const taskEvents = taskEventRows.map(asGenerationPlanEvent)
+      .filter((event) => event.payload.attempt === attempt.attempt);
+    const planEventRows = this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND workspace_id = ? AND task_id IS NULL AND type = 'plan-succeeded'
+       ORDER BY sequence ASC`,
+    ).all(task.planId, task.workspaceId) as Row[];
+    const planEvents = planEventRows.map(asGenerationPlanEvent)
+      .filter((event) => event.payload.checkpointId === task.id);
+    if (taskEvents.length !== 1 || planEvents.length !== 1) {
+      throw new WorkspaceStoreCodecError("Generation Plan checkpoint terminal events are missing or ambiguous");
+    }
+    const taskEvent = taskEvents[0]!;
+    const planEvent = planEvents[0]!;
+    if (taskEvent.payload.publicationFenceHash !== input.publicationFenceHash) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Checkpoint replay lease is stale");
+    }
+    if (!isDeepStrictEqual(taskEvent.payload, {
+      attempt: attempt.attempt,
+      resultRevisionId: null,
+      resultResourceRevisionId: null,
+      resultSnapshotId: snapshot.id,
+      validatedSnapshotId: validationAuthority.snapshot.id,
+      validationEvidenceHash: validationAuthority.evidenceHash,
+      publicationFenceHash: input.publicationFenceHash,
+    }) || !isDeepStrictEqual(planEvent.payload, {
+      checkpointId: task.id,
+      resultSnapshotId: snapshot.id,
+      validatedSnapshotId: validationAuthority.snapshot.id,
+      validationEvidenceHash: validationAuthority.evidenceHash,
+    }) || taskEvent.sequence + 1 !== planEvent.sequence) {
+      throw new WorkspaceStoreCodecError("Generation Plan checkpoint terminal event payload is inconsistent");
+    }
+    return {
+      status: "succeeded",
+      task,
+      attempt,
+      plan,
+      snapshot,
+      conflict: null,
+    };
+  }
+
+  private completeGenerationTaskCandidatePublicationInTransaction(input: {
+    task: GenerationTask;
+    attempt: GenerationTaskAttempt;
+    artifactRevision: ArtifactRevisionRecord;
+    snapshot: WorkspaceSnapshotRecord;
+    live: GenerationTaskExecutionLease;
+    now: number;
+  }): AnyPublishGenerationTaskCandidateResult {
+    if (!this.db.isTransaction) throw new Error("Generation Task publication completion requires a transaction");
+    const { task, attempt, artifactRevision, snapshot, live, now } = input;
+    const finishedAttempt = this.db.prepare(
+      `UPDATE generation_task_attempts
+       SET status = 'succeeded', blocked_reason = NULL, failure_class = NULL, error_json = NULL,
+           next_eligible_at = NULL, owner_id = NULL, lease_token = NULL,
+           lease_expires_at = NULL, heartbeat_at = NULL, finished_at = ?
+       WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+         AND status = ? AND execution_mode = ? AND candidate_revision_id = ?
+         AND candidate_resource_revision_id IS NULL AND candidate_evidence_hash = ?
+         AND owner_id = ? AND lease_token = ? AND lease_expires_at = ? AND lease_expires_at > ?`,
+    ).run(
+      now,
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attempt.attempt,
+      attempt.executionMode === "publication-only" ? "running" : "candidate-ready",
+      attempt.executionMode,
+      artifactRevision.id,
+      attempt.candidateEvidenceHash,
+      live.ownerId,
+      live.leaseToken,
+      live.leaseExpiresAt,
+      now,
+    );
+    if (Number(finishedAttempt.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Attempt changed during publication");
+    }
+    const finishedTask = this.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'succeeded', blocked_reason = NULL, blocked_by_task_id = NULL,
+           pending_context_policy = NULL, failure_class = NULL, error_json = NULL,
+           next_eligible_at = NULL, result_revision_id = ?, result_resource_revision_id = NULL,
+           result_snapshot_id = ?, finished_at = ?
+       WHERE id = ? AND plan_id = ? AND workspace_id = ?
+         AND current_attempt = ? AND status = ?
+         AND result_revision_id IS NULL AND result_resource_revision_id IS NULL
+         AND result_snapshot_id IS NULL`,
+    ).run(
+      artifactRevision.id,
+      snapshot.id,
+      now,
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attempt.attempt,
+      attempt.executionMode === "publication-only" ? "running" : "candidate-ready",
+    );
+    if (Number(finishedTask.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Task changed during publication");
+    }
+    this.releaseExactGenerationTaskClaimsInTransaction(task, attempt.attempt, live);
+    const publicationFenceHash = this.generationTaskPublicationFenceHash({
+      taskId: task.id,
+      workspaceId: task.workspaceId,
+      attempt: attempt.attempt,
+      ownerId: live.ownerId,
+      leaseToken: live.leaseToken,
+    });
+    this.appendGenerationPlanEventInTransaction({
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      type: "task-succeeded",
+      payload: {
+        attempt: attempt.attempt,
+        resultRevisionId: artifactRevision.id,
+        resultResourceRevisionId: null,
+        resultSnapshotId: snapshot.id,
+        candidateEvidenceHash: attempt.candidateEvidenceHash,
+        publicationFenceHash,
+      },
+    });
+    this.terminalizeFailedGenerationPlanIfSettledInTransaction(task, now);
+    return this.readGenerationTaskCandidatePublicationOutcomeInTransaction(
+      task.id,
+      attempt.attempt,
+      publicationFenceHash,
+    );
+  }
+
+  private completeGenerationTaskResourceCandidatePublicationInTransaction(input: {
+    task: GenerationTask;
+    attempt: GenerationTaskAttempt;
+    resourceRevision: ResourceRevision;
+    snapshot: WorkspaceSnapshotRecord;
+    live: GenerationTaskExecutionLease;
+    now: number;
+  }): AnyPublishGenerationTaskCandidateResult {
+    if (!this.db.isTransaction) throw new Error("Generation Task Resource publication completion requires a transaction");
+    const { task, attempt, resourceRevision, snapshot, live, now } = input;
+    const expectedStatus = attempt.executionMode === "publication-only" ? "running" : "candidate-ready";
+    const finishedAttempt = this.db.prepare(
+      `UPDATE generation_task_attempts
+       SET status = 'succeeded', blocked_reason = NULL, failure_class = NULL, error_json = NULL,
+           next_eligible_at = NULL, owner_id = NULL, lease_token = NULL,
+           lease_expires_at = NULL, heartbeat_at = NULL, finished_at = ?
+       WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+         AND status = ? AND execution_mode = ? AND candidate_revision_id IS NULL
+         AND candidate_resource_revision_id = ? AND candidate_evidence_hash = ?
+         AND owner_id = ? AND lease_token = ? AND lease_expires_at = ? AND lease_expires_at > ?`,
+    ).run(
+      now,
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attempt.attempt,
+      expectedStatus,
+      attempt.executionMode,
+      resourceRevision.id,
+      attempt.candidateEvidenceHash,
+      live.ownerId,
+      live.leaseToken,
+      live.leaseExpiresAt,
+      now,
+    );
+    if (Number(finishedAttempt.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Attempt changed during Resource publication");
+    }
+    const finishedTask = this.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'succeeded', blocked_reason = NULL, blocked_by_task_id = NULL,
+           pending_context_policy = NULL, failure_class = NULL, error_json = NULL,
+           next_eligible_at = NULL, result_revision_id = NULL, result_resource_revision_id = ?,
+           result_snapshot_id = ?, finished_at = ?
+       WHERE id = ? AND plan_id = ? AND workspace_id = ?
+         AND current_attempt = ? AND status = ?
+         AND result_revision_id IS NULL AND result_resource_revision_id IS NULL
+         AND result_snapshot_id IS NULL`,
+    ).run(
+      resourceRevision.id,
+      snapshot.id,
+      now,
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attempt.attempt,
+      expectedStatus,
+    );
+    if (Number(finishedTask.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Task changed during Resource publication");
+    }
+    this.releaseExactGenerationTaskClaimsInTransaction(task, attempt.attempt, live);
+    const publicationFenceHash = this.generationTaskPublicationFenceHash({
+      taskId: task.id,
+      workspaceId: task.workspaceId,
+      attempt: attempt.attempt,
+      ownerId: live.ownerId,
+      leaseToken: live.leaseToken,
+    });
+    this.appendGenerationPlanEventInTransaction({
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      type: "task-succeeded",
+      payload: {
+        attempt: attempt.attempt,
+        resultRevisionId: null,
+        resultResourceRevisionId: resourceRevision.id,
+        resultSnapshotId: snapshot.id,
+        candidateEvidenceHash: attempt.candidateEvidenceHash,
+        publicationFenceHash,
+      },
+    });
+    this.terminalizeFailedGenerationPlanIfSettledInTransaction(task, now);
+    return this.readGenerationTaskCandidatePublicationOutcomeInTransaction(
+      task.id,
+      attempt.attempt,
+      publicationFenceHash,
+    );
+  }
+
+  private transitionGenerationTaskCandidateNeedsRebaseInTransaction(input: {
+    task: GenerationTask;
+    attempt: GenerationTaskAttempt;
+    artifactRevision: ArtifactRevisionRecord;
+    live: GenerationTaskExecutionLease;
+    conflict: GenerationTaskPublicationConflict;
+    now: number;
+  }): AnyPublishGenerationTaskCandidateResult {
+    if (!this.db.isTransaction) throw new Error("Generation Task publication conflict requires a transaction");
+    const { task, attempt, artifactRevision, live, conflict, now } = input;
+    const error = {
+      code: "generation-task-publication-conflict",
+      pointer: conflict.pointer,
+      expectedId: conflict.expectedId,
+      actualId: conflict.actualId,
+      candidateRevisionId: artifactRevision.id,
+      candidateResourceRevisionId: null,
+      candidateEvidenceHash: attempt.candidateEvidenceHash,
+    };
+    const errorJson = canonicalJsonText(error, "Generation Task publication conflict");
+    const finishedAttempt = this.db.prepare(
+      `UPDATE generation_task_attempts
+       SET status = 'needs-rebase', blocked_reason = NULL,
+           failure_class = 'publication-conflict', error_json = ?, next_eligible_at = NULL,
+           owner_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+           heartbeat_at = NULL, finished_at = ?
+       WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+         AND status = ? AND execution_mode = ? AND candidate_revision_id = ?
+         AND candidate_resource_revision_id IS NULL AND candidate_evidence_hash = ?
+         AND owner_id = ? AND lease_token = ? AND lease_expires_at = ? AND lease_expires_at > ?`,
+    ).run(
+      errorJson,
+      now,
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attempt.attempt,
+      attempt.executionMode === "publication-only" ? "running" : "candidate-ready",
+      attempt.executionMode,
+      artifactRevision.id,
+      attempt.candidateEvidenceHash,
+      live.ownerId,
+      live.leaseToken,
+      live.leaseExpiresAt,
+      now,
+    );
+    if (Number(finishedAttempt.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Attempt changed during conflict disposition");
+    }
+    const stagedTask = this.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'needs-rebase', blocked_reason = NULL, blocked_by_task_id = NULL,
+           pending_context_policy = NULL, failure_class = 'publication-conflict', error_json = ?,
+           next_eligible_at = NULL, finished_at = NULL
+       WHERE id = ? AND plan_id = ? AND workspace_id = ?
+         AND current_attempt = ? AND status = ?
+         AND result_revision_id IS NULL AND result_resource_revision_id IS NULL
+         AND result_snapshot_id IS NULL`,
+    ).run(
+      errorJson,
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attempt.attempt,
+      attempt.executionMode === "publication-only" ? "running" : "candidate-ready",
+    );
+    if (Number(stagedTask.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Task changed during conflict disposition");
+    }
+    this.releaseExactGenerationTaskClaimsInTransaction(task, attempt.attempt, live);
+    const publicationFenceHash = this.generationTaskPublicationFenceHash({
+      taskId: task.id,
+      workspaceId: task.workspaceId,
+      attempt: attempt.attempt,
+      ownerId: live.ownerId,
+      leaseToken: live.leaseToken,
+    });
+    this.appendGenerationPlanEventInTransaction({
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      type: "task-needs-rebase",
+      payload: {
+        attempt: attempt.attempt,
+        pointer: conflict.pointer,
+        expectedId: conflict.expectedId,
+        actualId: conflict.actualId,
+        candidateRevisionId: artifactRevision.id,
+        candidateResourceRevisionId: null,
+        candidateEvidenceHash: attempt.candidateEvidenceHash,
+        publicationFenceHash,
+      },
+    });
+    return this.readGenerationTaskCandidatePublicationOutcomeInTransaction(
+      task.id,
+      attempt.attempt,
+      publicationFenceHash,
+    );
+  }
+
+  private transitionGenerationTaskResourceCandidateNeedsRebaseInTransaction(input: {
+    task: GenerationTask;
+    attempt: GenerationTaskAttempt;
+    resourceRevision: ResourceRevision;
+    live: GenerationTaskExecutionLease;
+    conflict: GenerationTaskPublicationConflict;
+    now: number;
+  }): AnyPublishGenerationTaskCandidateResult {
+    if (!this.db.isTransaction) throw new Error("Generation Task Resource publication conflict requires a transaction");
+    const { task, attempt, resourceRevision, live, conflict, now } = input;
+    const error = {
+      code: "generation-task-publication-conflict",
+      pointer: conflict.pointer,
+      expectedId: conflict.expectedId,
+      actualId: conflict.actualId,
+      candidateRevisionId: null,
+      candidateResourceRevisionId: resourceRevision.id,
+      candidateEvidenceHash: attempt.candidateEvidenceHash,
+    };
+    const errorJson = canonicalJsonText(error, "Generation Task Resource publication conflict");
+    const expectedStatus = attempt.executionMode === "publication-only" ? "running" : "candidate-ready";
+    const finishedAttempt = this.db.prepare(
+      `UPDATE generation_task_attempts
+       SET status = 'needs-rebase', blocked_reason = NULL,
+           failure_class = 'publication-conflict', error_json = ?, next_eligible_at = NULL,
+           owner_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+           heartbeat_at = NULL, finished_at = ?
+       WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+         AND status = ? AND execution_mode = ? AND candidate_revision_id IS NULL
+         AND candidate_resource_revision_id = ? AND candidate_evidence_hash = ?
+         AND owner_id = ? AND lease_token = ? AND lease_expires_at = ? AND lease_expires_at > ?`,
+    ).run(
+      errorJson,
+      now,
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attempt.attempt,
+      expectedStatus,
+      attempt.executionMode,
+      resourceRevision.id,
+      attempt.candidateEvidenceHash,
+      live.ownerId,
+      live.leaseToken,
+      live.leaseExpiresAt,
+      now,
+    );
+    if (Number(finishedAttempt.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(
+        task.id,
+        attempt.attempt,
+        "Attempt changed during Resource conflict disposition",
+      );
+    }
+    const stagedTask = this.db.prepare(
+      `UPDATE generation_tasks
+       SET status = 'needs-rebase', blocked_reason = NULL, blocked_by_task_id = NULL,
+           pending_context_policy = NULL, failure_class = 'publication-conflict', error_json = ?,
+           next_eligible_at = NULL, finished_at = NULL
+       WHERE id = ? AND plan_id = ? AND workspace_id = ?
+         AND current_attempt = ? AND status = ?
+         AND result_revision_id IS NULL AND result_resource_revision_id IS NULL
+         AND result_snapshot_id IS NULL`,
+    ).run(
+      errorJson,
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attempt.attempt,
+      expectedStatus,
+    );
+    if (Number(stagedTask.changes) !== 1) {
+      throw new GenerationTaskLeaseFenceError(
+        task.id,
+        attempt.attempt,
+        "Task changed during Resource conflict disposition",
+      );
+    }
+    this.releaseExactGenerationTaskClaimsInTransaction(task, attempt.attempt, live);
+    const publicationFenceHash = this.generationTaskPublicationFenceHash({
+      taskId: task.id,
+      workspaceId: task.workspaceId,
+      attempt: attempt.attempt,
+      ownerId: live.ownerId,
+      leaseToken: live.leaseToken,
+    });
+    this.appendGenerationPlanEventInTransaction({
+      planId: task.planId,
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      type: "task-needs-rebase",
+      payload: {
+        attempt: attempt.attempt,
+        pointer: conflict.pointer,
+        expectedId: conflict.expectedId,
+        actualId: conflict.actualId,
+        candidateRevisionId: null,
+        candidateResourceRevisionId: resourceRevision.id,
+        candidateEvidenceHash: attempt.candidateEvidenceHash,
+        publicationFenceHash,
+      },
+    });
+    return this.readGenerationTaskCandidatePublicationOutcomeInTransaction(
+      task.id,
+      attempt.attempt,
+      publicationFenceHash,
+    );
+  }
+
+  private releaseExactGenerationTaskClaimsInTransaction(
+    task: GenerationTask,
+    attemptNumber: number,
+    live: GenerationTaskExecutionLease,
+  ): void {
+    const deleted = this.db.prepare(
+      `DELETE FROM generation_task_claims
+       WHERE task_id = ? AND plan_id = ? AND workspace_id = ? AND attempt = ?
+         AND owner_id = ? AND lease_token = ? AND lease_expires_at = ?`,
+    ).run(
+      task.id,
+      task.planId,
+      task.workspaceId,
+      attemptNumber,
+      live.ownerId,
+      live.leaseToken,
+      live.leaseExpiresAt,
+    );
+    if (Number(deleted.changes) !== live.claims.length) {
+      throw new WorkspaceStoreCodecError("Generation Task publication did not release its exact claim set");
+    }
+  }
+
+  private replayGenerationTaskCandidatePublicationInTransaction(
+    task: GenerationTask,
+    attempt: GenerationTaskAttempt,
+    lease: GenerationTaskAttemptLease,
+  ): AnyPublishGenerationTaskCandidateResult | null {
+    const isSucceeded = task.status === "succeeded" && attempt.status === "succeeded";
+    const needsRebase = task.status === "needs-rebase" && attempt.status === "needs-rebase";
+    if (!isSucceeded && !needsRebase) return null;
+    return this.readGenerationTaskCandidatePublicationOutcomeInTransaction(
+      task.id,
+      attempt.attempt,
+      this.generationTaskPublicationFenceHash(lease),
+    );
+  }
+
+  private readGenerationTaskCandidatePublicationOutcomeInTransaction(
+    taskId: string,
+    attemptNumber: number,
+    publicationFenceHash: string,
+  ): AnyPublishGenerationTaskCandidateResult {
+    if (!this.db.isTransaction) throw new Error("Generation Task publication outcome requires a transaction");
+    const task = this.readGenerationTaskForExecutionInTransaction(taskId);
+    const attempt = this.readGenerationTaskAttemptInTransaction(taskId, attemptNumber);
+    if (!task || !attempt || task.currentAttempt !== attemptNumber
+      || task.planId !== attempt.planId || task.workspaceId !== attempt.workspaceId
+      || attempt.lease !== null || attempt.leaseExpiresAt !== null || attempt.heartbeatAt !== null
+      || attempt.finishedAt === null) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${taskId}/${attemptNumber} publication outcome is internally inconsistent`,
+      );
+    }
+    const artifactRevision = task.target.type === "artifact"
+      ? this.requireRecordedArtifactCandidateInTransaction(task, attempt)
+      : null;
+    const resourceRevision = task.target.type === "resource"
+      ? this.requireRecordedResourceCandidateInTransaction(task, attempt)
+      : null;
+    if (artifactRevision === null && resourceRevision === null) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} has no recorded publishable candidate`,
+      );
+    }
+    const candidateRevisionId = artifactRevision?.id ?? null;
+    const candidateResourceRevisionId = resourceRevision?.id ?? null;
+    const rows = this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND task_id = ? AND type IN ('task-succeeded','task-needs-rebase')
+       ORDER BY sequence ASC`,
+    ).all(task.planId, task.id) as Row[];
+    const outcomeEvents = rows.map(asGenerationPlanEvent)
+      .filter((event) => event.payload.attempt === attempt.attempt);
+    if (outcomeEvents.length !== 1) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} does not match one publication outcome event`,
+      );
+    }
+    const event = outcomeEvents[0]!;
+    if (event.payload.publicationFenceHash !== publicationFenceHash) {
+      throw new GenerationTaskLeaseFenceError(task.id, attempt.attempt, "Publication replay lease is stale");
+    }
+    if (task.status === "succeeded" && attempt.status === "succeeded") {
+      if (task.resultRevisionId !== candidateRevisionId
+        || task.resultResourceRevisionId !== candidateResourceRevisionId || task.resultSnapshotId === null
+        || task.failureClass !== null || task.error !== null || task.finishedAt !== attempt.finishedAt
+        || attempt.failureClass !== null || attempt.error !== null
+        || event.type !== "task-succeeded"
+        || !isDeepStrictEqual(event.payload, {
+          attempt: attempt.attempt,
+          resultRevisionId: candidateRevisionId,
+          resultResourceRevisionId: candidateResourceRevisionId,
+          resultSnapshotId: task.resultSnapshotId,
+          candidateEvidenceHash: attempt.candidateEvidenceHash,
+          publicationFenceHash,
+        })) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} succeeded publication is internally inconsistent`,
+        );
+      }
+      const snapshot = this.requireSnapshot(task.workspaceId, task.resultSnapshotId);
+      const exactArtifactSnapshot = artifactRevision !== null
+        && snapshot.reason === "artifact-published"
+        && isDeepStrictEqual(snapshot.provenance, {
+          kind: "artifact-publication",
+          revisionId: artifactRevision.id,
+          planId: task.planId,
+          taskId: task.id,
+        })
+        && snapshot.artifactTracks[artifactRevision.artifactId] === artifactRevision.trackId
+        && snapshot.artifactRevisions[artifactRevision.artifactId] === artifactRevision.id;
+      const exactResourceSnapshot = resourceRevision !== null
+        && snapshot.reason === "resource-published"
+        && isDeepStrictEqual(snapshot.provenance, {
+          kind: "resource-publication",
+          resourceRevisionId: resourceRevision.id,
+          planId: task.planId,
+          taskId: task.id,
+        })
+        && snapshot.resourceRevisions[resourceRevision.resourceId] === resourceRevision.id;
+      if (snapshot.parentSnapshotId !== attempt.expectedSnapshotId
+        || (!exactArtifactSnapshot && !exactResourceSnapshot)) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} publication Snapshot is not exact`,
+        );
+      }
+      return artifactRevision !== null
+        ? {
+            status: "succeeded",
+            task,
+            attempt,
+            artifactRevision,
+            resourceRevision: null,
+            snapshot,
+            conflict: null,
+          }
+        : {
+            status: "succeeded",
+            task,
+            attempt,
+            artifactRevision: null,
+            resourceRevision: resourceRevision!,
+            snapshot,
+            conflict: null,
+          };
+    }
+    if (task.status === "needs-rebase" && attempt.status === "needs-rebase") {
+      const error = attempt.error;
+      const pointer = error?.pointer;
+      const pointerMatchesTarget = pointer === "active-snapshot"
+        || (artifactRevision !== null && pointer === "artifact-head")
+        || (resourceRevision !== null && pointer === "resource-head");
+      const conflict: GenerationTaskPublicationConflict | null = (
+        pointerMatchesTarget
+        && (typeof error?.expectedId === "string" || error?.expectedId === null)
+        && (typeof error?.actualId === "string" || error?.actualId === null)
+      ) ? {
+          pointer,
+          expectedId: error.expectedId,
+          actualId: error.actualId,
+        } : null;
+      if (conflict === null || task.failureClass !== "publication-conflict"
+        || attempt.failureClass !== "publication-conflict" || !isDeepStrictEqual(task.error, error)
+        || task.resultRevisionId !== null || task.resultResourceRevisionId !== null
+        || task.resultSnapshotId !== null || task.finishedAt !== null
+        || event.type !== "task-needs-rebase"
+        || !isDeepStrictEqual(event.payload, {
+          attempt: attempt.attempt,
+          pointer: conflict.pointer,
+          expectedId: conflict.expectedId,
+          actualId: conflict.actualId,
+          candidateRevisionId,
+          candidateResourceRevisionId,
+          candidateEvidenceHash: attempt.candidateEvidenceHash,
+          publicationFenceHash,
+        })) {
+        throw new WorkspaceStoreCodecError(
+          `Generation Task ${task.id}/${attempt.attempt} rebase outcome is internally inconsistent`,
+        );
+      }
+      return artifactRevision !== null
+        ? {
+            status: "needs-rebase",
+            task,
+            attempt,
+            artifactRevision,
+            resourceRevision: null,
+            snapshot: null,
+            conflict,
+          }
+        : {
+            status: "needs-rebase",
+            task,
+            attempt,
+            artifactRevision: null,
+            resourceRevision: resourceRevision!,
+            snapshot: null,
+            conflict,
+          };
+    }
+    throw new WorkspaceStoreCodecError(
+      `Generation Task ${task.id}/${attempt.attempt} publication status is inconsistent`,
+    );
+  }
+
+  private assertGenerationTaskCandidateReadyEventInTransaction(
+    attempt: GenerationTaskAttempt,
+  ): void {
+    const events = (this.db.prepare(
+      `SELECT * FROM generation_plan_events
+       WHERE plan_id = ? AND task_id = ? AND type = 'task-candidate-ready'
+       ORDER BY sequence ASC`,
+    ).all(attempt.planId, attempt.taskId) as Row[]).map(asGenerationPlanEvent)
+      .filter((event) => event.payload.attempt === attempt.attempt);
+    const expectedPayload = {
+      attempt: attempt.attempt,
+      candidateRevisionId: attempt.candidateRevisionId,
+      candidateResourceRevisionId: attempt.candidateResourceRevisionId,
+      candidateEvidenceHash: attempt.candidateEvidenceHash,
+    };
+    if (events.length !== 1 || !isDeepStrictEqual(events[0]?.payload, expectedPayload)) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task Attempt ${attempt.taskId}/${attempt.attempt} does not match one candidate-ready event`,
       );
     }
   }

@@ -8,6 +8,7 @@ import { Worker } from "node:worker_threads";
 
 import {
   Store,
+  type GenerationTask,
   type GenerationTaskAttempt,
   type GenerationTaskAttemptLease,
   type GenerationTaskClaim,
@@ -15,6 +16,7 @@ import {
 } from "../src/index.ts";
 
 interface GenerationTaskAttemptClaim {
+  task: GenerationTask;
   attempt: GenerationTaskAttempt;
   lease: GenerationTaskAttemptLease;
   claims: GenerationTaskClaim[];
@@ -33,7 +35,7 @@ interface GenerationTaskClaimStoreContract {
     lease: GenerationTaskAttemptLease,
     now: number,
     leaseMs: number,
-  ): unknown;
+  ): GenerationTaskAttemptClaim;
   releaseGenerationTaskAttemptClaims(lease: GenerationTaskAttemptLease): boolean;
 }
 
@@ -524,6 +526,16 @@ test("claiming atomically commits Attempt running, Task running, Plan running, c
     const fixture = createQueuedValidationAttempt(store, "atomic-success");
     const result = claim(claimApi(store), fixture.attempt, "atomic-owner");
     assert.ok(result);
+    const currentTask = store.workspace
+      .getGenerationPlanDetailForProject(fixture.project.id, fixture.plan.id)
+      .tasks.find((task) => task.id === fixture.task.id);
+    assert.ok(currentTask);
+    assert.deepEqual(result.task, currentTask);
+    assert.equal(result.task.id, result.attempt.taskId);
+    assert.equal(result.task.planId, result.attempt.planId);
+    assert.equal(result.task.workspaceId, result.attempt.workspaceId);
+    assert.equal(result.task.currentAttempt, result.attempt.attempt);
+    assert.deepEqual(result.task.target, result.attempt.target);
     assert.equal(result.attempt.status, "running");
     assert.equal(result.lease.ownerId, "atomic-owner");
     assert.ok(result.claims.length > 0);
@@ -635,6 +647,38 @@ test("stale lease tokens cannot heartbeat or release the current worker's claims
       owner_id: first.lease.ownerId,
       lease_token: first.lease.leaseToken,
       lease_expires_at: 135_000,
+    }]);
+  } finally {
+    store.close();
+  }
+});
+
+test("a cancel-requested Attempt reports cancellation without renewing its lease", () => {
+  const store = new Store(":memory:", fakeClock("claim-cancellation-heartbeat"));
+  try {
+    const fixture = createQueuedValidationAttempt(store, "cancellation-heartbeat");
+    const api = claimApi(store);
+    const running = claim(api, fixture.attempt, "cancellation-owner");
+    assert.ok(running);
+    assert.equal(running.attempt.leaseExpiresAt, 130_000);
+
+    assert.equal(Number(store.db.prepare(
+      "UPDATE generation_task_attempts SET status = 'cancel-requested' WHERE task_id = ? AND attempt = ? AND status = 'running'",
+    ).run(fixture.task.id, fixture.attempt.attempt).changes), 1);
+    assert.equal(Number(store.db.prepare(
+      "UPDATE generation_tasks SET status = 'cancel-requested' WHERE id = ? AND status = 'running'",
+    ).run(fixture.task.id).changes), 1);
+
+    const cancellation = api.heartbeatGenerationTaskAttempt(running.lease, 105_000, 30_000);
+    assert.equal(cancellation.task.status, "cancel-requested");
+    assert.equal(cancellation.attempt.status, "cancel-requested");
+    assert.equal(cancellation.attempt.leaseExpiresAt, 130_000);
+    assert.deepEqual((store.db.prepare(
+      `SELECT DISTINCT lease_expires_at FROM generation_task_claims
+       WHERE task_id = ? AND attempt = ?`,
+    ).all(fixture.task.id, fixture.attempt.attempt) as Array<{ lease_expires_at: number }>)
+      .map((row) => ({ ...row })), [{
+      lease_expires_at: 130_000,
     }]);
   } finally {
     store.close();

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   GenerationTaskLeaseFenceError,
+  normalizeGenerationTaskIntent,
+  type GenerationTask,
   type GenerationTaskAttempt,
   type GenerationTaskAttemptClaim,
   type GenerationTaskRecoverySummary,
@@ -84,7 +86,48 @@ function claimedAttemptFixture(attempt = queuedAttemptFixture()): GenerationTask
     leaseToken: "lease-token-1",
   } as const;
   const leaseExpiresAt = 40_000;
+  const task: GenerationTask = {
+    ...normalizeGenerationTaskIntent({
+      id: attempt.taskId,
+      ordinal: 0,
+      workspaceId: attempt.workspaceId,
+      planId: attempt.planId,
+      kind: "page",
+      target: attempt.target,
+      dependencyIds: [],
+      payload: attempt.payload,
+      capabilities: ["generate"],
+      qaProfile: {
+        requiredFrameIds: [],
+        blockingSeverities: [],
+        requireRuntimeChecks: false,
+        requireVisualReview: false,
+      },
+      resourceLimits: {
+        timeoutMs: 120_000,
+        maxAgentTurns: 8,
+        maxRepairRounds: 2,
+        maxOutputBytes: 8_000_000,
+        capacityClasses: ["agent"],
+      },
+    }),
+    status: "running",
+    blockedReason: null,
+    blockedByTaskId: null,
+    pendingContextPolicy: null,
+    currentAttempt: attempt.attempt,
+    materializationFailures: 0,
+    failureClass: null,
+    error: null,
+    nextEligibleAt: null,
+    resultRevisionId: null,
+    resultResourceRevisionId: null,
+    resultSnapshotId: null,
+    createdAt: attempt.createdAt,
+    finishedAt: null,
+  };
   return {
+    task,
     attempt: {
       ...attempt,
       status: "running",
@@ -241,7 +284,7 @@ test("GenerationScheduler preserves a requestTick wake that arrives during an ac
       },
       listReadyGenerationTaskAttempts: () => [],
       tryClaimGenerationTaskAttempt: () => null,
-      heartbeatGenerationTaskAttempt: () => null,
+      heartbeatGenerationTaskAttempt: () => claimedAttemptFixture(),
       releaseGenerationTaskAttemptClaims: () => true,
     },
     planService: {
@@ -367,6 +410,55 @@ test("GenerationScheduler treats event notification as a best-effort wake after 
   await executed.promise;
   await scheduler.stop();
 
+  assert.equal(reportedErrors, 2);
+});
+
+test("GenerationScheduler notifies again when an executor rejects after a durable write may have committed", async () => {
+  const attempt = queuedAttemptFixture();
+  const claim = claimedAttemptFixture(attempt);
+  let notifications = 0;
+  let reportedErrors = 0;
+  const scheduler = new GenerationScheduler({
+    store: {
+      recoverExpiredGenerationTaskAttempts: emptyRecoverySummary,
+      listReadyGenerationTaskAttempts: () => [attempt],
+      tryClaimGenerationTaskAttempt: () => claim,
+      heartbeatGenerationTaskAttempt: () => claim,
+      releaseGenerationTaskAttemptClaims: () => false,
+    },
+    planService: {
+      reconcileNeedsRebaseTasks: async () => ({ planIds: [] }),
+      materializeReadyTaskAttempts: async () => ({ planIds: [] }),
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor: {
+      async execute() {
+        throw new Error("publication response was lost");
+      },
+    },
+    events: {
+      notify() {
+        notifications += 1;
+      },
+    },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_000 },
+    leaseMs: 30_000,
+    heartbeatMs: 10_000,
+    onError: () => {
+      reportedErrors += 1;
+    },
+  });
+
+  await scheduler.tick();
+  await scheduler.stop();
+
+  assert.equal(notifications, 2);
   assert.equal(reportedErrors, 1);
 });
 
@@ -482,6 +574,77 @@ test("GenerationScheduler aborts execution when heartbeat loses the lease fence"
   await waitFor(() => releaseCalls === 1, "the fenced execution did not run exact-lease cleanup");
   await scheduler.stop();
 
+  assert.equal(heartbeatCalls, 1);
+  assert.equal(releaseCalls, 1);
+});
+
+test("GenerationScheduler stops renewing and aborts a cancel-requested Attempt", async () => {
+  const attempt = queuedAttemptFixture();
+  const claim = claimedAttemptFixture(attempt);
+  const cancelRequestedClaim: GenerationTaskAttemptClaim = {
+    ...claim,
+    task: { ...claim.task, status: "cancel-requested" },
+    attempt: { ...claim.attempt, status: "cancel-requested" },
+  };
+  const executionStarted = deferred();
+  const executionAborted = deferred<unknown>();
+  let heartbeatCalls = 0;
+  let releaseCalls = 0;
+  const scheduler = new GenerationScheduler({
+    store: {
+      recoverExpiredGenerationTaskAttempts: emptyRecoverySummary,
+      listReadyGenerationTaskAttempts: () => [attempt],
+      tryClaimGenerationTaskAttempt: () => claim,
+      heartbeatGenerationTaskAttempt() {
+        heartbeatCalls += 1;
+        return cancelRequestedClaim;
+      },
+      releaseGenerationTaskAttemptClaims() {
+        releaseCalls += 1;
+        return false;
+      },
+    },
+    planService: {
+      reconcileNeedsRebaseTasks: async () => ({ planIds: [] }),
+      materializeReadyTaskAttempts: async () => ({ planIds: [] }),
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor: {
+      execute(_claim, signal) {
+        executionStarted.resolve();
+        return new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => {
+            executionAborted.resolve(signal.reason);
+            resolve();
+          }, { once: true });
+        });
+      },
+    },
+    events: { notify() {} },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_001 },
+    leaseMs: 30_000,
+    heartbeatMs: 5,
+  });
+
+  await scheduler.tick();
+  await executionStarted.promise;
+  const reason = await Promise.race([
+    executionAborted.promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("cancel-requested heartbeat did not abort execution")), 500);
+    }),
+  ]);
+  await waitFor(() => releaseCalls === 1, "the cancelled execution did not run exact-lease cleanup");
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  await scheduler.stop();
+
+  assert.match(String(reason), /cancellation requested/i);
   assert.equal(heartbeatCalls, 1);
   assert.equal(releaseCalls, 1);
 });

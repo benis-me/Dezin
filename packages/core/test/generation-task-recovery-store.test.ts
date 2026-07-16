@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   generationTaskCandidateEvidenceHash,
   Store,
+  type FinishGenerationTaskAttemptFailureInput,
   type GenerationTaskAttempt,
   type GenerationTaskAttemptClaim,
   type GenerationTaskAttemptLease,
@@ -15,6 +16,11 @@ import {
 } from "../src/index.ts";
 
 interface GenerationTaskRecoveryStoreContract {
+  finishGenerationTaskAttemptForProject(
+    projectId: string,
+    planId: string,
+    input: FinishGenerationTaskAttemptFailureInput,
+  ): unknown;
   recoverExpiredGenerationTaskAttempts(now: number, limit?: number): unknown;
   listReadyGenerationTaskAttempts(limit?: number): GenerationTaskAttempt[];
   tryClaimGenerationTaskAttempt(input: {
@@ -998,6 +1004,78 @@ test("cancel-requested expiry becomes cancelled, releases claims, and never crea
       ).get(fixture.plan.id, fixture.task.id) as { count: number }).count),
       1,
     );
+  } finally {
+    store.close();
+  }
+});
+
+test("the last live Task cancellation terminalizes an already-failed Plan exactly once", () => {
+  const control = adjustableClock("recovery-failed-plan-settlement");
+  const store = new Store(":memory:", control.clock);
+  try {
+    const fixture = createTwoResourceAttempts(store, "failed-plan-settlement");
+    const api = recoveryApi(store);
+    const failedTask = fixture.tasks[0]!;
+    const liveTask = fixture.tasks[1]!;
+    const failedClaim = claimAttempt(api, fixture.attempts[0]!, "failed-plan-owner", 100_000);
+    const liveClaim = claimAttempt(api, fixture.attempts[1]!, "live-plan-owner", 100_000);
+    control.setNextNow(100_001);
+
+    api.finishGenerationTaskAttemptForProject(fixture.project.id, fixture.plan.id, {
+      lease: failedClaim.lease,
+      failure: {
+        failureClass: "design",
+        error: { code: "terminal-design-failure" },
+      },
+    });
+
+    assert.equal(taskState(store, failedTask.id).status, "failed");
+    assert.equal(taskState(store, liveTask.id).status, "running");
+    assert.equal(
+      store.workspace.getGenerationPlanForProject(fixture.project.id, fixture.plan.id).status,
+      "running",
+      "the Plan must stay live until its independent running Task settles",
+    );
+
+    const requestedAttempt = store.db.prepare(
+      `UPDATE generation_task_attempts SET status = 'cancel-requested'
+       WHERE task_id = ? AND attempt = ? AND status = 'running'`,
+    ).run(liveTask.id, liveClaim.attempt.attempt);
+    assert.equal(Number(requestedAttempt.changes), 1);
+    const requestedTask = store.db.prepare(
+      "UPDATE generation_tasks SET status = 'cancel-requested' WHERE id = ? AND status = 'running'",
+    ).run(liveTask.id);
+    assert.equal(Number(requestedTask.changes), 1);
+    appendTaskEvent(store, {
+      planId: fixture.plan.id,
+      workspaceId: fixture.workspace.id,
+      taskId: liveTask.id,
+      type: "task-cancel-requested",
+      payload: { attempt: liveClaim.attempt.attempt, reason: "plan-already-failed" },
+      createdAt: 100_002,
+    });
+
+    api.recoverExpiredGenerationTaskAttempts(130_000);
+
+    assert.equal(taskState(store, liveTask.id).status, "cancelled");
+    assert.equal(claimCount(store, liveTask.id, liveClaim.attempt.attempt), 0);
+    const plan = store.workspace.getGenerationPlanForProject(fixture.project.id, fixture.plan.id);
+    assert.equal(
+      plan.status,
+      "failed",
+      "all Tasks are terminal, so the prior failure must now terminalize the Plan",
+    );
+    assert.equal(plan.finishedAt, 130_000);
+    const planFailedEvents = store.workspace.listGenerationPlanEventsForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { after: 0, limit: 1_000 },
+    ).filter((event) => event.type === "plan-failed");
+    assert.equal(planFailedEvents.length, 1);
+    assert.deepEqual(planFailedEvents[0]?.payload, {
+      failedTaskId: failedTask.id,
+      failureClass: "design",
+    });
   } finally {
     store.close();
   }

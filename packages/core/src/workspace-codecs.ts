@@ -1869,14 +1869,34 @@ export function asWorkspaceSnapshotProvenance(value: unknown): WorkspaceSnapshot
         proposalId: exactStoredString(provenance.proposalId, "propagation proposal id"),
         batchId: exactStoredString(provenance.batchId, "propagation batch id"),
       };
-    case "plan-checkpoint":
-      allowFields(provenance, ["kind", "proposalId", "planId", "checkpointId"], "plan-checkpoint provenance");
+    case "plan-checkpoint": {
+      allowFields(provenance, [
+        "kind",
+        "proposalId",
+        "planId",
+        "checkpointId",
+        "validatedSnapshotId",
+        "validationEvidenceHash",
+      ], "plan-checkpoint provenance");
+      const validatedSnapshotId = optional("validatedSnapshotId");
+      const validationEvidenceHash = optional("validationEvidenceHash");
+      if ((validatedSnapshotId === undefined) !== (validationEvidenceHash === undefined)) {
+        throw new WorkspaceStoreCodecError(
+          "checkpoint validation provenance must contain both the Snapshot and evidence hash",
+        );
+      }
+      if (validationEvidenceHash !== undefined && !/^[0-9a-f]{64}$/.test(validationEvidenceHash)) {
+        throw new WorkspaceStoreCodecError("checkpoint validation evidence hash is invalid");
+      }
       return {
         kind,
         proposalId: exactStoredString(provenance.proposalId, "checkpoint proposal id"),
         planId: exactStoredString(provenance.planId, "checkpoint plan id"),
         checkpointId: exactStoredString(provenance.checkpointId, "checkpoint id"),
+        ...(validatedSnapshotId === undefined ? {} : { validatedSnapshotId }),
+        ...(validationEvidenceHash === undefined ? {} : { validationEvidenceHash }),
       };
+    }
     case "restore": {
       allowFields(provenance, ["kind", "restoredSnapshotId", "restoredRevisionId"], "restore provenance");
       const restoredSnapshotId = optional("restoredSnapshotId");

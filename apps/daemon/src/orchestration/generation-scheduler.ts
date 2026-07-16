@@ -21,7 +21,7 @@ export interface GenerationSchedulerStore {
     lease: GenerationTaskAttemptLease,
     now: number,
     leaseMs: number,
-  ): unknown;
+  ): GenerationTaskAttemptClaim;
   releaseGenerationTaskAttemptClaims(lease: GenerationTaskAttemptLease): boolean;
 }
 
@@ -239,11 +239,16 @@ export class GenerationScheduler {
         heartbeatTimer = null;
         if (settled || controller.signal.aborted) return;
         try {
-          this.options.store.heartbeatGenerationTaskAttempt(
+          const renewed = this.options.store.heartbeatGenerationTaskAttempt(
             claim.lease,
             this.options.clock.now(),
             this.leaseMs,
           );
+          if (renewed.task.status === "cancel-requested"
+            || renewed.attempt.status === "cancel-requested") {
+            controller.abort(new Error("Generation Task cancellation requested"));
+            return;
+          }
           scheduleHeartbeat();
         } catch (error) {
           // Any failed renewal means the process can no longer prove ownership.
@@ -268,7 +273,13 @@ export class GenerationScheduler {
       if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
       supervisorSignal.removeEventListener("abort", forwardAbort);
       this.executionControllers.delete(controller);
-      this.options.store.releaseGenerationTaskAttemptClaims(claim.lease);
+      try {
+        this.options.store.releaseGenerationTaskAttemptClaims(claim.lease);
+      } finally {
+        // Wake readers after every settlement, including commit-then-response-
+        // lost publication errors and aborts after candidate staging.
+        this.notifyPlan(claim.attempt.planId);
+      }
     }
   }
 

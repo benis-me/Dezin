@@ -518,7 +518,14 @@ export type WorkspaceSnapshotProvenance =
       impact?: KernelImpactAnalysis;
     }
   | { kind: "propagation"; proposalId: string; batchId: string }
-  | { kind: "plan-checkpoint"; proposalId: string; planId: string; checkpointId: string }
+  | {
+      kind: "plan-checkpoint";
+      proposalId: string;
+      planId: string;
+      checkpointId: string;
+      validatedSnapshotId?: string;
+      validationEvidenceHash?: string;
+    }
   | { kind: "restore"; restoredSnapshotId?: string; restoredRevisionId?: string }
   | { kind: "legacy-migration"; migration: string };
 
@@ -1063,6 +1070,85 @@ export interface GenerationTaskCandidateEvidenceHashInput {
   candidateEvidence: Record<string, unknown>;
 }
 
+export interface GenerationTaskArtifactCandidateInput {
+  kind: "artifact";
+  sourceCommitHash: string;
+  sourceTreeHash: string;
+  renderSpec: Record<string, unknown>;
+  quality: Record<string, unknown>;
+}
+
+export interface GenerationTaskResourceCandidateInput {
+  kind: "resource";
+  /** Executor-reported identity, checked against the immutable Attempt target. */
+  resourceId: string;
+  revision: CreateResourceRevisionCandidateInput;
+}
+
+export type GenerationTaskCandidateInput =
+  | GenerationTaskArtifactCandidateInput
+  | GenerationTaskResourceCandidateInput;
+
+export interface StageGenerationTaskCandidateInput {
+  lease: GenerationTaskAttemptLease;
+  candidate: GenerationTaskArtifactCandidateInput;
+  evidence: Record<string, unknown>;
+}
+
+export type StageGenerationTaskArtifactCandidateInput = StageGenerationTaskCandidateInput;
+
+export interface StageGenerationTaskResourceCandidateInput {
+  lease: GenerationTaskAttemptLease;
+  candidate: GenerationTaskResourceCandidateInput;
+  evidence: Record<string, unknown>;
+}
+
+export type AnyStageGenerationTaskCandidateInput =
+  | StageGenerationTaskArtifactCandidateInput
+  | StageGenerationTaskResourceCandidateInput;
+
+export interface PublishGenerationTaskCandidateInput {
+  lease: GenerationTaskAttemptLease;
+}
+
+export interface FinishGenerationTaskAttemptFailureInput {
+  lease: GenerationTaskAttemptLease;
+  failure: {
+    failureClass: GenerationTaskFailureClass;
+    error: Record<string, unknown>;
+  };
+}
+
+export interface CompleteGenerationTaskValidationInput {
+  lease: GenerationTaskAttemptLease;
+  validation: {
+    snapshotId: string;
+    graphRevision: number;
+    artifactRevisionIds: string[];
+    resourceRevisionIds: string[];
+    evidence: Record<string, unknown>;
+  };
+}
+
+export interface GenerationTaskValidationRecord {
+  taskId: string;
+  planId: string;
+  workspaceId: string;
+  attempt: number;
+  snapshotId: string;
+  graphRevision: number;
+  artifactRevisionIds: string[];
+  resourceRevisionIds: string[];
+  evidence: Record<string, unknown>;
+  evidenceHash: string;
+  validationFenceHash: string;
+  createdAt: number;
+}
+
+export interface PublishGenerationPlanCheckpointInput {
+  lease: GenerationTaskAttemptLease;
+}
+
 export interface GenerationTaskAttemptLease {
   taskId: string;
   workspaceId: string;
@@ -1121,6 +1207,8 @@ export interface GenerationTaskExecutionLease extends GenerationTaskAttemptLease
 }
 
 export interface GenerationTaskAttemptClaim {
+  /** Exact current aggregate Task as committed by the same claim transaction. */
+  task: GenerationTask;
   attempt: GenerationTaskAttempt;
   lease: GenerationTaskAttemptLease;
   claims: GenerationTaskClaim[];

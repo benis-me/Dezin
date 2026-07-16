@@ -12,6 +12,7 @@ import {
   type RecordGenerationTaskMaterializationFailureInput,
 } from "../../../../packages/core/src/index.ts";
 import { BlockedContextError } from "../context/context-types.ts";
+import { classifyGenerationTaskError } from "./generation-task-failure.ts";
 
 export interface GenerationPlanStorePort {
   compileApprovedGenerationPlanForProject(projectId: string, planId: string): GenerationPlanDetail;
@@ -108,20 +109,7 @@ function serializeMaterializationError(error: unknown): Record<string, unknown> 
 }
 
 function failureClassFor(error: unknown, phase: MaterializationPhase): GenerationTaskFailureClass {
-  if (error instanceof BlockedContextError) return "context";
-  const declared = error !== null && typeof error === "object"
-    ? Reflect.get(error, "failureClass")
-    : null;
-  if (typeof declared === "string" && FAILURE_CLASSES.has(declared as GenerationTaskFailureClass)) {
-    return declared as GenerationTaskFailureClass;
-  }
-  if (phase === "context") return "adapter";
-  const code = error !== null && typeof error === "object" ? Reflect.get(error, "code") : null;
-  if (typeof code === "string" && (code.startsWith("SQLITE_")
-    || code === "EIO" || code === "ENOSPC" || code === "EROFS" || code === "EMFILE")) {
-    return "storage";
-  }
-  return "unknown";
+  return classifyGenerationTaskError(error, phase === "context" ? "adapter" : "unknown");
 }
 
 function retryContextPolicy(task: GenerationTask): GenerationTaskRetryContextPolicy {
@@ -131,21 +119,6 @@ function retryContextPolicy(task: GenerationTask): GenerationTaskRetryContextPol
 function isRebaseTask(task: GenerationTask): boolean {
   return task.status === "needs-rebase" || task.status === "awaiting-context-refresh";
 }
-
-const FAILURE_CLASSES = new Set<GenerationTaskFailureClass>([
-  "context",
-  "adapter",
-  "storage",
-  "provider",
-  "agent-transport",
-  "build-infrastructure",
-  "design",
-  "build",
-  "qa",
-  "publication-conflict",
-  "cancelled",
-  "unknown",
-]);
 
 export class GenerationPlanServiceInvariantError extends Error {
   readonly failureClass = "unknown" as const;

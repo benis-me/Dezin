@@ -273,6 +273,33 @@ CREATE TABLE IF NOT EXISTS generation_task_attempt_component_pins (
   PRIMARY KEY(task_id, attempt, instance_id),
   UNIQUE(task_id, attempt, ordinal)
 );
+CREATE TABLE IF NOT EXISTS generation_task_validation_results (
+  task_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK(attempt > 0 AND attempt <= 9007199254740991),
+  snapshot_id TEXT NOT NULL,
+  graph_revision INTEGER NOT NULL CHECK(graph_revision >= 0 AND graph_revision <= 9007199254740991),
+  artifact_revision_ids_json TEXT NOT NULL,
+  resource_revision_ids_json TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  evidence_hash TEXT NOT NULL,
+  validation_fence_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0 AND created_at <= 9007199254740991),
+  FOREIGN KEY(task_id, attempt, plan_id, workspace_id)
+    REFERENCES generation_task_attempts(task_id, attempt, plan_id, workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY(snapshot_id, workspace_id)
+    REFERENCES workspace_snapshots(id, workspace_id) ON DELETE CASCADE,
+  CHECK(json_valid(artifact_revision_ids_json) = 1
+    AND json_type(artifact_revision_ids_json) = 'array'),
+  CHECK(json_valid(resource_revision_ids_json) = 1
+    AND json_type(resource_revision_ids_json) = 'array'),
+  CHECK(json_valid(evidence_json) = 1 AND json_type(evidence_json) = 'object'),
+  CHECK(length(evidence_hash) = 64 AND evidence_hash NOT GLOB '*[^0-9a-f]*'),
+  CHECK(length(validation_fence_hash) = 64 AND validation_fence_hash NOT GLOB '*[^0-9a-f]*'),
+  PRIMARY KEY(task_id, attempt),
+  UNIQUE(task_id, attempt, workspace_id)
+);
 CREATE TABLE IF NOT EXISTS generation_task_materialization_failures (
   task_id TEXT NOT NULL,
   plan_id TEXT NOT NULL,
@@ -373,6 +400,9 @@ DROP TRIGGER IF EXISTS generation_task_attempt_advance_current;
 DROP TRIGGER IF EXISTS generation_task_attempt_input_update_immutable;
 DROP TRIGGER IF EXISTS generation_task_attempt_candidate_write_once;
 DROP TRIGGER IF EXISTS generation_task_attempt_delete_history_guard;
+DROP TRIGGER IF EXISTS generation_task_validation_result_insert_guard;
+DROP TRIGGER IF EXISTS generation_task_validation_result_update_immutable;
+DROP TRIGGER IF EXISTS generation_task_validation_result_delete_history_guard;
 DROP TRIGGER IF EXISTS generation_attempt_dependency_output_insert_guard;
 DROP TRIGGER IF EXISTS generation_attempt_dependency_output_update_immutable;
 DROP TRIGGER IF EXISTS generation_attempt_dependency_output_delete_history_guard;
@@ -1144,6 +1174,138 @@ CREATE TRIGGER generation_task_attempt_delete_history_guard
 BEFORE DELETE ON generation_task_attempts
 WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
 BEGIN SELECT RAISE(ABORT, 'Generation Task Attempt history is immutable'); END;
+
+CREATE TRIGGER generation_task_validation_result_insert_guard
+BEFORE INSERT ON generation_task_validation_results
+WHEN typeof(NEW.created_at) <> 'integer'
+  OR typeof(NEW.graph_revision) <> 'integer'
+  OR NEW.created_at < 0 OR NEW.created_at > 9007199254740991
+  OR NEW.graph_revision < 0 OR NEW.graph_revision > 9007199254740991
+  OR length(NEW.evidence_hash) <> 64 OR NEW.evidence_hash GLOB '*[^0-9a-f]*'
+  OR length(NEW.validation_fence_hash) <> 64 OR NEW.validation_fence_hash GLOB '*[^0-9a-f]*'
+  OR json_type(NEW.artifact_revision_ids_json) <> 'array'
+  OR json_type(NEW.resource_revision_ids_json) <> 'array'
+  OR json_type(NEW.evidence_json) <> 'object'
+  OR json_extract(NEW.evidence_json, '$.protocol') IS NOT 'dezin-prototype-validation-v1'
+  OR NOT EXISTS (
+    SELECT 1
+    FROM generation_task_attempts attempt
+    JOIN generation_tasks task
+      ON task.id = attempt.task_id
+     AND task.plan_id = attempt.plan_id
+     AND task.workspace_id = attempt.workspace_id
+    JOIN generation_plans plan
+      ON plan.id = task.plan_id AND plan.workspace_id = task.workspace_id
+    JOIN workspace_snapshots snapshot
+      ON snapshot.id = attempt.expected_snapshot_id
+     AND snapshot.workspace_id = attempt.workspace_id
+    WHERE attempt.task_id = NEW.task_id
+      AND attempt.plan_id = NEW.plan_id
+      AND attempt.workspace_id = NEW.workspace_id
+      AND attempt.attempt = NEW.attempt
+      AND attempt.materialization_sealed = 1
+      AND attempt.status = 'running'
+      AND attempt.execution_mode = 'full'
+      AND attempt.context_pack_id IS NULL
+      AND attempt.candidate_revision_id IS NULL
+      AND attempt.candidate_resource_revision_id IS NULL
+      AND attempt.candidate_evidence_json IS NULL
+      AND attempt.candidate_evidence_hash IS NULL
+      AND attempt.owner_id IS NOT NULL
+      AND attempt.lease_token IS NOT NULL
+      AND attempt.lease_expires_at > NEW.created_at
+      AND task.kind = 'prototype-validation'
+      AND task.target_type = 'workspace'
+      AND task.target_id = task.workspace_id
+      AND task.current_attempt = attempt.attempt
+      AND task.status = 'running'
+      AND task.result_revision_id IS NULL
+      AND task.result_resource_revision_id IS NULL
+      AND task.result_snapshot_id IS NULL
+      AND length(CAST(NEW.evidence_json AS BLOB)) <= min(
+        1048576,
+        json_extract(task.resource_limits_json, '$.maxOutputBytes')
+      )
+      AND plan.status = 'running'
+      AND NEW.snapshot_id = attempt.expected_snapshot_id
+      AND NEW.graph_revision = snapshot.graph_revision
+      AND snapshot.kernel_revision_id = attempt.kernel_revision_id
+      AND json_extract(NEW.evidence_json, '$.snapshot.id') = snapshot.id
+      AND json_extract(NEW.evidence_json, '$.snapshot.graphRevision') = snapshot.graph_revision
+      AND json_extract(NEW.evidence_json, '$.snapshot.kernelRevisionId') = snapshot.kernel_revision_id
+      AND json_array_length(NEW.artifact_revision_ids_json) = (
+        SELECT COUNT(*) FROM generation_task_attempt_dependency_outputs output
+        WHERE output.task_id = attempt.task_id
+          AND output.plan_id = attempt.plan_id
+          AND output.workspace_id = attempt.workspace_id
+          AND output.attempt = attempt.attempt
+          AND output.result_revision_id IS NOT NULL
+      )
+      AND json_array_length(NEW.resource_revision_ids_json) = (
+        SELECT COUNT(*) FROM generation_task_attempt_dependency_outputs output
+        WHERE output.task_id = attempt.task_id
+          AND output.plan_id = attempt.plan_id
+          AND output.workspace_id = attempt.workspace_id
+          AND output.attempt = attempt.attempt
+          AND output.result_resource_revision_id IS NOT NULL
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(NEW.artifact_revision_ids_json) candidate
+        WHERE candidate.type <> 'text' OR NOT EXISTS (
+          SELECT 1 FROM generation_task_attempt_dependency_outputs output
+          WHERE output.task_id = attempt.task_id
+            AND output.plan_id = attempt.plan_id
+            AND output.workspace_id = attempt.workspace_id
+            AND output.attempt = attempt.attempt
+            AND output.result_revision_id = candidate.value
+        )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(NEW.resource_revision_ids_json) candidate
+        WHERE candidate.type <> 'text' OR NOT EXISTS (
+          SELECT 1 FROM generation_task_attempt_dependency_outputs output
+          WHERE output.task_id = attempt.task_id
+            AND output.plan_id = attempt.plan_id
+            AND output.workspace_id = attempt.workspace_id
+            AND output.attempt = attempt.attempt
+            AND output.result_resource_revision_id = candidate.value
+        )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM generation_task_attempt_dependency_outputs output
+        WHERE output.task_id = attempt.task_id
+          AND output.plan_id = attempt.plan_id
+          AND output.workspace_id = attempt.workspace_id
+          AND output.attempt = attempt.attempt
+          AND output.result_revision_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(NEW.artifact_revision_ids_json) candidate
+            WHERE candidate.type = 'text' AND candidate.value = output.result_revision_id
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM generation_task_attempt_dependency_outputs output
+        WHERE output.task_id = attempt.task_id
+          AND output.plan_id = attempt.plan_id
+          AND output.workspace_id = attempt.workspace_id
+          AND output.attempt = attempt.attempt
+          AND output.result_resource_revision_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(NEW.resource_revision_ids_json) candidate
+            WHERE candidate.type = 'text' AND candidate.value = output.result_resource_revision_id
+          )
+      )
+  )
+BEGIN SELECT RAISE(ABORT, 'Generation Task validation result is stale or inconsistent'); END;
+
+CREATE TRIGGER generation_task_validation_result_update_immutable
+BEFORE UPDATE ON generation_task_validation_results
+BEGIN SELECT RAISE(ABORT, 'Generation Task validation results are immutable'); END;
+
+CREATE TRIGGER generation_task_validation_result_delete_history_guard
+BEFORE DELETE ON generation_task_validation_results
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Generation Task validation results are immutable'); END;
 
 CREATE TRIGGER generation_attempt_dependency_output_insert_guard
 BEFORE INSERT ON generation_task_attempt_dependency_outputs
