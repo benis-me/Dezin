@@ -417,11 +417,6 @@ async function ensurePreviewDependencies(
 ): Promise<void> {
   assertRuntimeActive(runtimeKey, rt, signal);
   if (!existsSync(join(projectDir, "package.json"))) throw new Error("dependencies not installed yet");
-  if (immutableSource
-    && !existsSync(join(projectDir, "package-lock.json"))
-    && !existsSync(join(projectDir, "npm-shrinkwrap.json"))) {
-    throw new Error("immutable preview requires an npm lockfile");
-  }
   const expectedFingerprint = await dependencyManifestFingerprint(projectDir);
   const nodeModules = join(projectDir, "node_modules");
   const installedFingerprint = await readFile(join(nodeModules, DEPENDENCY_STAMP), "utf8").catch(() => "");
@@ -429,6 +424,11 @@ async function ensurePreviewDependencies(
     rt.phase = "ready";
     rt.error = undefined;
     return;
+  }
+  if (immutableSource
+    && !existsSync(join(projectDir, "package-lock.json"))
+    && !existsSync(join(projectDir, "npm-shrinkwrap.json"))) {
+    throw new Error("immutable preview requires an npm lockfile");
   }
 
   rt.phase = "installing";
@@ -500,11 +500,12 @@ async function preparePreviewRuntime(
   assertRuntimeActive(runtimeKey, rt);
   const scope = previewRuntimeScope(projectId, runtimeKey);
   const isHistoricalVersion = scope.runId !== undefined;
+  const sourceIsImmutable = immutableSource || isHistoricalVersion;
   const hasGit = existsSync(join(projectDir, ".git"));
   const sourceStatus = hasGit ? await workingTreeFingerprint(projectDir) : "";
-  if (isHistoricalVersion && sourceStatus) throw new Error("historical preview source is not clean");
+  if (sourceIsImmutable && sourceStatus) throw new Error("immutable preview source is not clean");
   assertRuntimeActive(runtimeKey, rt);
-  if (!isHistoricalVersion) {
+  if (!sourceIsImmutable) {
     const bridgeUpdated = await ensureProjectPickerBridge(projectDir).catch(() => false);
     assertRuntimeActive(runtimeKey, rt);
     if (bridgeUpdated) {
@@ -512,13 +513,11 @@ async function preparePreviewRuntime(
       if (!sourceStatus) await gitCommit(projectDir, "Dezin: update preview inspect bridge", { skipHooks: true });
     }
   }
-  await ensurePreviewDependencies(projectDir, runtimeKey, rt, undefined, immutableSource);
-  if (isHistoricalVersion && hasGit && await workingTreeFingerprint(projectDir) !== sourceStatus) {
-    await run("git", ["reset", "--hard", "HEAD"], projectDir, rt, "git reset --hard HEAD");
-    await run("git", ["clean", "-fd"], projectDir, rt, "git clean -fd");
-    if (await workingTreeFingerprint(projectDir) !== sourceStatus) throw new Error("historical preview preparation changed source files");
+  await ensurePreviewDependencies(projectDir, runtimeKey, rt, undefined, sourceIsImmutable);
+  const configPath = sourceIsImmutable ? await historicalPreviewConfig(projectDir, rt) : undefined;
+  if (sourceIsImmutable && hasGit && await workingTreeFingerprint(projectDir) !== sourceStatus) {
+    throw new Error("immutable preview preparation changed source files");
   }
-  const configPath = isHistoricalVersion ? await historicalPreviewConfig(projectDir, rt) : undefined;
   const fingerprint = await devServerFingerprint(projectDir);
   assertRuntimeActive(runtimeKey, rt);
   return { configPath, fingerprint };

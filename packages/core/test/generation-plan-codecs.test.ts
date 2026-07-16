@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   asGenerationTaskClaim,
@@ -17,6 +18,8 @@ import {
 } from "../src/index.ts";
 
 const claimKeyId = (value: string): string => Buffer.from(value, "utf8").toString("hex");
+const SOURCE_COMMIT_HASH = "a".repeat(40);
+const SOURCE_TREE_HASH = "b".repeat(40);
 
 function taskClaimRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -47,6 +50,8 @@ function attemptInput(overrides: Record<string, unknown> = {}): Record<string, u
       trackId: "track-main",
     },
     baseRevisionId: "revision-home-1",
+    sourceCommitHash: SOURCE_COMMIT_HASH,
+    sourceTreeHash: SOURCE_TREE_HASH,
     expectedSnapshotId: "snapshot-1",
     contextPackId: "context-pack-1",
     kernelRevisionId: "kernel-1",
@@ -105,6 +110,29 @@ function attemptInput(overrides: Record<string, unknown> = {}): Record<string, u
     executionMode: "full",
     ...overrides,
   };
+}
+
+function legacyAttemptInputHash(input: ReturnType<typeof normalizeGenerationTaskAttemptInput>): string {
+  return createHash("sha256")
+    .update("dezin:generation-task-attempt-input:v1\0")
+    .update(JSON.stringify({
+      taskId: input.taskId,
+      planId: input.planId,
+      workspaceId: input.workspaceId,
+      attempt: input.attempt,
+      target: input.target,
+      baseRevisionId: input.baseRevisionId,
+      expectedSnapshotId: input.expectedSnapshotId,
+      contextPackId: input.contextPackId,
+      kernelRevisionId: input.kernelRevisionId,
+      payload: input.payload,
+      dependencyOutputs: input.dependencyOutputs,
+      resourcePins: input.resourcePins,
+      componentPins: input.componentPins,
+      retryContextPolicy: input.retryContextPolicy,
+      executionMode: input.executionMode,
+    }))
+    .digest("hex");
 }
 
 function taskIntent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -440,6 +468,12 @@ test("Generation Task Attempt input canonicalizes exact dependency outputs, Reso
   assert.deepEqual(Object.keys(normalized.componentPins[1]?.overrides ?? {}), ["a", "b"]);
   assert.match(normalized.inputHash, /^[a-f0-9]{64}$/);
   assert.equal(normalized.inputHash, generationTaskAttemptInputHash(normalized));
+  assert.equal(normalized.sourceCommitHash, SOURCE_COMMIT_HASH);
+  assert.equal(normalized.sourceTreeHash, SOURCE_TREE_HASH);
+  assert.notEqual(
+    normalized.inputHash,
+    normalizeGenerationTaskAttemptInput(attemptInput({ sourceTreeHash: "c".repeat(40) })).inputHash,
+  );
   assert.notEqual(
     normalized.inputHash,
     normalizeGenerationTaskAttemptInput(attemptInput({ planId: "plan-2" })).inputHash,
@@ -505,6 +539,40 @@ test("Generation Task Attempt input canonicalizes exact dependency outputs, Reso
       },
     ],
   })), /unique Task ids/i);
+  assert.throws(
+    () => normalizeGenerationTaskAttemptInput(attemptInput({ sourceCommitHash: null })),
+    /Source Base|commit.*tree|pair/i,
+  );
+  assert.throws(
+    () => normalizeGenerationTaskAttemptInput(attemptInput({ sourceCommitHash: "A".repeat(40) })),
+    /git object id/i,
+  );
+  assert.throws(
+    () => normalizeGenerationTaskAttemptInput(attemptInput({
+      sourceCommitHash: "a".repeat(40),
+      sourceTreeHash: "b".repeat(64),
+    })),
+    /same Git object format/i,
+  );
+  assert.throws(
+    () => normalizeGenerationTaskAttemptInput(attemptInput({
+      target: { type: "workspace", workspaceId: "workspace-1", id: "workspace-1" },
+      baseRevisionId: null,
+      contextPackId: null,
+      componentPins: [],
+    })),
+    /non-Artifact|Source Base/i,
+  );
+  const nonArtifact = normalizeGenerationTaskAttemptInput(attemptInput({
+    target: { type: "workspace", workspaceId: "workspace-1", id: "workspace-1" },
+    baseRevisionId: null,
+    contextPackId: null,
+    componentPins: [],
+    sourceCommitHash: null,
+    sourceTreeHash: null,
+  }));
+  assert.equal(nonArtifact.sourceCommitHash, null);
+  assert.equal(nonArtifact.sourceTreeHash, null);
 });
 
 function durableAttemptFixture() {
@@ -529,6 +597,8 @@ function durableAttemptFixture() {
     target_track_id: input.target.type === "artifact" ? input.target.trackId : null,
     target_resource_id: null,
     base_revision_id: input.baseRevisionId,
+    source_commit_hash: input.sourceCommitHash,
+    source_tree_hash: input.sourceTreeHash,
     expected_snapshot_id: input.expectedSnapshotId,
     context_pack_id: input.contextPackId,
     kernel_revision_id: input.kernelRevisionId,
@@ -619,6 +689,8 @@ test("Generation Task Attempt row codec reconstructs immutable input, pins, cand
   );
   assert.equal(attempt.planId, fixture.input.planId);
   assert.equal(attempt.inputHash, fixture.input.inputHash);
+  assert.equal(attempt.sourceCommitHash, SOURCE_COMMIT_HASH);
+  assert.equal(attempt.sourceTreeHash, SOURCE_TREE_HASH);
   assert.deepEqual(attempt.dependencyOutputs, fixture.input.dependencyOutputs);
   assert.deepEqual(attempt.resourcePins, fixture.input.resourcePins);
   assert.deepEqual(attempt.componentPins, fixture.input.componentPins);
@@ -648,6 +720,17 @@ test("Generation Task Attempt row codec reconstructs immutable input, pins, cand
   });
   assert.equal(running.leaseExpiresAt, 1_000);
   assert.equal(running.heartbeatAt, 120);
+
+  const legacyHash = legacyAttemptInputHash(fixture.input);
+  const legacy = asGenerationTaskAttempt({
+    ...fixture.row,
+    source_commit_hash: null,
+    source_tree_hash: null,
+    input_hash: legacyHash,
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows);
+  assert.equal(legacy.sourceCommitHash, null);
+  assert.equal(legacy.sourceTreeHash, null);
+  assert.equal(legacy.inputHash, legacyHash);
 });
 
 test("Generation Task Attempt row codec fails closed on corrupted durable boundaries", () => {
@@ -682,6 +765,14 @@ test("Generation Task Attempt row codec fails closed on corrupted durable bounda
     ...fixture.row,
     input_hash: "0".repeat(64),
   }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /input hash does not match/);
+  assert.throws(() => asGenerationTaskAttempt({
+    ...fixture.row,
+    source_tree_hash: "c".repeat(40),
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /input hash does not match/);
+  assert.throws(() => asGenerationTaskAttempt({
+    ...fixture.row,
+    source_commit_hash: null,
+  }, fixture.dependencyOutputRows, fixture.resourcePinRows, fixture.componentPinRows), /Source Base|commit.*tree|pair/i);
   assert.throws(() => asGenerationTaskAttempt({
     ...fixture.row,
     candidate_evidence_hash: "0".repeat(64),

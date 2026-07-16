@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { compileGenerationPlan, GenerationPlanCompileError } from "../src/generation-plan.ts";
+import {
+  generationTaskIntentHash,
+  normalizeGenerationTaskIntent,
+} from "../src/store-codecs.ts";
 import type {
   GenerationPlan,
+  GenerationTaskIntent,
+  GenerationTaskIntentInput,
   WorkspaceGenerationPayload,
   WorkspaceProposal,
 } from "../src/workspace-types.ts";
@@ -53,7 +59,7 @@ function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProp
     operations: [],
     layoutOperations: [],
     rationale: "Build a reusable card and two product pages.",
-    assumptions: [],
+    assumptions: ["Use the approved product taxonomy.", "Keep the visual language editorial."],
     generation: {
       kind: "workspace-generation",
       resourceOperations: [
@@ -181,6 +187,22 @@ function targetId(task: ReturnType<typeof compileGenerationPlan>["tasks"][number
   return task.target.id;
 }
 
+function taskInput(task: GenerationTaskIntent): GenerationTaskIntentInput {
+  return {
+    id: task.id,
+    ordinal: task.ordinal,
+    workspaceId: task.workspaceId,
+    planId: task.planId,
+    kind: task.kind,
+    target: structuredClone(task.target),
+    dependencyIds: [...task.dependencyIds],
+    payload: structuredClone(task.payload),
+    capabilities: [...task.capabilities],
+    qaProfile: structuredClone(task.qaProfile),
+    resourceLimits: structuredClone(task.resourceLimits),
+  };
+}
+
 test("compiles an approved Workspace Proposal into a deterministic immutable task DAG", () => {
   const fixture = approvedPlanFixture();
   const generation = workspaceGeneration(fixture.proposal);
@@ -272,6 +294,152 @@ test("compiles an approved Workspace Proposal into a deterministic immutable tas
   assert.equal(Object.isFrozen(compiled.dependencies), true);
 });
 
+test("freezes auditable v2 briefs, complete capabilities, and Resource adapter identity", () => {
+  const fixture = approvedPlanFixture();
+  const compiled = compileGenerationPlan(fixture);
+  const byTarget = new Map(compiled.tasks.map((task) => [task.target.id, task]));
+  const card = byTarget.get("component-card");
+  const home = byTarget.get("page-home");
+  const copy = byTarget.get("resource-copy");
+  assert.ok(card);
+  assert.ok(home);
+  assert.ok(copy);
+
+  assert.deepEqual(card.payload, {
+    version: 2,
+    artifactPlan: {
+      operation: "create",
+      nodeId: "node-card",
+      artifactId: "component-card",
+      kind: "component",
+      name: "Product card",
+      trackId: "track-card",
+      baseRevisionId: null,
+      dependsOnArtifactIds: [],
+      capabilityIds: ["cap-text"],
+      responsiveFrameIds: ["desktop"],
+    },
+    dependencyPlans: [{
+      kind: "resource",
+      ownerArtifactId: "component-card",
+      resourceId: "resource-images",
+    }],
+    responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
+    brief: {
+      proposalRationale: fixture.proposal.rationale,
+      assumptions: fixture.proposal.assumptions,
+      targetInstructions: {
+        operation: "create",
+        kind: "component",
+        name: "Product card",
+      },
+    },
+    capabilityDescriptors: [{ id: "cap-text", kind: "text", required: true }],
+  });
+  assert.deepEqual((home.payload.brief as any).targetInstructions, {
+    operation: "create",
+    kind: "page",
+    name: "Home",
+  });
+  assert.deepEqual(copy.payload, {
+    version: 2,
+    operation: {
+      operation: "create",
+      nodeId: "node-copy",
+      resourceId: "resource-copy",
+      kind: "research",
+      title: "Product copy",
+      revisionPolicy: { kind: "generate" },
+    },
+    brief: {
+      proposalRationale: fixture.proposal.rationale,
+      assumptions: fixture.proposal.assumptions,
+      targetInstructions: {
+        operation: "create",
+        kind: "research",
+        title: "Product copy",
+      },
+    },
+    capabilityDescriptors: [
+      { id: "cap-text", kind: "text", required: true },
+      { id: "cap-visual", kind: "visual-qa", required: true },
+    ],
+    adapter: {
+      id: "dezin.resource-adapter.research",
+      version: 1,
+      kind: "research",
+    },
+  });
+});
+
+test("round-trips v2 leaf intent and binds every frozen prompt input into intentHash", () => {
+  const tasks = compileGenerationPlan(approvedPlanFixture()).tasks.filter(
+    (task) => task.kind === "page" || task.kind === "component" || task.kind === "resource",
+  );
+  for (const task of tasks) {
+    const roundTripped = normalizeGenerationTaskIntent(
+      JSON.parse(JSON.stringify(taskInput(task))) as unknown,
+    );
+    assert.deepEqual(roundTripped, task);
+  }
+
+  const artifact = tasks.find((task) => task.kind === "page");
+  const resource = tasks.find((task) => task.kind === "resource");
+  assert.ok(artifact);
+  assert.ok(resource);
+  const mutations: Array<[GenerationTaskIntent, (payload: any) => void]> = [
+    [artifact, (payload) => { payload.brief.proposalRationale = "A different approved direction."; }],
+    [artifact, (payload) => { payload.brief.assumptions[0] = "A different assumption."; }],
+    [artifact, (payload) => { payload.brief.targetInstructions.name = "Different page"; }],
+    [artifact, (payload) => { payload.capabilityDescriptors[0].kind = "image"; }],
+    [resource, (payload) => { payload.adapter.id = "dezin.resource-adapter.other"; }],
+  ];
+  for (const [task, mutate] of mutations) {
+    const input = taskInput(task);
+    mutate(input.payload);
+    const normalized = normalizeGenerationTaskIntent(input);
+    assert.notEqual(normalized.intentHash, task.intentHash);
+    assert.equal(normalized.intentHash, generationTaskIntentHash(input));
+  }
+});
+
+test("keeps historical v1 leaf payloads readable without compiling new v1 work", () => {
+  const compiled = compileGenerationPlan(approvedPlanFixture());
+  const artifact = compiled.tasks.find((task) => task.kind === "page");
+  const resource = compiled.tasks.find((task) => task.kind === "resource");
+  assert.ok(artifact);
+  assert.ok(resource);
+
+  const artifactV1 = taskInput(artifact);
+  const artifactPayload = artifactV1.payload as any;
+  artifactV1.payload = {
+    version: 1,
+    artifactPlan: artifactPayload.artifactPlan,
+    dependencyPlans: artifactPayload.dependencyPlans,
+    responsiveFrames: artifactPayload.responsiveFrames,
+  };
+  const resourceV1 = taskInput(resource);
+  resourceV1.payload = {
+    version: 1,
+    operation: (resourceV1.payload as any).operation,
+  };
+
+  const restoredArtifact = normalizeGenerationTaskIntent(
+    JSON.parse(JSON.stringify(artifactV1)) as unknown,
+  );
+  const restoredResource = normalizeGenerationTaskIntent(
+    JSON.parse(JSON.stringify(resourceV1)) as unknown,
+  );
+  assert.equal(restoredArtifact.payload.version, 1);
+  assert.equal(restoredResource.payload.version, 1);
+  assert.equal(restoredArtifact.intentHash, generationTaskIntentHash(taskInput(restoredArtifact)));
+  assert.equal(restoredResource.intentHash, generationTaskIntentHash(taskInput(restoredResource)));
+  assert.equal(compiled.tasks.some((task) => (
+    (task.kind === "page" || task.kind === "component" || task.kind === "resource")
+      && task.payload.version !== 2
+  )), false);
+});
+
 test("rejects an Artifact dependency that is absent from both the approved plan and base graph", () => {
   const fixture = approvedPlanFixture();
   workspaceGeneration(fixture.proposal).artifactPlans[0]!.dependsOnArtifactIds.push("missing-component");
@@ -282,6 +450,33 @@ test("rejects an Artifact dependency that is absent from both the approved plan 
       && error.code === "invalid-reference"
       && /missing generation dependency Artifact missing-component/.test(error.message),
   );
+});
+
+test("rejects empty or per-Artifact-incomplete responsive Frame contracts before queueing", async (t) => {
+  await t.test("empty Artifact Frame set", () => {
+    const fixture = approvedPlanFixture();
+    workspaceGeneration(fixture.proposal).artifactPlans[0]!.responsiveFrameIds = [];
+    assert.throws(
+      () => compileGenerationPlan(fixture),
+      (error: unknown) => error instanceof GenerationPlanCompileError
+        && error.code === "invalid-reference"
+        && /must include at least one responsive Frame/.test(error.message),
+    );
+  });
+
+  await t.test("one Artifact omits a globally required Frame", () => {
+    const fixture = approvedPlanFixture();
+    const generation = workspaceGeneration(fixture.proposal);
+    generation.responsiveFrames.push({ id: "mobile", name: "Mobile", width: 390, height: 844 });
+    generation.qualityProfile.requiredFrameIds.push("mobile");
+    generation.artifactPlans[0]!.responsiveFrameIds.push("mobile");
+    assert.throws(
+      () => compileGenerationPlan(fixture),
+      (error: unknown) => error instanceof GenerationPlanCompileError
+        && error.code === "invalid-reference"
+        && /component-card.*missing required responsive Frame mobile/.test(error.message),
+    );
+  });
 });
 
 test("keeps the validation and checkpoint chain for an empty approved generation", () => {

@@ -224,6 +224,8 @@ function createCheckpointFixture(label: string) {
     {
       ...validationObservation,
       contextPackId: null,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
       retryContextPolicy: "same-context",
       executionMode: "full",
     },
@@ -270,6 +272,8 @@ function createCheckpointFixture(label: string) {
     {
       ...checkpointObservation,
       contextPackId: null,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
       retryContextPolicy: "same-context",
       executionMode: "full",
     },

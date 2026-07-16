@@ -6,6 +6,7 @@ import type {
   TurnRole,
 } from "../../../../packages/agent/src/index.ts";
 import type { AgentActivity } from "../../../../packages/agent/src/types.ts";
+import type { GenerationTaskFailureClass } from "../../../../packages/core/src/index.ts";
 
 export interface StandardArtifactCandidateIdentity {
   commitHash: string;
@@ -88,6 +89,7 @@ export class StandardArtifactExecutionError extends Error {
     | "no-source-change"
     | "invalid-candidate"
     | "invalid-quality";
+  readonly failureClass: GenerationTaskFailureClass;
 
   constructor(
     code: StandardArtifactExecutionError["code"],
@@ -96,6 +98,11 @@ export class StandardArtifactExecutionError extends Error {
     super(message);
     this.name = "StandardArtifactExecutionError";
     this.code = code;
+    this.failureClass = code === "invalid-quality"
+      ? "qa"
+      : code === "no-source-change" || code === "turn-budget-exhausted"
+        ? "design"
+        : "build-infrastructure";
   }
 }
 
@@ -241,7 +248,7 @@ export async function executeStandardArtifact(
     ));
     checkAbort(input.signal);
     input.onEvent?.({ type: "candidate", round, candidate });
-    if (seenTrees.has(candidate.treeHash)) break;
+    const repeatedTree = seenTrees.has(candidate.treeHash);
     seenTrees.add(candidate.treeHash);
 
     const quality = canonicalQuality(await input.evaluator.evaluate({
@@ -260,7 +267,10 @@ export async function executeStandardArtifact(
     versions.push(version);
     input.onEvent?.({ type: "quality", round, quality });
 
-    if (round >= input.maxRepairRounds || quality.repairFindings.length === 0) break;
+    // A repeated tree still names a newly retained commit in the Attempt's
+    // linear history. Evaluate and record that exact commit before stopping so
+    // durable Git refs and immutable version evidence can never diverge.
+    if (repeatedTree || round >= input.maxRepairRounds || quality.repairFindings.length === 0) break;
     const repair = input.buildRepairPrompt({
       round: round + 1,
       maxRepairRounds: input.maxRepairRounds,

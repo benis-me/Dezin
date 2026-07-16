@@ -663,6 +663,30 @@ function generationTaskAttemptHashPayload(input: GenerationTaskAttemptHashInput)
     attempt: input.attempt,
     target: input.target,
     baseRevisionId: input.baseRevisionId,
+    sourceCommitHash: input.sourceCommitHash,
+    sourceTreeHash: input.sourceTreeHash,
+    expectedSnapshotId: input.expectedSnapshotId,
+    contextPackId: input.contextPackId,
+    kernelRevisionId: input.kernelRevisionId,
+    payload: input.payload,
+    dependencyOutputs: input.dependencyOutputs,
+    resourcePins: input.resourcePins,
+    componentPins: input.componentPins,
+    retryContextPolicy: input.retryContextPolicy,
+    executionMode: input.executionMode,
+  };
+}
+
+function generationTaskAttemptLegacyHashPayload(
+  input: GenerationTaskAttemptHashInput,
+): Record<string, unknown> {
+  return {
+    taskId: input.taskId,
+    planId: input.planId,
+    workspaceId: input.workspaceId,
+    attempt: input.attempt,
+    target: input.target,
+    baseRevisionId: input.baseRevisionId,
     expectedSnapshotId: input.expectedSnapshotId,
     contextPackId: input.contextPackId,
     kernelRevisionId: input.kernelRevisionId,
@@ -679,6 +703,13 @@ export function generationTaskAttemptInputHash(
   input: GenerationTaskAttemptHashInput | GenerationTaskAttemptInput,
 ): string {
   return generationHash("generation-task-attempt-input", generationTaskAttemptHashPayload(input));
+}
+
+function generationTaskAttemptLegacyInputHash(input: GenerationTaskAttemptHashInput): string {
+  return generationHash(
+    "generation-task-attempt-input",
+    generationTaskAttemptLegacyHashPayload(input),
+  );
 }
 
 function normalizeGenerationTaskCandidateEvidenceHashInput(
@@ -728,7 +759,10 @@ export function generationTaskCandidateEvidenceHash(
   );
 }
 
-export function normalizeGenerationTaskAttemptInput(value: unknown): GenerationTaskAttemptInput {
+function normalizeGenerationTaskAttemptInputInternal(
+  value: unknown,
+  options: { allowLegacyArtifactSourceBase: boolean },
+): GenerationTaskAttemptInput {
   const input = generationRecord(value, "Generation Task Attempt input");
   generationAllowFields(input, [
     "taskId",
@@ -737,6 +771,8 @@ export function normalizeGenerationTaskAttemptInput(value: unknown): GenerationT
     "attempt",
     "target",
     "baseRevisionId",
+    "sourceCommitHash",
+    "sourceTreeHash",
     "expectedSnapshotId",
     "contextPackId",
     "kernelRevisionId",
@@ -760,6 +796,28 @@ export function normalizeGenerationTaskAttemptInput(value: unknown): GenerationT
   }
   if (input.executionMode !== "full" && input.executionMode !== "publication-only") {
     throw new WorkspaceStoreCodecError("Generation Task Attempt execution mode is unsupported");
+  }
+  const sourceCommitHash = input.sourceCommitHash === null
+    ? null
+    : generationGitObjectId(input.sourceCommitHash, "Generation Task Attempt Source Base commit hash");
+  const sourceTreeHash = input.sourceTreeHash === null
+    ? null
+    : generationGitObjectId(input.sourceTreeHash, "Generation Task Attempt Source Base tree hash");
+  if ((sourceCommitHash === null) !== (sourceTreeHash === null)) {
+    throw new WorkspaceStoreCodecError("Generation Task Attempt Source Base commit and tree must be one pair");
+  }
+  if (sourceCommitHash !== null && sourceTreeHash !== null
+    && sourceCommitHash.length !== sourceTreeHash.length) {
+    throw new WorkspaceStoreCodecError(
+      "Generation Task Attempt Source Base commit and tree must use the same Git object format",
+    );
+  }
+  if (target.type === "artifact") {
+    if (sourceCommitHash === null && !options.allowLegacyArtifactSourceBase) {
+      throw new WorkspaceStoreCodecError("Artifact Generation Task Attempt requires an immutable Source Base pair");
+    }
+  } else if (sourceCommitHash !== null) {
+    throw new WorkspaceStoreCodecError("Non-Artifact Generation Task Attempt Source Base must be null");
   }
   const dependencyOutputs = withCanonicalDependencyOutputOrdinals(
     generationArray(input.dependencyOutputs, "Generation Task Attempt Dependency outputs")
@@ -788,6 +846,8 @@ export function normalizeGenerationTaskAttemptInput(value: unknown): GenerationT
     attempt: generationSafeInteger(input.attempt, "Generation Task Attempt number", 1),
     target,
     baseRevisionId: generationNullableString(input.baseRevisionId, "Generation Task Attempt base Revision id"),
+    sourceCommitHash,
+    sourceTreeHash,
     expectedSnapshotId: generationCanonicalString(input.expectedSnapshotId, "Generation Task Attempt expected Snapshot id"),
     contextPackId: generationNullableString(input.contextPackId, "Generation Task Attempt Context Pack id"),
     kernelRevisionId: generationCanonicalString(input.kernelRevisionId, "Generation Task Attempt Kernel Revision id"),
@@ -799,6 +859,10 @@ export function normalizeGenerationTaskAttemptInput(value: unknown): GenerationT
     executionMode: input.executionMode,
   };
   return { ...normalized, inputHash: generationTaskAttemptInputHash(normalized) };
+}
+
+export function normalizeGenerationTaskAttemptInput(value: unknown): GenerationTaskAttemptInput {
+  return normalizeGenerationTaskAttemptInputInternal(value, { allowLegacyArtifactSourceBase: false });
 }
 
 export function normalizeGenerationTaskAttemptLease(value: unknown): GenerationTaskAttemptLease {
@@ -1616,7 +1680,8 @@ export function asGenerationTaskAttempt(
   const row = generationRecord(rowValue, "Generation Task Attempt row");
   generationAllowFields(row, [
     "task_id", "plan_id", "workspace_id", "attempt", "target_artifact_id", "target_track_id",
-    "target_resource_id", "base_revision_id", "expected_snapshot_id", "context_pack_id", "kernel_revision_id",
+    "target_resource_id", "base_revision_id", "source_commit_hash", "source_tree_hash",
+    "expected_snapshot_id", "context_pack_id", "kernel_revision_id",
     "materialization_sealed", "attempt_origin", "predecessor_attempt", "automatic_retry_index",
     "execution_mode", "payload_json", "input_hash", "pinned_resource_revision_ids_json",
     "component_dependency_revision_ids_json", "retry_context_policy", "status", "blocked_reason",
@@ -1712,7 +1777,7 @@ export function asGenerationTaskAttempt(
     throw new WorkspaceStoreCodecError("Generation Task Attempt Component revision summary does not match its pins");
   }
   const target = generationTaskAttemptTargetFromRow(row);
-  const input = normalizeGenerationTaskAttemptInput({
+  let input = normalizeGenerationTaskAttemptInputInternal({
     taskId,
     planId,
     workspaceId,
@@ -1721,6 +1786,14 @@ export function asGenerationTaskAttempt(
     baseRevisionId: generationStoredNullableString(
       row.base_revision_id,
       "Generation Task Attempt base Revision id",
+    ),
+    sourceCommitHash: generationStoredNullableString(
+      row.source_commit_hash,
+      "Generation Task Attempt Source Base commit hash",
+    ),
+    sourceTreeHash: generationStoredNullableString(
+      row.source_tree_hash,
+      "Generation Task Attempt Source Base tree hash",
     ),
     expectedSnapshotId: generationExactString(
       row.expected_snapshot_id,
@@ -1740,9 +1813,14 @@ export function asGenerationTaskAttempt(
     componentPins: componentPins.map(({ ordinal: _ordinal, designNodeId: _designNodeId, ...pin }) => pin),
     retryContextPolicy: row.retry_context_policy,
     executionMode: row.execution_mode,
-  });
-  if (generationExactString(row.input_hash, "Generation Task Attempt input hash") !== input.inputHash) {
-    throw new WorkspaceStoreCodecError("Generation Task Attempt input hash does not match its immutable input");
+  }, { allowLegacyArtifactSourceBase: true });
+  const storedInputHash = generationExactString(row.input_hash, "Generation Task Attempt input hash");
+  if (storedInputHash !== input.inputHash) {
+    if (input.sourceCommitHash !== null
+      || storedInputHash !== generationTaskAttemptLegacyInputHash(input)) {
+      throw new WorkspaceStoreCodecError("Generation Task Attempt input hash does not match its immutable input");
+    }
+    input = { ...input, inputHash: storedInputHash };
   }
   if (typeof row.status !== "string"
     || !GENERATION_TASK_ATTEMPT_STATUSES.has(row.status as GenerationTaskAttemptStatus)) {

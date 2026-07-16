@@ -24,7 +24,7 @@ function emptyGeneration() {
     dependencyPlans: [],
     prototypeIntents: [],
     capabilities: [],
-    responsiveFrames: [],
+    responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
     qualityProfile: {
       requiredFrameIds: [],
       blockingSeverities: [],
@@ -70,8 +70,8 @@ function createComponentPagePlan(store: Store) {
     artifactId,
     trackId,
     parentRevisionId: null,
-    sourceCommitHash: `base-commit-${artifactId}`,
-    sourceTreeHash: `base-tree-${artifactId}`,
+    sourceCommitHash: (artifactId === "substitution-page" ? "1" : "3").repeat(40),
+    sourceTreeHash: (artifactId === "substitution-page" ? "2" : "4").repeat(40),
     kernelRevisionId: workspace.activeKernelRevisionId,
     renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
     quality: { state: "passed", score: 100, findings: [] },
@@ -117,7 +117,7 @@ function createComponentPagePlan(store: Store) {
           baseRevisionId: oldComponentRevision.id,
           dependsOnArtifactIds: [],
           capabilityIds: [],
-          responsiveFrameIds: [],
+          responsiveFrameIds: ["desktop"],
         },
         {
           operation: "revise",
@@ -129,7 +129,7 @@ function createComponentPagePlan(store: Store) {
           baseRevisionId: oldPageRevision.id,
           dependsOnArtifactIds: ["substitution-component"],
           capabilityIds: [],
-          responsiveFrameIds: [],
+          responsiveFrameIds: ["desktop"],
         },
       ],
       dependencyPlans: [{
@@ -258,6 +258,8 @@ test("a generated Component successor substitutes the old Head in its dependent 
       {
         ...componentObservation,
         contextPackId: componentContext.id,
+        sourceCommitHash: fixture.oldComponentRevision.sourceCommitHash,
+        sourceTreeHash: fixture.oldComponentRevision.sourceTreeHash,
         retryContextPolicy: "same-context",
         executionMode: "full",
       },
@@ -393,6 +395,8 @@ test("a generated Component successor substitutes the old Head in its dependent 
       {
         ...pageObservation,
         contextPackId: pageContext.id,
+        sourceCommitHash: fixture.oldPageRevision.sourceCommitHash,
+        sourceTreeHash: fixture.oldPageRevision.sourceTreeHash,
         retryContextPolicy: "same-context",
         executionMode: "full",
       },

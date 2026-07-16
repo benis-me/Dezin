@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 const MAX_JSON_DEPTH = 64;
@@ -12,6 +13,8 @@ export interface GenerationTaskArtifactQualityGateInput {
   renderSpec: unknown;
   quality: unknown;
   evidence: unknown;
+  /** Core supplies this fence; daemon-only preflight may pass null. */
+  expectedEvidenceOwner: unknown;
 }
 
 export class GenerationTaskQualityGateError extends Error {
@@ -212,7 +215,7 @@ function validateFrames(input: {
   plannedFrames: unknown;
   renderSpec: unknown;
   requiredFrameIds: readonly string[];
-}): void {
+}): Record<string, unknown>[] {
   const plannedFrames = array(input.plannedFrames, "Generation Task planned Frames");
   const renderSpec = record(input.renderSpec, "Artifact RenderSpec");
   if (!Array.isArray(renderSpec.frames)
@@ -230,12 +233,13 @@ function validateFrames(input: {
       fail(`Artifact RenderSpec is missing required Frame ${requiredFrameId}`);
     }
   }
+  return frames;
 }
 
 function validateQuality(
   value: unknown,
   blockingSeverities: readonly string[],
-): void {
+): number {
   const quality = record(value, "Artifact quality result");
   exactFields(quality, ["state", "score", "findings"], "Artifact quality result");
   if (quality.state !== "passed" && quality.state !== "needs-attention"
@@ -297,39 +301,497 @@ function validateQuality(
   if ((activeSeverities.length === 0) !== (quality.state === "passed")) {
     fail("Artifact quality state does not match its active findings");
   }
+  return quality.score;
+}
+
+interface ExpectedEvidenceOwner {
+  projectId: string;
+  workspaceId: string;
+  planId: string;
+  taskId: string;
+  attempt: number;
+  attemptCreatedAt: number;
+  inputHash: string;
+  sourceBase: {
+    commitHash: string;
+    treeHash: string;
+  };
+  candidateRetentionRef: string;
+  candidateCommitHash: string;
+  candidateTreeHash: string;
+  contextPackId: string;
+  contextPackHash: string;
+}
+
+const EVIDENCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const GIT_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const SHA256 = /^[0-9a-f]{64}$/;
+
+function evidenceId(value: unknown, label: string): string {
+  const result = text(value, label, 256);
+  if (!EVIDENCE_ID.test(result) || result === "." || result === "..") {
+    fail(`${label} is not a safe identifier`);
+  }
+  return result;
+}
+
+function gitObjectId(value: unknown, label: string): string {
+  const result = text(value, label, 64);
+  if (!GIT_OBJECT_ID.test(result)) fail(`${label} must be a lowercase Git object id`);
+  return result;
+}
+
+function sha256(value: unknown, label: string): string {
+  const result = text(value, label, 64);
+  if (!SHA256.test(result)) fail(`${label} must be a lowercase SHA-256 digest`);
+  return result;
+}
+
+export function generationTaskArtifactCandidateRetentionRef(input: {
+  workspaceId: string;
+  taskId: string;
+  attempt: number;
+  inputHash: string;
+}): string {
+  const digest = createHash("sha256").update(JSON.stringify([
+    "artifact-candidate-attempt-v1",
+    input.workspaceId,
+    input.taskId,
+    input.attempt,
+    input.inputHash,
+  ])).digest("hex");
+  return `refs/dezin/generation-attempts/artifacts/${digest}`;
+}
+
+function expectedEvidenceOwner(value: unknown): ExpectedEvidenceOwner | null {
+  if (value === null) return null;
+  const owner = record(value, "Generation Task expected evidence owner");
+  exactFields(owner, [
+    "projectId", "workspaceId", "planId", "taskId", "attempt", "candidateCommitHash",
+    "candidateTreeHash", "contextPackId", "contextPackHash", "inputHash",
+    "attemptCreatedAt", "sourceBase", "candidateRetentionRef",
+  ], "Generation Task expected evidence owner");
+  if (!Number.isSafeInteger(owner.attempt) || Number(owner.attempt) < 1
+    || !Number.isSafeInteger(owner.attemptCreatedAt) || Number(owner.attemptCreatedAt) < 0) {
+    fail("Generation Task expected evidence Attempt is invalid");
+  }
+  const workspaceId = evidenceId(owner.workspaceId, "Generation Task expected Workspace id");
+  const taskId = evidenceId(owner.taskId, "Generation Task expected Task id");
+  const inputHash = sha256(owner.inputHash, "Generation Task expected input hash");
+  const sourceBase = record(owner.sourceBase, "Generation Task expected Source Base");
+  exactFields(sourceBase, ["commitHash", "treeHash"], "Generation Task expected Source Base");
+  const sourceCommitHash = gitObjectId(
+    sourceBase.commitHash,
+    "Generation Task expected Source Base commit",
+  );
+  const sourceTreeHash = gitObjectId(
+    sourceBase.treeHash,
+    "Generation Task expected Source Base tree",
+  );
+  if (sourceCommitHash.length !== sourceTreeHash.length) {
+    fail("Generation Task expected Source Base mixes Git object formats");
+  }
+  const candidateRetentionRef = text(
+    owner.candidateRetentionRef,
+    "Generation Task expected candidate retention ref",
+    512,
+  );
+  const canonicalRetentionRef = generationTaskArtifactCandidateRetentionRef({
+    workspaceId,
+    taskId,
+    attempt: Number(owner.attempt),
+    inputHash,
+  });
+  if (candidateRetentionRef !== canonicalRetentionRef) {
+    fail("Generation Task expected candidate retention ref is not canonical");
+  }
+  const contextPackHash = sha256(
+    owner.contextPackHash,
+    "Generation Task expected Context Pack hash",
+  );
+  const contextPackId = text(owner.contextPackId, "Generation Task expected Context Pack id", 512);
+  if (contextPackId !== `context-pack-${contextPackHash}`) {
+    fail("Generation Task expected Context Pack identity is not content-addressed");
+  }
+  const candidateCommitHash = gitObjectId(
+    owner.candidateCommitHash,
+    "Generation Task expected candidate commit",
+  );
+  const candidateTreeHash = gitObjectId(
+    owner.candidateTreeHash,
+    "Generation Task expected candidate tree",
+  );
+  if (candidateCommitHash.length !== candidateTreeHash.length) {
+    fail("Generation Task expected candidate mixes Git object formats");
+  }
+  return {
+    projectId: evidenceId(owner.projectId, "Generation Task expected Project id"),
+    workspaceId,
+    planId: evidenceId(owner.planId, "Generation Task expected Plan id"),
+    taskId,
+    attempt: Number(owner.attempt),
+    attemptCreatedAt: Number(owner.attemptCreatedAt),
+    inputHash,
+    sourceBase: { commitHash: sourceCommitHash, treeHash: sourceTreeHash },
+    candidateRetentionRef,
+    candidateCommitHash,
+    candidateTreeHash,
+    contextPackId,
+    contextPackHash,
+  };
+}
+
+function evidenceOwner(
+  value: unknown,
+  expected: ExpectedEvidenceOwner | null,
+): Record<string, unknown> {
+  const owner = record(value, "Artifact visual evidence owner");
+  exactFields(owner, [
+    "projectId", "workspaceId", "planId", "taskId", "attempt",
+    "candidateCommitHash", "candidateTreeHash", "contextPackId", "contextPackHash",
+  ], "Artifact visual evidence owner");
+  const projectId = evidenceId(owner.projectId, "Artifact visual evidence Project id");
+  const workspaceId = evidenceId(owner.workspaceId, "Artifact visual evidence Workspace id");
+  const planId = evidenceId(owner.planId, "Artifact visual evidence Plan id");
+  const taskId = evidenceId(owner.taskId, "Artifact visual evidence Task id");
+  if (!Number.isSafeInteger(owner.attempt) || Number(owner.attempt) < 1) {
+    fail("Artifact visual evidence Attempt is invalid");
+  }
+  const candidateCommitHash = gitObjectId(owner.candidateCommitHash, "Artifact visual evidence commit");
+  const candidateTreeHash = gitObjectId(owner.candidateTreeHash, "Artifact visual evidence tree");
+  if (candidateCommitHash.length !== candidateTreeHash.length) {
+    fail("Artifact visual evidence mixes Git object formats");
+  }
+  const contextPackHash = sha256(owner.contextPackHash, "Artifact visual evidence Context Pack hash");
+  const contextPackId = text(owner.contextPackId, "Artifact visual evidence Context Pack id", 512);
+  if (contextPackId !== `context-pack-${contextPackHash}`) {
+    fail("Artifact visual evidence Context Pack identity is not content-addressed");
+  }
+  if (expected !== null && (projectId !== expected.projectId
+    || workspaceId !== expected.workspaceId
+    || planId !== expected.planId
+    || taskId !== expected.taskId
+    || Number(owner.attempt) !== expected.attempt
+    || candidateCommitHash !== expected.candidateCommitHash
+    || candidateTreeHash !== expected.candidateTreeHash
+    || contextPackId !== expected.contextPackId
+    || contextPackHash !== expected.contextPackHash)) {
+    fail("Artifact visual evidence owner does not match the fenced Generation Task candidate");
+  }
+  return owner;
+}
+
+function artifactRunQualityEvidence(
+  value: unknown,
+  expected: ExpectedEvidenceOwner | null,
+  qualityScore: number,
+): { evidence: Record<string, unknown>; owner: ExpectedEvidenceOwner | null } {
+  const envelope = record(value, "Artifact candidate evidence");
+  if (envelope.protocol !== "dezin.artifact-run.v1") {
+    if (expected !== null && !Array.isArray(envelope.visualEvidence)) {
+      fail("Fenced Artifact evidence requires an immutable run envelope or exact visual ownership");
+    }
+    return { evidence: envelope, owner: expected };
+  }
+
+  const qualityEvidence = record(envelope.qualityEvidence, "Artifact run quality evidence");
+  const hasRuntimeChecks = qualityEvidence.runtimeChecks !== undefined;
+  const hasVisualReview = qualityEvidence.visualReview !== undefined;
+  exactFields(envelope, [
+    ...(hasRuntimeChecks ? ["runtimeChecks"] : []),
+    ...(hasVisualReview ? ["visualReview"] : []),
+    "protocol",
+    "projectId",
+    "taskId",
+    "planId",
+    "workspaceId",
+    "attempt",
+    "attemptCreatedAt",
+    "inputHash",
+    "contextPackId",
+    "contextPackHash",
+    "sourceBase",
+    "candidateRetentionRef",
+    "selectedRound",
+    "versions",
+    "qualityEvidence",
+  ], "Artifact run evidence");
+  const projectId = evidenceId(envelope.projectId, "Artifact run Project id");
+  const taskId = evidenceId(envelope.taskId, "Artifact run Task id");
+  const planId = evidenceId(envelope.planId, "Artifact run Plan id");
+  const workspaceId = evidenceId(envelope.workspaceId, "Artifact run Workspace id");
+  if (!Number.isSafeInteger(envelope.attempt) || Number(envelope.attempt) < 1
+    || !Number.isSafeInteger(envelope.attemptCreatedAt) || Number(envelope.attemptCreatedAt) < 0) {
+    fail("Artifact run Attempt identity is invalid");
+  }
+  const inputHash = sha256(envelope.inputHash, "Artifact run input hash");
+  const contextPackHash = sha256(envelope.contextPackHash, "Artifact run Context Pack hash");
+  const contextPackId = text(envelope.contextPackId, "Artifact run Context Pack id", 512);
+  if (contextPackId !== `context-pack-${contextPackHash}`) {
+    fail("Artifact run Context Pack identity is not content-addressed");
+  }
+  const sourceBase = record(envelope.sourceBase, "Artifact run Source Base");
+  exactFields(sourceBase, ["commitHash", "treeHash"], "Artifact run Source Base");
+  const sourceCommitHash = gitObjectId(sourceBase.commitHash, "Artifact run Source Base commit");
+  const sourceTreeHash = gitObjectId(sourceBase.treeHash, "Artifact run Source Base tree");
+  if (sourceCommitHash.length !== sourceTreeHash.length) {
+    fail("Artifact run Source Base mixes Git object formats");
+  }
+  const candidateRetentionRef = text(
+    envelope.candidateRetentionRef,
+    "Artifact run candidate retention ref",
+    512,
+  );
+  if (!/^refs\/dezin\/generation-attempts\/artifacts\/[0-9a-f]{64}$/.test(candidateRetentionRef)) {
+    fail("Artifact run candidate retention ref is invalid");
+  }
+  if (!Number.isSafeInteger(envelope.selectedRound) || Number(envelope.selectedRound) < 0
+    || !Array.isArray(envelope.versions) || envelope.versions.length === 0
+    || envelope.versions.length > 1_000) {
+    fail("Artifact run version history is invalid");
+  }
+  const selectedRound = Number(envelope.selectedRound);
+  const candidate = record(qualityEvidence.candidate, "Artifact run selected candidate");
+  const selectedCommitHash = gitObjectId(candidate.commitHash, "Artifact run selected candidate commit");
+  const selectedTreeHash = gitObjectId(candidate.treeHash, "Artifact run selected candidate tree");
+  let selectedVersion: Record<string, unknown> | null = null;
+  for (let index = 0; index < envelope.versions.length; index += 1) {
+    const version = envelope.versions[index] as Record<string, unknown>;
+    exactFields(version, ["round", "commitHash", "treeHash", "passed", "score"],
+      `Artifact run version ${index}`);
+    const commitHash = gitObjectId(version.commitHash, `Artifact run version ${index} commit`);
+    const treeHash = gitObjectId(version.treeHash, `Artifact run version ${index} tree`);
+    if (commitHash.length !== treeHash.length || version.round !== index
+      || typeof version.passed !== "boolean"
+      || typeof version.score !== "number" || !Number.isFinite(version.score)
+      || version.score < 0 || version.score > 100) {
+      fail(`Artifact run version ${index} is invalid`);
+    }
+    if (index === selectedRound) selectedVersion = version;
+  }
+  if (selectedVersion === null || selectedVersion.passed !== true
+    || selectedVersion.commitHash !== selectedCommitHash
+    || selectedVersion.treeHash !== selectedTreeHash
+    || selectedVersion.score !== qualityScore
+    || qualityEvidence.round !== selectedRound) {
+    fail("Artifact run selected version does not match its quality evidence");
+  }
+  if ((hasRuntimeChecks && !isDeepStrictEqual(envelope.runtimeChecks, qualityEvidence.runtimeChecks))
+    || (hasVisualReview && !isDeepStrictEqual(envelope.visualReview, qualityEvidence.visualReview))) {
+    fail("Artifact run quality summary diverges from its exact quality evidence");
+  }
+  if (expected !== null && (projectId !== expected.projectId
+    || taskId !== expected.taskId
+    || planId !== expected.planId
+    || workspaceId !== expected.workspaceId
+    || Number(envelope.attempt) !== expected.attempt
+    || Number(envelope.attemptCreatedAt) !== expected.attemptCreatedAt
+    || inputHash !== expected.inputHash
+    || sourceCommitHash !== expected.sourceBase.commitHash
+    || sourceTreeHash !== expected.sourceBase.treeHash
+    || candidateRetentionRef !== expected.candidateRetentionRef
+    || contextPackId !== expected.contextPackId
+    || contextPackHash !== expected.contextPackHash
+    || selectedCommitHash !== expected.candidateCommitHash
+    || selectedTreeHash !== expected.candidateTreeHash)) {
+    fail("Artifact run evidence does not match the fenced Generation Task candidate");
+  }
+  return {
+    evidence: qualityEvidence,
+    owner: {
+      projectId,
+      workspaceId,
+      planId,
+      taskId,
+      attempt: Number(envelope.attempt),
+      attemptCreatedAt: Number(envelope.attemptCreatedAt),
+      inputHash,
+      sourceBase: { commitHash: sourceCommitHash, treeHash: sourceTreeHash },
+      candidateRetentionRef,
+      candidateCommitHash: selectedCommitHash,
+      candidateTreeHash: selectedTreeHash,
+      contextPackId,
+      contextPackHash,
+    },
+  };
 }
 
 function validateEvidence(value: unknown, input: {
   requireRuntimeChecks: boolean;
   requireVisualReview: boolean;
+  frames: readonly Record<string, unknown>[];
+  expectedOwner: ExpectedEvidenceOwner | null;
+  qualityScore: number;
 }): void {
-  const evidence = record(value, "Artifact candidate evidence");
+  const unwrapped = artifactRunQualityEvidence(value, input.expectedOwner, input.qualityScore);
+  const evidence = unwrapped.evidence;
+  const evidenceFence = unwrapped.owner;
+  const baseFields = ["protocol", "candidate", "contextPack", "frames", "frameResults", "round"];
+  const hasRuntimeChecks = evidence.runtimeChecks !== undefined;
+  const hasVisualReview = evidence.visualReview !== undefined;
+  const hasVisualEvidence = evidence.visualEvidence !== undefined;
+  exactFields(evidence, [
+    ...baseFields,
+    ...(hasRuntimeChecks ? ["runtimeChecks"] : []),
+    ...(hasVisualReview ? ["visualReview"] : []),
+    ...(hasVisualEvidence ? ["visualEvidence"] : []),
+  ], "Artifact candidate evidence");
+  if (evidence.protocol !== "dezin.standard-artifact-quality.v1") {
+    fail("Artifact candidate evidence protocol is invalid");
+  }
+  const candidate = record(evidence.candidate, "Artifact candidate evidence identity");
+  exactFields(candidate, ["commitHash", "treeHash"], "Artifact candidate evidence identity");
+  const candidateCommitHash = gitObjectId(candidate.commitHash, "Artifact candidate evidence commit");
+  const candidateTreeHash = gitObjectId(candidate.treeHash, "Artifact candidate evidence tree");
+  if (candidateCommitHash.length !== candidateTreeHash.length) {
+    fail("Artifact candidate evidence mixes Git object formats");
+  }
+  const contextPack = record(evidence.contextPack, "Artifact candidate evidence Context Pack");
+  exactFields(contextPack, ["id", "hash"], "Artifact candidate evidence Context Pack");
+  const contextPackHash = sha256(contextPack.hash, "Artifact candidate evidence Context Pack hash");
+  const contextPackId = text(contextPack.id, "Artifact candidate evidence Context Pack id", 512);
+  if (contextPackId !== `context-pack-${contextPackHash}`) {
+    fail("Artifact candidate evidence Context Pack identity is not content-addressed");
+  }
+  if (evidenceFence !== null && (candidateCommitHash !== evidenceFence.candidateCommitHash
+    || candidateTreeHash !== evidenceFence.candidateTreeHash
+    || contextPackId !== evidenceFence.contextPackId
+    || contextPackHash !== evidenceFence.contextPackHash)) {
+    fail("Artifact candidate evidence identity does not match its fenced candidate");
+  }
+  if (!Number.isSafeInteger(evidence.round) || Number(evidence.round) < 0) {
+    fail("Artifact candidate evidence round is invalid");
+  }
+  if (!isDeepStrictEqual(evidence.frames, input.frames)) {
+    fail("Artifact candidate evidence Frames diverge from the immutable Task plan");
+  }
+
   const runtimeChecks = evidence.runtimeChecks;
   if (input.requireRuntimeChecks || runtimeChecks !== undefined) {
-    if (!Array.isArray(runtimeChecks) || runtimeChecks.length === 0 || runtimeChecks.length > 1_000) {
-      fail("Artifact candidate requires non-empty runtime-check evidence");
+    if (!Array.isArray(runtimeChecks) || runtimeChecks.length !== input.frames.length) {
+      fail("Artifact candidate requires one runtime check per immutable Task Frame");
     }
-    const ids = new Set<string>();
+    const expectedIds = input.frames.map((frame) => `frame:${String(frame.id)}`);
+    const ids: string[] = [];
     for (let index = 0; index < runtimeChecks.length; index += 1) {
       const check = runtimeChecks[index] as Record<string, unknown>;
       exactFields(check, ["id", "status"], `Artifact runtime check ${index}`);
       const id = text(check.id, `Artifact runtime check ${index} id`, 512);
-      if (ids.has(id)) fail(`Artifact runtime check id ${id} is duplicated`);
-      ids.add(id);
+      ids.push(id);
       if (check.status !== "passed") fail(`Artifact runtime check ${id} did not pass`);
     }
+    if (!isDeepStrictEqual(ids, expectedIds)) {
+      fail("Artifact runtime checks do not exactly cover the immutable Task Frames");
+    }
   }
+
   const visualReview = evidence.visualReview;
+  const reviewedFrameAttemptIds = new Map<string, string>();
   if (input.requireVisualReview || visualReview !== undefined) {
     if (visualReview === null || typeof visualReview !== "object" || Array.isArray(visualReview)) {
       fail("Artifact candidate requires visual-review evidence");
     }
     const review = visualReview as Record<string, unknown>;
+    exactFields(review, ["status", "fidelity", "evidence"], "Artifact visual review");
     if (review.status !== "passed") fail("Artifact visual review did not pass");
     if (typeof review.fidelity !== "number" || !Number.isFinite(review.fidelity)
       || review.fidelity < 0 || review.fidelity > 1) {
       fail("Artifact visual review fidelity must be between 0 and 1");
     }
+    if (!Array.isArray(review.evidence) || review.evidence.length !== input.frames.length
+      || !Array.isArray(evidence.visualEvidence)
+      || evidence.visualEvidence.length !== input.frames.length) {
+      fail("Artifact visual review requires one durable descriptor per immutable Task Frame");
+    }
+    const summaries = review.evidence as Array<Record<string, unknown>>;
+    const descriptors = evidence.visualEvidence as Array<Record<string, unknown>>;
+    const frameAttemptIds = new Set<string>();
+    const storageKeys = new Set<string>();
+    for (let index = 0; index < input.frames.length; index += 1) {
+      const plannedFrame = input.frames[index]!;
+      const summary = summaries[index]!;
+      exactFields(summary, [
+        "frameId", "frameAttemptId", "sha256", "byteLength", "storageKey",
+      ], `Artifact visual review evidence ${index}`);
+      const frameId = evidenceId(summary.frameId, `Artifact visual review evidence ${index} Frame id`);
+      const frameAttemptId = evidenceId(
+        summary.frameAttemptId,
+        `Artifact visual review evidence ${index} Frame Attempt id`,
+      );
+      const checksum = sha256(summary.sha256, `Artifact visual review evidence ${frameId} checksum`);
+      if (!Number.isSafeInteger(summary.byteLength) || Number(summary.byteLength) < 1) {
+        fail(`Artifact visual review evidence ${frameId} byte length is invalid`);
+      }
+      const key = text(summary.storageKey, `Artifact visual review evidence ${frameId} storage key`, 4_096);
+      if (frameId !== plannedFrame.id || frameAttemptIds.has(frameAttemptId) || storageKeys.has(key)) {
+        fail("Artifact visual review evidence does not uniquely cover the immutable Task Frames");
+      }
+      frameAttemptIds.add(frameAttemptId);
+      storageKeys.add(key);
+      reviewedFrameAttemptIds.set(frameId, frameAttemptId);
+
+      const descriptor = descriptors[index]!;
+      exactFields(descriptor, [
+        "protocol", "owner", "frame", "round", "mediaType", "sha256", "byteLength", "storageKey",
+      ], `Artifact visual evidence descriptor ${index}`);
+      if (descriptor.protocol !== "dezin.generation-task-visual-evidence.v1"
+        || descriptor.mediaType !== "image/png"
+        || descriptor.round !== evidence.round
+        || descriptor.sha256 !== checksum
+        || descriptor.byteLength !== summary.byteLength
+        || descriptor.storageKey !== key) {
+        fail(`Artifact visual evidence descriptor ${frameId} does not match its review summary`);
+      }
+      const owner = evidenceOwner(descriptor.owner, evidenceFence);
+      if (owner.candidateCommitHash !== candidateCommitHash
+        || owner.candidateTreeHash !== candidateTreeHash
+        || owner.contextPackId !== contextPackId
+        || owner.contextPackHash !== contextPackHash) {
+        fail(`Artifact visual evidence descriptor ${frameId} does not match its quality envelope`);
+      }
+      const descriptorFrame = record(descriptor.frame, `Artifact visual evidence descriptor ${frameId} Frame`);
+      if (!isDeepStrictEqual(descriptorFrame, { ...plannedFrame, frameAttemptId })) {
+        fail(`Artifact visual evidence descriptor ${frameId} does not match its immutable Task Frame`);
+      }
+      const expectedStorageKey = [
+        "generation-task-evidence",
+        owner.projectId,
+        owner.workspaceId,
+        owner.planId,
+        owner.taskId,
+        `attempt-${owner.attempt}`,
+        "visual",
+        `round-${String(evidence.round)}-${frameId}-${checksum}.png`,
+      ].join("/");
+      if (key !== expectedStorageKey) {
+        fail(`Artifact visual evidence descriptor ${frameId} storage ownership is invalid`);
+      }
+    }
+  } else if (hasVisualEvidence) {
+    fail("Artifact visual evidence cannot exist without a visual review");
+  }
+
+  const frameResults = evidence.frameResults;
+  if (!Array.isArray(frameResults)) fail("Artifact candidate Frame results must be an array");
+  const requiresFrameResults = input.requireRuntimeChecks || input.requireVisualReview
+    || hasRuntimeChecks || hasVisualReview;
+  if (frameResults.length !== (requiresFrameResults ? input.frames.length : 0)) {
+    fail("Artifact candidate Frame results do not exactly cover the evaluated Task Frames");
+  }
+  for (let index = 0; index < frameResults.length; index += 1) {
+    const result = frameResults[index] as Record<string, unknown>;
+    exactFields(result, [
+      "frameId", "frameAttemptId", "width", "height", "status", "reviewed",
+    ], `Artifact candidate Frame result ${index}`);
+    const frame = input.frames[index]!;
+    if (result.frameId !== frame.id || result.width !== frame.width || result.height !== frame.height
+      || result.status !== "passed"
+      || typeof result.reviewed !== "boolean"
+      || (hasVisualReview && (result.reviewed !== true
+        || result.frameAttemptId !== reviewedFrameAttemptIds.get(String(frame.id))))) {
+      fail(`Artifact candidate Frame result ${index} does not match its immutable Task Frame`);
+    }
+    evidenceId(result.frameAttemptId, `Artifact candidate Frame result ${index} Attempt id`);
   }
 }
 
@@ -338,16 +800,23 @@ export function validateGenerationTaskArtifactQualityGate(
 ): void {
   try {
     const input = record(unsafeInput, "Generation Task Artifact quality gate input");
-    exactFields(input, ["qaProfile", "plannedFrames", "renderSpec", "quality", "evidence"],
+    exactFields(input, [
+      "qaProfile", "plannedFrames", "renderSpec", "quality", "evidence", "expectedEvidenceOwner",
+    ],
       "Generation Task Artifact quality gate input");
     const profile = validateProfile(input.qaProfile);
-    validateFrames({
+    const frames = validateFrames({
       plannedFrames: input.plannedFrames,
       renderSpec: input.renderSpec,
       requiredFrameIds: profile.requiredFrameIds,
     });
-    validateQuality(input.quality, profile.blockingSeverities);
-    validateEvidence(input.evidence, profile);
+    const qualityScore = validateQuality(input.quality, profile.blockingSeverities);
+    validateEvidence(input.evidence, {
+      ...profile,
+      frames,
+      qualityScore,
+      expectedOwner: expectedEvidenceOwner(input.expectedEvidenceOwner),
+    });
   } catch (error) {
     if (error instanceof GenerationTaskQualityGateError) throw error;
     fail("Generation Task Artifact quality evidence could not be validated safely");

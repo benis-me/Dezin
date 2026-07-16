@@ -1,8 +1,10 @@
 import type http from "node:http";
+import type { GenerationRuntime } from "./orchestration/generation-runtime.ts";
 import type { RuntimeSupervisor } from "./runtime-supervisor.ts";
 
 export interface DaemonShutdownOptions {
   server: http.Server;
+  generationRuntime?: Pick<GenerationRuntime, "stop">;
   runtimeSupervisor: RuntimeSupervisor;
   closeStore: () => void;
   timeoutMs?: number;
@@ -46,13 +48,27 @@ export async function shutdownDaemon(options: DaemonShutdownOptions): Promise<bo
         });
       });
 
+  // Stop Generation admission first. RuntimeSupervisor shutdown is invoked
+  // immediately afterwards so both layers share the same deadline and can
+  // cooperatively abort already-admitted work without permitting a new poll.
+  let generationSettlement: Promise<boolean>;
   try {
-    const [runtimeSettled, connectionsSettled] = await Promise.all([
-      options.runtimeSupervisor.shutdown(deadlineAt).catch(() => false),
+    generationSettlement = options.generationRuntime === undefined
+      ? Promise.resolve(true)
+      : Promise.resolve(options.generationRuntime.stop()).then(() => true, () => false);
+  } catch {
+    generationSettlement = Promise.resolve(false);
+  }
+  const runtimeSettlement = options.runtimeSupervisor.shutdown(deadlineAt).catch(() => false);
+
+  try {
+    const [generationSettled, runtimeSettled, connectionsSettled] = await Promise.all([
+      settleBeforeDeadline(generationSettlement, deadlineAt),
+      settleBeforeDeadline(runtimeSettlement, deadlineAt),
       settleBeforeDeadline(serverSettlement, deadlineAt),
     ]);
     if (!connectionsSettled) options.server.closeAllConnections();
-    return runtimeSettled && connectionsSettled;
+    return generationSettled && runtimeSettled && connectionsSettled;
   } finally {
     if (!serverClosed) options.server.closeAllConnections();
     options.closeStore();

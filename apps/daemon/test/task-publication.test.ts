@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { GenerationTaskAttemptClaim } from "../../../packages/core/src/index.ts";
+import type {
+  ArtifactRevisionRecord,
+  GenerationTaskAttemptClaim,
+} from "../../../packages/core/src/index.ts";
+import type { ArtifactCandidateRetentionPort } from "../src/orchestration/artifact-candidate-retention.ts";
 import {
   GenerationTaskPublication,
   type GenerationTaskPublicationStorePort,
@@ -19,12 +23,17 @@ function claimFixture(): GenerationTaskAttemptClaim {
       id: "task-page-home",
       planId: "plan-1",
       workspaceId: "workspace-1",
+      kind: "page",
+      target: { type: "artifact", workspaceId: "workspace-1", id: "artifact-home", trackId: "track-main" },
     },
     attempt: {
       taskId: "task-page-home",
       planId: "plan-1",
       workspaceId: "workspace-1",
       attempt: 2,
+      executionMode: "full",
+      candidateRevisionId: null,
+      candidateEvidence: null,
     },
     lease: {
       taskId: "task-page-home",
@@ -35,6 +44,27 @@ function claimFixture(): GenerationTaskAttemptClaim {
     },
     claims: [],
   } as unknown as GenerationTaskAttemptClaim;
+}
+
+function artifactRevision(): ArtifactRevisionRecord {
+  return {
+    id: "artifact-revision-home",
+    workspaceId: "workspace-1",
+    artifactId: "artifact-home",
+    trackId: "track-main",
+    sequence: 1,
+    parentRevisionId: null,
+    sourceCommitHash: "a".repeat(40),
+    sourceTreeHash: "b".repeat(40),
+    artifactRoot: ".",
+    kernelRevisionId: "kernel-1",
+    renderSpec: { frames: [{ id: "desktop" }] },
+    quality: { state: "passed" },
+    contextPackHash: "c".repeat(64),
+    producedByRunId: null,
+    legacyRunId: null,
+    createdAt: 100,
+  };
 }
 
 function artifactResult(): ArtifactPreparedCandidate {
@@ -87,9 +117,16 @@ function validationResult(): PrototypeValidationResult {
 
 function recordingStore(calls: Array<{ name: string; args: unknown[] }>): GenerationTaskPublicationStorePort {
   return {
+    getArtifactRevision(revisionId) {
+      calls.push({ name: "get-artifact-revision", args: [revisionId] });
+      return revisionId === artifactRevision().id ? artifactRevision() : null;
+    },
     stageGenerationTaskCandidateForProject(...args) {
       calls.push({ name: "stage", args });
-      return {} as never;
+      const input = args[2];
+      return input.candidate.kind === "artifact"
+        ? { attempt: {} as never, artifactRevision: artifactRevision(), resourceRevision: null }
+        : { attempt: {} as never, artifactRevision: null, resourceRevision: {} as never };
     },
     publishGenerationTaskCandidateForProject(...args) {
       calls.push({ name: "publish", args });
@@ -110,6 +147,19 @@ function recordingStore(calls: Array<{ name: string; args: unknown[] }>): Genera
   };
 }
 
+function recordingRetention(
+  calls: Array<{ name: string; args: unknown[] }>,
+): ArtifactCandidateRetentionPort {
+  return {
+    async promote(...args) {
+      calls.push({ name: "promote", args });
+    },
+    async release(...args) {
+      calls.push({ name: "release", args });
+    },
+  };
+}
+
 test("GenerationTaskPublication stages then publishes an exact Artifact result", async () => {
   const claim = claimFixture();
   const result = artifactResult();
@@ -117,6 +167,7 @@ test("GenerationTaskPublication stages then publishes an exact Artifact result",
   const notifications: string[] = [];
   const options = {
     store: recordingStore(calls),
+    artifactRetention: recordingRetention(calls),
     projectIdForWorkspace: (workspaceId: string) => {
       assert.equal(workspaceId, "workspace-1");
       return "project-1";
@@ -128,7 +179,7 @@ test("GenerationTaskPublication stages then publishes an exact Artifact result",
 
   await publication.publishPreparedResult(claim, result, new AbortController().signal);
 
-  assert.deepEqual(calls.map((call) => call.name), ["stage", "publish"]);
+  assert.deepEqual(calls.map((call) => call.name), ["stage", "promote", "release", "publish"]);
   assert.deepEqual(calls[0]?.args, ["project-1", "plan-1", {
     lease: claim.lease,
     candidate: {
@@ -140,7 +191,7 @@ test("GenerationTaskPublication stages then publishes an exact Artifact result",
     },
     evidence: result.evidence,
   }]);
-  assert.deepEqual(calls[1]?.args, ["project-1", "plan-1", { lease: claim.lease }]);
+  assert.deepEqual(calls[3]?.args, ["project-1", "plan-1", { lease: claim.lease }]);
   assert.deepEqual(notifications, ["plan-1", "plan-1"]);
 });
 
@@ -148,6 +199,7 @@ test("GenerationTaskPublication routes Resource and validation results without l
   const calls: Array<{ name: string; args: unknown[] }> = [];
   const publication = new GenerationTaskPublication({
     store: recordingStore(calls),
+    artifactRetention: recordingRetention(calls),
     projectIdForWorkspace: () => "project-1",
     notifyPlan() {},
   });
@@ -204,7 +256,7 @@ test("GenerationTaskPublication preserves candidate-ready state when aborted aft
   store.stageGenerationTaskCandidateForProject = () => {
     calls.push("stage");
     controller.abort(new Error("stop after durable staging"));
-    return {} as never;
+    return { attempt: {} as never, artifactRevision: artifactRevision(), resourceRevision: null };
   };
   store.publishGenerationTaskCandidateForProject = () => {
     calls.push("publish");
@@ -212,6 +264,7 @@ test("GenerationTaskPublication preserves candidate-ready state when aborted aft
   };
   const publication = new GenerationTaskPublication({
     store,
+    artifactRetention: recordingRetention([]),
     projectIdForWorkspace: () => "project-1",
     notifyPlan: () => calls.push("notify"),
   });
@@ -228,6 +281,7 @@ test("GenerationTaskPublication routes publication-only, checkpoint, and failure
   const calls: Array<{ name: string; args: unknown[] }> = [];
   const publication = new GenerationTaskPublication({
     store: recordingStore(calls),
+    artifactRetention: recordingRetention(calls),
     projectIdForWorkspace: () => "project-1",
     notifyPlan() {
       throw new Error("best-effort listener unavailable");
@@ -237,13 +291,29 @@ test("GenerationTaskPublication routes publication-only, checkpoint, and failure
     failureClass: "qa",
     error: { code: "visual-regression" },
   };
+  const publicationClaim = {
+    ...claim,
+    attempt: {
+      ...claim.attempt,
+      executionMode: "publication-only" as const,
+      candidateRevisionId: artifactRevision().id,
+      candidateEvidence: artifactResult().evidence,
+    },
+  };
 
-  await publication.publishRecordedCandidate(claim, new AbortController().signal);
+  await publication.publishRecordedCandidate(publicationClaim, new AbortController().signal);
   await publication.publishCheckpoint(claim, new AbortController().signal);
   await publication.finishFailure(claim, failure);
 
-  assert.deepEqual(calls.map((call) => call.name), ["publish", "checkpoint", "failure"]);
-  assert.deepEqual(calls[2]?.args, ["project-1", "plan-1", {
+  assert.deepEqual(calls.map((call) => call.name), [
+    "get-artifact-revision",
+    "promote",
+    "release",
+    "publish",
+    "checkpoint",
+    "failure",
+  ]);
+  assert.deepEqual(calls[5]?.args, ["project-1", "plan-1", {
     lease: claim.lease,
     failure,
   }]);
@@ -267,6 +337,7 @@ test("GenerationTaskPublication never performs a second write after a Store erro
   };
   const publication = new GenerationTaskPublication({
     store,
+    artifactRetention: recordingRetention([]),
     projectIdForWorkspace: () => "project-1",
     notifyPlan() {},
   });
@@ -277,4 +348,95 @@ test("GenerationTaskPublication never performs a second write after a Store erro
   );
   assert.equal(publishes, 0);
   assert.equal(failures, 0);
+});
+
+test("Artifact publication releases the Attempt ref before an atomic Core publish can lose its response", async () => {
+  const claim = claimFixture();
+  const calls: string[] = [];
+  const store = recordingStore([]);
+  store.stageGenerationTaskCandidateForProject = () => {
+    calls.push("stage");
+    return { attempt: {} as never, artifactRevision: artifactRevision(), resourceRevision: null };
+  };
+  store.publishGenerationTaskCandidateForProject = () => {
+    calls.push("publish-committed");
+    throw new Error("response lost after commit");
+  };
+  const publication = new GenerationTaskPublication({
+    store,
+    artifactRetention: {
+      async promote() { calls.push("promote"); },
+      async release() { calls.push("release"); },
+    },
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan() {},
+  });
+
+  await assert.rejects(
+    publication.publishPreparedResult(claim, artifactResult(), new AbortController().signal),
+    /response lost after commit/,
+  );
+  assert.deepEqual(calls, ["stage", "promote", "release", "publish-committed"]);
+});
+
+test("Artifact publication never enters Core when durable Attempt-ref release fails", async () => {
+  const claim = claimFixture();
+  const calls: string[] = [];
+  const store = recordingStore([]);
+  store.publishGenerationTaskCandidateForProject = () => {
+    calls.push("publish");
+    return {} as never;
+  };
+  const publication = new GenerationTaskPublication({
+    store,
+    artifactRetention: {
+      async promote() { calls.push("promote"); },
+      async release() {
+        calls.push("release");
+        throw new Error("ref release failed");
+      },
+    },
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan() {},
+  });
+
+  await assert.rejects(
+    publication.publishPreparedResult(claim, artifactResult(), new AbortController().signal),
+    /ref release failed/,
+  );
+  assert.deepEqual(calls, ["promote", "release"]);
+});
+
+test("publication-only response loss cannot strand its original Attempt ref", async () => {
+  const claim = claimFixture();
+  const calls: string[] = [];
+  const store = recordingStore([]);
+  store.publishGenerationTaskCandidateForProject = () => {
+    calls.push("publish-committed");
+    throw new Error("publication replay response lost");
+  };
+  const publication = new GenerationTaskPublication({
+    store,
+    artifactRetention: {
+      async promote() { calls.push("promote"); },
+      async release() { calls.push("release"); },
+    },
+    projectIdForWorkspace: () => "project-1",
+    notifyPlan() {},
+  });
+  const publicationClaim = {
+    ...claim,
+    attempt: {
+      ...claim.attempt,
+      executionMode: "publication-only" as const,
+      candidateRevisionId: artifactRevision().id,
+      candidateEvidence: artifactResult().evidence,
+    },
+  };
+
+  await assert.rejects(
+    publication.publishRecordedCandidate(publicationClaim, new AbortController().signal),
+    /publication replay response lost/,
+  );
+  assert.deepEqual(calls, ["promote", "release", "publish-committed"]);
 });

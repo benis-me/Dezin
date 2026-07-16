@@ -104,6 +104,8 @@ function createQueuedValidationAttempt(store: Store, label: string) {
   const attempt = store.workspace.createGenerationTaskAttemptForProject(project.id, compiled.plan.id, {
     ...observation,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
@@ -255,6 +257,8 @@ function createQueuedResourceAttempts(
     return store.workspace.createGenerationTaskAttemptForProject(project.id, compiled.plan.id, {
       ...observation,
       contextPackId: pack.id,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
       retryContextPolicy: "same-context",
       executionMode: "full",
     });

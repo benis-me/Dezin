@@ -44,6 +44,80 @@ export interface ResourceRevision {
   createdAt: number;
 }
 
+export interface ResourcePayloadCleanupIdentity {
+  taskId: string;
+  attempt: number;
+  inputHash: string;
+  workspaceId: string;
+  resourceId: string;
+  revisionId: string;
+}
+
+export interface ResourcePayloadStagingBeginInput extends ResourcePayloadCleanupIdentity {
+  lease: GenerationTaskAttemptLease;
+  manifestPath: string;
+  payloadChecksum: string;
+  manifestChecksum: string;
+  receiptChecksum: string;
+  byteSize: number;
+  mimeType: string;
+}
+
+export type ResourcePayloadStorageDisposition = "owned-created" | "preexisting";
+
+export interface ResourcePayloadStagingJournal extends ResourcePayloadCleanupIdentity {
+  sequence: number;
+  planId: string;
+  ownerId: string;
+  leaseToken: string;
+  manifestPath: string;
+  payloadChecksum: string;
+  manifestChecksum: string;
+  receiptChecksum: string;
+  byteSize: number;
+  mimeType: string;
+  status: "prepared" | "receipt-committed";
+  storageDisposition: ResourcePayloadStorageDisposition | null;
+  createdAt: number;
+  classifiedAt: number | null;
+  receiptCommittedAt: number | null;
+}
+
+export interface ClassifyResourcePayloadStagingInput extends ResourcePayloadCleanupIdentity {
+  lease: GenerationTaskAttemptLease;
+  storageDisposition: ResourcePayloadStorageDisposition;
+}
+
+export interface CompleteResourcePayloadStagingInput extends ResourcePayloadCleanupIdentity {
+  lease: GenerationTaskAttemptLease;
+  receiptChecksum: string;
+}
+
+export interface ResourcePayloadRecoveryCursor {
+  afterSequence: number;
+  throughSequence: number;
+}
+
+export interface ResourcePayloadRecoveryEntry {
+  journal: ResourcePayloadStagingJournal;
+  cleanup: ResourcePayloadCleanupClaim | null;
+}
+
+export interface ResourcePayloadRecoveryPage {
+  entries: ResourcePayloadRecoveryEntry[];
+  nextCursor: ResourcePayloadRecoveryCursor | null;
+}
+
+export type TryClaimResourcePayloadCleanupInput = ResourcePayloadCleanupIdentity;
+export type CompleteResourcePayloadCleanupInput = ResourcePayloadCleanupIdentity;
+
+export interface ResourcePayloadCleanupClaim extends ResourcePayloadCleanupIdentity {
+  planId: string;
+  status: "claimed" | "completed";
+  claimedAt: number;
+  completedAt: number | null;
+}
+
 export interface CreateResourceForProjectInput {
   kind: ResourceKind;
   title: string;
@@ -736,6 +810,55 @@ export interface WorkspaceGenerationPayload {
   qualityProfile: ArtifactQualityProfile;
 }
 
+/** Canonical Proposal intent copied into each executable leaf Task. */
+export interface GenerationTaskProposalBrief {
+  proposalRationale: string;
+  assumptions: string[];
+}
+
+export interface GenerationTaskArtifactTargetInstructions {
+  operation: "create" | "revise";
+  kind: ArtifactKind;
+  name: string;
+}
+
+export interface GenerationTaskResourceTargetInstructions {
+  operation: "create" | "revise";
+  kind: ResourceKind;
+  title: string;
+}
+
+export interface GenerationTaskArtifactBrief extends GenerationTaskProposalBrief {
+  targetInstructions: GenerationTaskArtifactTargetInstructions;
+}
+
+export interface GenerationTaskResourceBrief extends GenerationTaskProposalBrief {
+  targetInstructions: GenerationTaskResourceTargetInstructions;
+}
+
+export interface GenerationTaskResourceAdapterDescriptor {
+  id: `dezin.resource-adapter.${ResourceKind}`;
+  version: 1;
+  kind: ResourceKind;
+}
+
+export interface ArtifactGenerationTaskPayloadV2 extends Record<string, unknown> {
+  version: 2;
+  artifactPlan: WorkspaceGenerationArtifactPlan;
+  dependencyPlans: WorkspaceGenerationDependencyPlan[];
+  responsiveFrames: RenderFrameSpec[];
+  brief: GenerationTaskArtifactBrief;
+  capabilityDescriptors: WorkspaceGenerationCapability[];
+}
+
+export interface ResourceGenerationTaskPayloadV2 extends Record<string, unknown> {
+  version: 2;
+  operation: Extract<WorkspaceGenerationResourceOperation, { revisionPolicy: { kind: "generate" } }>;
+  brief: GenerationTaskResourceBrief;
+  capabilityDescriptors: WorkspaceGenerationCapability[];
+  adapter: GenerationTaskResourceAdapterDescriptor;
+}
+
 export interface ComponentPropagationOverrideResolution {
   instanceId: string;
   resolution: "preserve" | "accept-component" | "manual";
@@ -1025,7 +1148,16 @@ export interface GenerationTaskAttemptComponentPin extends GenerationTaskAttempt
   designNodeId: string;
 }
 
-export interface CreateGenerationTaskAttemptInput {
+export interface GenerationTaskSourceBase {
+  sourceCommitHash: string;
+  sourceTreeHash: string;
+}
+
+/**
+ * Core-only materialization facts. Git identity is intentionally absent:
+ * WorkspaceStore observes durable graph state, not the daemon's source tree.
+ */
+export interface GenerationTaskMaterializationObservation {
   taskId: string;
   planId: string;
   workspaceId: string;
@@ -1033,20 +1165,21 @@ export interface CreateGenerationTaskAttemptInput {
   target: GenerationTaskTarget;
   baseRevisionId: string | null;
   expectedSnapshotId: string;
-  contextPackId: string | null;
   kernelRevisionId: string;
   payload: Record<string, unknown>;
   dependencyOutputs: GenerationTaskAttemptDependencyOutputInput[];
   resourcePins: GenerationTaskAttemptResourcePinInput[];
   componentPins: GenerationTaskAttemptComponentPinInput[];
+}
+
+export interface CreateGenerationTaskAttemptInput extends GenerationTaskMaterializationObservation {
+  contextPackId: string | null;
+  /** Frozen daemon-resolved Git identity for Artifact Attempts; null otherwise. */
+  sourceCommitHash: string | null;
+  sourceTreeHash: string | null;
   retryContextPolicy: GenerationTaskRetryContextPolicy;
   executionMode: GenerationTaskExecutionMode;
 }
-
-export type GenerationTaskMaterializationObservation = Omit<
-  CreateGenerationTaskAttemptInput,
-  "contextPackId" | "retryContextPolicy" | "executionMode"
->;
 
 export interface GenerationTaskAttemptInput extends Omit<
   CreateGenerationTaskAttemptInput,

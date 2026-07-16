@@ -5,8 +5,8 @@
  * (@dezin/core Store) → write the artifact to disk so /projects/:id/preview/ serves it.
  */
 
-import { appendFile, mkdir, readdir, readFile, rm, writeFile, stat } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { appendFile, mkdir, readFile, rm, writeFile, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { composeSystemPrompt, inferDials } from "../../../packages/prompt/src/index.ts";
@@ -78,6 +78,7 @@ import {
 } from "../../../packages/research/src/index.ts";
 import { providerRuntimeConfig } from "./provider-profile-config.ts";
 import { createProviderFetch } from "./provider-fetch.ts";
+import { collectStandardLintSurface } from "./standard-lint-surface.ts";
 import { ensureCaptured, capturedPageCount, releaseSharinganProject, sharinganRunCaptureId } from "./sharingan-handler.ts";
 import { buildSharinganContext, buildSharinganSystemPrompt } from "./sharingan-context.ts";
 import { writeProbeCli } from "./sharingan-probe-cli.ts";
@@ -118,6 +119,7 @@ import {
 import type { AppDeps, DevServerLease } from "./app.ts";
 
 export {
+  collectStandardLintSurface,
   freshFindings,
   recurKey,
   standardRepairableDefects,
@@ -184,37 +186,6 @@ function startPreviewPoller(file: string, onChange: (mtimeMs: number) => void): 
   return () => {
     active = false;
   };
-}
-
-const STANDARD_LINT_EXTENSIONS = new Set([".css", ".html", ".js", ".json", ".jsx", ".ts", ".tsx"]);
-const STANDARD_LINT_SKIP_DIRS = new Set([".git", ".sharingan", "dist", "node_modules", "version-worktrees"]);
-
-export async function collectStandardLintSurface(root: string, maxBytes = 2_000_000): Promise<string> {
-  const chunks: string[] = [];
-  let used = 0;
-  const walk = async (dir: string): Promise<void> => {
-    const entries = await readdir(dir, { withFileTypes: true });
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (used >= maxBytes) return;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (!STANDARD_LINT_SKIP_DIRS.has(entry.name)) await walk(path);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      const ext = entry.name.slice(entry.name.lastIndexOf("."));
-      if (!STANDARD_LINT_EXTENSIONS.has(ext)) continue;
-      const text = await readFile(path, "utf8").catch(() => "");
-      if (!text) continue;
-      const budget = maxBytes - used;
-      const clipped = text.slice(0, budget);
-      used += clipped.length;
-      chunks.push(`\n/* file: ${relative(root, path)} */\n${clipped}`);
-    }
-  };
-  await walk(root);
-  return chunks.join("\n");
 }
 
 interface RunBody {

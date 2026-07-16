@@ -95,7 +95,7 @@ function approvedPlanFixture(): { shell: GenerationPlan; proposal: WorkspaceProp
           baseRevisionId: null,
           dependsOnArtifactIds: [],
           capabilityIds: ["cap-text"],
-          responsiveFrameIds: ["desktop"],
+          responsiveFrameIds: ["mobile", "desktop"],
         },
       ],
       dependencyPlans: [
@@ -224,6 +224,17 @@ function expectContractError(task: GenerationTask, pattern: RegExp): void {
   );
 }
 
+function expectLegacyV1Disposition(task: GenerationTask): void {
+  assert.throws(
+    () => validateGenerationTaskPayload(task),
+    (error: unknown) => error instanceof GenerationTaskPayloadContractError
+      && error.code === "GENERATION_TASK_PAYLOAD_LEGACY_V1"
+      && error.disposition === "recompile-required"
+      && error.failureClass === "build"
+      && /legacy.*v1.*recompil/i.test(error.message),
+  );
+}
+
 test("accepts every fully populated payload frozen by compileGenerationPlan", () => {
   const tasks = compiledTasks();
   assert.deepEqual(
@@ -231,6 +242,24 @@ test("accepts every fully populated payload frozen by compileGenerationPlan", ()
     ["resource", "component", "page", "page", "prototype-validation", "checkpoint"],
   );
   for (const task of tasks) validateGenerationTaskPayload(task);
+});
+
+test("rejects readable legacy v1 leaf payloads with an explicit recompile disposition", () => {
+  const page = taskOfTarget("page-home");
+  const pageV2 = clonePayload(page) as any;
+  expectLegacyV1Disposition(withPayload(page, {
+    version: 1,
+    artifactPlan: pageV2.artifactPlan,
+    dependencyPlans: pageV2.dependencyPlans,
+    responsiveFrames: pageV2.responsiveFrames,
+  }));
+
+  const resource = taskOfKind("resource");
+  const resourceV2 = clonePayload(resource) as any;
+  expectLegacyV1Disposition(withPayload(resource, {
+    version: 1,
+    operation: resourceV2.operation,
+  }));
 });
 
 test("accepts exact version-only placeholders for reserved propagation kinds", () => {
@@ -244,7 +273,7 @@ test("accepts exact version-only placeholders for reserved propagation kinds", (
 
 test("rejects unsupported versions, missing fields, extra fields, and future task kinds", () => {
   const resource = taskOfKind("resource");
-  expectContractError(withPayload(resource, { ...clonePayload(resource), version: 2 }), /version/i);
+  expectContractError(withPayload(resource, { ...clonePayload(resource), version: 3 }), /version/i);
   const missing = clonePayload(resource);
   delete missing.operation;
   expectContractError(withPayload(resource, missing), /fields/i);
@@ -278,6 +307,15 @@ test("validates Artifact plans, identities, sorted unique sets, and dependency u
     [(payload: any) => { payload.responsiveFrames[0].initialState = "bad\nstate"; }, /control/i],
     [(payload: any) => { payload.responsiveFrames[0].extra = true; }, /fields/i],
     [(payload: any) => { payload.responsiveFrames.pop(); }, /frame ids/i],
+    [(payload: any) => { payload.brief.proposalRationale = " "; }, /rationale/i],
+    [(payload: any) => { payload.brief.assumptions[0] = " assumption "; }, /canonical/i],
+    [(payload: any) => { payload.brief.targetInstructions.name = "Different page"; }, /instructions.*name/i],
+    [(payload: any) => { payload.brief.targetInstructions.kind = "component"; }, /instructions.*kind/i],
+    [(payload: any) => { payload.brief.targetInstructions.extra = true; }, /fields/i],
+    [(payload: any) => { payload.capabilityDescriptors[0].kind = "audio"; }, /capability kind/i],
+    [(payload: any) => { payload.capabilityDescriptors[0].required = "yes"; }, /required/i],
+    [(payload: any) => { payload.capabilityDescriptors[0].extra = true; }, /fields/i],
+    [(payload: any) => { payload.capabilityDescriptors.pop(); }, /Task capabilities/i],
   ] as const) {
     const payload = clonePayload(page);
     mutate(payload);
@@ -295,6 +333,13 @@ test("validates Resource operation and generate policy recursively", () => {
     [(payload: any) => { payload.operation.revisionPolicy.kind = "exact"; }, /generate/i],
     [(payload: any) => { payload.operation.revisionPolicy.revisionId = "revision-1"; }, /fields/i],
     [(payload: any) => { payload.operation.extra = true; }, /fields/i],
+    [(payload: any) => { payload.brief.targetInstructions.title = "Different research"; }, /instructions.*title/i],
+    [(payload: any) => { payload.brief.targetInstructions.kind = "file"; }, /instructions.*kind/i],
+    [(payload: any) => { payload.capabilityDescriptors[0].required = false; }, /required/i],
+    [(payload: any) => { payload.adapter.id = "dezin.resource-adapter.file"; }, /adapter id/i],
+    [(payload: any) => { payload.adapter.version = 2; }, /adapter version/i],
+    [(payload: any) => { payload.adapter.kind = "file"; }, /adapter kind/i],
+    [(payload: any) => { payload.adapter.extra = true; }, /fields/i],
   ] as const) {
     const payload = clonePayload(resource);
     mutate(payload);

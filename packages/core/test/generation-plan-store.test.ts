@@ -22,7 +22,7 @@ function emptyGeneration() {
     dependencyPlans: [],
     prototypeIntents: [],
     capabilities: [],
-    responsiveFrames: [],
+    responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
     qualityProfile: {
       requiredFrameIds: [],
       blockingSeverities: [],
@@ -139,7 +139,7 @@ function createApprovedComponentPlanShell(
           baseRevisionId: ownerRevision.id,
           dependsOnArtifactIds: [],
           capabilityIds: [],
-          responsiveFrameIds: [],
+          responsiveFrameIds: ["desktop"],
         },
         {
           operation: "revise",
@@ -151,7 +151,7 @@ function createApprovedComponentPlanShell(
           baseRevisionId: componentRevision.id,
           dependsOnArtifactIds: [],
           capabilityIds: [],
-          responsiveFrameIds: [],
+          responsiveFrameIds: ["desktop"],
         },
       ],
       dependencyPlans: instanceIds.map((instanceId) => ({

@@ -58,6 +58,14 @@ import type {
   ResolvedContextKind,
   Resource,
   ResourceKind,
+  ResourcePayloadCleanupClaim,
+  ResourcePayloadCleanupIdentity,
+  ResourcePayloadStagingBeginInput,
+  ResourcePayloadStagingJournal,
+  ResourcePayloadRecoveryCursor,
+  ResourcePayloadRecoveryPage,
+  ClassifyResourcePayloadStagingInput,
+  CompleteResourcePayloadStagingInput,
   ResourcePinPolicy,
   ResourcePublicationExpectation,
   ResourceRevision,
@@ -88,13 +96,18 @@ import type {
   UpdateResourceForProjectInput,
   UpdateResourceForProjectResult,
   TryClaimGenerationTaskAttemptInput,
+  TryClaimResourcePayloadCleanupInput,
+  CompleteResourcePayloadCleanupInput,
 } from "./workspace-types.ts";
 import {
   assertAcyclicTaskGraph,
   compileGenerationPlan,
   GenerationPlanCompileError,
 } from "./generation-plan.ts";
-import { validateGenerationTaskArtifactQualityGate } from "./generation-task-quality.ts";
+import {
+  generationTaskArtifactCandidateRetentionRef,
+  validateGenerationTaskArtifactQualityGate,
+} from "./generation-task-quality.ts";
 import {
   buildGenerationTaskPrototypeValidationResult,
   GenerationTaskPrototypeValidationError,
@@ -208,6 +221,68 @@ export interface StageGenerationTaskResourceCandidateResult {
 export type AnyStageGenerationTaskCandidateResult =
   | StageGenerationTaskCandidateResult
   | StageGenerationTaskResourceCandidateResult;
+
+export type ArtifactCandidateRefRecoveryAttemptStatus =
+  | "succeeded"
+  | "retryable-failed"
+  | "failed"
+  | "needs-rebase"
+  | "cancelled";
+
+type ArtifactCandidateRefRecoveryTask = GenerationTask & {
+  kind: "page" | "component";
+  target: { type: "artifact"; workspaceId: string; id: string; trackId: string };
+};
+
+type ArtifactCandidateRefRecoveryAttemptBase = GenerationTaskAttempt & {
+  status: ArtifactCandidateRefRecoveryAttemptStatus;
+  target: { type: "artifact"; workspaceId: string; id: string; trackId: string };
+  sourceCommitHash: string;
+  sourceTreeHash: string;
+  materializationSealed: true;
+  lease: null;
+  finishedAt: number;
+};
+
+export type ArtifactCandidateRefRecoveryEntry =
+  | {
+    retentionKind: "retained-candidate";
+    task: ArtifactCandidateRefRecoveryTask;
+    attempt: ArtifactCandidateRefRecoveryAttemptBase & {
+      candidateRevisionId: string;
+      candidateResourceRevisionId: null;
+      candidateEvidence: Record<string, unknown>;
+      candidateEvidenceHash: string;
+    };
+    revision: ArtifactRevisionRecord;
+  }
+  | {
+    retentionKind: "orphan-attempt";
+    task: ArtifactCandidateRefRecoveryTask;
+    attempt: ArtifactCandidateRefRecoveryAttemptBase & {
+      candidateRevisionId: null;
+      candidateResourceRevisionId: null;
+      candidateEvidence: null;
+      candidateEvidenceHash: null;
+    };
+    revision: null;
+  };
+
+/*
+ * Keyset cursor for a stable total order. This is intentionally independent of
+ * mutable timestamps so terminal rows cannot move between recovery pages.
+ */
+export interface ArtifactCandidateRefRecoveryCursor {
+  planId: string;
+  taskOrdinal: number;
+  taskId: string;
+  attempt: number;
+}
+
+export interface ArtifactCandidateRefRecoveryPage {
+  entries: ArtifactCandidateRefRecoveryEntry[];
+  nextCursor: ArtifactCandidateRefRecoveryCursor | null;
+}
 
 export type GenerationTaskPublicationConflict = {
   pointer: "artifact-head" | "resource-head" | "active-snapshot";
@@ -395,6 +470,232 @@ function boundarySafeInteger(value: unknown, label: string, minimum = 0): number
     throw new WorkspaceStoreCodecError(`${label} must be a safe integer >= ${minimum}`);
   }
   return value;
+}
+
+function normalizeArtifactCandidateRefRecoveryCursor(
+  value: ArtifactCandidateRefRecoveryCursor | null | undefined,
+): ArtifactCandidateRefRecoveryCursor | null {
+  if (value === null || value === undefined) return null;
+  const record = boundaryObject(value, "Artifact candidate ref recovery cursor", [
+    "planId",
+    "taskOrdinal",
+    "taskId",
+    "attempt",
+  ]);
+  return {
+    planId: boundaryId(record.planId, "Artifact candidate ref recovery cursor Plan id"),
+    taskOrdinal: boundarySafeInteger(
+      record.taskOrdinal,
+      "Artifact candidate ref recovery cursor Task ordinal",
+    ),
+    taskId: boundaryId(record.taskId, "Artifact candidate ref recovery cursor Task id"),
+    attempt: boundarySafeInteger(
+      record.attempt,
+      "Artifact candidate ref recovery cursor Attempt number",
+      1,
+    ),
+  };
+}
+
+function normalizeResourcePayloadCleanupInput(
+  value: TryClaimResourcePayloadCleanupInput | CompleteResourcePayloadCleanupInput,
+): TryClaimResourcePayloadCleanupInput {
+  const record = boundaryObject(value, "Resource payload cleanup identity", [
+    "taskId",
+    "attempt",
+    "inputHash",
+    "workspaceId",
+    "resourceId",
+    "revisionId",
+  ]);
+  return {
+    taskId: boundaryId(record.taskId, "Resource payload cleanup Task id"),
+    attempt: boundarySafeInteger(record.attempt, "Resource payload cleanup Attempt", 1),
+    inputHash: boundaryChecksum(record.inputHash, "Resource payload cleanup input hash"),
+    workspaceId: boundaryId(record.workspaceId, "Resource payload cleanup Workspace id"),
+    resourceId: boundaryId(record.resourceId, "Resource payload cleanup Resource id"),
+    revisionId: boundaryId(record.revisionId, "Resource payload cleanup Revision id"),
+  };
+}
+
+function asResourcePayloadCleanupClaim(row: Row): ResourcePayloadCleanupClaim {
+  const status = row.status;
+  if (status !== "claimed" && status !== "completed") {
+    throw new WorkspaceStoreCodecError("Resource payload cleanup claim status is invalid");
+  }
+  const claimedAt = boundarySafeInteger(
+    row.claimed_at,
+    "Resource payload cleanup claimed time",
+  );
+  const completedAt = row.completed_at === null
+    ? null
+    : boundarySafeInteger(row.completed_at, "Resource payload cleanup completed time");
+  if ((status === "claimed" && completedAt !== null)
+    || (status === "completed" && (completedAt === null || completedAt < claimedAt))) {
+    throw new WorkspaceStoreCodecError("Resource payload cleanup completion state is incoherent");
+  }
+  return {
+    taskId: requiredCell(row.task_id, "Resource payload cleanup Task id"),
+    planId: requiredCell(row.plan_id, "Resource payload cleanup Plan id"),
+    attempt: boundarySafeInteger(row.attempt, "Resource payload cleanup Attempt", 1),
+    inputHash: boundaryChecksum(row.input_hash, "Resource payload cleanup input hash"),
+    workspaceId: requiredCell(row.workspace_id, "Resource payload cleanup Workspace id"),
+    resourceId: requiredCell(row.resource_id, "Resource payload cleanup Resource id"),
+    revisionId: requiredCell(row.revision_id, "Resource payload cleanup Revision id"),
+    status,
+    claimedAt,
+    completedAt,
+  };
+}
+
+function resourcePayloadCleanupIdentityMatches(
+  claim: ResourcePayloadCleanupClaim,
+  input: TryClaimResourcePayloadCleanupInput,
+): boolean {
+  return claim.taskId === input.taskId
+    && claim.attempt === input.attempt
+    && claim.inputHash === input.inputHash
+    && claim.workspaceId === input.workspaceId
+    && claim.resourceId === input.resourceId
+    && claim.revisionId === input.revisionId;
+}
+
+const RESOURCE_PAYLOAD_MIME = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+
+function normalizeResourcePayloadStagingBeginInput(
+  value: ResourcePayloadStagingBeginInput,
+): ResourcePayloadStagingBeginInput {
+  const record = boundaryObject(value, "Resource payload staging input", [
+    "taskId", "attempt", "inputHash", "workspaceId", "resourceId", "revisionId",
+    "lease",
+    "manifestPath", "payloadChecksum", "manifestChecksum", "receiptChecksum",
+    "byteSize", "mimeType",
+  ]);
+  const identity = {
+    taskId: boundaryId(record.taskId, "Resource payload staging Task id"),
+    attempt: boundarySafeInteger(record.attempt, "Resource payload staging Attempt", 1),
+    inputHash: boundaryChecksum(record.inputHash, "Resource payload staging input hash"),
+    workspaceId: boundaryId(record.workspaceId, "Resource payload staging Workspace id"),
+    resourceId: boundaryId(record.resourceId, "Resource payload staging Resource id"),
+    revisionId: boundaryId(record.revisionId, "Resource payload staging Revision id"),
+  };
+  const mimeType = boundaryString(record.mimeType, "Resource payload MIME type", 127);
+  if (!RESOURCE_PAYLOAD_MIME.test(mimeType)) {
+    throw new WorkspaceStoreCodecError("Resource payload MIME type is invalid");
+  }
+  const lease = normalizeGenerationTaskAttemptLease(record.lease);
+  if (lease.taskId !== identity.taskId || lease.attempt !== identity.attempt
+    || lease.workspaceId !== identity.workspaceId) {
+    throw new WorkspaceStoreCodecError("Resource payload staging lease identity is mismatched");
+  }
+  return {
+    ...identity,
+    lease,
+    manifestPath: boundaryRelativePath(record.manifestPath, "Resource payload manifest path"),
+    payloadChecksum: boundaryChecksum(record.payloadChecksum, "Resource payload checksum"),
+    manifestChecksum: boundaryChecksum(record.manifestChecksum, "Resource manifest checksum"),
+    receiptChecksum: boundaryChecksum(record.receiptChecksum, "Resource receipt checksum"),
+    byteSize: boundarySafeInteger(record.byteSize, "Resource payload byte size"),
+    mimeType,
+  };
+}
+
+function asResourcePayloadStagingJournal(row: Row): ResourcePayloadStagingJournal {
+  const status = row.status;
+  if (status !== "prepared" && status !== "receipt-committed") {
+    throw new WorkspaceStoreCodecError("Resource payload staging status is invalid");
+  }
+  const storageDisposition = row.storage_disposition;
+  if (storageDisposition !== null
+    && storageDisposition !== "owned-created"
+    && storageDisposition !== "preexisting") {
+    throw new WorkspaceStoreCodecError("Resource payload storage disposition is invalid");
+  }
+  const createdAt = boundarySafeInteger(row.created_at, "Resource payload staging created time");
+  const classifiedAt = row.classified_at === null
+    ? null
+    : boundarySafeInteger(row.classified_at, "Resource payload staging classified time");
+  const receiptCommittedAt = row.receipt_committed_at === null
+    ? null
+    : boundarySafeInteger(row.receipt_committed_at, "Resource payload receipt committed time");
+  if ((storageDisposition === null) !== (classifiedAt === null)
+    || (status === "prepared" && receiptCommittedAt !== null)
+    || (status === "receipt-committed"
+      && (storageDisposition === null || classifiedAt === null || receiptCommittedAt === null))) {
+    throw new WorkspaceStoreCodecError("Resource payload staging state is incoherent");
+  }
+  return {
+    sequence: boundarySafeInteger(row.sequence, "Resource payload staging sequence", 1),
+    taskId: requiredCell(row.task_id, "Resource payload staging Task id"),
+    planId: requiredCell(row.plan_id, "Resource payload staging Plan id"),
+    attempt: boundarySafeInteger(row.attempt, "Resource payload staging Attempt", 1),
+    inputHash: boundaryChecksum(row.input_hash, "Resource payload staging input hash"),
+    workspaceId: requiredCell(row.workspace_id, "Resource payload staging Workspace id"),
+    resourceId: requiredCell(row.resource_id, "Resource payload staging Resource id"),
+    revisionId: requiredCell(row.revision_id, "Resource payload staging Revision id"),
+    ownerId: requiredCell(row.owner_id, "Resource payload staging owner id"),
+    leaseToken: requiredCell(row.lease_token, "Resource payload staging lease token"),
+    manifestPath: boundaryRelativePath(row.manifest_path, "Resource payload staging manifest path"),
+    payloadChecksum: boundaryChecksum(row.payload_checksum, "Resource payload staging payload checksum"),
+    manifestChecksum: boundaryChecksum(row.manifest_checksum, "Resource payload staging manifest checksum"),
+    receiptChecksum: boundaryChecksum(row.receipt_checksum, "Resource payload staging receipt checksum"),
+    byteSize: boundarySafeInteger(row.byte_size, "Resource payload staging byte size"),
+    mimeType: boundaryString(row.mime_type, "Resource payload staging MIME type", 127),
+    status,
+    storageDisposition,
+    createdAt,
+    classifiedAt,
+    receiptCommittedAt,
+  };
+}
+
+function resourcePayloadStagingIdentityMatches(
+  journal: ResourcePayloadStagingJournal,
+  input: ResourcePayloadCleanupIdentity,
+): boolean {
+  return journal.taskId === input.taskId
+    && journal.attempt === input.attempt
+    && journal.inputHash === input.inputHash
+    && journal.workspaceId === input.workspaceId
+    && journal.resourceId === input.resourceId
+    && journal.revisionId === input.revisionId;
+}
+
+function resourcePayloadStagingBeginMatches(
+  journal: ResourcePayloadStagingJournal,
+  input: ResourcePayloadStagingBeginInput,
+): boolean {
+  return resourcePayloadStagingIdentityMatches(journal, input)
+    && journal.ownerId === input.lease.ownerId
+    && journal.leaseToken === input.lease.leaseToken
+    && journal.manifestPath === input.manifestPath
+    && journal.payloadChecksum === input.payloadChecksum
+    && journal.manifestChecksum === input.manifestChecksum
+    && journal.receiptChecksum === input.receiptChecksum
+    && journal.byteSize === input.byteSize
+    && journal.mimeType === input.mimeType;
+}
+
+function normalizeResourcePayloadRecoveryCursor(
+  value: unknown,
+): ResourcePayloadRecoveryCursor | null {
+  if (value === null || value === undefined) return null;
+  const record = boundaryObject(value, "Resource payload recovery cursor", [
+    "afterSequence", "throughSequence",
+  ]);
+  const afterSequence = boundarySafeInteger(
+    record.afterSequence,
+    "Resource payload recovery cursor after sequence",
+  );
+  const throughSequence = boundarySafeInteger(
+    record.throughSequence,
+    "Resource payload recovery cursor through sequence",
+    1,
+  );
+  if (afterSequence > throughSequence) {
+    throw new WorkspaceStoreCodecError("Resource payload recovery cursor is incoherent");
+  }
+  return { afterSequence, throughSequence };
 }
 
 function boundaryChecksum(value: unknown, label: string): string {
@@ -1978,6 +2279,13 @@ export class WorkspaceStore {
         );
       }
     }
+    if (this.db.prepare(
+      "SELECT 1 FROM resource_payload_cleanup_claims WHERE revision_id = ?",
+    ).get(input.revisionId)) {
+      throw new WorkspaceGraphValidationError(
+        `Resource Revision payload is tombstoned for cleanup: ${input.revisionId}`,
+      );
+    }
     if (this.db.prepare("SELECT 1 FROM resource_revisions WHERE id = ?").get(input.revisionId)) {
       throw new WorkspaceGraphValidationError(`Resource Revision identity collision: ${input.revisionId}`);
     }
@@ -2867,6 +3175,791 @@ export class WorkspaceStore {
     });
   }
 
+  /**
+   * Returns an exclusive keyset page of immutable terminal Artifact Attempts.
+   * Callers must continue with nextCursor until null on every recovery pass.
+   */
+  listArtifactCandidateRefRecoveryEntries(
+    limitValue = 100,
+    cursorValue: ArtifactCandidateRefRecoveryCursor | null = null,
+  ): ArtifactCandidateRefRecoveryPage {
+    const limit = boundarySafeInteger(
+      limitValue,
+      "Artifact candidate ref recovery limit",
+      1,
+    );
+    if (limit > 1_000) {
+      throw new WorkspaceStoreCodecError(
+        "Artifact candidate ref recovery limit must not exceed 1000",
+      );
+    }
+    const cursor = normalizeArtifactCandidateRefRecoveryCursor(cursorValue);
+    return this.transactionRead(() => {
+      const rows = this.db.prepare(
+        `SELECT attempt.task_id, attempt.attempt, attempt.candidate_revision_id,
+                revision.id AS revision_id,
+                task.ordinal AS task_ordinal, plan.id AS plan_id
+         FROM generation_task_attempts attempt
+         JOIN generation_tasks task
+           ON task.id = attempt.task_id
+          AND task.plan_id = attempt.plan_id
+          AND task.workspace_id = attempt.workspace_id
+         JOIN generation_plans plan
+           ON plan.id = attempt.plan_id AND plan.workspace_id = attempt.workspace_id
+         LEFT JOIN artifact_revisions revision
+           ON revision.id = attempt.candidate_revision_id
+          AND revision.workspace_id = attempt.workspace_id
+          AND revision.artifact_id = attempt.target_artifact_id
+          AND revision.track_id = attempt.target_track_id
+         WHERE task.kind IN ('page','component')
+           AND task.target_type = 'artifact'
+           AND task.target_artifact_id = attempt.target_artifact_id
+           AND task.target_track_id = attempt.target_track_id
+           AND attempt.status IN (
+             'succeeded','retryable-failed','failed','needs-rebase','cancelled'
+           )
+           AND attempt.materialization_sealed = 1
+           AND attempt.source_commit_hash IS NOT NULL
+           AND attempt.source_tree_hash IS NOT NULL
+           AND attempt.owner_id IS NULL
+           AND attempt.lease_token IS NULL
+           AND attempt.lease_expires_at IS NULL
+           AND attempt.heartbeat_at IS NULL
+           AND attempt.finished_at IS NOT NULL
+           AND (
+             (
+               attempt.candidate_revision_id IS NOT NULL
+               AND attempt.candidate_resource_revision_id IS NULL
+               AND attempt.candidate_evidence_json IS NOT NULL
+               AND attempt.candidate_evidence_hash IS NOT NULL
+               AND revision.id IS NOT NULL
+               AND revision.sealed = 1
+             )
+             OR (
+               attempt.candidate_revision_id IS NULL
+               AND attempt.candidate_resource_revision_id IS NULL
+               AND attempt.candidate_evidence_json IS NULL
+               AND attempt.candidate_evidence_hash IS NULL
+             )
+           )
+           AND (
+             ? IS NULL
+             OR plan.id COLLATE BINARY > ? COLLATE BINARY
+             OR (plan.id = ? AND task.ordinal > ?)
+             OR (plan.id = ? AND task.ordinal = ?
+                 AND task.id COLLATE BINARY > ? COLLATE BINARY)
+             OR (plan.id = ? AND task.ordinal = ? AND task.id = ?
+                 AND attempt.attempt > ?)
+           )
+         ORDER BY plan.id COLLATE BINARY ASC, task.ordinal ASC,
+                  task.id COLLATE BINARY ASC, attempt.attempt ASC
+         LIMIT ?`,
+      ).all(
+        cursor?.planId ?? null,
+        cursor?.planId ?? "",
+        cursor?.planId ?? "",
+        cursor?.taskOrdinal ?? 0,
+        cursor?.planId ?? "",
+        cursor?.taskOrdinal ?? 0,
+        cursor?.taskId ?? "",
+        cursor?.planId ?? "",
+        cursor?.taskOrdinal ?? 0,
+        cursor?.taskId ?? "",
+        cursor?.attempt ?? 1,
+        limit,
+      ) as Array<{
+        task_id: string;
+        attempt: number;
+        candidate_revision_id: string | null;
+        revision_id: string | null;
+        task_ordinal: number;
+        plan_id: string;
+      }>;
+      const entries = rows.map((row): ArtifactCandidateRefRecoveryEntry => {
+        const taskId = requiredCell(row.task_id, "Artifact candidate recovery Task id");
+        const attemptNumber = boundarySafeInteger(
+          row.attempt,
+          "Artifact candidate recovery Attempt number",
+          1,
+        );
+        const task = this.readGenerationTaskForExecutionInTransaction(taskId);
+        const attempt = this.readGenerationTaskAttemptInTransaction(taskId, attemptNumber);
+        if (task === null || attempt === null
+          || (task.kind !== "page" && task.kind !== "component")
+          || task.target.type !== "artifact"
+          || attempt.target.type !== "artifact"
+          || (attempt.status !== "succeeded"
+            && attempt.status !== "retryable-failed"
+            && attempt.status !== "failed"
+            && attempt.status !== "needs-rebase"
+            && attempt.status !== "cancelled")
+          || task.id !== attempt.taskId
+          || task.planId !== attempt.planId
+          || task.workspaceId !== attempt.workspaceId
+          || task.target.workspaceId !== task.workspaceId
+          || attempt.target.workspaceId !== attempt.workspaceId
+          || task.target.id !== attempt.target.id
+          || task.target.trackId !== attempt.target.trackId
+          || attempt.sourceCommitHash === null
+          || attempt.sourceTreeHash === null
+          || attempt.lease !== null
+          || attempt.finishedAt === null
+          || attempt.finishedAt < attempt.createdAt) {
+          throw new WorkspaceStoreCodecError(
+            `Artifact candidate recovery identity is incoherent for ${taskId}/${attemptNumber}`,
+          );
+        }
+        if (row.candidate_revision_id === null) {
+          if (row.revision_id !== null
+            || attempt.candidateRevisionId !== null
+            || attempt.candidateResourceRevisionId !== null
+            || attempt.candidateEvidence !== null
+            || attempt.candidateEvidenceHash !== null) {
+            throw new WorkspaceStoreCodecError(
+              `Artifact orphan recovery identity is incoherent for ${taskId}/${attemptNumber}`,
+            );
+          }
+          return {
+            retentionKind: "orphan-attempt",
+            task: task as ArtifactCandidateRefRecoveryTask,
+            attempt: { ...attempt, materializationSealed: true } as ArtifactCandidateRefRecoveryAttemptBase & {
+              candidateRevisionId: null;
+              candidateResourceRevisionId: null;
+              candidateEvidence: null;
+              candidateEvidenceHash: null;
+            },
+            revision: null,
+          };
+        }
+        const revisionId = requiredCell(
+          row.candidate_revision_id,
+          "Artifact candidate recovery Revision id",
+        );
+        const revision = this.loadArtifactRevision(revisionId);
+        if (revision === null
+          || row.revision_id !== revision.id
+          || attempt.candidateRevisionId !== revision.id
+          || attempt.candidateResourceRevisionId !== null
+          || attempt.candidateEvidence === null
+          || attempt.candidateEvidenceHash === null
+          || revision.workspaceId !== attempt.workspaceId
+          || revision.artifactId !== attempt.target.id
+          || revision.trackId !== attempt.target.trackId) {
+          throw new WorkspaceStoreCodecError(
+            `Artifact candidate recovery Revision identity is incoherent for ${taskId}/${attemptNumber}`,
+          );
+        }
+        const evidenceHash = generationTaskCandidateEvidenceHash({
+          taskId: attempt.taskId,
+          planId: attempt.planId,
+          workspaceId: attempt.workspaceId,
+          attempt: attempt.attempt,
+          candidateRevisionId: attempt.candidateRevisionId,
+          candidateResourceRevisionId: null,
+          candidateEvidence: attempt.candidateEvidence,
+        });
+        if (attempt.candidateEvidenceHash !== evidenceHash) {
+          throw new WorkspaceStoreCodecError(
+            `Artifact candidate recovery evidence hash is incoherent for ${taskId}/${attemptNumber}`,
+          );
+        }
+        this.validateArtifactRevisionLineage(revision);
+        return {
+          retentionKind: "retained-candidate",
+          task: task as ArtifactCandidateRefRecoveryTask,
+          attempt: { ...attempt, materializationSealed: true } as ArtifactCandidateRefRecoveryAttemptBase & {
+            candidateRevisionId: string;
+            candidateResourceRevisionId: null;
+            candidateEvidence: Record<string, unknown>;
+            candidateEvidenceHash: string;
+          },
+          revision,
+        };
+      });
+      const last = rows.at(-1);
+      return {
+        entries,
+        nextCursor: rows.length === limit && last !== undefined
+          ? {
+              planId: requiredCell(last.plan_id, "Artifact candidate recovery cursor Plan id"),
+              taskOrdinal: boundarySafeInteger(
+                last.task_ordinal,
+                "Artifact candidate recovery cursor Task ordinal",
+              ),
+              taskId: requiredCell(last.task_id, "Artifact candidate recovery cursor Task id"),
+              attempt: boundarySafeInteger(
+                last.attempt,
+                "Artifact candidate recovery cursor Attempt number",
+                1,
+              ),
+            }
+          : null,
+      };
+    });
+  }
+
+  beginResourcePayloadStaging(
+    unsafeInput: ResourcePayloadStagingBeginInput,
+  ): ResourcePayloadStagingJournal {
+    const input = normalizeResourcePayloadStagingBeginInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const createdAt = boundarySafeInteger(
+        this.clock.now(),
+        "Resource payload staging created time",
+      );
+      const existingRows = this.db.prepare(
+        `SELECT * FROM resource_payload_staging_journal
+         WHERE revision_id = ? OR (task_id = ? AND attempt = ?)
+         ORDER BY sequence ASC`,
+      ).all(input.revisionId, input.taskId, input.attempt) as Row[];
+      if (existingRows.length > 1) {
+        throw new WorkspaceStoreCodecError(
+          "Resource payload staging identity collides with multiple journal entries",
+        );
+      }
+      if (existingRows.length === 1) {
+        const existing = asResourcePayloadStagingJournal(existingRows[0]!);
+        if (!resourcePayloadStagingBeginMatches(existing, input)) {
+          throw new WorkspaceStoreCodecError(
+            "Resource payload staging identity collides with a different journal entry",
+          );
+        }
+        const active = this.db.prepare(
+          `SELECT 1 FROM generation_task_attempts
+           WHERE task_id = ? AND attempt = ? AND workspace_id = ?
+             AND owner_id = ? AND lease_token = ?
+             AND status IN ('running','cancel-requested')
+             AND lease_expires_at > ?`,
+        ).get(
+          input.taskId,
+          input.attempt,
+          input.workspaceId,
+          input.lease.ownerId,
+          input.lease.leaseToken,
+          createdAt,
+        );
+        if (active === undefined) {
+          throw new WorkspaceStoreCodecError("Resource payload staging lease fence is stale");
+        }
+        return existing;
+      }
+      const ownership = this.db.prepare(
+        `SELECT attempt.plan_id
+         FROM generation_task_attempts attempt
+         JOIN generation_tasks task
+           ON task.id = attempt.task_id
+          AND task.plan_id = attempt.plan_id
+          AND task.workspace_id = attempt.workspace_id
+         WHERE attempt.task_id = ? AND attempt.attempt = ?
+           AND attempt.input_hash = ? AND attempt.workspace_id = ?
+           AND attempt.target_resource_id = ?
+           AND attempt.status IN ('running','cancel-requested')
+           AND attempt.owner_id = ? AND attempt.lease_token = ?
+           AND attempt.lease_expires_at > ?
+           AND task.kind = 'resource' AND task.target_type = 'resource'
+           AND task.target_resource_id = ? AND task.workspace_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM resource_revisions revision WHERE revision.id = ?
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM generation_task_attempts candidate
+             WHERE candidate.candidate_resource_revision_id = ?
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM generation_tasks result
+             WHERE result.result_resource_revision_id = ?
+           )`,
+      ).get(
+        input.taskId,
+        input.attempt,
+        input.inputHash,
+        input.workspaceId,
+        input.resourceId,
+        input.lease.ownerId,
+        input.lease.leaseToken,
+        createdAt,
+        input.resourceId,
+        input.workspaceId,
+        input.revisionId,
+        input.revisionId,
+        input.revisionId,
+      ) as { plan_id: string } | undefined;
+      if (ownership === undefined) {
+        throw new WorkspaceStoreCodecError(
+          "Resource payload staging journal is not owned by an active exact Resource Attempt",
+        );
+      }
+      const planId = requiredCell(ownership.plan_id, "Resource payload staging Plan id");
+      const inserted = this.db.prepare(
+        `INSERT INTO resource_payload_staging_journal (
+           revision_id, task_id, plan_id, attempt, input_hash, workspace_id, resource_id,
+           owner_id, lease_token,
+           manifest_path, payload_checksum, manifest_checksum, receipt_checksum,
+           byte_size, mime_type, status, storage_disposition, created_at,
+           classified_at, receipt_committed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', NULL, ?, NULL, NULL)`,
+      ).run(
+        input.revisionId,
+        input.taskId,
+        planId,
+        input.attempt,
+        input.inputHash,
+        input.workspaceId,
+        input.resourceId,
+        input.lease.ownerId,
+        input.lease.leaseToken,
+        input.manifestPath,
+        input.payloadChecksum,
+        input.manifestChecksum,
+        input.receiptChecksum,
+        input.byteSize,
+        input.mimeType,
+        createdAt,
+      );
+      if (Number(inserted.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Resource payload staging journal was not recorded");
+      }
+      const row = this.db.prepare(
+        "SELECT * FROM resource_payload_staging_journal WHERE revision_id = ?",
+      ).get(input.revisionId) as Row | undefined;
+      if (row === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload staging journal disappeared after insertion");
+      }
+      return asResourcePayloadStagingJournal(row);
+    });
+  }
+
+  getResourcePayloadStaging(
+    unsafeInput: ResourcePayloadCleanupIdentity,
+  ): ResourcePayloadStagingJournal | null {
+    const input = normalizeResourcePayloadCleanupInput(unsafeInput);
+    const row = this.db.prepare(
+      `SELECT * FROM resource_payload_staging_journal
+       WHERE revision_id = ? AND task_id = ? AND attempt = ?`,
+    ).get(input.revisionId, input.taskId, input.attempt) as Row | undefined;
+    if (row === undefined) return null;
+    const journal = asResourcePayloadStagingJournal(row);
+    if (!resourcePayloadStagingIdentityMatches(journal, input)) {
+      throw new WorkspaceStoreCodecError("Resource payload staging lookup identity is mismatched");
+    }
+    return journal;
+  }
+
+  classifyResourcePayloadStaging(
+    unsafeInput: ClassifyResourcePayloadStagingInput,
+  ): ResourcePayloadStagingJournal {
+    const record = boundaryObject(unsafeInput, "Resource payload staging classification", [
+      "taskId", "attempt", "inputHash", "workspaceId", "resourceId", "revisionId",
+      "lease", "storageDisposition",
+    ]);
+    const identity = {
+      taskId: boundaryId(record.taskId, "Resource payload staging Task id"),
+      attempt: boundarySafeInteger(record.attempt, "Resource payload staging Attempt", 1),
+      inputHash: boundaryChecksum(record.inputHash, "Resource payload staging input hash"),
+      workspaceId: boundaryId(record.workspaceId, "Resource payload staging Workspace id"),
+      resourceId: boundaryId(record.resourceId, "Resource payload staging Resource id"),
+      revisionId: boundaryId(record.revisionId, "Resource payload staging Revision id"),
+    };
+    const storageDisposition = record.storageDisposition;
+    if (storageDisposition !== "owned-created" && storageDisposition !== "preexisting") {
+      throw new WorkspaceStoreCodecError("Resource payload storage disposition is invalid");
+    }
+    const lease = normalizeGenerationTaskAttemptLease(record.lease);
+    if (lease.taskId !== identity.taskId || lease.attempt !== identity.attempt
+      || lease.workspaceId !== identity.workspaceId) {
+      throw new WorkspaceStoreCodecError("Resource payload staging classification lease is mismatched");
+    }
+    return this.transactionImmediate(() => {
+      const row = this.db.prepare(
+        "SELECT * FROM resource_payload_staging_journal WHERE revision_id = ?",
+      ).get(identity.revisionId) as Row | undefined;
+      if (row === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload staging journal does not exist");
+      }
+      const existing = asResourcePayloadStagingJournal(row);
+      if (!resourcePayloadStagingIdentityMatches(existing, identity)) {
+        throw new WorkspaceStoreCodecError("Resource payload staging classification identity is mismatched");
+      }
+      if (existing.ownerId !== lease.ownerId || existing.leaseToken !== lease.leaseToken) {
+        throw new WorkspaceStoreCodecError("Resource payload staging classification lease fence is stale");
+      }
+      const classifiedAt = boundarySafeInteger(
+        this.clock.now(),
+        "Resource payload staging classified time",
+      );
+      const active = this.db.prepare(
+        `SELECT 1 FROM generation_task_attempts
+         WHERE task_id = ? AND attempt = ? AND workspace_id = ?
+           AND owner_id = ? AND lease_token = ?
+           AND status IN ('running','cancel-requested')
+           AND lease_expires_at > ?`,
+      ).get(
+        identity.taskId,
+        identity.attempt,
+        identity.workspaceId,
+        lease.ownerId,
+        lease.leaseToken,
+        classifiedAt,
+      );
+      if (active === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload staging classification lease fence is stale");
+      }
+      if (existing.storageDisposition !== null) {
+        if (existing.storageDisposition !== storageDisposition) {
+          throw new WorkspaceStoreCodecError("Resource payload storage disposition is immutable");
+        }
+        return existing;
+      }
+      const updated = this.db.prepare(
+        `UPDATE resource_payload_staging_journal
+         SET storage_disposition = ?, classified_at = ?
+         WHERE revision_id = ? AND task_id = ? AND attempt = ? AND input_hash = ?
+           AND workspace_id = ? AND resource_id = ? AND status = 'prepared'
+           AND storage_disposition IS NULL AND classified_at IS NULL`,
+      ).run(
+        storageDisposition,
+        classifiedAt,
+        identity.revisionId,
+        identity.taskId,
+        identity.attempt,
+        identity.inputHash,
+        identity.workspaceId,
+        identity.resourceId,
+      );
+      if (Number(updated.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Resource payload staging classification lost its fence");
+      }
+      const result = this.db.prepare(
+        "SELECT * FROM resource_payload_staging_journal WHERE revision_id = ?",
+      ).get(identity.revisionId) as Row | undefined;
+      if (result === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload staging journal disappeared after classification");
+      }
+      return asResourcePayloadStagingJournal(result);
+    });
+  }
+
+  completeResourcePayloadStaging(
+    unsafeInput: CompleteResourcePayloadStagingInput,
+  ): ResourcePayloadStagingJournal {
+    const record = boundaryObject(unsafeInput, "Resource payload staging completion", [
+      "taskId", "attempt", "inputHash", "workspaceId", "resourceId", "revisionId",
+      "lease", "receiptChecksum",
+    ]);
+    const identity = {
+      taskId: boundaryId(record.taskId, "Resource payload staging Task id"),
+      attempt: boundarySafeInteger(record.attempt, "Resource payload staging Attempt", 1),
+      inputHash: boundaryChecksum(record.inputHash, "Resource payload staging input hash"),
+      workspaceId: boundaryId(record.workspaceId, "Resource payload staging Workspace id"),
+      resourceId: boundaryId(record.resourceId, "Resource payload staging Resource id"),
+      revisionId: boundaryId(record.revisionId, "Resource payload staging Revision id"),
+    };
+    const receiptChecksum = boundaryChecksum(
+      record.receiptChecksum,
+      "Resource payload staging receipt checksum",
+    );
+    const lease = normalizeGenerationTaskAttemptLease(record.lease);
+    if (lease.taskId !== identity.taskId || lease.attempt !== identity.attempt
+      || lease.workspaceId !== identity.workspaceId) {
+      throw new WorkspaceStoreCodecError("Resource payload staging completion lease is mismatched");
+    }
+    return this.transactionImmediate(() => {
+      const row = this.db.prepare(
+        "SELECT * FROM resource_payload_staging_journal WHERE revision_id = ?",
+      ).get(identity.revisionId) as Row | undefined;
+      if (row === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload staging journal does not exist");
+      }
+      const existing = asResourcePayloadStagingJournal(row);
+      if (!resourcePayloadStagingIdentityMatches(existing, identity)
+        || existing.receiptChecksum !== receiptChecksum
+        || existing.ownerId !== lease.ownerId || existing.leaseToken !== lease.leaseToken) {
+        throw new WorkspaceStoreCodecError("Resource payload staging completion identity is mismatched");
+      }
+      const receiptCommittedAt = boundarySafeInteger(
+        this.clock.now(),
+        "Resource payload receipt committed time",
+      );
+      const active = this.db.prepare(
+        `SELECT 1 FROM generation_task_attempts
+         WHERE task_id = ? AND attempt = ? AND workspace_id = ?
+           AND owner_id = ? AND lease_token = ?
+           AND status IN ('running','cancel-requested')
+           AND lease_expires_at > ?`,
+      ).get(
+        identity.taskId,
+        identity.attempt,
+        identity.workspaceId,
+        lease.ownerId,
+        lease.leaseToken,
+        receiptCommittedAt,
+      );
+      if (active === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload staging completion lease fence is stale");
+      }
+      if (existing.status === "receipt-committed") return existing;
+      if (existing.storageDisposition === null || existing.classifiedAt === null) {
+        throw new WorkspaceStoreCodecError("Resource payload staging cannot complete before classification");
+      }
+      const updated = this.db.prepare(
+        `UPDATE resource_payload_staging_journal
+         SET status = 'receipt-committed', receipt_committed_at = ?
+         WHERE revision_id = ? AND task_id = ? AND attempt = ? AND input_hash = ?
+           AND workspace_id = ? AND resource_id = ? AND receipt_checksum = ?
+           AND status = 'prepared' AND storage_disposition IS NOT NULL
+           AND classified_at IS NOT NULL AND receipt_committed_at IS NULL`,
+      ).run(
+        receiptCommittedAt,
+        identity.revisionId,
+        identity.taskId,
+        identity.attempt,
+        identity.inputHash,
+        identity.workspaceId,
+        identity.resourceId,
+        receiptChecksum,
+      );
+      if (Number(updated.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Resource payload staging completion lost its fence");
+      }
+      const result = this.db.prepare(
+        "SELECT * FROM resource_payload_staging_journal WHERE revision_id = ?",
+      ).get(identity.revisionId) as Row | undefined;
+      if (result === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload staging journal disappeared after completion");
+      }
+      return asResourcePayloadStagingJournal(result);
+    });
+  }
+
+  listResourcePayloadRecoveryEntries(input: {
+    cursor?: ResourcePayloadRecoveryCursor | null;
+    limit?: number;
+  }): ResourcePayloadRecoveryPage {
+    const record = boundaryObject(input, "Resource payload recovery page input", [], ["cursor", "limit"]);
+    const cursor = normalizeResourcePayloadRecoveryCursor(
+      Object.hasOwn(record, "cursor") ? record.cursor : null,
+    );
+    const limit = Object.hasOwn(record, "limit")
+      ? boundarySafeInteger(record.limit, "Resource payload recovery limit", 1)
+      : 100;
+    if (limit > 1_000) {
+      throw new WorkspaceStoreCodecError("Resource payload recovery limit must not exceed 1000");
+    }
+    return this.transactionImmediate(() => {
+      const throughSequence = cursor?.throughSequence ?? boundarySafeInteger(
+        (this.db.prepare(
+          "SELECT COALESCE(MAX(sequence), 0) AS value FROM resource_payload_staging_journal",
+        ).get() as { value: number }).value,
+        "Resource payload recovery sweep upper sequence",
+      );
+      if (throughSequence === 0) return { entries: [], nextCursor: null };
+      const afterSequence = cursor?.afterSequence ?? 0;
+      const rows = this.db.prepare(
+        `SELECT journal.*
+         FROM resource_payload_staging_journal journal
+         LEFT JOIN resource_payload_cleanup_claims cleanup
+           ON cleanup.revision_id = journal.revision_id
+         WHERE journal.sequence > ? AND journal.sequence <= ?
+           AND (cleanup.status IS NULL OR cleanup.status = 'claimed')
+           AND NOT EXISTS (
+             SELECT 1 FROM resource_revisions revision
+             WHERE revision.id = journal.revision_id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM generation_task_attempts candidate
+             WHERE candidate.candidate_resource_revision_id = journal.revision_id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM generation_tasks result
+             WHERE result.result_resource_revision_id = journal.revision_id
+           )
+         ORDER BY journal.sequence ASC
+         LIMIT ?`,
+      ).all(afterSequence, throughSequence, limit) as Row[];
+      const entries = rows.map((row) => {
+        const journal = asResourcePayloadStagingJournal(row);
+        const cleanupRow = this.db.prepare(
+          "SELECT * FROM resource_payload_cleanup_claims WHERE revision_id = ?",
+        ).get(journal.revisionId) as Row | undefined;
+        return {
+          journal,
+          cleanup: cleanupRow === undefined ? null : asResourcePayloadCleanupClaim(cleanupRow),
+        };
+      });
+      const last = entries.at(-1)?.journal.sequence;
+      return {
+        entries,
+        nextCursor: rows.length === limit && last !== undefined
+          ? { afterSequence: last, throughSequence }
+          : null,
+      };
+    });
+  }
+
+  tryClaimResourcePayloadCleanup(
+    unsafeInput: TryClaimResourcePayloadCleanupInput,
+  ): ResourcePayloadCleanupClaim | null {
+    const input = normalizeResourcePayloadCleanupInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const existingRows = this.db.prepare(
+        `SELECT * FROM resource_payload_cleanup_claims
+         WHERE revision_id = ? OR (task_id = ? AND attempt = ?)
+         ORDER BY revision_id COLLATE BINARY ASC`,
+      ).all(input.revisionId, input.taskId, input.attempt) as Row[];
+      if (existingRows.length > 1) {
+        throw new WorkspaceStoreCodecError(
+          "Resource payload cleanup identity collides with multiple durable claims",
+        );
+      }
+      if (existingRows.length === 1) {
+        const existing = asResourcePayloadCleanupClaim(existingRows[0]!);
+        if (!resourcePayloadCleanupIdentityMatches(existing, input)) {
+          throw new WorkspaceStoreCodecError(
+            "Resource payload cleanup identity collides with a different durable claim",
+          );
+        }
+        return existing;
+      }
+
+      const eligible = this.db.prepare(
+        `SELECT attempt.plan_id
+         FROM generation_task_attempts attempt
+         JOIN generation_tasks task
+           ON task.id = attempt.task_id
+          AND task.plan_id = attempt.plan_id
+          AND task.workspace_id = attempt.workspace_id
+         WHERE attempt.task_id = ? AND attempt.attempt = ?
+           AND attempt.input_hash = ? AND attempt.workspace_id = ?
+           AND attempt.target_resource_id = ?
+           AND task.kind = 'resource' AND task.target_type = 'resource'
+           AND task.target_resource_id = ? AND task.workspace_id = ?
+           AND attempt.status IN (
+             'succeeded','retryable-failed','failed','needs-rebase','cancelled'
+           )
+           AND attempt.materialization_sealed = 1
+           AND attempt.candidate_revision_id IS NULL
+           AND attempt.candidate_resource_revision_id IS NULL
+           AND attempt.candidate_evidence_json IS NULL
+           AND attempt.candidate_evidence_hash IS NULL
+           AND attempt.owner_id IS NULL AND attempt.lease_token IS NULL
+           AND attempt.lease_expires_at IS NULL AND attempt.heartbeat_at IS NULL
+           AND attempt.finished_at IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM generation_task_claims claim
+             WHERE claim.task_id = attempt.task_id AND claim.attempt = attempt.attempt
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM resource_revisions revision WHERE revision.id = ?
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM generation_task_attempts candidate
+             WHERE candidate.candidate_resource_revision_id = ?
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM generation_tasks result
+             WHERE result.result_resource_revision_id = ?
+           )`,
+      ).get(
+        input.taskId,
+        input.attempt,
+        input.inputHash,
+        input.workspaceId,
+        input.resourceId,
+        input.resourceId,
+        input.workspaceId,
+        input.revisionId,
+        input.revisionId,
+        input.revisionId,
+      ) as { plan_id: string } | undefined;
+      if (eligible === undefined) return null;
+      const planId = requiredCell(eligible.plan_id, "Resource payload cleanup Plan id");
+      const claimedAt = boundarySafeInteger(
+        this.clock.now(),
+        "Resource payload cleanup claim time",
+      );
+      const inserted = this.db.prepare(
+        `INSERT INTO resource_payload_cleanup_claims (
+           revision_id, task_id, plan_id, attempt, input_hash, workspace_id,
+           resource_id, status, claimed_at, completed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'claimed', ?, NULL)`,
+      ).run(
+        input.revisionId,
+        input.taskId,
+        planId,
+        input.attempt,
+        input.inputHash,
+        input.workspaceId,
+        input.resourceId,
+        claimedAt,
+      );
+      if (Number(inserted.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Resource payload cleanup claim was not recorded");
+      }
+      const claimed = this.db.prepare(
+        "SELECT * FROM resource_payload_cleanup_claims WHERE revision_id = ?",
+      ).get(input.revisionId) as Row | undefined;
+      if (claimed === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload cleanup claim disappeared after insertion");
+      }
+      return asResourcePayloadCleanupClaim(claimed);
+    });
+  }
+
+  completeResourcePayloadCleanup(
+    unsafeInput: CompleteResourcePayloadCleanupInput,
+  ): ResourcePayloadCleanupClaim {
+    const input = normalizeResourcePayloadCleanupInput(unsafeInput);
+    return this.transactionImmediate(() => {
+      const row = this.db.prepare(
+        "SELECT * FROM resource_payload_cleanup_claims WHERE revision_id = ?",
+      ).get(input.revisionId) as Row | undefined;
+      if (row === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload cleanup claim does not exist");
+      }
+      const existing = asResourcePayloadCleanupClaim(row);
+      if (!resourcePayloadCleanupIdentityMatches(existing, input)) {
+        throw new WorkspaceStoreCodecError(
+          "Resource payload cleanup completion identity does not match its durable claim",
+        );
+      }
+      if (existing.status === "completed") return existing;
+      const completedAt = boundarySafeInteger(
+        this.clock.now(),
+        "Resource payload cleanup completion time",
+      );
+      if (completedAt < existing.claimedAt) {
+        throw new WorkspaceStoreCodecError(
+          "Resource payload cleanup completion time precedes its durable claim",
+        );
+      }
+      const completed = this.db.prepare(
+        `UPDATE resource_payload_cleanup_claims
+         SET status = 'completed', completed_at = ?
+         WHERE revision_id = ? AND task_id = ? AND attempt = ?
+           AND input_hash = ? AND workspace_id = ? AND resource_id = ?
+           AND status = 'claimed' AND completed_at IS NULL`,
+      ).run(
+        completedAt,
+        input.revisionId,
+        input.taskId,
+        input.attempt,
+        input.inputHash,
+        input.workspaceId,
+        input.resourceId,
+      );
+      if (Number(completed.changes) !== 1) {
+        throw new WorkspaceStoreCodecError("Resource payload cleanup completion lost its claim fence");
+      }
+      const result = this.db.prepare(
+        "SELECT * FROM resource_payload_cleanup_claims WHERE revision_id = ?",
+      ).get(input.revisionId) as Row | undefined;
+      if (result === undefined) {
+        throw new WorkspaceStoreCodecError("Resource payload cleanup claim disappeared after completion");
+      }
+      return asResourcePayloadCleanupClaim(result);
+    });
+  }
+
   tryClaimGenerationTaskAttempt(
     unsafeInput: TryClaimGenerationTaskAttemptInput,
   ): GenerationTaskAttemptClaim | null {
@@ -3225,14 +4318,37 @@ export class WorkspaceStore {
             `Generation Task ${task.id}/${attempt.attempt} does not target an Artifact`,
           );
         }
+        const contextPackHash = this.generationTaskAttemptContextPackHashInTransaction(attempt);
+        if (attempt.contextPackId === null || contextPackHash === null) {
+          throw new WorkspaceStoreCodecError(
+            `Generation Task ${task.id}/${attempt.attempt} Artifact candidate has no frozen Context Pack`,
+          );
+        }
         validateGenerationTaskArtifactQualityGate({
           qaProfile: task.qaProfile,
           plannedFrames: attempt.payload.responsiveFrames ?? [],
           renderSpec: input.candidate.renderSpec,
           quality: input.candidate.quality,
           evidence: input.evidence,
+          expectedEvidenceOwner: {
+            projectId,
+            workspaceId: task.workspaceId,
+            planId: task.planId,
+            taskId: task.id,
+            attempt: attempt.attempt,
+            inputHash: attempt.inputHash,
+            attemptCreatedAt: attempt.createdAt,
+            sourceBase: {
+              commitHash: attempt.sourceCommitHash,
+              treeHash: attempt.sourceTreeHash,
+            },
+            candidateRetentionRef: generationTaskArtifactCandidateRetentionRef(attempt),
+            candidateCommitHash: input.candidate.sourceCommitHash,
+            candidateTreeHash: input.candidate.sourceTreeHash,
+            contextPackId: attempt.contextPackId,
+            contextPackHash,
+          },
         });
-        const contextPackHash = this.generationTaskAttemptContextPackHashInTransaction(attempt);
         artifactRevision = this.createArtifactRevisionInTransaction(
           {
             artifactId: attempt.target.id,
@@ -3978,11 +5094,13 @@ export class WorkspaceStore {
         );
       }
 
-      const transient = input.failure.failureClass === "adapter"
+      const transientFailure = input.failure.failureClass === "adapter"
         || input.failure.failureClass === "storage"
         || input.failure.failureClass === "provider"
         || input.failure.failureClass === "agent-transport"
         || input.failure.failureClass === "build-infrastructure";
+      const transient = transientFailure && !(source.target.type === "artifact"
+        && (source.sourceCommitHash === null || source.sourceTreeHash === null));
       const retryDelay = transient
         ? ([1_000, 4_000, 16_000] as const)[source.automaticRetryIndex] ?? null
         : null;
@@ -4203,7 +5321,10 @@ export class WorkspaceStore {
         const retryDelay = retryIndex <= 3
           ? ([1_000, 4_000, 16_000] as const)[retryIndex - 1] ?? null
           : null;
-        const shouldRetry = source.status !== "cancel-requested" && retryDelay !== null;
+        const shouldRetry = source.status !== "cancel-requested"
+          && retryDelay !== null
+          && !(source.target.type === "artifact"
+            && (source.sourceCommitHash === null || source.sourceTreeHash === null));
         const sourceStatus = source.status === "cancel-requested"
           ? "cancelled"
           : shouldRetry
@@ -4470,17 +5591,19 @@ export class WorkspaceStore {
           `expected ${expectedPolicy}/${expectedMode} retry execution policy`,
         );
       }
+      this.validateGenerationTaskAttemptSourceBaseInTransaction(task, input);
       this.validateGenerationTaskAttemptContextInTransaction(task, input);
 
       const createdAt = this.clock.now();
       this.db.prepare(
         `INSERT INTO generation_task_attempts (
            task_id, plan_id, workspace_id, attempt, target_artifact_id, target_track_id,
-           target_resource_id, base_revision_id, expected_snapshot_id, context_pack_id,
+           target_resource_id, base_revision_id, source_commit_hash, source_tree_hash,
+           expected_snapshot_id, context_pack_id,
            kernel_revision_id, execution_mode, payload_json, input_hash,
            pinned_resource_revision_ids_json, component_dependency_revision_ids_json,
            retry_context_policy, status, materialization_sealed, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?)`,
       ).run(
         input.taskId,
         input.planId,
@@ -4490,6 +5613,8 @@ export class WorkspaceStore {
         input.target.type === "artifact" ? input.target.trackId : null,
         input.target.type === "resource" ? input.target.id : null,
         input.baseRevisionId,
+        input.sourceCommitHash,
+        input.sourceTreeHash,
         input.expectedSnapshotId,
         input.contextPackId,
         input.kernelRevisionId,
@@ -4598,6 +5723,8 @@ export class WorkspaceStore {
           inputHash: input.inputHash,
           expectedSnapshotId: input.expectedSnapshotId,
           baseRevisionId: input.baseRevisionId,
+          sourceCommitHash: input.sourceCommitHash,
+          sourceTreeHash: input.sourceTreeHash,
           contextPackId: input.contextPackId,
           kernelRevisionId: input.kernelRevisionId,
           retryContextPolicy: input.retryContextPolicy,
@@ -6269,6 +7396,42 @@ export class WorkspaceStore {
     }
   }
 
+  private validateGenerationTaskAttemptSourceBaseInTransaction(
+    task: GenerationTask,
+    input: GenerationTaskAttemptInput,
+  ): void {
+    if (!this.db.isTransaction) {
+      throw new Error("Generation Task Attempt Source Base validation requires a transaction");
+    }
+    if (task.target.type !== "artifact") {
+      if (input.sourceCommitHash !== null || input.sourceTreeHash !== null) {
+        throw new GenerationTaskMaterializationConflictError(
+          task.id,
+          "non-Artifact Attempt cannot bind a Git Source Base",
+        );
+      }
+      return;
+    }
+    if (input.sourceCommitHash === null || input.sourceTreeHash === null) {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        "Artifact Attempt requires an immutable Git Source Base",
+      );
+    }
+    if (input.baseRevisionId === null) return;
+    const base = this.requireArtifactRevision(input.baseRevisionId);
+    if (base.workspaceId !== task.workspaceId
+      || base.artifactId !== task.target.id
+      || base.trackId !== task.target.trackId
+      || base.sourceCommitHash !== input.sourceCommitHash
+      || base.sourceTreeHash !== input.sourceTreeHash) {
+      throw new GenerationTaskMaterializationConflictError(
+        task.id,
+        "Source Base does not match the exact base Revision commit/tree identity",
+      );
+    }
+  }
+
   private generationTaskAttemptMatchesObservation(
     input: GenerationTaskAttemptInput,
     observation: GenerationTaskMaterializationObservation,
@@ -6307,6 +7470,8 @@ export class WorkspaceStore {
       && attempt.attempt === input.attempt
       && isDeepStrictEqual(attempt.target, input.target)
       && attempt.baseRevisionId === input.baseRevisionId
+      && attempt.sourceCommitHash === input.sourceCommitHash
+      && attempt.sourceTreeHash === input.sourceTreeHash
       && attempt.expectedSnapshotId === input.expectedSnapshotId
       && attempt.contextPackId === input.contextPackId
       && attempt.kernelRevisionId === input.kernelRevisionId
@@ -6349,6 +7514,12 @@ export class WorkspaceStore {
       || (source.status !== "retryable-failed" && source.status !== "needs-rebase")) {
       throw new WorkspaceStoreCodecError("Generation Task retry source is not its exact terminal current Attempt");
     }
+    if (source.target.type === "artifact"
+      && (source.sourceCommitHash === null || source.sourceTreeHash === null)) {
+      throw new WorkspaceStoreCodecError(
+        "Legacy Artifact Generation Task Attempt without a Source Base cannot be retried",
+      );
+    }
     if (source.attempt >= Number.MAX_SAFE_INTEGER) {
       throw new WorkspaceStoreCodecError("Generation Task retry Attempt number is exhausted");
     }
@@ -6365,6 +7536,8 @@ export class WorkspaceStore {
       attempt: attemptNumber,
       target: source.target,
       baseRevisionId: source.baseRevisionId,
+      sourceCommitHash: source.sourceCommitHash,
+      sourceTreeHash: source.sourceTreeHash,
       expectedSnapshotId: source.expectedSnapshotId,
       contextPackId: source.contextPackId,
       kernelRevisionId: source.kernelRevisionId,
@@ -6397,12 +7570,13 @@ export class WorkspaceStore {
       `INSERT INTO generation_task_attempts (
          task_id, plan_id, workspace_id, attempt, attempt_origin, predecessor_attempt,
          automatic_retry_index, target_artifact_id, target_track_id, target_resource_id,
-         base_revision_id, expected_snapshot_id, context_pack_id, kernel_revision_id,
+         base_revision_id, source_commit_hash, source_tree_hash, expected_snapshot_id,
+         context_pack_id, kernel_revision_id,
          execution_mode, payload_json, input_hash, pinned_resource_revision_ids_json,
          component_dependency_revision_ids_json, retry_context_policy, status,
          materialization_sealed, candidate_revision_id, candidate_resource_revision_id,
          candidate_evidence_json, candidate_evidence_hash, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                  'queued', 0, ?, ?, ?, ?, ?)`,
     ).run(
       successorInput.taskId,
@@ -6416,6 +7590,8 @@ export class WorkspaceStore {
       successorInput.target.type === "artifact" ? successorInput.target.trackId : null,
       successorInput.target.type === "resource" ? successorInput.target.id : null,
       successorInput.baseRevisionId,
+      successorInput.sourceCommitHash,
+      successorInput.sourceTreeHash,
       successorInput.expectedSnapshotId,
       successorInput.contextPackId,
       successorInput.kernelRevisionId,
@@ -6487,6 +7663,8 @@ export class WorkspaceStore {
         inputHash: successorInput.inputHash,
         expectedSnapshotId: successorInput.expectedSnapshotId,
         baseRevisionId: successorInput.baseRevisionId,
+        sourceCommitHash: successorInput.sourceCommitHash,
+        sourceTreeHash: successorInput.sourceTreeHash,
         contextPackId: successorInput.contextPackId,
         kernelRevisionId: successorInput.kernelRevisionId,
         retryContextPolicy: successorInput.retryContextPolicy,
@@ -7023,7 +8201,19 @@ export class WorkspaceStore {
       );
     }
     const artifactRevision = this.requireArtifactRevision(attempt.candidateRevisionId);
+    const sourceAttempt = this.generationTaskCandidateSourceAttemptInTransaction(attempt);
     const contextPackHash = this.generationTaskAttemptContextPackHashInTransaction(attempt);
+    if (attempt.contextPackId === null || contextPackHash === null) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} recorded Artifact candidate has no frozen Context Pack`,
+      );
+    }
+    const evidenceContextPackHash = this.generationTaskAttemptContextPackHashInTransaction(sourceAttempt);
+    if (sourceAttempt.contextPackId === null || evidenceContextPackHash === null) {
+      throw new WorkspaceStoreCodecError(
+        `Generation Task ${task.id}/${attempt.attempt} candidate origin has no frozen Context Pack`,
+      );
+    }
     const dependencies = this.listArtifactRevisionDependencies(artifactRevision.id);
     const resourcePins = this.listArtifactRevisionResourcePins(artifactRevision.id);
     const expectedDependencies: ArtifactRevisionDependencyRecord[] = attempt.componentPins.map((pin) => ({
@@ -7080,8 +8270,25 @@ export class WorkspaceStore {
       renderSpec: artifactRevision.renderSpec,
       quality: artifactRevision.quality,
       evidence: attempt.candidateEvidence,
+      expectedEvidenceOwner: {
+        projectId: this.requireWorkspaceById(task.workspaceId).projectId,
+        workspaceId: task.workspaceId,
+        planId: task.planId,
+        taskId: task.id,
+        attempt: sourceAttempt.attempt,
+        inputHash: sourceAttempt.inputHash,
+        attemptCreatedAt: sourceAttempt.createdAt,
+        sourceBase: {
+          commitHash: sourceAttempt.sourceCommitHash,
+          treeHash: sourceAttempt.sourceTreeHash,
+        },
+        candidateRetentionRef: generationTaskArtifactCandidateRetentionRef(sourceAttempt),
+        candidateCommitHash: artifactRevision.sourceCommitHash,
+        candidateTreeHash: artifactRevision.sourceTreeHash,
+        contextPackId: sourceAttempt.contextPackId,
+        contextPackHash: evidenceContextPackHash,
+      },
     });
-    this.generationTaskCandidateSourceAttemptInTransaction(attempt);
     return artifactRevision;
   }
 
@@ -8422,6 +9629,8 @@ export class WorkspaceStore {
       inputHash: attempt.inputHash,
       expectedSnapshotId: attempt.expectedSnapshotId,
       baseRevisionId: attempt.baseRevisionId,
+      sourceCommitHash: attempt.sourceCommitHash,
+      sourceTreeHash: attempt.sourceTreeHash,
       contextPackId: attempt.contextPackId,
       kernelRevisionId: attempt.kernelRevisionId,
       retryContextPolicy: attempt.retryContextPolicy,
@@ -8432,7 +9641,26 @@ export class WorkspaceStore {
         automaticRetryIndex: attempt.automaticRetryIndex,
       }),
     };
-    if (events.length !== 1 || !isDeepStrictEqual(events[0]?.payload, expectedPayload)) {
+    const legacyExpectedPayload = {
+      attempt: attempt.attempt,
+      inputHash: attempt.inputHash,
+      expectedSnapshotId: attempt.expectedSnapshotId,
+      baseRevisionId: attempt.baseRevisionId,
+      contextPackId: attempt.contextPackId,
+      kernelRevisionId: attempt.kernelRevisionId,
+      retryContextPolicy: attempt.retryContextPolicy,
+      executionMode: attempt.executionMode,
+      ...(attempt.attemptOrigin === "materialized" ? {} : {
+        attemptOrigin: attempt.attemptOrigin,
+        predecessorAttempt: attempt.predecessorAttempt,
+        automaticRetryIndex: attempt.automaticRetryIndex,
+      }),
+    };
+    const eventPayload = events[0]?.payload;
+    const exact = isDeepStrictEqual(eventPayload, expectedPayload);
+    const historicalNullable = attempt.sourceCommitHash === null
+      && isDeepStrictEqual(eventPayload, legacyExpectedPayload);
+    if (events.length !== 1 || (!exact && !historicalNullable)) {
       throw new WorkspaceStoreCodecError(
         `Generation Task Attempt ${attempt.taskId}/${attempt.attempt} does not match one materialized event`,
       );

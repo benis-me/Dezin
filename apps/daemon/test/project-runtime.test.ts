@@ -594,6 +594,100 @@ test("immutable preview fails closed before resolution when its npm lockfile is 
   }
 });
 
+test("immutable preview uses temporary instrumentation and never edits stale or missing source bridge config", async (t) => {
+  for (const bridge of ["stale", "missing"] as const) {
+    await t.test(bridge, async () => {
+      const dir = mkdtempSync(join(tmpdir(), `dezin-immutable-bridge-${bridge}-`));
+      const projectId = `immutable-${bridge}`;
+      const runtimeKey = `artifact-quality:${projectId}:attempt-1`;
+      let acquiredConfigPath = "";
+      const manager: PreviewLeaseManager = {
+        async acquire(scope, projectDir, options = {}) {
+          assert.deepEqual(scope, { projectId });
+          assert.equal(projectDir, dir);
+          assert.ok(options.configPath, "immutable previews require external instrumentation");
+          acquiredConfigPath = options.configPath!;
+          assert.equal(isAbsolute(acquiredConfigPath), true);
+          assert.equal(acquiredConfigPath.startsWith(dir), false, "instrumentation must live outside candidate source");
+          const config = readFileSync(acquiredConfigPath, "utf8");
+          assert.match(config, /data-dezin-runtime-probe/);
+          assert.match(config, /attrs:attrs\(el\)/);
+          assert.doesNotMatch(config, /window\.__stalePicker/);
+          options.onEntryReady?.();
+          return {
+            leaseId: `lease-${bridge}`,
+            url: `http://127.0.0.1:4310/#dezin-bridge=${"a".repeat(43)}`,
+            bridgeNonce: "a".repeat(43),
+            expiresAt: Date.now() + 60_000,
+            async release() { await options.onEntryDispose?.(); },
+          };
+        },
+        async renew() { return null; },
+        async release() { return false; },
+        async stopScope() {},
+        async stopAll() {},
+        activeCount() { return 0; },
+      };
+      try {
+        const packageJson = Buffer.from(JSON.stringify({
+          private: true,
+          type: "module",
+          scripts: { dev: "vite" },
+          devDependencies: { vite: "*" },
+        }));
+        const packageLock = Buffer.from(JSON.stringify({
+          name: projectId,
+          lockfileVersion: 3,
+          packages: { "": { name: projectId, devDependencies: { vite: "*" } } },
+        }));
+        writeFileSync(join(dir, "package.json"), packageJson);
+        writeFileSync(join(dir, "package-lock.json"), packageLock);
+        writeFileSync(join(dir, "index.html"), "<!doctype html><html><head></head><body>Immutable candidate</body></html>");
+        writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
+        if (bridge === "stale") {
+          const template = readFileSync(join(templateDir(), "vite.config.js"), "utf8");
+          writeFileSync(
+            join(dir, "vite.config.js"),
+            template
+              .replace(/const PICKER_BRIDGE = `[\s\S]*?<\/script>`;/, "const PICKER_BRIDGE = `<script data-dezin-bridge>window.__stalePicker = true;</script>`;")
+              .replace(/const RUNTIME_PROBE = `[\s\S]*?<\/script>`;/, "const RUNTIME_PROBE = `<script data-dezin-runtime-probe>window.__staleProbe = true;</script>`;"),
+          );
+        }
+        mkdirSync(join(dir, "node_modules"), { recursive: true });
+        const fingerprint = createHash("sha256")
+          .update("package.json").update("\0").update(packageJson).update("\0")
+          .update("package-lock.json").update("\0").update(packageLock).update("\0")
+          .digest("hex");
+        writeFileSync(join(dir, "node_modules", ".dezin-dependency-fingerprint"), `${fingerprint}\n`);
+        execFileSync("git", ["init", "-q"], { cwd: dir });
+        commitFixture(dir, `immutable ${bridge} candidate`);
+        const before = {
+          head: execFileSync("git", ["rev-parse", "HEAD^{commit}"], { cwd: dir, encoding: "utf8" }).trim(),
+          tree: execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim(),
+          status: execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }),
+        };
+
+        const lease = await ensureDevServer(projectId, dir, runtimeKey, undefined, manager, {
+          immutableSource: true,
+          disposeOnIdle: true,
+        });
+        assert.ok(acquiredConfigPath);
+        await lease.release();
+        const after = {
+          head: execFileSync("git", ["rev-parse", "HEAD^{commit}"], { cwd: dir, encoding: "utf8" }).trim(),
+          tree: execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim(),
+          status: execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: dir, encoding: "utf8" }),
+        };
+        assert.deepEqual(before, after);
+        assert.equal(after.status, "");
+      } finally {
+        await stopAllDevServers();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("ensureDevServer restarts when a cached git worktree moves to another commit", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dezin-runtime-git-"));
   mkdirSync(join(dir, "node_modules"));

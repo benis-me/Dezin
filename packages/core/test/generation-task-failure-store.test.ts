@@ -63,7 +63,7 @@ function emptyGeneration() {
     dependencyPlans: [],
     prototypeIntents: [],
     capabilities: [],
-    responsiveFrames: [],
+    responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
     qualityProfile: {
       requiredFrameIds: [],
       blockingSeverities: [],
@@ -113,7 +113,7 @@ function createClaimedPageFixture(label: string) {
         baseRevisionId: null,
         dependsOnArtifactIds: [],
         capabilityIds: [],
-        responsiveFrameIds: [],
+        responsiveFrameIds: ["desktop"],
       }],
     },
     rationale: `Exercise fenced execution failure ${label}`,
@@ -170,6 +170,8 @@ function createClaimedPageFixture(label: string) {
     {
       ...observation,
       contextPackId: contextPack.id,
+      sourceCommitHash: checksum(`failure-attempt-commit-${label}`),
+      sourceTreeHash: checksum(`failure-attempt-tree-${label}`),
       retryContextPolicy: "same-context",
       executionMode: "full",
     },

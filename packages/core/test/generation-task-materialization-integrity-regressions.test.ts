@@ -212,6 +212,8 @@ function createMaterializedValidationTask(store: Store) {
   const attempt = store.workspace.createGenerationTaskAttemptForProject(project.id, compiled.plan.id, {
     ...observation,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
@@ -262,6 +264,8 @@ test("Resource materialization rejects a previously observed base after Head and
     () => store.workspace.createGenerationTaskAttemptForProject(fixture.project.id, fixture.plan.id, {
       ...observation,
       contextPackId: pack.id,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
       retryContextPolicy: "same-context",
       executionMode: "full",
     }),
@@ -286,6 +290,8 @@ test("repair Context Pack is rejected explicitly before Generation Attempt persi
     store.workspace.createGenerationTaskAttemptForProject(fixture.project.id, fixture.plan.id, {
       ...observation,
       contextPackId: pack.id,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
       retryContextPolicy: "same-context",
       executionMode: "full",
     });

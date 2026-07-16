@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -77,6 +80,76 @@ interface GenerationTaskResourceCandidateStoreContract {
     planId: string,
     input: { lease: GenerationTaskAttemptLease },
   ): PublishGenerationTaskResourceCandidateResult;
+  tryClaimResourcePayloadCleanup(input: ResourcePayloadCleanupInput): ResourcePayloadCleanupClaim | null;
+  completeResourcePayloadCleanup(input: ResourcePayloadCleanupInput): ResourcePayloadCleanupClaim;
+  beginResourcePayloadStaging(input: ResourcePayloadStagingBeginInput): ResourcePayloadStagingJournal;
+  classifyResourcePayloadStaging(
+    input: ResourcePayloadCleanupInput & {
+      lease: GenerationTaskAttemptLease;
+      storageDisposition: "owned-created" | "preexisting";
+    },
+  ): ResourcePayloadStagingJournal;
+  completeResourcePayloadStaging(
+    input: ResourcePayloadCleanupInput & {
+      lease: GenerationTaskAttemptLease;
+      receiptChecksum: string;
+    },
+  ): ResourcePayloadStagingJournal;
+  listResourcePayloadRecoveryEntries(input: {
+    cursor?: ResourcePayloadRecoveryCursor | null;
+    limit?: number;
+  }): ResourcePayloadRecoveryPage;
+}
+
+interface ResourcePayloadCleanupInput {
+  taskId: string;
+  attempt: number;
+  inputHash: string;
+  workspaceId: string;
+  resourceId: string;
+  revisionId: string;
+}
+
+interface ResourcePayloadCleanupClaim extends ResourcePayloadCleanupInput {
+  planId: string;
+  status: "claimed" | "completed";
+  claimedAt: number;
+  completedAt: number | null;
+}
+
+interface ResourcePayloadStagingBeginInput extends ResourcePayloadCleanupInput {
+  lease: GenerationTaskAttemptLease;
+  manifestPath: string;
+  payloadChecksum: string;
+  manifestChecksum: string;
+  receiptChecksum: string;
+  byteSize: number;
+  mimeType: string;
+}
+
+interface ResourcePayloadStagingJournal extends Omit<ResourcePayloadStagingBeginInput, "lease"> {
+  ownerId: string;
+  leaseToken: string;
+  sequence: number;
+  planId: string;
+  status: "prepared" | "receipt-committed";
+  storageDisposition: "owned-created" | "preexisting" | null;
+  createdAt: number;
+  classifiedAt: number | null;
+  receiptCommittedAt: number | null;
+}
+
+interface ResourcePayloadRecoveryCursor {
+  afterSequence: number;
+  throughSequence: number;
+}
+
+interface ResourcePayloadRecoveryPage {
+  entries: Array<{
+    journal: ResourcePayloadStagingJournal;
+    cleanup: ResourcePayloadCleanupClaim | null;
+  }>;
+  nextCursor: ResourcePayloadRecoveryCursor | null;
 }
 
 function resourceCandidateApi(store: Store): GenerationTaskResourceCandidateStoreContract {
@@ -119,9 +192,9 @@ function emptyGeneration() {
   };
 }
 
-function createResourceCandidateFixture(label: string) {
+function createResourceCandidateFixture(label: string, databasePath = ":memory:") {
   const control = controlledClock(`resource-candidate-${label}`);
-  const store = new Store(":memory:", control.clock);
+  const store = new Store(databasePath, control.clock);
   const project = store.createProject({ name: `Resource candidate ${label}`, mode: "standard" });
   const foundation = store.workspace.ensureWorkspaceRecord(project.id);
   const created = store.workspace.createResourceForProject(project.id, {
@@ -247,6 +320,8 @@ function createResourceCandidateFixture(label: string) {
     {
       ...observation,
       contextPackId: contextPack.id,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
       retryContextPolicy: "same-context",
       executionMode: "full",
     },
@@ -416,6 +491,172 @@ function stageFixtureCandidate(
     resourceCandidateInput(fixture, label),
   );
 }
+
+function resourcePayloadJournalInput(
+  fixture: ResourceCandidateFixture,
+  revisionId: string,
+): ResourcePayloadStagingBeginInput {
+  return {
+    taskId: fixture.task.id,
+    attempt: fixture.attempt.attempt,
+    inputHash: fixture.attempt.inputHash,
+    workspaceId: fixture.workspace.id,
+    resourceId: fixture.resource.id,
+    revisionId,
+    lease: fixture.claim.lease,
+    manifestPath: `resource-revisions/${checksum(fixture.workspace.id)}/${checksum(revisionId)}/manifest.json`,
+    payloadChecksum: checksum(`${revisionId}:payload`),
+    manifestChecksum: checksum(`${revisionId}:manifest`),
+    receiptChecksum: checksum(`${revisionId}:receipt`),
+    byteSize: 128,
+    mimeType: "text/plain",
+  };
+}
+
+function resourcePayloadIdentity(input: ResourcePayloadCleanupInput): ResourcePayloadCleanupInput {
+  return {
+    taskId: input.taskId,
+    attempt: input.attempt,
+    inputHash: input.inputHash,
+    workspaceId: input.workspaceId,
+    resourceId: input.resourceId,
+    revisionId: input.revisionId,
+  };
+}
+
+test("journals exact Resource payload staging before storage and exposes a bounded restart inventory", () => {
+  const fixture = createResourceCandidateFixture("payload-journal-lifecycle");
+  try {
+    const api = resourceCandidateApi(fixture.store);
+    const input = resourcePayloadJournalInput(
+      fixture,
+      "generated-resource-revision-payload-journal-lifecycle",
+    );
+
+    const prepared = api.beginResourcePayloadStaging(input);
+    assert.equal(prepared.status, "prepared");
+    assert.equal(prepared.storageDisposition, null);
+    assert.equal(prepared.planId, fixture.plan.id);
+    assert.deepEqual(api.beginResourcePayloadStaging(input), prepared, "lost begin response must replay exactly");
+
+    const firstPage = api.listResourcePayloadRecoveryEntries({ limit: 1 });
+    assert.deepEqual(firstPage.entries, [{ journal: prepared, cleanup: null }]);
+    assert.deepEqual(firstPage.nextCursor, {
+      afterSequence: prepared.sequence,
+      throughSequence: prepared.sequence,
+    });
+    assert.deepEqual(
+      api.listResourcePayloadRecoveryEntries({ cursor: firstPage.nextCursor, limit: 1 }),
+      { entries: [], nextCursor: null },
+    );
+
+    fixture.control.set(100_002);
+    const classified = api.classifyResourcePayloadStaging({
+      ...resourcePayloadIdentity(input),
+      lease: input.lease,
+      storageDisposition: "owned-created",
+    });
+    assert.equal(classified.storageDisposition, "owned-created");
+    assert.equal(classified.classifiedAt, 100_002);
+
+    fixture.control.set(100_003);
+    const committed = api.completeResourcePayloadStaging({
+      ...resourcePayloadIdentity(input),
+      lease: input.lease,
+      receiptChecksum: input.receiptChecksum,
+    });
+    assert.equal(committed.status, "receipt-committed");
+    assert.equal(committed.receiptCommittedAt, 100_003);
+    assert.deepEqual(
+      api.completeResourcePayloadStaging({
+        ...resourcePayloadIdentity(input),
+        lease: input.lease,
+        receiptChecksum: input.receiptChecksum,
+      }),
+      committed,
+      "lost completion response must replay exactly",
+    );
+    fixture.store.deleteProject(fixture.project.id);
+    assert.equal(fixture.store.getProject(fixture.project.id), null);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Resource payload staging journal rejects identity substitution and fences referenced candidates", () => {
+  const fixture = createResourceCandidateFixture("payload-journal-fence");
+  try {
+    const api = resourceCandidateApi(fixture.store);
+    const input = resourcePayloadJournalInput(
+      fixture,
+      "generated-resource-revision-payload-journal-fence",
+    );
+    api.beginResourcePayloadStaging(input);
+    assert.throws(
+      () => api.beginResourcePayloadStaging({ ...input, payloadChecksum: checksum("substituted") }),
+      /collides|identity|checksum/i,
+    );
+    api.classifyResourcePayloadStaging({
+      ...resourcePayloadIdentity(input),
+      lease: input.lease,
+      storageDisposition: "owned-created",
+    });
+    api.completeResourcePayloadStaging({
+      ...resourcePayloadIdentity(input),
+      lease: input.lease,
+      receiptChecksum: input.receiptChecksum,
+    });
+
+    const staged = api.stageGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      {
+        ...resourceCandidateInput(fixture, "payload-journal-fence"),
+        candidate: {
+          ...resourceCandidateInput(fixture, "payload-journal-fence").candidate,
+          revision: {
+            ...resourceCandidateInput(fixture, "payload-journal-fence").candidate.revision,
+            revisionId: input.revisionId,
+            manifestPath: input.manifestPath,
+            checksum: input.manifestChecksum,
+          },
+        },
+      },
+    );
+    assert.equal(staged.resourceRevision.id, input.revisionId);
+    assert.equal(api.tryClaimResourcePayloadCleanup(resourcePayloadIdentity(input)), null);
+    assert.deepEqual(api.listResourcePayloadRecoveryEntries({ limit: 10 }), {
+      entries: [],
+      nextCursor: null,
+    });
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("a stale Resource payload worker cannot create a staging journal", () => {
+  const fixture = createResourceCandidateFixture("payload-journal-stale-lease");
+  try {
+    const api = resourceCandidateApi(fixture.store);
+    const input = resourcePayloadJournalInput(
+      fixture,
+      "generated-resource-revision-payload-journal-stale-lease",
+    );
+    assert.throws(
+      () => api.beginResourcePayloadStaging({
+        ...input,
+        lease: { ...input.lease, leaseToken: `${input.lease.leaseToken}-stale` },
+      }),
+      /lease|active|fence|owner/i,
+    );
+    const journalCount = fixture.store.db.prepare(
+      "SELECT COUNT(*) AS count FROM resource_payload_staging_journal",
+    ).get() as { count: number };
+    assert.equal(journalCount.count, 0);
+  } finally {
+    fixture.store.close();
+  }
+});
 
 test("staging a Resource candidate atomically records an Attempt-derived immutable Revision", () => {
   const fixture = createResourceCandidateFixture("stage-success");
@@ -1106,6 +1347,171 @@ test("a claimed publication-only successor reuses the Resource candidate and its
       beforeRevisionCount,
     );
     assert.equal(taskEvents(fixture, "task-succeeded").length, 1);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("a terminal empty Resource Attempt durably claims and completes its exact payload tombstone", () => {
+  const directory = mkdtempSync(join(tmpdir(), "dezin-resource-cleanup-claim-"));
+  const databasePath = join(directory, "store.sqlite");
+  const fixture = createResourceCandidateFixture("payload-cleanup-terminal", databasePath);
+  const input: ResourcePayloadCleanupInput = {
+    taskId: fixture.task.id,
+    attempt: fixture.attempt.attempt,
+    inputHash: fixture.attempt.inputHash,
+    workspaceId: fixture.workspace.id,
+    resourceId: fixture.resource.id,
+    revisionId: "generated-resource-revision-payload-cleanup-terminal",
+  };
+  try {
+    const api = resourceCandidateApi(fixture.store);
+    const journalInput = resourcePayloadJournalInput(fixture, input.revisionId);
+    api.beginResourcePayloadStaging(journalInput);
+    api.classifyResourcePayloadStaging({
+      ...input,
+      lease: journalInput.lease,
+      storageDisposition: "owned-created",
+    });
+    api.completeResourcePayloadStaging({
+      ...input,
+      lease: journalInput.lease,
+      receiptChecksum: journalInput.receiptChecksum,
+    });
+    fixture.store.workspace.finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      {
+        lease: fixture.claim.lease,
+        failure: {
+          failureClass: "cancelled",
+          error: { code: "TEST_CANCELLED_AFTER_PAYLOAD_STAGE" },
+        },
+      },
+    );
+    assert.equal(typeof api.tryClaimResourcePayloadCleanup, "function");
+    const claimed = api.tryClaimResourcePayloadCleanup(input);
+    assert.deepEqual(claimed, {
+      ...input,
+      planId: fixture.plan.id,
+      status: "claimed",
+      claimedAt: 100_001,
+      completedAt: null,
+    });
+    assert.deepEqual(api.tryClaimResourcePayloadCleanup(input), claimed);
+    fixture.store.close();
+
+    const restartControl = controlledClock("payload-cleanup-restart");
+    restartControl.set(200_000);
+    const reopened = new Store(databasePath, restartControl.clock);
+    try {
+      const restartedApi = resourceCandidateApi(reopened);
+      assert.deepEqual(restartedApi.tryClaimResourcePayloadCleanup(input), claimed);
+      const completed = restartedApi.completeResourcePayloadCleanup(input);
+      assert.deepEqual(completed, {
+        ...claimed,
+        status: "completed",
+        completedAt: 200_000,
+      });
+      assert.deepEqual(restartedApi.completeResourcePayloadCleanup(input), completed);
+      assert.throws(
+        () => reopened.workspace.createResourceRevisionCandidateForProject(
+          fixture.project.id,
+          fixture.resource.id,
+          {
+            revisionId: input.revisionId,
+            parentRevisionId: fixture.baseRevision.id,
+            manifestPath: "resource-revisions/payload-cleanup/tombstoned/manifest.json",
+            summary: "Must not resurrect a deleted staged payload",
+            metadata: {},
+            checksum: checksum("payload-cleanup-tombstoned"),
+            provenance: { source: "tombstone-regression" },
+          },
+        ),
+        /cleanup|tombstone|deleted|revision/i,
+      );
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { fixture.store.close(); } catch {}
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a Core-committed Resource candidate is retained even when its stage response is lost", () => {
+  const fixture = createResourceCandidateFixture("payload-cleanup-retained");
+  try {
+    const staged = stageFixtureCandidate(fixture, "payload-cleanup-retained");
+    const input: ResourcePayloadCleanupInput = {
+      taskId: fixture.task.id,
+      attempt: fixture.attempt.attempt,
+      inputHash: fixture.attempt.inputHash,
+      workspaceId: fixture.workspace.id,
+      resourceId: fixture.resource.id,
+      revisionId: staged.resourceRevision.id,
+    };
+    assert.equal(resourceCandidateApi(fixture.store).tryClaimResourcePayloadCleanup(input), null);
+    const published = resourceCandidateApi(fixture.store).publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      publicationInput({ ...fixture, staged }),
+    );
+    assert.equal(published.status, "succeeded");
+    assert.equal(resourceCandidateApi(fixture.store).tryClaimResourcePayloadCleanup(input), null);
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("lease recovery terminalizes an empty source Attempt before its payload can be claimed", () => {
+  const fixture = createResourceCandidateFixture("payload-cleanup-lease-recovery");
+  try {
+    const input: ResourcePayloadCleanupInput = {
+      taskId: fixture.task.id,
+      attempt: fixture.attempt.attempt,
+      inputHash: fixture.attempt.inputHash,
+      workspaceId: fixture.workspace.id,
+      resourceId: fixture.resource.id,
+      revisionId: "generated-resource-revision-payload-cleanup-lease-recovery",
+    };
+    const api = resourceCandidateApi(fixture.store);
+    const journalInput = resourcePayloadJournalInput(fixture, input.revisionId);
+    api.beginResourcePayloadStaging(journalInput);
+    api.classifyResourcePayloadStaging({
+      ...input,
+      lease: journalInput.lease,
+      storageDisposition: "owned-created",
+    });
+    api.completeResourcePayloadStaging({
+      ...input,
+      lease: journalInput.lease,
+      receiptChecksum: journalInput.receiptChecksum,
+    });
+    assert.ok(fixture.claim.attempt.leaseExpiresAt);
+    fixture.control.set(fixture.claim.attempt.leaseExpiresAt);
+    fixture.store.workspace.recoverExpiredGenerationTaskAttempts(
+      fixture.claim.attempt.leaseExpiresAt,
+    );
+    const source = fixture.store.workspace.getGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.task.id,
+      fixture.attempt.attempt,
+    );
+    assert.ok(source);
+    assert.equal(source.status, "retryable-failed");
+    assert.equal(
+      resourceCandidateApi(fixture.store).tryClaimResourcePayloadCleanup({
+        ...input,
+        resourceId: `${fixture.resource.id}-wrong`,
+      }),
+      null,
+    );
+    assert.equal(
+      resourceCandidateApi(fixture.store).tryClaimResourcePayloadCleanup(input)?.status,
+      "claimed",
+    );
   } finally {
     fixture.store.close();
   }

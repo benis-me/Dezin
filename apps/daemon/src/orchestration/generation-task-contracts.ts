@@ -12,6 +12,7 @@ const RESOURCE_KINDS = new Set([
   "effect",
   "external-reference",
 ]);
+const CAPABILITY_KINDS = new Set(["text", "image", "video", "browser", "visual-qa"]);
 const VIEWER_BRIDGE_TEXT_CONTROL = /[\u0000-\u001f\u007f]/;
 const VIEWER_BRIDGE_FRAME_TEXT_LIMIT = 256;
 const VIEWER_BRIDGE_BACKGROUND_LIMIT = 4_096;
@@ -23,15 +24,42 @@ const VIEWER_BRIDGE_FRAME_JSON_LIMIT = 65_536;
 const JSON_DEPTH_LIMIT = 64;
 const JSON_NODE_LIMIT = 100_000;
 
+export type GenerationTaskPayloadContractCode =
+  | "GENERATION_TASK_PAYLOAD_INVALID"
+  | "GENERATION_TASK_PAYLOAD_LEGACY_V1";
+export type GenerationTaskPayloadDisposition = "reject" | "recompile-required";
+
 export class GenerationTaskPayloadContractError extends Error {
-  constructor(message: string) {
+  readonly code: GenerationTaskPayloadContractCode;
+  readonly disposition: GenerationTaskPayloadDisposition;
+  readonly failureClass = "build" as const;
+
+  constructor(
+    message: string,
+    options: {
+      code?: GenerationTaskPayloadContractCode;
+      disposition?: GenerationTaskPayloadDisposition;
+    } = {},
+  ) {
     super(message);
     this.name = "GenerationTaskPayloadContractError";
+    this.code = options.code ?? "GENERATION_TASK_PAYLOAD_INVALID";
+    this.disposition = options.disposition ?? "reject";
   }
 }
 
 function fail(message: string): never {
   throw new GenerationTaskPayloadContractError(message);
+}
+
+function failLegacyV1(kind: GenerationTask["kind"]): never {
+  throw new GenerationTaskPayloadContractError(
+    `${kind} Task uses the legacy v1 payload and must be recompiled before execution`,
+    {
+      code: "GENERATION_TASK_PAYLOAD_LEGACY_V1",
+      disposition: "recompile-required",
+    },
+  );
 }
 
 function isWellFormedUtf16(value: string): boolean {
@@ -467,15 +495,69 @@ function validateResourceDependency(value: unknown, artifactId: string, label: s
   return JSON.stringify(["resource", artifactId, resourceId]);
 }
 
+function validateBrief(value: unknown, label: string): Record<string, unknown> {
+  const brief = exactObject(
+    value,
+    ["proposalRationale", "assumptions", "targetInstructions"],
+    [],
+    label,
+  );
+  canonicalString(brief.proposalRationale, `${label} Proposal rationale`);
+  stringArray(brief.assumptions, `${label} assumptions`);
+  return brief;
+}
+
+function validateCapabilityDescriptors(
+  value: unknown,
+  task: GenerationTask,
+  label: string,
+  requireRequired: boolean,
+): void {
+  const descriptorIds = denseArray(value, label).map((value, index) => {
+    const descriptor = exactObject(value, ["id", "kind", "required"], [], `${label}[${index}]`);
+    const id = canonicalString(descriptor.id, `${label}[${index}] id`);
+    if (typeof descriptor.kind !== "string" || !CAPABILITY_KINDS.has(descriptor.kind)) {
+      fail(`${label}[${index}] capability kind is unsupported`);
+    }
+    if (typeof descriptor.required !== "boolean") {
+      fail(`${label}[${index}] required must be boolean`);
+    }
+    if (requireRequired && descriptor.required !== true) {
+      fail(`${label}[${index}] required must be true for a Resource Task`);
+    }
+    return id;
+  });
+  if (new Set(descriptorIds).size !== descriptorIds.length) fail(`${label} ids must be unique`);
+  const sortedIds = [...descriptorIds].sort(compareBinary);
+  if (descriptorIds.some((id, index) => id !== sortedIds[index])) fail(`${label} must be sorted`);
+  const taskCapabilityIds = stringArray(task.capabilities, `${task.kind} Task capabilities`, {
+    unique: true,
+    sorted: true,
+  });
+  if (descriptorIds.length !== taskCapabilityIds.length
+    || descriptorIds.some((id, index) => id !== taskCapabilityIds[index])) {
+    fail(`${label} do not match the Task capabilities`);
+  }
+}
+
 function validateArtifactPayload(task: GenerationTask): void {
   if (task.target.type !== "artifact") fail(`${task.kind} Task target must be an Artifact`);
+  const rawPayload = plainRecord(task.payload, `${task.kind} Task payload`);
+  if (rawPayload.version === 1) failLegacyV1(task.kind);
   const payload = exactObject(
     task.payload,
-    ["version", "artifactPlan", "dependencyPlans", "responsiveFrames"],
+    [
+      "version",
+      "artifactPlan",
+      "dependencyPlans",
+      "responsiveFrames",
+      "brief",
+      "capabilityDescriptors",
+    ],
     [],
     `${task.kind} Task payload`,
   );
-  if (payload.version !== 1) fail(`${task.kind} Task payload version is unsupported`);
+  if (payload.version !== 2) fail(`${task.kind} Task payload version is unsupported`);
   const plan = exactObject(payload.artifactPlan, [
     "operation",
     "nodeId",
@@ -539,12 +621,41 @@ function validateArtifactPayload(task: GenerationTask): void {
     || frameIds.some((id, index) => id !== plannedFrameIds[index])) {
     fail(`${task.kind} responsive Frame ids do not match its Artifact plan`);
   }
+  const brief = validateBrief(payload.brief, `${task.kind} Task brief`);
+  const instructions = exactObject(
+    brief.targetInstructions,
+    ["operation", "kind", "name"],
+    [],
+    `${task.kind} Task target instructions`,
+  );
+  if (instructions.operation !== plan.operation) {
+    fail(`${task.kind} Task target instructions operation does not match its Artifact plan`);
+  }
+  if (instructions.kind !== plan.kind) {
+    fail(`${task.kind} Task target instructions kind does not match its Artifact plan`);
+  }
+  if (canonicalString(instructions.name, `${task.kind} Task target instructions name`) !== plan.name) {
+    fail(`${task.kind} Task target instructions name does not match its Artifact plan`);
+  }
+  validateCapabilityDescriptors(
+    payload.capabilityDescriptors,
+    task,
+    `${task.kind} Task capability descriptors`,
+    false,
+  );
 }
 
 function validateResourcePayload(task: GenerationTask): void {
   if (task.target.type !== "resource") fail("Resource Task target must be a Resource");
-  const payload = exactObject(task.payload, ["version", "operation"], [], "Resource Task payload");
-  if (payload.version !== 1) fail("Resource Task payload version is unsupported");
+  const rawPayload = plainRecord(task.payload, "Resource Task payload");
+  if (rawPayload.version === 1) failLegacyV1(task.kind);
+  const payload = exactObject(
+    task.payload,
+    ["version", "operation", "brief", "capabilityDescriptors", "adapter"],
+    [],
+    "Resource Task payload",
+  );
+  if (payload.version !== 2) fail("Resource Task payload version is unsupported");
   const operation = exactObject(payload.operation, [
     "operation",
     "nodeId",
@@ -566,6 +677,34 @@ function validateResourcePayload(task: GenerationTask): void {
   canonicalString(operation.title, "Resource operation title");
   const policy = exactObject(operation.revisionPolicy, ["kind"], [], "Resource revision policy");
   if (policy.kind !== "generate") fail("Resource Task must use the frozen generate revision policy");
+  const brief = validateBrief(payload.brief, "Resource Task brief");
+  const instructions = exactObject(
+    brief.targetInstructions,
+    ["operation", "kind", "title"],
+    [],
+    "Resource Task target instructions",
+  );
+  if (instructions.operation !== operation.operation) {
+    fail("Resource Task target instructions operation does not match its operation");
+  }
+  if (instructions.kind !== operation.kind) {
+    fail("Resource Task target instructions kind does not match its operation");
+  }
+  if (canonicalString(instructions.title, "Resource Task target instructions title") !== operation.title) {
+    fail("Resource Task target instructions title does not match its operation");
+  }
+  validateCapabilityDescriptors(
+    payload.capabilityDescriptors,
+    task,
+    "Resource Task capability descriptors",
+    true,
+  );
+  const adapter = exactObject(payload.adapter, ["id", "version", "kind"], [], "Resource Task adapter");
+  if (adapter.kind !== operation.kind) fail("Resource Task adapter kind does not match its operation");
+  if (adapter.version !== 1) fail("Resource Task adapter version is unsupported");
+  if (canonicalString(adapter.id, "Resource Task adapter id") !== `dezin.resource-adapter.${operation.kind}`) {
+    fail("Resource Task adapter id does not match its Resource kind");
+  }
 }
 
 function validateTransition(value: unknown, label: string): void {
@@ -649,7 +788,9 @@ function assertNever(kind: never): never {
 }
 
 /**
- * Validates the complete immutable payload contract emitted by the v1 Plan compiler.
+ * Validates the complete immutable payload contract emitted by the Plan compiler.
+ * Executable Artifact and Resource leaves require v2; durable v1 leaves receive
+ * an explicit recompile-required disposition and are never sent to an executor.
  * Propagation kinds intentionally accept only a version marker until Task 13 defines
  * their frozen payloads; the executor still rejects both kinds as non-executable.
  */

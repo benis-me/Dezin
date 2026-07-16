@@ -1137,3 +1137,30 @@ process.exit(7);
   assert.equal(findings[0]?.id, "visual-agent-review-failed");
   assert.ok(!findings.some((finding) => finding.id === "visual-reviewed"));
 });
+
+test("reviewScreenshotWithAgent aborts the critic process and preserves the exact abort reason", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dezin-visual-review-abort-"));
+  const screenshot = join(root, ".visual-qa", "screenshot.png");
+  const agent = join(root, "slow-agent.js");
+  mkdirSync(join(root, ".visual-qa"), { recursive: true });
+  writeFileSync(join(root, "index.html"), "<h1>Pricing</h1>", "utf8");
+  writeFileSync(screenshot, Buffer.from([1, 2, 3, 4]));
+  writeFileSync(
+    agent,
+    `#!/usr/bin/env node
+setTimeout(() => process.exit(0), 250);
+`,
+    { mode: 0o755 },
+  );
+  const controller = new AbortController();
+  const reason = new DOMException("stop visual reviewer", "AbortError");
+  const reviewing = reviewScreenshotWithAgent({
+    htmlPath: join(root, "index.html"),
+    settings: { visualQaEnabled: true, agentCommand: agent } as any,
+    agentCommand: agent,
+    signal: controller.signal,
+  }, screenshot);
+
+  setTimeout(() => controller.abort(reason), 20);
+  await assert.rejects(reviewing, (error: unknown) => error === reason);
+});

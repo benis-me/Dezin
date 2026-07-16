@@ -203,7 +203,9 @@ test("a no-op Agent turn fails before commit or quality evaluation", async () =>
       ...baseInput({ runner, transaction, qualities: [quality({ passed: true, score: 100 })] }),
       evaluator: { async evaluate() { evaluated += 1; return quality({ passed: true, score: 100 }); } },
     }),
-    (error) => error instanceof StandardArtifactExecutionError && error.code === "no-source-change",
+    (error) => error instanceof StandardArtifactExecutionError
+      && error.code === "no-source-change"
+      && error.failureClass === "design",
   );
   assert.equal(evaluated, 0);
   assert.deepEqual(transaction.commits, []);
@@ -296,12 +298,20 @@ test("tree oscillation cannot grind through the remaining repair budget", async 
   const result = await executeStandardArtifact(baseInput({
     runner,
     transaction,
-    qualities: [quality({ passed: false, score: 80, repairs: [{ id: "cycle" }] })],
+    qualities: [
+      quality({ passed: false, score: 80, repairs: [{ id: "cycle" }] }),
+      quality({ passed: false, score: 79, repairs: [{ id: "cycle-again" }] }),
+    ],
   }));
 
   assert.equal(runner.inputs.length, 2);
-  assert.equal(result.versions.length, 1);
+  assert.equal(result.versions.length, 2);
+  assert.deepEqual(
+    result.versions.map((version) => version.candidate.commitHash),
+    [HASH_A, HASH_C],
+  );
   assert.equal(result.selected.candidate.commitHash, HASH_A);
+  assert.deepEqual(transaction.restored, [candidate(HASH_A, HASH_B)]);
 });
 
 test("version ordering prefers passing, score, recency, then binary commit identity", () => {

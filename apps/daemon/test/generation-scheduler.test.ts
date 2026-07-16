@@ -46,6 +46,8 @@ function queuedAttemptFixture(): GenerationTaskAttempt {
       trackId: "track-main",
     },
     baseRevisionId: null,
+    sourceCommitHash: "a".repeat(40),
+    sourceTreeHash: "b".repeat(40),
     expectedSnapshotId: "snapshot-1",
     contextPackId: null,
     kernelRevisionId: "kernel-1",
@@ -166,6 +168,210 @@ async function waitFor(predicate: () => boolean, message: string, timeoutMs = 50
   }
 }
 
+test("GenerationScheduler coalesces startup-barrier wakeups without touching durable admission before start", async () => {
+  const attempt = queuedAttemptFixture();
+  const claim = claimedAttemptFixture(attempt);
+  const allowStartupRecovery = deferred();
+  const calls = {
+    recover: 0,
+    reconcile: 0,
+    materialize: 0,
+    listReady: 0,
+    registerOperation: 0,
+    claim: 0,
+    execute: 0,
+    release: 0,
+  };
+  const scheduler = new GenerationScheduler({
+    store: {
+      recoverExpiredGenerationTaskAttempts() {
+        calls.recover += 1;
+        return emptyRecoverySummary();
+      },
+      listReadyGenerationTaskAttempts() {
+        calls.listReady += 1;
+        return [attempt];
+      },
+      tryClaimGenerationTaskAttempt() {
+        calls.claim += 1;
+        return claim;
+      },
+      heartbeatGenerationTaskAttempt: () => claim,
+      releaseGenerationTaskAttemptClaims() {
+        calls.release += 1;
+        return true;
+      },
+    },
+    planService: {
+      async reconcileNeedsRebaseTasks() {
+        calls.reconcile += 1;
+        return { planIds: [] };
+      },
+      async materializeReadyTaskAttempts() {
+        calls.materialize += 1;
+        return { planIds: [] };
+      },
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        calls.registerOperation += 1;
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor: {
+      async execute() {
+        calls.execute += 1;
+      },
+    },
+    events: { notify() {} },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_000 },
+    leaseMs: 30_000,
+    heartbeatMs: 10_000,
+  });
+  const startup = allowStartupRecovery.promise.then(() => scheduler.start());
+
+  scheduler.requestTick();
+  scheduler.requestTick();
+  await Promise.all([scheduler.tick(), scheduler.tick()]);
+
+  assert.deepEqual(calls, {
+    recover: 0,
+    reconcile: 0,
+    materialize: 0,
+    listReady: 0,
+    registerOperation: 0,
+    claim: 0,
+    execute: 0,
+    release: 0,
+  });
+
+  allowStartupRecovery.resolve();
+  await startup;
+  scheduler.start();
+  await scheduler.tick();
+  await waitFor(() => calls.release === 1, "the coalesced startup wake did not settle");
+  await scheduler.stop();
+
+  assert.deepEqual(calls, {
+    recover: 1,
+    reconcile: 1,
+    materialize: 1,
+    listReady: 1,
+    registerOperation: 1,
+    claim: 1,
+    execute: 1,
+    release: 1,
+  });
+});
+
+test("GenerationScheduler stop before start permanently fences admission and remains idempotent", async () => {
+  let storeCalls = 0;
+  const scheduler = new GenerationScheduler({
+    store: {
+      recoverExpiredGenerationTaskAttempts() {
+        storeCalls += 1;
+        return emptyRecoverySummary();
+      },
+      listReadyGenerationTaskAttempts() {
+        storeCalls += 1;
+        return [];
+      },
+      tryClaimGenerationTaskAttempt() {
+        storeCalls += 1;
+        return null;
+      },
+      heartbeatGenerationTaskAttempt: () => claimedAttemptFixture(),
+      releaseGenerationTaskAttemptClaims: () => true,
+    },
+    planService: {
+      reconcileNeedsRebaseTasks: async () => ({ planIds: [] }),
+      materializeReadyTaskAttempts: async () => ({ planIds: [] }),
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor: { execute: async () => {} },
+    events: { notify() {} },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_000 },
+    leaseMs: 30_000,
+    heartbeatMs: 10_000,
+  });
+
+  scheduler.requestTick();
+  await scheduler.tick();
+  await Promise.all([scheduler.stop(), scheduler.stop()]);
+  scheduler.requestTick();
+  await scheduler.tick();
+  assert.throws(() => scheduler.start(), /cannot restart after stop/i);
+  await scheduler.stop();
+
+  assert.equal(storeCalls, 0);
+});
+
+test("GenerationScheduler stop aborts an in-flight maintenance pass even when its port never settles", {
+  timeout: 1_000,
+}, async () => {
+  const entered = deferred();
+  const maintenanceSignals: AbortSignal[] = [];
+  let reportedErrors = 0;
+  let materializationCalls = 0;
+  let readyReads = 0;
+  const scheduler = new GenerationScheduler({
+    store: {
+      recoverExpiredGenerationTaskAttempts: emptyRecoverySummary,
+      listReadyGenerationTaskAttempts() {
+        readyReads += 1;
+        return [];
+      },
+      tryClaimGenerationTaskAttempt: () => null,
+      heartbeatGenerationTaskAttempt: () => claimedAttemptFixture(),
+      releaseGenerationTaskAttemptClaims: () => true,
+    },
+    planService: {
+      reconcileNeedsRebaseTasks(signal) {
+        maintenanceSignals.push(signal);
+        entered.resolve();
+        return new Promise(() => {});
+      },
+      async materializeReadyTaskAttempts() {
+        materializationCalls += 1;
+        return { planIds: [] };
+      },
+    },
+    runtimeSupervisor: {
+      trackOperation(_scope, start) {
+        return Promise.resolve().then(() => start(new AbortController().signal));
+      },
+    },
+    executor: { execute: async () => {} },
+    events: { notify() {} },
+    projectIdForWorkspace: () => "project-1",
+    ownerId: "daemon-owner-1",
+    clock: { now: () => 10_000 },
+    leaseMs: 30_000,
+    heartbeatMs: 10_000,
+    onError: () => {
+      reportedErrors += 1;
+    },
+  });
+
+  scheduler.start();
+  await entered.promise;
+  await scheduler.stop();
+
+  assert.equal(maintenanceSignals.length, 1);
+  assert.equal(maintenanceSignals[0]?.aborted, true);
+  assert.equal(materializationCalls, 0);
+  assert.equal(readyReads, 0);
+  assert.equal(reportedErrors, 0);
+});
+
 test("GenerationScheduler coalesces concurrent ticks and orders recovery, reconciliation, materialization, then claim", async () => {
   const order: string[] = [];
   const materializationEntered = deferred();
@@ -251,6 +457,7 @@ test("GenerationScheduler coalesces concurrent ticks and orders recovery, reconc
     heartbeatMs: 10_000,
   });
 
+  scheduler.start();
   const first = scheduler.tick();
   await materializationEntered.promise;
   const second = scheduler.tick();
@@ -312,6 +519,7 @@ test("GenerationScheduler preserves a requestTick wake that arrives during an ac
     heartbeatMs: 10_000,
   });
 
+  scheduler.start();
   const activePass = scheduler.tick();
   await firstMaterialization.promise;
   scheduler.requestTick();
@@ -357,6 +565,7 @@ test("GenerationScheduler registers RuntimeSupervisor ownership before it attemp
     heartbeatMs: 10_000,
   });
 
+  scheduler.start();
   await scheduler.tick();
   await waitFor(() => order.includes("claim"), "the scheduler did not attempt the claim");
   await scheduler.stop();
@@ -406,6 +615,7 @@ test("GenerationScheduler treats event notification as a best-effort wake after 
     },
   });
 
+  scheduler.start();
   await scheduler.tick();
   await executed.promise;
   await scheduler.stop();
@@ -455,6 +665,7 @@ test("GenerationScheduler notifies again when an executor rejects after a durabl
     },
   });
 
+  scheduler.start();
   await scheduler.tick();
   await scheduler.stop();
 
@@ -506,6 +717,7 @@ test("GenerationScheduler registers a claimed controller before a notification c
     heartbeatMs: 10_000,
   });
 
+  scheduler.start();
   await scheduler.tick();
   assert.ok(stopPromise);
   await stopPromise;
@@ -563,6 +775,7 @@ test("GenerationScheduler aborts execution when heartbeat loses the lease fence"
     heartbeatMs: 5,
   });
 
+  scheduler.start();
   await scheduler.tick();
   await executionStarted.promise;
   await Promise.race([
@@ -632,6 +845,7 @@ test("GenerationScheduler stops renewing and aborts a cancel-requested Attempt",
     heartbeatMs: 5,
   });
 
+  scheduler.start();
   await scheduler.tick();
   await executionStarted.promise;
   const reason = await Promise.race([
@@ -689,6 +903,7 @@ test("GenerationScheduler stop prevents admission after an in-flight maintenance
     heartbeatMs: 10_000,
   });
 
+  scheduler.start();
   const ticking = scheduler.tick();
   await materializationEntered.promise;
   const stopping = scheduler.stop();

@@ -80,7 +80,7 @@ function emptyGeneration() {
     dependencyPlans: [],
     prototypeIntents: [],
     capabilities: [],
-    responsiveFrames: [],
+    responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
     qualityProfile: {
       requiredFrameIds: [],
       blockingSeverities: [],
@@ -152,6 +152,8 @@ function retryInput(attempt: GenerationTaskAttempt) {
   return {
     target: attempt.target,
     baseRevisionId: attempt.baseRevisionId,
+    sourceCommitHash: attempt.sourceCommitHash,
+    sourceTreeHash: attempt.sourceTreeHash,
     expectedSnapshotId: attempt.expectedSnapshotId,
     contextPackId: attempt.contextPackId,
     kernelRevisionId: attempt.kernelRevisionId,
@@ -167,6 +169,60 @@ function retryInput(attempt: GenerationTaskAttempt) {
 function retryInputWithoutMode(attempt: GenerationTaskAttempt) {
   const { executionMode: _executionMode, ...input } = retryInput(attempt);
   return input;
+}
+
+function legacyAttemptInputHash(attempt: GenerationTaskAttempt): string {
+  return createHash("sha256")
+    .update("dezin:generation-task-attempt-input:v1\0")
+    .update(JSON.stringify({
+      taskId: attempt.taskId,
+      planId: attempt.planId,
+      workspaceId: attempt.workspaceId,
+      attempt: attempt.attempt,
+      target: attempt.target,
+      baseRevisionId: attempt.baseRevisionId,
+      expectedSnapshotId: attempt.expectedSnapshotId,
+      contextPackId: attempt.contextPackId,
+      kernelRevisionId: attempt.kernelRevisionId,
+      payload: attempt.payload,
+      dependencyOutputs: attempt.dependencyOutputs,
+      resourcePins: attempt.resourcePins,
+      componentPins: attempt.componentPins,
+      retryContextPolicy: attempt.retryContextPolicy,
+      executionMode: attempt.executionMode,
+    }))
+    .digest("hex");
+}
+
+function emulateMigratedArtifactAttemptWithoutSourceBase(
+  store: Store,
+  attempt: GenerationTaskAttempt,
+): void {
+  const legacyInputHash = legacyAttemptInputHash(attempt);
+  store.db.exec(`
+    DROP TRIGGER generation_task_attempt_input_update_immutable;
+    DROP TRIGGER generation_plan_event_update_immutable;
+  `);
+  store.db.prepare(
+    `UPDATE generation_task_attempts
+     SET source_commit_hash = NULL, source_tree_hash = NULL, input_hash = ?
+     WHERE task_id = ? AND attempt = ?`,
+  ).run(legacyInputHash, attempt.taskId, attempt.attempt);
+  const row = store.db.prepare(
+    `SELECT sequence, payload_json FROM generation_plan_events
+     WHERE plan_id = ? AND task_id = ? AND type = 'task-materialized'`,
+  ).get(attempt.planId, attempt.taskId) as { sequence: number; payload_json: string };
+  const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  payload.inputHash = legacyInputHash;
+  delete payload.sourceCommitHash;
+  delete payload.sourceTreeHash;
+  const canonicalPayload = JSON.stringify(Object.fromEntries(
+    Object.entries(payload).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+  ));
+  store.db.prepare(
+    `UPDATE generation_plan_events SET payload_json = ?
+     WHERE plan_id = ? AND sequence = ?`,
+  ).run(canonicalPayload, attempt.planId, row.sequence);
 }
 
 function attemptCount(store: Store, taskId: string): number {
@@ -224,6 +280,8 @@ function createQueuedValidationAttempt(store: Store, label: string) {
   const attempt = store.workspace.createGenerationTaskAttemptForProject(project.id, compiled.plan.id, {
     ...observation,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
@@ -259,8 +317,8 @@ function createPinnedPageAttempt(
     artifactId,
     trackId,
     parentRevisionId: null,
-    sourceCommitHash: `base-commit-${label}`,
-    sourceTreeHash: `base-tree-${label}`,
+    sourceCommitHash: checksum(`base-commit-${label}`),
+    sourceTreeHash: checksum(`base-tree-${label}`),
     kernelRevisionId: afterGraph.activeKernelRevisionId,
     renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
     quality: { state: "passed", score: 100, findings: [] },
@@ -334,7 +392,7 @@ function createPinnedPageAttempt(
         baseRevisionId: baseRevision.id,
         dependsOnArtifactIds: [],
         capabilityIds: [],
-        responsiveFrameIds: [],
+        responsiveFrameIds: ["desktop"],
       }],
       dependencyPlans: [{
         kind: "resource",
@@ -422,6 +480,8 @@ function createPinnedPageAttempt(
   const attempt = store.workspace.createGenerationTaskAttemptForProject(project.id, compiled.plan.id, {
     ...observation,
     contextPackId: contextPack.id,
+    sourceCommitHash: baseRevision.sourceCommitHash,
+    sourceTreeHash: baseRevision.sourceTreeHash,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
@@ -475,6 +535,8 @@ function createPublicationOnlyAttempt(store: Store, label: string) {
     {
       ...observation,
       contextPackId: fixture.contextPack.id,
+      sourceCommitHash: fixture.attempt.sourceCommitHash,
+      sourceTreeHash: fixture.attempt.sourceTreeHash,
       retryContextPolicy: "same-context",
       executionMode: "publication-only",
     },
@@ -685,6 +747,8 @@ function createTwoResourceAttempts(store: Store, label: string) {
     return store.workspace.createGenerationTaskAttemptForProject(project.id, compiled.plan.id, {
       ...observation,
       contextPackId: contextPack.id,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
       retryContextPolicy: "same-context",
       executionMode: "full",
     });
@@ -815,6 +879,57 @@ test("expired running attempts atomically append exact immutable successors with
   } finally {
     store.close();
   }
+});
+
+test("legacy active Artifact Attempts without a Source Base terminalize instead of rolling back recovery", async (t) => {
+  await t.test("fenced execution failure becomes terminal without a strict successor", () => {
+    const { clock, setNextNow } = adjustableClock("legacy-source-failure");
+    const store = new Store(":memory:", clock);
+    try {
+      const fixture = createPinnedPageAttempt(store, "legacy-source-failure");
+      emulateMigratedArtifactAttemptWithoutSourceBase(store, fixture.attempt);
+      const api = recoveryApi(store);
+      const claim = claimAttempt(api, fixture.attempt, "legacy-source-failure-owner", 100_000);
+      setNextNow(100_001);
+      const result = store.workspace.finishGenerationTaskAttemptForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        {
+          lease: claim.lease,
+          failure: {
+            failureClass: "build-infrastructure",
+            error: { code: "legacy-artifact-source-base-missing" },
+          },
+        },
+      );
+      assert.equal(result.status, "failed");
+      assert.equal(result.successorAttempt, null);
+      assert.equal(attemptCount(store, fixture.task.id), 1);
+      assert.equal(claimCount(store, fixture.task.id, 1), 0);
+      assert.equal(taskState(store, fixture.task.id).status, "failed");
+    } finally {
+      store.close();
+    }
+  });
+
+  await t.test("expired lease recovery becomes terminal without a strict successor", () => {
+    const store = new Store(":memory:", fakeClock("legacy-source-recovery"));
+    try {
+      const fixture = createPinnedPageAttempt(store, "legacy-source-recovery");
+      emulateMigratedArtifactAttemptWithoutSourceBase(store, fixture.attempt);
+      const api = recoveryApi(store);
+      claimAttempt(api, fixture.attempt, "legacy-source-recovery-owner", 100_000, 10);
+      const summary = api.recoverExpiredGenerationTaskAttempts(100_010) as {
+        failedTaskIds: string[];
+      };
+      assert.deepEqual(summary.failedTaskIds, [fixture.task.id]);
+      assert.equal(attemptCount(store, fixture.task.id), 1);
+      assert.equal(claimCount(store, fixture.task.id, 1), 0);
+      assert.equal(taskState(store, fixture.task.id).status, "failed");
+    } finally {
+      store.close();
+    }
+  });
 });
 
 test("a sealed recovery successor becomes claimable without re-entering materialization", () => {

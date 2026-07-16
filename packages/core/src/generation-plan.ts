@@ -4,6 +4,7 @@ import {
 } from "./store-codecs.ts";
 import { compareBinary } from "./workspace-codecs.ts";
 import type {
+  ArtifactGenerationTaskPayloadV2,
   ArtifactQualityProfile,
   GenerationPlan,
   GenerationPlanGraph,
@@ -14,11 +15,11 @@ import type {
   GenerationTaskKind,
   GenerationTaskResourceLimits,
   GenerationTaskTarget,
+  ResourceGenerationTaskPayloadV2,
   WorkspaceGenerationArtifactPlan,
   WorkspaceGenerationCapability,
   WorkspaceGenerationDependencyPlan,
   WorkspaceGenerationPayload,
-  WorkspaceGenerationResourceOperation,
   WorkspaceProposal,
 } from "./workspace-types.ts";
 
@@ -226,6 +227,23 @@ function validateGenerationPayload(
     assertUnique(plan.dependsOnArtifactIds, (id) => id, `Artifact dependency for ${plan.artifactId}`);
     assertUnique(plan.capabilityIds, (id) => id, `capability for ${plan.artifactId}`);
     assertUnique(plan.responsiveFrameIds, (id) => id, `responsive Frame for ${plan.artifactId}`);
+    if (plan.responsiveFrameIds.length === 0) {
+      compileError(
+        "invalid-reference",
+        `generation Artifact ${plan.artifactId} must include at least one responsive Frame`,
+        { artifactId: plan.artifactId },
+      );
+    }
+    const artifactFrameIds = new Set(plan.responsiveFrameIds);
+    for (const requiredFrameId of generation.qualityProfile.requiredFrameIds) {
+      if (!artifactFrameIds.has(requiredFrameId)) {
+        compileError(
+          "invalid-reference",
+          `generation Artifact ${plan.artifactId} is missing required responsive Frame ${requiredFrameId}`,
+          { artifactId: plan.artifactId, frameId: requiredFrameId },
+        );
+      }
+    }
     for (const dependencyArtifactId of plan.dependsOnArtifactIds) {
       if (dependencyArtifactId === plan.artifactId) {
         compileError("cyclic-task-graph", `generation Artifact ${plan.artifactId} cannot depend on itself`, {
@@ -333,9 +351,13 @@ function buildTask(
 
 function generatedResourceOperations(
   generation: WorkspaceGenerationPayload,
-): WorkspaceGenerationResourceOperation[] {
+): Array<ResourceGenerationTaskPayloadV2["operation"]> {
   return sorted(
-    generation.resourceOperations.filter((operation) => operation.revisionPolicy.kind === "generate"),
+    generation.resourceOperations.filter(
+      (operation): operation is ResourceGenerationTaskPayloadV2["operation"] => (
+        operation.revisionPolicy.kind === "generate"
+      ),
+    ),
     (operation) => operation.resourceId,
   );
 }
@@ -350,10 +372,37 @@ function relevantDependencies(
   );
 }
 
+function capabilityDescriptorsFor(
+  capabilityIds: readonly string[],
+  capabilitiesById: ReadonlyMap<string, WorkspaceGenerationCapability>,
+): WorkspaceGenerationCapability[] {
+  return [...capabilityIds]
+    .sort(compareBinary)
+    .map((capabilityId) => {
+      const capability = capabilitiesById.get(capabilityId);
+      if (!capability) {
+        compileError("invalid-reference", `missing generation capability ${capabilityId}`, { capabilityId });
+      }
+      return { ...capability };
+    });
+}
+
+function proposalBrief(proposal: WorkspaceProposal): Pick<
+  ArtifactGenerationTaskPayloadV2["brief"],
+  "proposalRationale" | "assumptions"
+> {
+  return {
+    proposalRationale: proposal.rationale,
+    assumptions: [...proposal.assumptions],
+  };
+}
+
 function taskPayloadForArtifact(
+  proposal: WorkspaceProposal,
   generation: WorkspaceGenerationPayload,
   plan: WorkspaceGenerationArtifactPlan,
-): Record<string, unknown> {
+  capabilitiesById: ReadonlyMap<string, WorkspaceGenerationCapability>,
+): ArtifactGenerationTaskPayloadV2 {
   const frameIds = new Set(plan.responsiveFrameIds);
   const artifactPlan = {
     ...plan,
@@ -362,13 +411,22 @@ function taskPayloadForArtifact(
     responsiveFrameIds: [...plan.responsiveFrameIds].sort(compareBinary),
   };
   return {
-    version: 1,
+    version: 2,
     artifactPlan,
     dependencyPlans: relevantDependencies(generation, plan.artifactId),
     responsiveFrames: sorted(
       generation.responsiveFrames.filter((frame) => frameIds.has(frame.id)),
       (frame) => frame.id,
     ),
+    brief: {
+      ...proposalBrief(proposal),
+      targetInstructions: {
+        operation: plan.operation,
+        kind: plan.kind,
+        name: plan.name,
+      },
+    },
+    capabilityDescriptors: capabilityDescriptorsFor(plan.capabilityIds, capabilitiesById),
   };
 }
 
@@ -455,12 +513,30 @@ export function compileGenerationPlan(input: {
       workspaceId: input.shell.workspaceId,
       id: operation.resourceId,
     };
+    const payload: ResourceGenerationTaskPayloadV2 = {
+      version: 2,
+      operation,
+      brief: {
+        ...proposalBrief(input.proposal),
+        targetInstructions: {
+          operation: operation.operation,
+          kind: operation.kind,
+          title: operation.title,
+        },
+      },
+      capabilityDescriptors: capabilityDescriptorsFor(requiredCapabilityIds, capabilitiesById),
+      adapter: {
+        id: `dezin.resource-adapter.${operation.kind}`,
+        version: 1,
+        kind: operation.kind,
+      },
+    };
     return buildTask(input.shell, {
       kind: "resource",
       ordinal,
       target,
       dependencyIds: [],
-      payload: { version: 1, operation },
+      payload,
       capabilities: requiredCapabilityIds,
       qaProfile: NO_QA,
       resourceLimits: taskLimits(RESOURCE_LIMITS, requiredCapabilityIds, capabilitiesById),
@@ -519,7 +595,7 @@ export function compileGenerationPlan(input: {
       ordinal: resourceTasks.length + index,
       target,
       dependencyIds: [...dependencyIds].sort(compareBinary),
-      payload: taskPayloadForArtifact(generation, plan),
+      payload: taskPayloadForArtifact(input.proposal, generation, plan, capabilitiesById),
       capabilities: plan.capabilityIds,
       qaProfile: generation.qualityProfile,
       resourceLimits: taskLimits(ARTIFACT_LIMITS, plan.capabilityIds, capabilitiesById),

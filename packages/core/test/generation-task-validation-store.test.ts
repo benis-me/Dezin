@@ -81,6 +81,8 @@ function createFixture(label: string) {
   const attempt = store.workspace.createGenerationTaskAttemptForProject(project.id, compiled.plan.id, {
     ...observation,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });

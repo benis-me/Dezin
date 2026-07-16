@@ -6,6 +6,52 @@ import { Store } from "../../../packages/core/src/index.ts";
 import { RuntimeSupervisor } from "../src/runtime-supervisor.ts";
 import { shutdownDaemon } from "../src/daemon-shutdown.ts";
 
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("daemon shutdown initiates Generation admission stop before the RuntimeSupervisor and closes Store last", async () => {
+  const order: string[] = [];
+  const generationStopped = deferred();
+  const supervisorStopped = deferred();
+  const server = http.createServer((_req, res) => res.end("ok"));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  const shuttingDown = shutdownDaemon({
+    server,
+    generationRuntime: {
+      stop() {
+        order.push("generation-stop");
+        return generationStopped.promise;
+      },
+    },
+    runtimeSupervisor: {
+      shutdown() {
+        order.push("runtime-supervisor-shutdown");
+        return supervisorStopped.promise.then(() => true);
+      },
+    } as unknown as RuntimeSupervisor,
+    closeStore() {
+      order.push("store-close");
+    },
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["generation-stop", "runtime-supervisor-shutdown"]);
+  generationStopped.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(order.includes("store-close"), false);
+  supervisorStopped.resolve();
+  assert.equal(await shuttingDown, true);
+  assert.deepEqual(order, [
+    "generation-stop",
+    "runtime-supervisor-shutdown",
+    "store-close",
+  ]);
+});
+
 test("daemon shutdown shares one deadline across a stuck SSE connection and hung resource hook", async () => {
   const store = new Store(":memory:");
   let resourceHookEntered = false;

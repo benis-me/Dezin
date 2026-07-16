@@ -70,6 +70,8 @@ test("fresh schema installs the normalized Generation Plan execution model", () 
       }>).map(({ name, notnull, dflt_value }) => [name, { dflt_value, notnull }]),
     );
     assert.equal(attemptColumns.get("context_pack_id")?.notnull, 0);
+    assert.deepEqual(attemptColumns.get("source_commit_hash"), { dflt_value: null, notnull: 0 });
+    assert.deepEqual(attemptColumns.get("source_tree_hash"), { dflt_value: null, notnull: 0 });
     assert.equal(attemptColumns.has("candidate_evidence_hash"), true);
     assert.deepEqual(attemptColumns.get("materialization_sealed"), { dflt_value: "0", notnull: 1 });
 
@@ -240,6 +242,18 @@ test("additive migration installs retry lineage after replaying the pre-lineage 
         UNIQUE(task_id, attempt, plan_id, workspace_id)
       );
     `);
+    db.prepare(
+      `INSERT INTO generation_task_attempts (
+         task_id, plan_id, workspace_id, attempt, target_artifact_id, target_track_id,
+         base_revision_id, expected_snapshot_id, kernel_revision_id, execution_mode,
+         payload_json, input_hash, pinned_resource_revision_ids_json,
+         component_dependency_revision_ids_json, materialization_sealed,
+         retry_context_policy, status, created_at
+       ) VALUES ('legacy-task', 'legacy-plan', 'legacy-workspace', 1,
+         'legacy-artifact', 'legacy-track', 'legacy-revision', 'legacy-snapshot',
+         'legacy-kernel', 'full', '{}', 'legacy-input-hash', '[]', '[]', 1,
+         'same-context', 'failed', 10)`,
+    ).run();
 
     // Store replays idempotent DDL before additive ALTERs. No index or trigger
     // in the replay may reference the new lineage columns until migration adds
@@ -253,10 +267,24 @@ test("additive migration installs retry lineage after replaying the pre-lineage 
       ),
     );
     assert.deepEqual(
-      ["attempt_origin", "predecessor_attempt", "automatic_retry_index"].filter(
+      [
+        "attempt_origin",
+        "predecessor_attempt",
+        "automatic_retry_index",
+        "source_commit_hash",
+        "source_tree_hash",
+      ].filter(
         (column) => !attemptColumns.has(column),
       ),
       [],
+    );
+    assert.deepEqual(
+      { ...(db.prepare(
+        `SELECT source_commit_hash AS sourceCommitHash, source_tree_hash AS sourceTreeHash
+         FROM generation_task_attempts WHERE task_id = 'legacy-task' AND attempt = 1`,
+      ).get() as Record<string, unknown>) },
+      { sourceCommitHash: null, sourceTreeHash: null },
+      "additive migration must preserve a readable nullable disposition for historical Attempts",
     );
     assert.equal(
       Number((db.prepare(

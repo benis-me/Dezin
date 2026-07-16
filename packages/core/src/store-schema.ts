@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS generation_task_attempts (
   target_track_id TEXT,
   target_resource_id TEXT,
   base_revision_id TEXT,
+  source_commit_hash TEXT,
+  source_tree_hash TEXT,
   expected_snapshot_id TEXT NOT NULL,
   context_pack_id TEXT,
   kernel_revision_id TEXT NOT NULL,
@@ -173,6 +175,14 @@ CREATE TABLE IF NOT EXISTS generation_task_attempts (
     (target_artifact_id IS NOT NULL AND target_track_id IS NOT NULL AND target_resource_id IS NULL) OR
     (target_artifact_id IS NULL AND target_track_id IS NULL)
   ),
+  CHECK((source_commit_hash IS NULL) = (source_tree_hash IS NULL)),
+  CHECK(target_artifact_id IS NOT NULL OR source_commit_hash IS NULL),
+  CHECK(source_commit_hash IS NULL OR (
+    length(source_commit_hash) IN (40, 64)
+    AND length(source_tree_hash) = length(source_commit_hash)
+    AND source_commit_hash NOT GLOB '*[^0-9a-f]*'
+    AND source_tree_hash NOT GLOB '*[^0-9a-f]*'
+  )),
   CHECK(
     (candidate_revision_id IS NULL AND candidate_resource_revision_id IS NULL
       AND candidate_evidence_json IS NULL AND candidate_evidence_hash IS NULL) OR
@@ -197,6 +207,70 @@ CREATE TABLE IF NOT EXISTS generation_task_attempts (
   PRIMARY KEY(task_id, attempt),
   UNIQUE(task_id, attempt, workspace_id),
   UNIQUE(task_id, attempt, plan_id, workspace_id)
+);
+CREATE TABLE IF NOT EXISTS resource_payload_staging_journal (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  revision_id TEXT NOT NULL UNIQUE,
+  task_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK(attempt > 0 AND attempt <= 9007199254740991),
+  input_hash TEXT NOT NULL CHECK(length(input_hash) = 64 AND input_hash NOT GLOB '*[^0-9a-f]*'),
+  workspace_id TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  lease_token TEXT NOT NULL,
+  manifest_path TEXT NOT NULL,
+  payload_checksum TEXT NOT NULL CHECK(length(payload_checksum) = 64 AND payload_checksum NOT GLOB '*[^0-9a-f]*'),
+  manifest_checksum TEXT NOT NULL CHECK(length(manifest_checksum) = 64 AND manifest_checksum NOT GLOB '*[^0-9a-f]*'),
+  receipt_checksum TEXT NOT NULL CHECK(length(receipt_checksum) = 64 AND receipt_checksum NOT GLOB '*[^0-9a-f]*'),
+  byte_size INTEGER NOT NULL CHECK(byte_size >= 0 AND byte_size <= 9007199254740991),
+  mime_type TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('prepared','receipt-committed')),
+  storage_disposition TEXT CHECK(storage_disposition IN ('owned-created','preexisting')),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0 AND created_at <= 9007199254740991),
+  classified_at INTEGER CHECK(classified_at >= 0 AND classified_at <= 9007199254740991),
+  receipt_committed_at INTEGER CHECK(receipt_committed_at >= 0 AND receipt_committed_at <= 9007199254740991),
+  FOREIGN KEY(task_id, attempt, plan_id, workspace_id)
+    REFERENCES generation_task_attempts(task_id, attempt, plan_id, workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY(task_id, resource_id, workspace_id)
+    REFERENCES generation_tasks(id, target_resource_id, workspace_id),
+  FOREIGN KEY(resource_id, workspace_id)
+    REFERENCES resources(id, workspace_id),
+  CHECK(
+    (storage_disposition IS NULL AND classified_at IS NULL)
+    OR (storage_disposition IS NOT NULL AND classified_at IS NOT NULL AND classified_at >= created_at)
+  ),
+  CHECK(
+    (status = 'prepared' AND receipt_committed_at IS NULL)
+    OR (status = 'receipt-committed' AND storage_disposition IS NOT NULL
+      AND receipt_committed_at IS NOT NULL AND receipt_committed_at >= classified_at)
+  ),
+  UNIQUE(task_id, attempt),
+  UNIQUE(task_id, attempt, workspace_id, resource_id, revision_id)
+);
+CREATE TABLE IF NOT EXISTS resource_payload_cleanup_claims (
+  revision_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK(attempt > 0 AND attempt <= 9007199254740991),
+  input_hash TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('claimed','completed')),
+  claimed_at INTEGER NOT NULL CHECK(claimed_at >= 0 AND claimed_at <= 9007199254740991),
+  completed_at INTEGER CHECK(completed_at >= 0 AND completed_at <= 9007199254740991),
+  FOREIGN KEY(task_id, attempt, plan_id, workspace_id)
+    REFERENCES generation_task_attempts(task_id, attempt, plan_id, workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY(task_id, resource_id, workspace_id)
+    REFERENCES generation_tasks(id, target_resource_id, workspace_id),
+  FOREIGN KEY(resource_id, workspace_id)
+    REFERENCES resources(id, workspace_id),
+  CHECK(
+    (status = 'claimed' AND completed_at IS NULL)
+    OR (status = 'completed' AND completed_at IS NOT NULL AND completed_at >= claimed_at)
+  ),
+  UNIQUE(task_id, attempt),
+  UNIQUE(task_id, attempt, workspace_id, resource_id, revision_id)
 );
 CREATE TABLE IF NOT EXISTS generation_task_attempt_dependency_outputs (
   task_id TEXT NOT NULL,
@@ -362,6 +436,10 @@ CREATE INDEX IF NOT EXISTS idx_generation_task_dependencies_dependency
   ON generation_task_dependencies(dependency_task_id, task_id);
 CREATE INDEX IF NOT EXISTS idx_generation_task_attempts_status
   ON generation_task_attempts(workspace_id, status, next_eligible_at, task_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_resource_payload_cleanup_claims_status
+  ON resource_payload_cleanup_claims(status, revision_id);
+CREATE INDEX IF NOT EXISTS idx_resource_payload_staging_journal_recovery
+  ON resource_payload_staging_journal(sequence, status, revision_id);
 CREATE INDEX IF NOT EXISTS idx_generation_attempt_dependency_outputs_source
   ON generation_task_attempt_dependency_outputs(dependency_task_id, task_id, attempt);
 CREATE INDEX IF NOT EXISTS idx_generation_attempt_resource_pins_revision
@@ -428,6 +506,225 @@ DROP TRIGGER IF EXISTS generation_task_attempt_lease_fence_guard;
 DROP TRIGGER IF EXISTS generation_task_running_entry_guard;
 DROP TRIGGER IF EXISTS generation_run_insert_ownership;
 DROP TRIGGER IF EXISTS generation_run_update_immutable;
+DROP TRIGGER IF EXISTS generation_resource_payload_staging_insert_guard;
+DROP TRIGGER IF EXISTS generation_resource_payload_staging_identity_update_immutable;
+DROP TRIGGER IF EXISTS generation_resource_payload_staging_transition_guard;
+DROP TRIGGER IF EXISTS generation_resource_payload_staging_delete_history_guard;
+DROP TRIGGER IF EXISTS resource_payload_cleanup_insert_guard;
+DROP TRIGGER IF EXISTS resource_payload_cleanup_identity_update_immutable;
+DROP TRIGGER IF EXISTS resource_payload_cleanup_completion_guard;
+DROP TRIGGER IF EXISTS resource_revision_cleanup_tombstone_insert_guard;
+DROP TRIGGER IF EXISTS generation_resource_payload_cleanup_insert_guard;
+DROP TRIGGER IF EXISTS generation_resource_payload_cleanup_identity_update_immutable;
+DROP TRIGGER IF EXISTS generation_resource_payload_cleanup_completion_guard;
+DROP TRIGGER IF EXISTS generation_resource_revision_cleanup_tombstone_insert_guard;
+
+CREATE TRIGGER generation_resource_payload_staging_insert_guard
+BEFORE INSERT ON resource_payload_staging_journal
+WHEN NEW.status <> 'prepared'
+  OR NEW.storage_disposition IS NOT NULL
+  OR NEW.classified_at IS NOT NULL
+  OR NEW.receipt_committed_at IS NOT NULL
+  OR NOT EXISTS (
+    SELECT 1
+    FROM generation_task_attempts attempt
+    JOIN generation_tasks task
+      ON task.id = attempt.task_id
+     AND task.plan_id = attempt.plan_id
+     AND task.workspace_id = attempt.workspace_id
+    WHERE attempt.task_id = NEW.task_id
+      AND attempt.plan_id = NEW.plan_id
+      AND attempt.attempt = NEW.attempt
+      AND attempt.input_hash = NEW.input_hash
+      AND attempt.workspace_id = NEW.workspace_id
+      AND attempt.target_resource_id = NEW.resource_id
+      AND attempt.status IN ('running','cancel-requested')
+      AND attempt.owner_id = NEW.owner_id
+      AND attempt.lease_token = NEW.lease_token
+      AND attempt.lease_expires_at IS NOT NULL
+      AND attempt.lease_expires_at > NEW.created_at
+      AND task.kind = 'resource'
+      AND task.target_type = 'resource'
+      AND task.target_resource_id = NEW.resource_id
+      AND task.workspace_id = NEW.workspace_id
+  )
+  OR EXISTS (
+    SELECT 1 FROM resource_revisions revision WHERE revision.id = NEW.revision_id
+  )
+  OR EXISTS (
+    SELECT 1 FROM generation_task_attempts candidate
+    WHERE candidate.candidate_resource_revision_id = NEW.revision_id
+  )
+  OR EXISTS (
+    SELECT 1 FROM generation_tasks result
+    WHERE result.result_resource_revision_id = NEW.revision_id
+  )
+BEGIN SELECT RAISE(ABORT, 'Resource payload staging journal is not an exact active Resource Attempt'); END;
+
+CREATE TRIGGER generation_resource_payload_staging_identity_update_immutable
+BEFORE UPDATE OF revision_id, task_id, plan_id, attempt, input_hash, workspace_id,
+  resource_id, owner_id, lease_token, manifest_path, payload_checksum, manifest_checksum, receipt_checksum,
+  byte_size, mime_type, created_at ON resource_payload_staging_journal
+WHEN NEW.revision_id IS NOT OLD.revision_id
+  OR NEW.task_id IS NOT OLD.task_id
+  OR NEW.plan_id IS NOT OLD.plan_id
+  OR NEW.attempt IS NOT OLD.attempt
+  OR NEW.input_hash IS NOT OLD.input_hash
+  OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.resource_id IS NOT OLD.resource_id
+  OR NEW.owner_id IS NOT OLD.owner_id
+  OR NEW.lease_token IS NOT OLD.lease_token
+  OR NEW.manifest_path IS NOT OLD.manifest_path
+  OR NEW.payload_checksum IS NOT OLD.payload_checksum
+  OR NEW.manifest_checksum IS NOT OLD.manifest_checksum
+  OR NEW.receipt_checksum IS NOT OLD.receipt_checksum
+  OR NEW.byte_size IS NOT OLD.byte_size
+  OR NEW.mime_type IS NOT OLD.mime_type
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'Resource payload staging journal identity is immutable'); END;
+
+CREATE TRIGGER generation_resource_payload_staging_transition_guard
+BEFORE UPDATE OF status, storage_disposition, classified_at, receipt_committed_at
+ON resource_payload_staging_journal
+WHEN NOT (
+  OLD.status = 'prepared'
+  AND NEW.status = 'prepared'
+  AND OLD.storage_disposition IS NULL
+  AND OLD.classified_at IS NULL
+  AND NEW.storage_disposition IN ('owned-created','preexisting')
+  AND NEW.classified_at IS NOT NULL
+  AND NEW.classified_at >= OLD.created_at
+  AND NEW.receipt_committed_at IS NULL
+  AND EXISTS (
+    SELECT 1 FROM generation_task_attempts attempt
+    WHERE attempt.task_id = OLD.task_id
+      AND attempt.attempt = OLD.attempt
+      AND attempt.workspace_id = OLD.workspace_id
+      AND attempt.owner_id = OLD.owner_id
+      AND attempt.lease_token = OLD.lease_token
+      AND attempt.status IN ('running','cancel-requested')
+      AND attempt.lease_expires_at > NEW.classified_at
+  )
+) AND NOT (
+  OLD.status = 'prepared'
+  AND OLD.storage_disposition IS NOT NULL
+  AND OLD.classified_at IS NOT NULL
+  AND NEW.status = 'receipt-committed'
+  AND NEW.storage_disposition IS OLD.storage_disposition
+  AND NEW.classified_at IS OLD.classified_at
+  AND NEW.receipt_committed_at IS NOT NULL
+  AND NEW.receipt_committed_at >= OLD.classified_at
+  AND EXISTS (
+    SELECT 1 FROM generation_task_attempts attempt
+    WHERE attempt.task_id = OLD.task_id
+      AND attempt.attempt = OLD.attempt
+      AND attempt.workspace_id = OLD.workspace_id
+      AND attempt.owner_id = OLD.owner_id
+      AND attempt.lease_token = OLD.lease_token
+      AND attempt.status IN ('running','cancel-requested')
+      AND attempt.lease_expires_at > NEW.receipt_committed_at
+  )
+)
+BEGIN SELECT RAISE(ABORT, 'Resource payload staging journal transition is not append-only'); END;
+
+CREATE TRIGGER generation_resource_payload_staging_delete_history_guard
+BEFORE DELETE ON resource_payload_staging_journal
+WHEN EXISTS (SELECT 1 FROM project_workspaces WHERE id = OLD.workspace_id)
+BEGIN SELECT RAISE(ABORT, 'Resource payload staging journal is durable history'); END;
+
+CREATE TRIGGER generation_resource_payload_cleanup_insert_guard
+BEFORE INSERT ON resource_payload_cleanup_claims
+WHEN NEW.status <> 'claimed'
+  OR NEW.completed_at IS NOT NULL
+  OR NOT EXISTS (
+    SELECT 1
+    FROM generation_task_attempts attempt
+    JOIN generation_tasks task
+      ON task.id = attempt.task_id
+     AND task.plan_id = attempt.plan_id
+     AND task.workspace_id = attempt.workspace_id
+    WHERE attempt.task_id = NEW.task_id
+      AND attempt.plan_id = NEW.plan_id
+      AND attempt.attempt = NEW.attempt
+      AND attempt.input_hash = NEW.input_hash
+      AND attempt.workspace_id = NEW.workspace_id
+      AND attempt.target_resource_id = NEW.resource_id
+      AND task.kind = 'resource'
+      AND task.target_type = 'resource'
+      AND task.target_resource_id = NEW.resource_id
+      AND task.workspace_id = NEW.workspace_id
+      AND attempt.status IN ('succeeded','retryable-failed','failed','needs-rebase','cancelled')
+      AND attempt.materialization_sealed = 1
+      AND attempt.candidate_revision_id IS NULL
+      AND attempt.candidate_resource_revision_id IS NULL
+      AND attempt.candidate_evidence_json IS NULL
+      AND attempt.candidate_evidence_hash IS NULL
+      AND attempt.owner_id IS NULL
+      AND attempt.lease_token IS NULL
+      AND attempt.lease_expires_at IS NULL
+      AND attempt.heartbeat_at IS NULL
+      AND attempt.finished_at IS NOT NULL
+  )
+  OR NOT EXISTS (
+    SELECT 1 FROM resource_payload_staging_journal journal
+    WHERE journal.revision_id = NEW.revision_id
+      AND journal.task_id = NEW.task_id
+      AND journal.plan_id = NEW.plan_id
+      AND journal.attempt = NEW.attempt
+      AND journal.input_hash = NEW.input_hash
+      AND journal.workspace_id = NEW.workspace_id
+      AND journal.resource_id = NEW.resource_id
+  )
+  OR EXISTS (
+    SELECT 1 FROM generation_task_claims claim
+    WHERE claim.task_id = NEW.task_id AND claim.attempt = NEW.attempt
+  )
+  OR EXISTS (
+    SELECT 1 FROM resource_revisions revision
+    WHERE revision.id = NEW.revision_id
+       OR (revision.workspace_id = NEW.workspace_id
+           AND revision.resource_id = NEW.resource_id
+           AND revision.id = NEW.revision_id)
+  )
+  OR EXISTS (
+    SELECT 1 FROM generation_task_attempts candidate
+    WHERE candidate.candidate_resource_revision_id = NEW.revision_id
+  )
+  OR EXISTS (
+    SELECT 1 FROM generation_tasks result
+    WHERE result.result_resource_revision_id = NEW.revision_id
+  )
+BEGIN SELECT RAISE(ABORT, 'Resource payload cleanup claim is not an exact unreferenced terminal Attempt'); END;
+
+CREATE TRIGGER generation_resource_payload_cleanup_identity_update_immutable
+BEFORE UPDATE OF revision_id, task_id, plan_id, attempt, input_hash,
+  workspace_id, resource_id, claimed_at ON resource_payload_cleanup_claims
+WHEN NEW.revision_id IS NOT OLD.revision_id
+  OR NEW.task_id IS NOT OLD.task_id
+  OR NEW.plan_id IS NOT OLD.plan_id
+  OR NEW.attempt IS NOT OLD.attempt
+  OR NEW.input_hash IS NOT OLD.input_hash
+  OR NEW.workspace_id IS NOT OLD.workspace_id
+  OR NEW.resource_id IS NOT OLD.resource_id
+  OR NEW.claimed_at IS NOT OLD.claimed_at
+BEGIN SELECT RAISE(ABORT, 'Resource payload cleanup claim identity is immutable'); END;
+
+CREATE TRIGGER generation_resource_payload_cleanup_completion_guard
+BEFORE UPDATE OF status, completed_at ON resource_payload_cleanup_claims
+WHEN NOT (
+  OLD.status = 'claimed' AND OLD.completed_at IS NULL
+  AND NEW.status = 'completed' AND NEW.completed_at IS NOT NULL
+  AND NEW.completed_at >= OLD.claimed_at
+)
+BEGIN SELECT RAISE(ABORT, 'Resource payload cleanup completion is append-only'); END;
+
+CREATE TRIGGER generation_resource_revision_cleanup_tombstone_insert_guard
+BEFORE INSERT ON resource_revisions
+WHEN EXISTS (
+  SELECT 1 FROM resource_payload_cleanup_claims cleanup
+  WHERE cleanup.revision_id = NEW.id
+)
+BEGIN SELECT RAISE(ABORT, 'Resource Revision payload is tombstoned for cleanup'); END;
 
 CREATE TRIGGER generation_plan_construction_seal_guard
 BEFORE UPDATE OF construction_sealed ON generation_plans
@@ -621,6 +918,15 @@ BEFORE INSERT ON generation_task_attempts
 WHEN NEW.attempt_origin = 'materialized' AND (
   NEW.predecessor_attempt IS NOT NULL
   OR NEW.automatic_retry_index <> 0
+  OR (NEW.source_commit_hash IS NULL) <> (NEW.source_tree_hash IS NULL)
+  OR (NEW.target_artifact_id IS NULL AND NEW.source_commit_hash IS NOT NULL)
+  OR (NEW.target_artifact_id IS NOT NULL AND NEW.source_commit_hash IS NULL)
+  OR (NEW.source_commit_hash IS NOT NULL AND (
+    length(NEW.source_commit_hash) NOT IN (40, 64)
+    OR length(NEW.source_tree_hash) <> length(NEW.source_commit_hash)
+    OR NEW.source_commit_hash GLOB '*[^0-9a-f]*'
+    OR NEW.source_tree_hash GLOB '*[^0-9a-f]*'
+  ))
   OR NEW.materialization_sealed <> 0
   OR NEW.status <> 'queued'
   OR NEW.owner_id IS NOT NULL
@@ -669,6 +975,8 @@ WHEN NEW.attempt_origin = 'materialized' AND (
               AND revision.artifact_id = task.target_artifact_id
               AND revision.track_id = task.target_track_id
               AND revision.workspace_id = task.workspace_id
+              AND revision.source_commit_hash = NEW.source_commit_hash
+              AND revision.source_tree_hash = NEW.source_tree_hash
               AND revision.sealed = 1
           )
         )) OR
@@ -713,6 +1021,15 @@ CREATE TRIGGER generation_task_attempt_retry_insert_guard
 BEFORE INSERT ON generation_task_attempts
 WHEN NEW.attempt_origin IN ('same-input-retry','publication-retry') AND (
   NEW.materialization_sealed <> 0
+  OR (NEW.source_commit_hash IS NULL) <> (NEW.source_tree_hash IS NULL)
+  OR (NEW.target_artifact_id IS NULL AND NEW.source_commit_hash IS NOT NULL)
+  OR (NEW.target_artifact_id IS NOT NULL AND NEW.source_commit_hash IS NULL)
+  OR (NEW.source_commit_hash IS NOT NULL AND (
+    length(NEW.source_commit_hash) NOT IN (40, 64)
+    OR length(NEW.source_tree_hash) <> length(NEW.source_commit_hash)
+    OR NEW.source_commit_hash GLOB '*[^0-9a-f]*'
+    OR NEW.source_tree_hash GLOB '*[^0-9a-f]*'
+  ))
   OR NEW.status <> 'queued'
   OR NEW.predecessor_attempt IS NULL
   OR NEW.predecessor_attempt <> NEW.attempt - 1
@@ -760,6 +1077,8 @@ WHEN NEW.attempt_origin IN ('same-input-retry','publication-retry') AND (
       AND NEW.target_track_id IS predecessor.target_track_id
       AND NEW.target_resource_id IS predecessor.target_resource_id
       AND NEW.base_revision_id IS predecessor.base_revision_id
+      AND NEW.source_commit_hash IS predecessor.source_commit_hash
+      AND NEW.source_tree_hash IS predecessor.source_tree_hash
       AND NEW.expected_snapshot_id IS predecessor.expected_snapshot_id
       AND NEW.context_pack_id IS predecessor.context_pack_id
       AND NEW.kernel_revision_id IS predecessor.kernel_revision_id
@@ -1007,6 +1326,8 @@ AND NEW.materialization_sealed IS NOT OLD.materialization_sealed AND NOT (
       AND NEW.target_track_id IS predecessor.target_track_id
       AND NEW.target_resource_id IS predecessor.target_resource_id
       AND NEW.base_revision_id IS predecessor.base_revision_id
+      AND NEW.source_commit_hash IS predecessor.source_commit_hash
+      AND NEW.source_tree_hash IS predecessor.source_tree_hash
       AND NEW.expected_snapshot_id IS predecessor.expected_snapshot_id
       AND NEW.context_pack_id IS predecessor.context_pack_id
       AND NEW.kernel_revision_id IS predecessor.kernel_revision_id
@@ -1150,7 +1471,8 @@ END;
 
 CREATE TRIGGER generation_task_attempt_input_update_immutable
 BEFORE UPDATE OF task_id, plan_id, workspace_id, attempt, target_artifact_id, target_track_id,
-  target_resource_id, base_revision_id, expected_snapshot_id, context_pack_id,
+  target_resource_id, base_revision_id, source_commit_hash, source_tree_hash,
+  expected_snapshot_id, context_pack_id,
   kernel_revision_id, execution_mode, payload_json, input_hash,
   pinned_resource_revision_ids_json, component_dependency_revision_ids_json,
   attempt_origin, predecessor_attempt, automatic_retry_index,
@@ -4000,6 +4322,23 @@ BEGIN SELECT RAISE(ABORT, 'Run Context Pack binding is immutable'); END;
 
 /** Additive migrations for databases created before a column existed. */
 export function migrateStoreSchema(db: DatabaseSync): void {
+  // Replay installs current triggers before additive columns are restored.
+  // Drop cleanup guards that read Attempt columns so legacy-table ALTERs can
+  // run, then reinstall the complete trigger set after all columns exist.
+  db.exec(`
+    DROP TRIGGER IF EXISTS generation_resource_payload_staging_insert_guard;
+    DROP TRIGGER IF EXISTS generation_resource_payload_staging_identity_update_immutable;
+    DROP TRIGGER IF EXISTS generation_resource_payload_staging_transition_guard;
+    DROP TRIGGER IF EXISTS generation_resource_payload_staging_delete_history_guard;
+    DROP TRIGGER IF EXISTS resource_payload_cleanup_insert_guard;
+    DROP TRIGGER IF EXISTS resource_payload_cleanup_identity_update_immutable;
+    DROP TRIGGER IF EXISTS resource_payload_cleanup_completion_guard;
+    DROP TRIGGER IF EXISTS resource_revision_cleanup_tombstone_insert_guard;
+    DROP TRIGGER IF EXISTS generation_resource_payload_cleanup_insert_guard;
+    DROP TRIGGER IF EXISTS generation_resource_payload_cleanup_identity_update_immutable;
+    DROP TRIGGER IF EXISTS generation_resource_payload_cleanup_completion_guard;
+    DROP TRIGGER IF EXISTS generation_resource_revision_cleanup_tombstone_insert_guard;
+  `);
   const ensureColumn = (table: string, column: string, decl: string): boolean => {
     const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === column)) {
@@ -4119,6 +4458,8 @@ export function migrateStoreSchema(db: DatabaseSync): void {
     "automatic_retry_index",
     "automatic_retry_index INTEGER NOT NULL DEFAULT 0 CHECK(automatic_retry_index >= 0 AND automatic_retry_index <= 3)",
   );
+  ensureColumn("generation_task_attempts", "source_commit_hash", "source_commit_hash TEXT");
+  ensureColumn("generation_task_attempts", "source_tree_hash", "source_tree_hash TEXT");
   // This index must be installed after the additive lineage columns. STORE_SCHEMA
   // is replayed before migrateStoreSchema() for an existing database, including
   // databases created by the claim/lease foundation that predate these columns.

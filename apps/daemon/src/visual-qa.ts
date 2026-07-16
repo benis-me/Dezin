@@ -5,10 +5,10 @@ import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { unzlibSync } from "fflate";
 import puppeteer from "puppeteer-core";
-import type { QualityFinding, Settings } from "../../../packages/core/src/index.ts";
+import type { QualityFinding, RenderFrameSpec, Settings } from "../../../packages/core/src/index.ts";
 import { detectComputedFindings, markCorroboration, type ComputedContext, type ComputedElement as QualityComputedElement, type ComputedStyle } from "../../../packages/quality/src/index.ts";
 import { agentSpawnEnv, getProvider } from "../../../packages/agent/src/index.ts";
-import { findChrome } from "./capture-cover.ts";
+import { applyArtifactThumbnailFrame, findChrome } from "./capture-cover.ts";
 import { buildAgentEnv } from "./agent-env.ts";
 import { captureFullPageScreenshot } from "./full-page-capture.ts";
 
@@ -36,6 +36,30 @@ export interface VisualQaInput {
   criticElements?: CriticElement[];
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
   consoleMessages?: VisualQaConsoleMessage[];
+  /** Exact immutable Task Frames. When present every Frame is bridged, rendered, and captured. */
+  renderFrames?: readonly RenderFrameSpec[];
+  /** Prefix used to derive one bounded, deterministic attempt identity per Frame. */
+  frameAttemptIdPrefix?: string;
+  /** Runs exact Frame/runtime/capture checks without invoking the design critic. */
+  runtimeOnly?: boolean;
+  /** Exact Frame currently shown in screenshotPath when invoking the critic. */
+  reviewFrame?: RenderFrameSpec & { frameAttemptId: string };
+  signal?: AbortSignal;
+}
+
+export interface VisualQaFrameResult {
+  frameId: string;
+  frameAttemptId: string;
+  width: number;
+  height: number;
+  status: "passed" | "failed";
+  screenshotPath?: string;
+  reviewed: boolean;
+}
+
+export interface VisualQaReport {
+  findings: QualityFinding[];
+  frames: VisualQaFrameResult[];
 }
 
 /** One on-page element the critic may target, derived from the geometry snapshot. */
@@ -198,10 +222,13 @@ function toRel(root: string, file: string): string {
 /** Reject if `p` doesn't settle within `ms`, so a wedged headless page (blocked main thread,
  *  stuck WASM, perpetual animation) can never hang the capture and silently kill the critic. */
 function withTimeout<T>(ms: number, p: Promise<T>): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`visual capture step timed out after ${ms}ms`)), ms)),
-  ]);
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`visual capture step timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string): string {
@@ -213,6 +240,24 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
   const sourceRenderMapRel = ref?.renderMapPath ? toRel(projectDir, ref.renderMapPath) : "";
   const brief = input.brief?.trim();
   const directionSpec = input.directionSpec?.trim();
+  const reviewFrame = input.reviewFrame;
+  let frameFixture = "";
+  if (reviewFrame?.fixture !== undefined) {
+    try {
+      frameFixture = JSON.stringify(reviewFrame.fixture).slice(0, 4_000);
+    } catch {
+      frameFixture = "[unavailable]";
+    }
+  }
+  const frameContext = reviewFrame
+    ? [
+        `Exact Task Frame: ${reviewFrame.id} (${reviewFrame.name}), ${reviewFrame.width}x${reviewFrame.height}`,
+        reviewFrame.initialState ? `initial state: ${reviewFrame.initialState}` : "",
+        frameFixture ? `fixture: ${frameFixture}` : "",
+        reviewFrame.background ? `background: ${reviewFrame.background}` : "",
+        `attempt: ${reviewFrame.frameAttemptId}`,
+      ].filter(Boolean).join("; ")
+    : "";
   const history = (input.conversationHistory ?? [])
     .map((m, index) => `[${index + 1}] ${m.role.toUpperCase()}:\n${m.content.trim()}`)
     .filter((line) => line.length > 12)
@@ -252,6 +297,7 @@ export function agentReviewPrompt(input: VisualQaInput, screenshotPath: string):
     sourceRenderMapRel ? `Source render map (browser-measured bounding boxes and computed styles for source-vs-result fidelity): ${sourceRenderMapRel}` : "",
     ref?.assetsSummary ? `Source image inventory: ${ref.assetsSummary}` : "",
     input.renderUrl ? `Rendered URL: ${input.renderUrl}` : "",
+    frameContext,
     consoleMessages ? `Browser console / runtime signals:\n${consoleMessages}` : "",
     history ? `Current conversation context:\n${history}` : "",
     brief ? `USER BRIEF:\n${brief}` : "",
@@ -891,6 +937,82 @@ export function shouldRunComputedDetector(input: Pick<VisualQaInput, "isSharinga
   return !input.isSharingan;
 }
 
+interface GeometryFrameResult extends VisualQaFrameResult {
+  criticElements: CriticElement[];
+  consoleMessages: VisualQaConsoleMessage[];
+}
+
+interface GeometryViewport {
+  label: string;
+  width: number;
+  height: number;
+  primary: boolean;
+  frame?: RenderFrameSpec;
+  frameIndex?: number;
+  frameAttemptId?: string;
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("Visual QA aborted", "AbortError");
+}
+
+function checkAbort(signal: AbortSignal): void {
+  if (signal.aborted) throw abortReason(signal);
+}
+
+export function visualQaFrameAttemptId(prefix: string | undefined, frame: RenderFrameSpec, index: number): string {
+  const safePrefix = (prefix?.trim() || "visual-qa").replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 64);
+  const safeFrame = frame.id.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 48);
+  return `${safePrefix}-${index}-${safeFrame}`.slice(0, 128);
+}
+
+function geometryViewports(
+  sourceDesktopViewport: { width: number; height: number } | undefined,
+  renderFrames: readonly RenderFrameSpec[],
+  attemptPrefix: string | undefined,
+): GeometryViewport[] {
+  const planned = renderFrames.map((frame, index): GeometryViewport => ({
+    label: `frame:${frame.id}`,
+    width: frame.width,
+    height: frame.height,
+    primary: false,
+    frame,
+    frameIndex: index,
+    frameAttemptId: visualQaFrameAttemptId(attemptPrefix, frame, index),
+  }));
+  if (!sourceDesktopViewport) {
+    if (planned.length > 0) {
+      planned[0] = { ...planned[0]!, primary: true };
+      return planned;
+    }
+    return DEFAULT_VIEWPORTS.map((viewport, index) => ({ ...viewport, primary: index === 0 }));
+  }
+  const matchingFrameIndex = planned.findIndex((viewport) =>
+    viewport.width === sourceDesktopViewport.width && viewport.height === sourceDesktopViewport.height);
+  if (matchingFrameIndex >= 0) {
+    planned[matchingFrameIndex] = { ...planned[matchingFrameIndex]!, primary: true };
+    return [planned[matchingFrameIndex]!, ...planned.filter((_viewport, index) => index !== matchingFrameIndex)];
+  }
+  return [
+    { label: "source", ...sourceDesktopViewport, primary: true },
+    ...planned,
+  ];
+}
+
+function frameScreenshotPath(base: string, frame: RenderFrameSpec, index: number, primary: boolean): string {
+  if (primary) return base;
+  const safeFrame = frame.id.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 80) || `frame-${index}`;
+  return join(dirname(base), "frames", `${String(index).padStart(3, "0")}-${safeFrame}.png`);
+}
+
+function frameScopedFinding(finding: QualityFinding, frameId: string): QualityFinding {
+  return {
+    ...finding,
+    id: `${finding.id}@${frameId}`,
+    message: `[Frame ${frameId}] ${finding.message}`,
+  };
+}
+
 async function collectGeometry(
   htmlPath: string,
   screenshotPath?: string,
@@ -900,8 +1022,13 @@ async function collectGeometry(
   sourceDesktopViewport?: { width: number; height: number },
   strictTextLayout = false,
   sharinganSource?: SourceRenderMap | null,
-): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[]; elements: CriticElement[]; desktopSnapshot?: GeometrySnapshot }> {
+  renderFrames: readonly RenderFrameSpec[] = [],
+  signal: AbortSignal = new AbortController().signal,
+  attemptPrefix?: string,
+): Promise<{ findings: QualityFinding[]; consoleMessages: VisualQaConsoleMessage[]; elements: CriticElement[]; frames: GeometryFrameResult[]; desktopSnapshot?: GeometrySnapshot }> {
   const consoleMessages: VisualQaConsoleMessage[] = [];
+  checkAbort(signal);
+  const viewports = geometryViewports(sourceDesktopViewport, renderFrames, attemptPrefix);
   const executablePath = findChrome();
   if (!executablePath) {
     return {
@@ -915,20 +1042,33 @@ async function collectGeometry(
       ],
       consoleMessages,
       elements: [],
+      frames: viewports
+        .filter((viewport) => viewport.frame && viewport.frameAttemptId)
+        .map((viewport) => ({
+          frameId: viewport.frame!.id,
+          frameAttemptId: viewport.frameAttemptId!,
+          width: viewport.width,
+          height: viewport.height,
+          status: "failed" as const,
+          reviewed: false,
+          criticElements: [],
+          consoleMessages: [],
+        })),
       desktopSnapshot: undefined,
     };
   }
   let browser: Awaited<ReturnType<typeof puppeteer.launch>> | undefined;
   let elements: CriticElement[] = [];
   let computedFindings: QualityFinding[] = [];
+  const frames: GeometryFrameResult[] = [];
   try {
+    checkAbort(signal);
     browser = await puppeteer.launch({ executablePath, headless: true, args: ["--no-sandbox", "--hide-scrollbars"] });
+    checkAbort(signal);
     const all: QualityFinding[] = [];
     let desktopSnapshot: GeometrySnapshot | undefined;
-    const viewports = sourceDesktopViewport
-      ? [{ label: "desktop", ...sourceDesktopViewport }]
-      : DEFAULT_VIEWPORTS;
     for (const viewport of viewports) {
+      checkAbort(signal);
       const page = await browser.newPage();
       page.on("console", (msg) => {
         const location = msg.location();
@@ -964,14 +1104,29 @@ async function collectGeometry(
           url: response.url(),
         });
       });
-      await page.setViewport({ width: viewport.width, height: viewport.height, deviceScaleFactor: 1 });
+      const consoleStart = consoleMessages.length;
+      try {
+        await page.setViewport({ width: viewport.width, height: viewport.height, deviceScaleFactor: 1 });
+        checkAbort(signal);
       // Use `domcontentloaded`, NOT `load`: on real apps a never-settling resource (async Shiki
       // WASM, the Vite HMR socket, a perpetual animation) can keep `load` from firing within the
       // timeout, so `goto` throws and the whole review fails (visual-render-failed → no screenshot
       // → the critic silently returns nothing and the run "passes" on lint alone). We do NOT need
       // `load`: we explicitly poll for real painted content next, which is what avoids the
       // pre-mount blank frame that motivated the earlier `load` switch.
-      await page.goto(renderUrl ?? pathToFileURL(htmlPath).href, { waitUntil: "domcontentloaded", timeout: 15000 });
+        const targetUrl = renderUrl ?? pathToFileURL(htmlPath).href;
+        await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+        checkAbort(signal);
+        if (viewport.frame && viewport.frameAttemptId) {
+          await applyArtifactThumbnailFrame(page, targetUrl, {
+            frameId: viewport.frame.id,
+            frameAttemptId: viewport.frameAttemptId,
+            initialState: viewport.frame.initialState,
+            fixture: viewport.frame.fixture,
+            background: viewport.frame.background,
+          }, signal);
+        }
+        checkAbort(signal);
       await page
         .waitForFunction(
           () => {
@@ -1154,31 +1309,90 @@ async function collectGeometry(
           elements,
         };
       }));
-      all.push(...findingsFromGeometry(snapshot as GeometrySnapshot, viewport.label, { strictTextLayout, sharinganSource }));
-      if (viewport.label === "desktop") {
-        desktopSnapshot = snapshot as GeometrySnapshot;
-        const desktopElements = desktopSnapshot.elements ?? [];
-        elements = toCriticElements(desktopElements);
+        checkAbort(signal);
+        const exactSnapshot = snapshot as GeometrySnapshot;
+        const currentGeometryFindings = findingsFromGeometry(exactSnapshot, viewport.label, { strictTextLayout, sharinganSource });
+        all.push(...currentGeometryFindings);
+        const currentElements = toCriticElements(exactSnapshot.elements ?? []);
+        if (viewport.primary) {
+          desktopSnapshot = exactSnapshot;
+          const desktopElements = desktopSnapshot.elements ?? [];
+          elements = currentElements;
         // Deterministic computed-style findings — contrast, type, spacing, component tells — run
         // on the desktop render only (viewport-independent) and are bounded so they can't flood repair.
         // Skipped entirely for Sharingan clones (runComputed=false): faithfully reproducing a
         // source's taste is not slop.
-        computedFindings = runComputed
-          ? boundComputedFindings(
-              detectComputedFindings(toComputedElements(desktopElements), {
-                ...computedCtx,
-                pageBackground: (snapshot as GeometrySnapshot).pageBackground,
-                designTokens: (snapshot as GeometrySnapshot).designTokens,
-              }),
-            )
-          : [];
-        if (screenshotPath) {
-          await mkdir(dirname(screenshotPath), { recursive: true });
-          // Bound the capture too — full-page screenshot of a wedged/animating page can hang.
-          await withTimeout(15_000, captureFullPageScreenshot(page, { path: screenshotPath }));
+          computedFindings = runComputed
+            ? boundComputedFindings(
+                detectComputedFindings(toComputedElements(desktopElements), {
+                  ...computedCtx,
+                  pageBackground: exactSnapshot.pageBackground,
+                  designTokens: exactSnapshot.designTokens,
+                }),
+              )
+            : [];
         }
+        let capturedPath: string | undefined;
+        if (screenshotPath && (viewport.primary || viewport.frame)) {
+          capturedPath = viewport.frame && viewport.frameIndex !== undefined
+            ? frameScreenshotPath(screenshotPath, viewport.frame, viewport.frameIndex, viewport.primary)
+            : screenshotPath;
+          await mkdir(dirname(capturedPath), { recursive: true });
+          // Bound each exact Frame capture — a wedged/animating page cannot hang the run.
+          await withTimeout(15_000, captureFullPageScreenshot(page, { path: capturedPath }));
+        }
+        checkAbort(signal);
+        if (viewport.frame && viewport.frameAttemptId) {
+          const frameConsoleMessages = consoleMessages.slice(consoleStart);
+          const runtimeMessages = frameConsoleMessages.filter((message) =>
+            message.type === "pageerror"
+            || message.type === "requestfailed"
+            || message.type === "response"
+            || (message.type === "console" && ["error", "assert"].includes(message.level)));
+          if (runtimeMessages.length > 0) {
+            all.push({
+              severity: "P1",
+              id: `visual-runtime-error@${viewport.frame.id}`,
+              message: `[Frame ${viewport.frame.id}] Runtime error: ${runtimeMessages[0]!.text}`,
+              fix: "Repair the application runtime error for this exact Frame state and fixture, then rerun Frame QA.",
+            });
+          }
+          const geometryFailed = currentGeometryFindings.some((finding) =>
+            finding.severity === "P0" || finding.severity === "P1");
+          frames.push({
+            frameId: viewport.frame.id,
+            frameAttemptId: viewport.frameAttemptId,
+            width: viewport.width,
+            height: viewport.height,
+            status: runtimeMessages.length === 0 && !geometryFailed && capturedPath ? "passed" : "failed",
+            screenshotPath: capturedPath,
+            reviewed: false,
+            criticElements: currentElements,
+            consoleMessages: frameConsoleMessages,
+          });
+        }
+      } catch (error) {
+        if (signal.aborted) throw abortReason(signal);
+        if (!viewport.frame || !viewport.frameAttemptId) throw error;
+        all.push({
+          severity: "P1",
+          id: `visual-render-failed@${viewport.frame.id}`,
+          message: `[Frame ${viewport.frame.id}] Visual QA could not render or apply the exact Frame: ${error instanceof Error ? error.message : "unknown render failure"}.`,
+          fix: "Repair the preview/runtime bridge for this exact Frame and rerun Frame QA.",
+        });
+        frames.push({
+          frameId: viewport.frame.id,
+          frameAttemptId: viewport.frameAttemptId,
+          width: viewport.width,
+          height: viewport.height,
+          status: "failed",
+          reviewed: false,
+          criticElements: [],
+          consoleMessages: consoleMessages.slice(consoleStart),
+        });
+      } finally {
+        await page.close().catch(() => {});
       }
-      await page.close().catch(() => {});
     }
     const seen = new Set<string>();
     return {
@@ -1194,20 +1408,23 @@ async function collectGeometry(
       ],
       consoleMessages,
       elements,
+      frames,
       desktopSnapshot,
     };
-  } catch {
+  } catch (error) {
+    if (signal.aborted) throw abortReason(signal);
     return {
       findings: [
         {
           severity: "P1",
           id: "visual-render-failed",
-          message: "Visual QA could not render the final artifact in headless Chrome.",
+          message: `Visual QA could not render the final artifact in headless Chrome: ${error instanceof Error ? error.message : "unknown render failure"}.`,
           fix: "Open the preview and check for script errors, blocked local assets, or markup that prevents first paint.",
         },
       ],
       consoleMessages,
       elements,
+      frames,
       desktopSnapshot: undefined,
     };
   } finally {
@@ -1215,8 +1432,19 @@ async function collectGeometry(
   }
 }
 
-function spawnAgentText(command: string, args: string[], cwd: string, timeoutMs: number, extraEnv: NodeJS.ProcessEnv = {}): Promise<string> {
+function spawnAgentText(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  extraEnv: NodeJS.ProcessEnv = {},
+  signal?: AbortSignal,
+): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortReason(signal));
+      return;
+    }
     const env = agentSpawnEnv(extraEnv);
     let child;
     try {
@@ -1226,22 +1454,46 @@ function spawnAgentText(command: string, args: string[], cwd: string, timeoutMs:
     }
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const resolveOnce = (value: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const rejectOnce = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => {
+      child.kill("SIGKILL");
+      rejectOnce(abortReason(signal!));
+    };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error("agent visual review timed out"));
+      rejectOnce(new Error("agent visual review timed out"));
     }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (d: string) => (stdout += d));
     child.stderr?.on("data", (d: string) => (stderr += d));
     child.on("error", (e) => {
-      clearTimeout(timer);
-      reject(e);
+      rejectOnce(e);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0 && stdout.trim()) resolve(stdout);
-      else reject(new Error(stderr.trim().slice(0, 200) || stdout.trim().slice(0, 200) || `${command} exited with ${code}`));
+      if (code === 0 && stdout.trim()) resolveOnce(stdout);
+      else rejectOnce(new Error(stderr.trim().slice(0, 200) || stdout.trim().slice(0, 200) || `${command} exited with ${code}`));
     });
   });
 }
@@ -1273,6 +1525,7 @@ export async function reviewWithRetry(reviewOnce: () => Promise<QualityFinding[]
 }
 
 export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshotPath: string): Promise<QualityFinding[]> {
+  if (input.signal?.aborted) throw abortReason(input.signal);
   if (!input.settings.visualQaEnabled) return [];
   if (!existsSync(screenshotPath)) {
     return withScreenshotReviewMetadata(
@@ -1297,10 +1550,18 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
   const args = provider ? provider.oneShotArgs(model, prompt) : ["-p", prompt];
   try {
     const findings = await reviewWithRetry(async () =>
-      parseVisualReview(await spawnAgentText(command, args, projectDir, 120_000, buildAgentEnv(input.settings, command)), { isSharingan: input.isSharingan }),
+      parseVisualReview(await spawnAgentText(
+        command,
+        args,
+        projectDir,
+        120_000,
+        buildAgentEnv(input.settings, command),
+        input.signal,
+      ), { isSharingan: input.isSharingan }),
     );
     return withScreenshotReviewMetadata(findings, input, screenshotPath);
   } catch (err) {
+    if (input.signal?.aborted) throw abortReason(input.signal);
     return withScreenshotReviewMetadata(
       [
         {
@@ -1317,33 +1578,50 @@ export async function reviewScreenshotWithAgent(input: VisualQaInput, screenshot
   }
 }
 
-export async function auditVisualArtifact(input: VisualQaInput): Promise<QualityFinding[]> {
-  if (!input.settings.visualQaEnabled) return [];
+function unavailableFrameResults(input: VisualQaInput): VisualQaFrameResult[] {
+  return (input.renderFrames ?? []).map((frame, index) => ({
+    frameId: frame.id,
+    frameAttemptId: visualQaFrameAttemptId(input.frameAttemptIdPrefix, frame, index),
+    width: frame.width,
+    height: frame.height,
+    status: "failed",
+    reviewed: false,
+  }));
+}
+
+export async function auditVisualArtifactReport(input: VisualQaInput): Promise<VisualQaReport> {
+  if (!input.settings.visualQaEnabled && !input.runtimeOnly) return { findings: [], frames: [] };
+  const signal = input.signal ?? new AbortController().signal;
+  checkAbort(signal);
   const projectDir = input.projectRoot ?? dirname(input.htmlPath);
   const screenshotPath = input.screenshotPath ?? join(projectDir, ".visual-qa", "screenshot.png");
   // A screenshot is evidence for exactly one audit attempt. Clear the mutable capture target
   // before every enabled audit so a failed render cannot be reviewed or persisted as if it were
   // the current artifact.
   await rm(screenshotPath, { force: true });
+  await rm(join(dirname(screenshotPath), "frames"), { recursive: true, force: true });
+  checkAbort(signal);
   if (input.isSharingan && !input.sharinganReference) {
-    return [
-      {
+    return {
+      findings: [{
         severity: "P0",
         id: "visual-source-evidence-missing",
         message: "Sharingan source screenshot and render-map evidence are unavailable, so reconstruction fidelity cannot be verified.",
         fix: "Re-capture the intended Sharingan source entry before generating or accepting a reconstruction.",
-      },
-    ];
+      }],
+      frames: unavailableFrameResults(input),
+    };
   }
   if (!existsSync(input.htmlPath)) {
-    return [
-      {
+    return {
+      findings: [{
         severity: "P1",
         id: "visual-artifact-missing",
         message: "Visual QA could not run because the final artifact file is missing.",
         fix: "Rerun generation and confirm the selected Agent writes the expected project files.",
-      },
-    ];
+      }],
+      frames: unavailableFrameResults(input),
+    };
   }
   const sourceMap = input.isSharingan ? readSourceRenderMap(input.sharinganReference?.renderMapPath) : null;
   if (input.isSharingan) {
@@ -1354,14 +1632,15 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
       sourceScreenshotValid = false;
     }
     if (!sourceMap || !sourceScreenshotValid) {
-      return [
-        {
+      return {
+        findings: [{
           severity: "P0",
           id: "visual-source-evidence-invalid",
           message: "Sharingan source screenshot or render-map evidence is missing, corrupt, or structurally unusable, so reconstruction fidelity cannot be verified.",
           fix: "Re-capture the intended Sharingan source entry before generating, repairing, or accepting the reconstruction.",
-        },
-      ];
+        }],
+        frames: unavailableFrameResults(input),
+      };
     }
   }
   const geometry = await collectGeometry(
@@ -1369,18 +1648,98 @@ export async function auditVisualArtifact(input: VisualQaInput): Promise<Quality
     screenshotPath,
     input.renderUrl,
     { provider: input.provider },
-    shouldRunComputedDetector(input),
+    !input.runtimeOnly && shouldRunComputedDetector(input),
     sourceViewportFromRenderMap(sourceMap),
     Boolean(input.isSharingan),
     sourceMap,
+    input.renderFrames ?? [],
+    signal,
+    input.frameAttemptIdPrefix,
   );
+  checkAbort(signal);
+  if (input.runtimeOnly) {
+    return {
+      findings: geometry.findings,
+      frames: geometry.frames.map(({
+        criticElements: _criticElements,
+        consoleMessages: _consoleMessages,
+        ...frame
+      }) => frame),
+    };
+  }
   const sourceFindings = sourceMap && geometry.desktopSnapshot ? sourceFidelityFindings(sourceMap, geometry.desktopSnapshot) : [];
   const screenshotFindings = input.isSharingan
     ? sourceScreenshotDiffFindings(input.sharinganReference?.screenshotPath, screenshotPath)
     : [];
-  // Blind dual-assessment: the agent critic never sees the deterministic findings; we cross-check
-  // AFTER, tagging elements both lanes independently flagged as corroborated (higher confidence).
-  const ai = await reviewScreenshotWithAgent({ ...input, consoleMessages: geometry.consoleMessages, criticElements: geometry.elements }, screenshotPath);
+  // Blind dual-assessment: the agent critic never sees deterministic findings. Exact Task
+  // Frames are each reviewed from their own screenshot and state-specific element map.
+  const ai: QualityFinding[] = [];
+  let reportFrames = geometry.frames.map(({
+    criticElements: _criticElements,
+    consoleMessages: _consoleMessages,
+    ...frame
+  }) => frame);
+  if ((input.renderFrames?.length ?? 0) > 0) {
+    const updated: VisualQaFrameResult[] = [];
+    const reviewMarkers: QualityFinding[] = [];
+    for (const frame of geometry.frames) {
+      checkAbort(signal);
+      // A runtime/geometry failure is itself a design signal, not a reason to skip
+      // visual assessment. Review every Frame that produced current screenshot
+      // evidence; only an uncaptured Frame is genuinely unassessable.
+      if (!frame.screenshotPath) {
+        const {
+          criticElements: _criticElements,
+          consoleMessages: _consoleMessages,
+          ...publicFrame
+        } = frame;
+        updated.push(publicFrame);
+        continue;
+      }
+      const frameReview = await reviewScreenshotWithAgent({
+        ...input,
+        consoleMessages: frame.consoleMessages,
+        criticElements: frame.criticElements,
+        reviewFrame: {
+          ...structuredClone(input.renderFrames!.find((candidate) => candidate.id === frame.frameId)!),
+          frameAttemptId: frame.frameAttemptId,
+        },
+      }, frame.screenshotPath);
+      checkAbort(signal);
+      const marker = frameReview.find((finding) => finding.id === "visual-reviewed");
+      if (marker) reviewMarkers.push(marker);
+      ai.push(...frameReview
+        .filter((finding) => finding.id !== "visual-reviewed")
+        .map((finding) => frameScopedFinding(finding, frame.frameId)));
+      updated.push({
+        frameId: frame.frameId,
+        frameAttemptId: frame.frameAttemptId,
+        width: frame.width,
+        height: frame.height,
+        status: frame.status,
+        screenshotPath: frame.screenshotPath,
+        reviewed: marker !== undefined,
+      });
+    }
+    reportFrames = updated;
+    if (updated.length === input.renderFrames!.length && updated.every((frame) => frame.reviewed)) {
+      ai.push(reviewMarkers[0]!);
+    }
+  } else {
+    ai.push(...await reviewScreenshotWithAgent({
+      ...input,
+      consoleMessages: geometry.consoleMessages,
+      criticElements: geometry.elements,
+    }, screenshotPath));
+    checkAbort(signal);
+  }
   const synthesized = markCorroboration(geometry.findings, ai);
-  return [...sourceFindings, ...screenshotFindings, ...synthesized.deterministic, ...synthesized.agent];
+  return {
+    findings: [...sourceFindings, ...screenshotFindings, ...synthesized.deterministic, ...synthesized.agent],
+    frames: reportFrames,
+  };
+}
+
+export async function auditVisualArtifact(input: VisualQaInput): Promise<QualityFinding[]> {
+  return (await auditVisualArtifactReport(input)).findings;
 }

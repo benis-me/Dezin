@@ -122,6 +122,8 @@ function claimFixture(): GenerationTaskAttemptClaim {
       attempt: task.currentAttempt,
       target: task.target,
       baseRevisionId: null,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
       expectedSnapshotId: SNAPSHOT_ID,
       contextPackId: null,
       kernelRevisionId: KERNEL_REVISION_ID,
@@ -587,6 +589,9 @@ function dispatcherHarness(validator: PrototypeValidationExecutor) {
     resources: {
       async execute() {
         throw new Error("Resource adapter must not own prototype validation");
+      },
+      async cleanupIfUnreferenced() {
+        return false;
       },
     },
     prototypeValidation: validator,

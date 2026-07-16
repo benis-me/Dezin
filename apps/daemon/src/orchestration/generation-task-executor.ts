@@ -67,6 +67,15 @@ export interface ResourceGenerationTaskLeafExecutor {
     claim: GenerationTaskAttemptClaim,
     signal: AbortSignal,
   ): Promise<ResourcePreparedCandidate>;
+  /**
+   * Best-effort storage reconciliation after every prepared-candidate outcome.
+   * The implementation may delete only when the durable Store atomically proves
+   * that neither candidate state nor a Resource Revision references the payload.
+   */
+  cleanupIfUnreferenced(
+    claim: GenerationTaskAttemptClaim,
+    candidate: ResourcePreparedCandidate,
+  ): Promise<boolean>;
 }
 
 export interface PrototypeValidationTaskLeafExecutor {
@@ -93,6 +102,7 @@ export interface GenerationTaskExecutorOptions {
   /** Adapter boundary for the exact immutable-Snapshot validator. */
   readonly prototypeValidation: PrototypeValidationTaskLeafExecutor;
   readonly publication: GenerationTaskPublicationPort;
+  readonly reportError?: (error: unknown) => void;
 }
 
 export interface GenerationTaskExecutionFailure {
@@ -466,6 +476,7 @@ function validatePreparedResult(
       renderSpec: normalized.renderSpec,
       quality: normalized.quality,
       evidence: normalized.evidence,
+      expectedEvidenceOwner: null,
     });
     contract(Buffer.byteLength(JSON.stringify(normalized), "utf8") <= outputBudget,
       "Artifact prepared result exceeds its Task output budget");
@@ -675,6 +686,7 @@ export class GenerationTaskExecutor {
       resources: options.resources,
       prototypeValidation: options.prototypeValidation,
       publication: options.publication,
+      reportError: options.reportError,
     });
   }
 
@@ -694,6 +706,7 @@ export class GenerationTaskExecutor {
 
     let result: PreparedGenerationTaskResult;
     let normalizedResult: PreparedGenerationTaskResult;
+    let resourceCandidate: ResourcePreparedCandidate | null = null;
     try {
       switch (claim.task.kind) {
         case "page":
@@ -702,6 +715,7 @@ export class GenerationTaskExecutor {
           break;
         case "resource":
           result = await this.options.resources.execute(claim, signal);
+          resourceCandidate = result;
           break;
         case "prototype-validation":
           result = await this.options.prototypeValidation.execute(claim, signal);
@@ -717,12 +731,36 @@ export class GenerationTaskExecutor {
       if (signal.aborted) throw abortReason(signal);
       normalizedResult = validatePreparedResult(claim, result);
     } catch (error) {
+      await this.cleanupResourceCandidate(claim, resourceCandidate);
       if (signal.aborted) throw abortReason(signal);
       if (isLeaseFenceError(error)) throw error;
       await this.options.publication.finishFailure(claim, serializeExecutionFailure(error));
       return;
     }
 
-    await this.options.publication.publishPreparedResult(claim, normalizedResult, signal);
+    try {
+      await this.options.publication.publishPreparedResult(claim, normalizedResult, signal);
+    } finally {
+      await this.cleanupResourceCandidate(claim, resourceCandidate);
+    }
+  }
+
+  private async cleanupResourceCandidate(
+    claim: GenerationTaskAttemptClaim,
+    candidate: ResourcePreparedCandidate | null,
+  ): Promise<void> {
+    if (candidate === null) return;
+    try {
+      await this.options.resources.cleanupIfUnreferenced(claim, candidate);
+    } catch (error) {
+      // The receipt remains a durable orphan journal for startup recovery. A
+      // cleanup observer must never mask a publication response-loss boundary
+      // or prevent the exact fenced failure transition.
+      try {
+        this.options.reportError?.(error);
+      } catch {
+        // Observational only.
+      }
+    }
   }
 }

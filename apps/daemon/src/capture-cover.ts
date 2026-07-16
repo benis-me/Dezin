@@ -361,10 +361,15 @@ export interface CaptureViewport {
   height: number;
 }
 
-export interface ArtifactThumbnailCaptureFrame extends CaptureViewport {
+export interface ArtifactRenderFrameCommand {
   frameId: string;
+  frameAttemptId?: string;
+  initialState?: string;
+  fixture?: unknown;
   background?: string;
 }
+
+export interface ArtifactThumbnailCaptureFrame extends CaptureViewport, ArtifactRenderFrameCommand {}
 
 export type ArtifactThumbnailCapture = (
   url: string,
@@ -546,7 +551,7 @@ export function artifactFrameRejectionReason(reason: unknown): string {
 export async function applyArtifactThumbnailFrame(
   page: Page,
   targetUrl: string,
-  frame: Pick<ArtifactThumbnailCaptureFrame, "frameId" | "background">,
+  frame: ArtifactRenderFrameCommand,
   signal: AbortSignal,
 ): Promise<void> {
   const nonce = artifactPreviewBridgeNonce(targetUrl);
@@ -596,6 +601,9 @@ export async function applyArtifactThumbnailFrame(
             protocol: 1,
             nonce: request.nonce,
             frameId: request.frameId,
+            ...(request.frameAttemptId === undefined ? {} : { frameAttemptId: request.frameAttemptId }),
+            ...(request.initialState === undefined ? {} : { initialState: request.initialState }),
+            ...(request.fixture === undefined ? {} : { fixture: request.fixture }),
             ...(request.background === undefined ? {} : { background: request.background }),
           });
           return;
@@ -630,6 +638,9 @@ export async function applyArtifactThumbnailFrame(
   }, {
     nonce,
     frameId: frame.frameId,
+    ...(frame.frameAttemptId === undefined ? {} : { frameAttemptId: frame.frameAttemptId }),
+    ...(frame.initialState === undefined ? {} : { initialState: frame.initialState }),
+    ...(frame.fixture === undefined ? {} : { fixture: frame.fixture }),
     ...(frame.background === undefined ? {} : { background: frame.background }),
     rejectionReasons: [...ARTIFACT_FRAME_REJECTION_REASONS],
     timeoutMs: ARTIFACT_FRAME_APPLY_TIMEOUT_MS,

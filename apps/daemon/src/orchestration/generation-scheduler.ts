@@ -26,8 +26,8 @@ export interface GenerationSchedulerStore {
 }
 
 export interface GenerationSchedulerPlanService {
-  reconcileNeedsRebaseTasks(): Promise<{ planIds: readonly string[] }>;
-  materializeReadyTaskAttempts(): Promise<{ planIds: readonly string[] }>;
+  reconcileNeedsRebaseTasks(signal: AbortSignal): Promise<{ planIds: readonly string[] }>;
+  materializeReadyTaskAttempts(signal: AbortSignal): Promise<{ planIds: readonly string[] }>;
 }
 
 export interface GenerationSchedulerRuntimeSupervisor {
@@ -94,6 +94,28 @@ function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
   timer.unref?.();
 }
 
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("Generation maintenance aborted", "AbortError");
+}
+
+function checkAbort(signal: AbortSignal): void {
+  if (signal.aborted) throw abortReason(signal);
+}
+
+async function awaitWithAbort<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
+  checkAbort(signal);
+  let listener: (() => void) | null = null;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    listener = () => reject(abortReason(signal));
+    signal.addEventListener("abort", listener, { once: true });
+  });
+  try {
+    return await Promise.race([value, aborted]);
+  } finally {
+    if (listener !== null) signal.removeEventListener("abort", listener);
+  }
+}
+
 /**
  * Durable admission loop for Generation Task Attempts.
  *
@@ -109,6 +131,7 @@ export class GenerationScheduler {
   private readonly readyLimit: number;
   private readonly executions = new Set<Promise<unknown>>();
   private readonly executionControllers = new Set<AbortController>();
+  private readonly maintenanceController = new AbortController();
   private tickPromise: Promise<void> | null = null;
   private tickRequested = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -134,14 +157,21 @@ export class GenerationScheduler {
     if (this.stopped) throw new Error("GenerationScheduler cannot restart after stop");
     if (this.started) return;
     this.started = true;
-    this.schedulePoll(0);
+    // Startup recovery owns the admission barrier. Wakes received before this
+    // point are represented by the single bounded boolean and drained exactly
+    // once now that the barrier has explicitly opened.
+    this.tickRequested = true;
+    void this.startTickLoop()
+      .catch((error) => this.reportMaintenanceError(error))
+      .finally(() => this.schedulePoll(this.pollMs));
   }
 
   requestTick(): void {
     if (this.stopped) return;
     this.tickRequested = true;
+    if (!this.started) return;
     if (this.tickPromise === null) {
-      void this.startTickLoop().catch((error) => this.reportError(error));
+      void this.startTickLoop().catch((error) => this.reportMaintenanceError(error));
     }
   }
 
@@ -149,6 +179,7 @@ export class GenerationScheduler {
     if (this.stopped) return Promise.resolve();
     if (this.tickPromise !== null) return this.tickPromise;
     this.tickRequested = true;
+    if (!this.started) return Promise.resolve();
     return this.startTickLoop();
   }
 
@@ -159,10 +190,12 @@ export class GenerationScheduler {
     }
     this.stopped = true;
     this.started = false;
+    this.tickRequested = false;
     if (this.pollTimer !== null) {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
+    this.maintenanceController.abort(new Error("GenerationScheduler stopped"));
     for (const controller of this.executionControllers) {
       controller.abort(new Error("GenerationScheduler stopped"));
     }
@@ -170,17 +203,25 @@ export class GenerationScheduler {
   }
 
   private async runTick(): Promise<void> {
+    const signal = this.maintenanceController.signal;
+    checkAbort(signal);
     const recovered = this.options.store.recoverExpiredGenerationTaskAttempts(this.options.clock.now());
     this.notifyPlans(recovered.planIds);
-    if (this.stopped) return;
+    checkAbort(signal);
 
-    const reconciled = await this.options.planService.reconcileNeedsRebaseTasks();
+    const reconciled = await awaitWithAbort(
+      this.options.planService.reconcileNeedsRebaseTasks(signal),
+      signal,
+    );
     this.notifyPlans(reconciled.planIds);
-    if (this.stopped) return;
+    checkAbort(signal);
 
-    const materialized = await this.options.planService.materializeReadyTaskAttempts();
+    const materialized = await awaitWithAbort(
+      this.options.planService.materializeReadyTaskAttempts(signal),
+      signal,
+    );
     this.notifyPlans(materialized.planIds);
-    if (this.stopped) return;
+    checkAbort(signal);
 
     const ready = this.options.store.listReadyGenerationTaskAttempts(this.readyLimit);
     for (const attempt of ready) {
@@ -302,7 +343,7 @@ export class GenerationScheduler {
     this.pollTimer = setTimeout(() => {
       this.pollTimer = null;
       void this.tick()
-        .catch((error) => this.reportError(error))
+        .catch((error) => this.reportMaintenanceError(error))
         .finally(() => this.schedulePoll(this.pollMs));
     }, delayMs);
     unrefTimer(this.pollTimer);
@@ -311,11 +352,18 @@ export class GenerationScheduler {
   private startTickLoop(): Promise<void> {
     // Defer the first pass until tickPromise is installed so synchronous
     // recovery/listener callbacks cannot re-enter a second loop.
-    const running = Promise.resolve().then(() => this.drainRequestedTicks());
+    const running = Promise.resolve()
+      .then(() => this.drainRequestedTicks())
+      .catch((error: unknown) => {
+        // stop() owns the maintenance abort. Existing callers await tick() as a
+        // settlement barrier, so an intentional stop resolves that barrier
+        // while genuine maintenance failures retain their rejection semantics.
+        if (!this.isMaintenanceStopAbort(error)) throw error;
+      });
     const tracked = running.finally(() => {
       if (this.tickPromise === tracked) this.tickPromise = null;
-      if (this.tickRequested && !this.stopped && this.tickPromise === null) {
-        void this.startTickLoop().catch((error) => this.reportError(error));
+      if (this.tickRequested && this.started && !this.stopped && this.tickPromise === null) {
+        void this.startTickLoop().catch((error) => this.reportMaintenanceError(error));
       }
     });
     this.tickPromise = tracked;
@@ -323,10 +371,10 @@ export class GenerationScheduler {
   }
 
   private async drainRequestedTicks(): Promise<void> {
-    do {
+    while (this.tickRequested && this.started && !this.stopped) {
       this.tickRequested = false;
       await this.runTick();
-    } while (this.tickRequested && !this.stopped);
+    }
   }
 
   private async waitForSettlements(): Promise<void> {
@@ -343,5 +391,16 @@ export class GenerationScheduler {
     } catch {
       // Error reporting is observational and cannot own scheduler correctness.
     }
+  }
+
+  private reportMaintenanceError(error: unknown): void {
+    if (this.isMaintenanceStopAbort(error)) return;
+    this.reportError(error);
+  }
+
+  private isMaintenanceStopAbort(error: unknown): boolean {
+    return this.stopped
+      && this.maintenanceController.signal.aborted
+      && error === this.maintenanceController.signal.reason;
   }
 }

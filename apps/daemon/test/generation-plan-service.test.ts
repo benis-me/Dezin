@@ -23,6 +23,25 @@ const QUALITY_PROFILE: ArtifactQualityProfile = {
   requireRuntimeChecks: true,
   requireVisualReview: true,
 };
+const SOURCE_COMMIT_HASH = "a".repeat(40);
+const SOURCE_TREE_HASH = "b".repeat(40);
+
+function sourceBaseForTask(task: GenerationTask): {
+  sourceCommitHash: string | null;
+  sourceTreeHash: string | null;
+} {
+  return task.target.type === "artifact"
+    ? { sourceCommitHash: SOURCE_COMMIT_HASH, sourceTreeHash: SOURCE_TREE_HASH }
+    : { sourceCommitHash: null, sourceTreeHash: null };
+}
+
+function defaultSourceBaseResolver(): {
+  resolve(): Promise<{ sourceCommitHash: string; sourceTreeHash: string }>;
+} {
+  return {
+    resolve: async () => ({ sourceCommitHash: SOURCE_COMMIT_HASH, sourceTreeHash: SOURCE_TREE_HASH }),
+  };
+}
 
 function planFixture(input: {
   id: string;
@@ -238,6 +257,7 @@ test("GenerationPlanService immediately delegates every approved-shell compilati
       },
     },
     contextResolver: { resolve: async () => ({ id: "unused" }) },
+    sourceBaseResolver: defaultSourceBaseResolver(),
     rebaseReconciler: idleRebaseReconciler(),
   });
 
@@ -277,6 +297,7 @@ test("GenerationPlanService isolates exact Context and Attempt materialization b
     [taskB.id, observationFixture(taskB)],
   ]);
   const contextCalls: Array<Record<string, unknown>> = [];
+  const sourceBaseCalls: Array<Record<string, unknown>> = [];
   const attemptCalls: Array<{
     projectId: string;
     planId: string;
@@ -325,6 +346,14 @@ test("GenerationPlanService isolates exact Context and Attempt materialization b
         return { id: `context-pack-${task.id}` };
       },
     },
+    sourceBaseResolver: {
+      async resolve(input: Record<string, unknown>) {
+        const task = input.task as GenerationTask;
+        order.push(`source:${task.id}`);
+        sourceBaseCalls.push(input);
+        return { sourceCommitHash: SOURCE_COMMIT_HASH, sourceTreeHash: SOURCE_TREE_HASH };
+      },
+    },
     rebaseReconciler: idleRebaseReconciler(),
   });
 
@@ -334,10 +363,21 @@ test("GenerationPlanService isolates exact Context and Attempt materialization b
   for (const task of [taskA, taskB]) {
     const observedAt = order.indexOf(`observe:${task.id}`);
     const contextAt = order.indexOf(`context:${task.id}`);
+    const sourceAt = order.indexOf(`source:${task.id}`);
     const createdAt = order.indexOf(`create:${task.id}`);
-    assert.ok(observedAt >= 0 && contextAt > observedAt && createdAt > contextAt);
+    if (task.target.type === "artifact") {
+      assert.ok(observedAt >= 0 && contextAt > observedAt && sourceAt > contextAt && createdAt > sourceAt);
+    } else {
+      assert.ok(observedAt >= 0 && contextAt > observedAt && sourceAt === -1 && createdAt > contextAt);
+    }
   }
   assert.equal(contextCalls.length, 2);
+  assert.deepEqual(sourceBaseCalls, [{
+    projectId: "project-a",
+    planId: planA.id,
+    task: taskA,
+    observation: observations.get(taskA.id),
+  }]);
   for (const [projectId, plan, task] of [
     ["project-a", planA, taskA],
     ["project-b", planB, taskB],
@@ -351,11 +391,77 @@ test("GenerationPlanService isolates exact Context and Attempt materialization b
       input: {
         ...observation,
         contextPackId: `context-pack-${task.id}`,
+        ...sourceBaseForTask(task),
         retryContextPolicy: "same-context",
         executionMode: "full",
       },
     });
   }
+});
+
+test("GenerationPlanService propagates maintenance cancellation without recording a false failure", {
+  timeout: 1_000,
+}, async () => {
+  const plan = planFixture({ id: "plan-cancel-maintenance", workspaceId: "workspace-1" });
+  const task = taskFixture({
+    id: "task-cancel-maintenance",
+    planId: plan.id,
+    workspaceId: plan.workspaceId,
+  });
+  const observation = observationFixture(task);
+  let resolveEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    resolveEntered = resolve;
+  });
+  let resolverSignal: AbortSignal | null = null;
+  let attemptWrites = 0;
+  let failureWrites = 0;
+  let reportedErrors = 0;
+  const service = new GenerationPlanService({
+    store: storePort({
+      listGenerationPlans: () => [plan],
+      listGenerationTaskIdsReadyForMaterializationForProject: () => [task.id],
+      getGenerationPlanDetailForProject: () => ({ plan, tasks: [task], dependencies: [] }),
+      observeGenerationTaskMaterializationForProject: () => observation,
+      createGenerationTaskAttemptForProject(_projectId, _planId, input) {
+        attemptWrites += 1;
+        return attemptFixture(input);
+      },
+      recordGenerationTaskMaterializationFailureForProject(_projectId, _planId, input) {
+        failureWrites += 1;
+        return failureFixture(task, input);
+      },
+    }),
+    projectLookup: {
+      listProjectIds: () => ["project-1"],
+      projectIdForPlan: () => "project-1",
+    },
+    contextResolver: {
+      resolve(_input, signal) {
+        resolverSignal = signal;
+        resolveEntered();
+        return new Promise(() => {});
+      },
+    },
+    sourceBaseResolver: {
+      resolve: async () => assert.fail("Source Base resolution must not follow an aborted Context"),
+    },
+    rebaseReconciler: idleRebaseReconciler(),
+    onError: () => {
+      reportedErrors += 1;
+    },
+  });
+  const controller = new AbortController();
+  const materialization = service.materializeReadyTaskAttempts(controller.signal);
+  await entered;
+  const reason = new Error("daemon shutdown");
+  controller.abort(reason);
+
+  await assert.rejects(materialization, (error: unknown) => error === reason);
+  assert.strictEqual(resolverSignal, controller.signal);
+  assert.equal(attemptWrites, 0);
+  assert.equal(failureWrites, 0);
+  assert.equal(reportedErrors, 0);
 });
 
 test("GenerationPlanService materializes validation and checkpoint Tasks without resolving Agent Context", async () => {
@@ -383,6 +489,7 @@ test("GenerationPlanService materializes validation and checkpoint Tasks without
   const observations = new Map(tasks.map((task) => [task.id, observationFixture(task)]));
   const attemptInputs: CreateGenerationTaskAttemptInput[] = [];
   let contextCalls = 0;
+  let sourceBaseCalls = 0;
   const service = new GenerationPlanService({
     store: storePort({
       listGenerationPlans: () => [plan],
@@ -410,6 +517,12 @@ test("GenerationPlanService materializes validation and checkpoint Tasks without
         throw new Error("non-Agent Tasks must not request Context");
       },
     },
+    sourceBaseResolver: {
+      async resolve() {
+        sourceBaseCalls += 1;
+        throw new Error("non-Artifact Tasks must not resolve a Git Source Base");
+      },
+    },
     rebaseReconciler: idleRebaseReconciler(),
   });
 
@@ -417,9 +530,12 @@ test("GenerationPlanService materializes validation and checkpoint Tasks without
 
   assert.deepEqual(summary, { planIds: [plan.id] });
   assert.equal(contextCalls, 0);
+  assert.equal(sourceBaseCalls, 0);
   assert.deepEqual(attemptInputs, tasks.map((task) => ({
     ...observations.get(task.id)!,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "full",
   })));
@@ -440,6 +556,8 @@ test("GenerationPlanService reuses the exact prior Context Pack for same-context
       ...observation,
       attempt: 1,
       contextPackId: "context-pack-prior",
+      sourceCommitHash: SOURCE_COMMIT_HASH,
+      sourceTreeHash: SOURCE_TREE_HASH,
       retryContextPolicy: "same-context",
       executionMode: "full",
     }),
@@ -448,6 +566,7 @@ test("GenerationPlanService reuses the exact prior Context Pack for same-context
   };
   const created: CreateGenerationTaskAttemptInput[] = [];
   let contextCalls = 0;
+  let sourceBaseCalls = 0;
   const service = new GenerationPlanService({
     store: storePort({
       listGenerationPlans: () => [plan],
@@ -476,15 +595,24 @@ test("GenerationPlanService reuses the exact prior Context Pack for same-context
         return { id: "context-pack-must-not-be-used" };
       },
     },
+    sourceBaseResolver: {
+      async resolve() {
+        sourceBaseCalls += 1;
+        return { sourceCommitHash: "c".repeat(40), sourceTreeHash: "d".repeat(40) };
+      },
+    },
     rebaseReconciler: idleRebaseReconciler(),
   });
 
   await service.materializeReadyTaskAttempts();
 
   assert.equal(contextCalls, 0);
+  assert.equal(sourceBaseCalls, 0);
   assert.deepEqual(created, [{
     ...observation,
     contextPackId: priorAttempt.contextPackId,
+    sourceCommitHash: priorAttempt.sourceCommitHash,
+    sourceTreeHash: priorAttempt.sourceTreeHash,
     retryContextPolicy: "same-context",
     executionMode: "full",
   }]);
@@ -504,10 +632,13 @@ test("GenerationPlanService resolves a fresh Context Pack for latest-context mat
     ...observation,
     attempt: 1,
     contextPackId: "context-pack-prior",
+    sourceCommitHash: "1".repeat(40),
+    sourceTreeHash: "2".repeat(40),
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
   const contextRequests: Array<Record<string, unknown>> = [];
+  const sourceBaseRequests: Array<Record<string, unknown>> = [];
   const created: CreateGenerationTaskAttemptInput[] = [];
   const service = new GenerationPlanService({
     store: storePort({
@@ -531,18 +662,184 @@ test("GenerationPlanService resolves a fresh Context Pack for latest-context mat
         return { id: "context-pack-fresh" };
       },
     },
+    sourceBaseResolver: {
+      async resolve(input: Record<string, unknown>) {
+        sourceBaseRequests.push(input);
+        return { sourceCommitHash: SOURCE_COMMIT_HASH, sourceTreeHash: SOURCE_TREE_HASH };
+      },
+    },
     rebaseReconciler: idleRebaseReconciler(),
   });
 
   await service.materializeReadyTaskAttempts();
 
   assert.deepEqual(contextRequests, [{ projectId: "project-1", planId: plan.id, task, observation }]);
+  assert.deepEqual(sourceBaseRequests, [{ projectId: "project-1", planId: plan.id, task, observation }]);
   assert.deepEqual(created, [{
     ...observation,
     contextPackId: "context-pack-fresh",
+    sourceCommitHash: SOURCE_COMMIT_HASH,
+    sourceTreeHash: SOURCE_TREE_HASH,
     retryContextPolicy: "latest-context",
     executionMode: "full",
   }]);
+});
+
+test("GenerationPlanService rejects a non-exact Source Base resolver result before Attempt creation", async () => {
+  const plan = planFixture({ id: "plan-invalid-source-base", workspaceId: "workspace-1" });
+  const task = taskFixture({
+    id: "task-invalid-source-base",
+    planId: plan.id,
+    workspaceId: plan.workspaceId,
+  });
+  const observation = observationFixture(task);
+  const failures: RecordGenerationTaskMaterializationFailureInput[] = [];
+  let createCalls = 0;
+  const service = new GenerationPlanService({
+    store: storePort({
+      listGenerationPlans: () => [plan],
+      listGenerationTaskIdsReadyForMaterializationForProject: () => [task.id],
+      getGenerationPlanDetailForProject: () => ({ plan, tasks: [task], dependencies: [] }),
+      observeGenerationTaskMaterializationForProject: () => observation,
+      createGenerationTaskAttemptForProject() {
+        createCalls += 1;
+        throw new Error("Attempt creation must not receive an invalid Source Base");
+      },
+      recordGenerationTaskMaterializationFailureForProject(_projectId, _planId, input) {
+        failures.push(input);
+        return failureFixture(task, input);
+      },
+    }),
+    projectLookup: {
+      listProjectIds: () => ["project-1"],
+      projectIdForPlan: () => "project-1",
+    },
+    contextResolver: { resolve: async () => ({ id: "context-pack-valid" }) },
+    sourceBaseResolver: {
+      resolve: async () => ({
+        sourceCommitHash: "A".repeat(40),
+        sourceTreeHash: SOURCE_TREE_HASH,
+        unexpected: true,
+      }),
+    },
+    rebaseReconciler: idleRebaseReconciler(),
+  });
+
+  await service.materializeReadyTaskAttempts();
+
+  assert.equal(createCalls, 0);
+  assert.equal(failures.length, 1);
+  assert.match(String(failures[0]?.error.message), /Source Base resolver.*invalid|exact Git object/i);
+});
+
+test("GenerationPlanService rejects a mixed SHA-1/SHA-256 Source Base before Attempt creation", async () => {
+  const plan = planFixture({ id: "plan-mixed-source-base", workspaceId: "workspace-1" });
+  const task = taskFixture({
+    id: "task-mixed-source-base",
+    planId: plan.id,
+    workspaceId: plan.workspaceId,
+  });
+  const observation = observationFixture(task);
+  const failures: RecordGenerationTaskMaterializationFailureInput[] = [];
+  let createCalls = 0;
+  const service = new GenerationPlanService({
+    store: storePort({
+      listGenerationPlans: () => [plan],
+      listGenerationTaskIdsReadyForMaterializationForProject: () => [task.id],
+      getGenerationPlanDetailForProject: () => ({ plan, tasks: [task], dependencies: [] }),
+      observeGenerationTaskMaterializationForProject: () => observation,
+      createGenerationTaskAttemptForProject() {
+        createCalls += 1;
+        throw new Error("Attempt creation must not receive a mixed-format Source Base");
+      },
+      recordGenerationTaskMaterializationFailureForProject(_projectId, _planId, input) {
+        failures.push(input);
+        return failureFixture(task, input);
+      },
+    }),
+    projectLookup: {
+      listProjectIds: () => ["project-1"],
+      projectIdForPlan: () => "project-1",
+    },
+    contextResolver: { resolve: async () => ({ id: "context-pack-valid" }) },
+    sourceBaseResolver: {
+      resolve: async () => ({
+        sourceCommitHash: "a".repeat(40),
+        sourceTreeHash: "b".repeat(64),
+      }),
+    },
+    rebaseReconciler: idleRebaseReconciler(),
+  });
+
+  await service.materializeReadyTaskAttempts();
+
+  assert.equal(createCalls, 0);
+  assert.equal(failures.length, 1);
+  assert.match(String(failures[0]?.error.message), /Source Base.*invalid|Git object/i);
+});
+
+test("GenerationPlanService gives a legacy nullable Source Base an explicit same-context disposition", async () => {
+  const plan = planFixture({ id: "plan-legacy-source-base", workspaceId: "workspace-1" });
+  const task = taskFixture({
+    id: "task-legacy-source-base",
+    planId: plan.id,
+    workspaceId: plan.workspaceId,
+    currentAttempt: 1,
+    pendingContextPolicy: "same-context",
+  });
+  const observation = observationFixture(task);
+  const priorAttempt: GenerationTaskAttempt = {
+    ...attemptFixture({
+      ...observation,
+      attempt: 1,
+      contextPackId: "context-pack-legacy",
+      sourceCommitHash: null,
+      sourceTreeHash: null,
+      retryContextPolicy: "same-context",
+      executionMode: "full",
+    }),
+    status: "failed",
+    finishedAt: 9_999,
+  };
+  const failures: RecordGenerationTaskMaterializationFailureInput[] = [];
+  let sourceBaseCalls = 0;
+  let createCalls = 0;
+  const service = new GenerationPlanService({
+    store: storePort({
+      listGenerationPlans: () => [plan],
+      listGenerationTaskIdsReadyForMaterializationForProject: () => [task.id],
+      getGenerationPlanDetailForProject: () => ({ plan, tasks: [task], dependencies: [] }),
+      observeGenerationTaskMaterializationForProject: () => observation,
+      getGenerationTaskAttemptForProject: () => priorAttempt,
+      createGenerationTaskAttemptForProject() {
+        createCalls += 1;
+        throw new Error("legacy nullable Source Base must not be silently replaced");
+      },
+      recordGenerationTaskMaterializationFailureForProject(_projectId, _planId, input) {
+        failures.push(input);
+        return failureFixture(task, input);
+      },
+    }),
+    projectLookup: {
+      listProjectIds: () => ["project-1"],
+      projectIdForPlan: () => "project-1",
+    },
+    contextResolver: { resolve: async () => ({ id: "unused" }) },
+    sourceBaseResolver: {
+      async resolve() {
+        sourceBaseCalls += 1;
+        return { sourceCommitHash: SOURCE_COMMIT_HASH, sourceTreeHash: SOURCE_TREE_HASH };
+      },
+    },
+    rebaseReconciler: idleRebaseReconciler(),
+  });
+
+  await service.materializeReadyTaskAttempts();
+
+  assert.equal(sourceBaseCalls, 0);
+  assert.equal(createCalls, 0);
+  assert.equal(failures.length, 1);
+  assert.match(String(failures[0]?.error.message), /legacy|missing prior.*Source Base|cannot reuse/i);
 });
 
 test("GenerationPlanService records a deterministic materialization conflict when the durable Task is still ready", async () => {
@@ -577,6 +874,7 @@ test("GenerationPlanService records a deterministic materialization conflict whe
       projectIdForPlan: () => "project-1",
     },
     contextResolver: { resolve: async () => ({ id: "unused" }) },
+    sourceBaseResolver: defaultSourceBaseResolver(),
     rebaseReconciler: idleRebaseReconciler(),
   });
 
@@ -617,6 +915,7 @@ test("GenerationPlanService treats a materialization conflict as benign only aft
       projectIdForPlan: () => "project-1",
     },
     contextResolver: { resolve: async () => ({ id: "unused" }) },
+    sourceBaseResolver: defaultSourceBaseResolver(),
     rebaseReconciler: idleRebaseReconciler(),
     onError: () => {
       reportedErrors += 1;
@@ -670,6 +969,7 @@ test("GenerationPlanService delegates rebase reconciliation and excludes rebase 
       projectIdForPlan: () => "project-1",
     },
     contextResolver: { resolve: async () => ({ id: "context-pack-regular" }) },
+    sourceBaseResolver: defaultSourceBaseResolver(),
     rebaseReconciler: {
       async reconcileNeedsRebaseTasks() {
         rebaseCalls += 1;
@@ -755,6 +1055,7 @@ for (const contextFailure of [
           return { id: "context-pack-sibling" };
         },
       },
+      sourceBaseResolver: defaultSourceBaseResolver(),
       rebaseReconciler: idleRebaseReconciler(),
     });
 
@@ -775,6 +1076,7 @@ for (const contextFailure of [
     assert.deepEqual(materialized, [{
       ...observations.get(sibling.id)!,
       contextPackId: "context-pack-sibling",
+      ...sourceBaseForTask(sibling),
       retryContextPolicy: "same-context",
       executionMode: "full",
     }]);

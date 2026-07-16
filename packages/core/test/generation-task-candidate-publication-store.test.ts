@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
+  generationTaskArtifactCandidateRetentionRef,
   GenerationTaskLeaseFenceError,
   GenerationTaskQualityGateError,
   Store,
@@ -61,7 +62,7 @@ function emptyGeneration() {
     dependencyPlans: [],
     prototypeIntents: [],
     capabilities: [],
-    responsiveFrames: [],
+    responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
     qualityProfile: {
       requiredFrameIds: [],
       blockingSeverities: [],
@@ -135,7 +136,7 @@ function createPublicationFixture(label: string) {
         baseRevisionId: baseRevision.id,
         dependsOnArtifactIds: [],
         capabilityIds: [],
-        responsiveFrameIds: [],
+        responsiveFrameIds: ["desktop"],
       }],
     },
     rationale: "Publish an immutable generated Page candidate",
@@ -157,8 +158,9 @@ function createPublicationFixture(label: string) {
   assert.ok(kernel);
   const baseRevisionChecksum = store.workspace.getArtifactRevisionContextChecksum(baseRevision.id);
   assert.ok(baseRevisionChecksum);
+  const contextHash = checksum(`${label}:context-pack`);
   const context = store.workspace.persistContextPack({
-    id: `candidate-publication-context-${label}`,
+    id: `context-pack-${contextHash}`,
     workspaceId: workspace.id,
     graphRevision: workspace.graphRevision,
     target: { type: "artifact", id: artifactId },
@@ -193,7 +195,7 @@ function createPublicationFixture(label: string) {
     omissions: [],
     tokenEstimate: 2,
     manifestPath: `context-packs/candidate-publication-${label}.json`,
-    hash: checksum(`${label}:context-pack`),
+    hash: contextHash,
   });
   const attempt = store.workspace.createGenerationTaskAttemptForProject(
     project.id,
@@ -201,6 +203,8 @@ function createPublicationFixture(label: string) {
     {
       ...observation,
       contextPackId: context.id,
+      sourceCommitHash: baseRevision.sourceCommitHash,
+      sourceTreeHash: baseRevision.sourceTreeHash,
       retryContextPolicy: "same-context",
       executionMode: "full",
     },
@@ -219,16 +223,46 @@ function createPublicationFixture(label: string) {
     sourceCommitHash: checksum(`${label}:candidate-commit`),
     sourceTreeHash: checksum(`${label}:candidate-tree`),
     renderSpec: {
-      frames: [
-        { id: "desktop", width: 1_440, height: 900 },
-        { id: "mobile", width: 390, height: 844 },
-      ],
+      frames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
     },
     quality: { state: "passed", score: 98, findings: [] },
   };
+  const qualityEvidence = {
+    protocol: "dezin.standard-artifact-quality.v1",
+    candidate: {
+      commitHash: candidate.sourceCommitHash,
+      treeHash: candidate.sourceTreeHash,
+    },
+    contextPack: { id: context.id, hash: context.hash },
+    frames: candidate.renderSpec.frames,
+    frameResults: [],
+    round: 0,
+  };
   const evidence = {
-    runtimeChecks: [{ id: "load", status: "passed" }],
-    visualReview: { status: "passed", fidelity: 0.98 },
+    protocol: "dezin.artifact-run.v1",
+    projectId: project.id,
+    taskId: task.id,
+    planId: task.planId,
+    workspaceId: task.workspaceId,
+    attempt: attempt.attempt,
+    attemptCreatedAt: attempt.createdAt,
+    inputHash: attempt.inputHash,
+    contextPackId: context.id,
+    contextPackHash: context.hash,
+    sourceBase: {
+      commitHash: attempt.sourceCommitHash,
+      treeHash: attempt.sourceTreeHash,
+    },
+    candidateRetentionRef: generationTaskArtifactCandidateRetentionRef(attempt),
+    selectedRound: 0,
+    versions: [{
+      round: 0,
+      commitHash: candidate.sourceCommitHash,
+      treeHash: candidate.sourceTreeHash,
+      passed: true,
+      score: candidate.quality.score,
+    }],
+    qualityEvidence,
   };
   const staged = store.workspace.stageGenerationTaskCandidateForProject(
     project.id,

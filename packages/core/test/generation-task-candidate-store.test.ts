@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
+  generationTaskArtifactCandidateRetentionRef,
   generationTaskCandidateEvidenceHash,
   GenerationTaskLeaseFenceError,
   GenerationTaskQualityGateError,
@@ -43,7 +44,7 @@ function emptyGeneration() {
     dependencyPlans: [],
     prototypeIntents: [],
     capabilities: [],
-    responsiveFrames: [],
+    responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
     qualityProfile: {
       requiredFrameIds: [],
       blockingSeverities: [],
@@ -123,8 +124,9 @@ function persistArtifactContextPack(
     ...artifactItems,
     ...resourceItem,
   ];
+  const hash = checksum(`${input.id}:pack`);
   return store.workspace.persistContextPack({
-    id: input.id,
+    id: `context-pack-${hash}`,
     workspaceId: input.workspaceId,
     graphRevision: input.graphRevision,
     target: { type: "artifact", id: input.targetArtifactId },
@@ -134,7 +136,7 @@ function persistArtifactContextPack(
     omissions: [],
     tokenEstimate: items.length,
     manifestPath: `context-packs/${input.id}.json`,
-    hash: checksum(`${input.id}:pack`),
+    hash,
   });
 }
 
@@ -261,7 +263,7 @@ function createCandidateFixture(label: string) {
           baseRevisionId: componentRevision.id,
           dependsOnArtifactIds: [],
           capabilityIds: [],
-          responsiveFrameIds: [],
+          responsiveFrameIds: ["desktop"],
         },
         {
           operation: "revise",
@@ -273,7 +275,7 @@ function createCandidateFixture(label: string) {
           baseRevisionId: pageRevision.id,
           dependsOnArtifactIds: [`candidate-component-${label}`],
           capabilityIds: [],
-          responsiveFrameIds: [],
+          responsiveFrameIds: ["desktop"],
         },
       ],
       dependencyPlans: [
@@ -331,6 +333,8 @@ function createCandidateFixture(label: string) {
     {
       ...componentObservation,
       contextPackId: componentContext.id,
+      sourceCommitHash: componentRevision.sourceCommitHash,
+      sourceTreeHash: componentRevision.sourceTreeHash,
       retryContextPolicy: "same-context",
       executionMode: "full",
     },
@@ -445,6 +449,8 @@ function createCandidateFixture(label: string) {
     {
       ...pageObservation,
       contextPackId: pageContext.id,
+      sourceCommitHash: pageRevision.sourceCommitHash,
+      sourceTreeHash: pageRevision.sourceTreeHash,
       retryContextPolicy: "same-context",
       executionMode: "full",
     },
@@ -476,7 +482,40 @@ function createCandidateFixture(label: string) {
   };
 }
 
-function candidateInput(label: string): StageGenerationTaskCandidateInput {
+function candidateInput(
+  label: string,
+  claim: GenerationTaskAttemptClaim,
+  projectId: string,
+): StageGenerationTaskCandidateInput {
+  const contextPackId = claim.attempt.contextPackId;
+  if (!contextPackId?.startsWith("context-pack-")) {
+    throw new Error("Artifact candidate fixture requires a content-addressed Context Pack");
+  }
+  const candidate = {
+    kind: "artifact" as const,
+    sourceCommitHash: checksum(`${label}:candidate-commit`),
+    sourceTreeHash: checksum(`${label}:candidate-tree`),
+    renderSpec: {
+      frames: [
+        { id: "desktop", name: "Desktop", width: 1_440, height: 900 },
+      ],
+    },
+    quality: { state: "passed" as const, score: 97, findings: [] },
+  };
+  const qualityEvidence = {
+    protocol: "dezin.standard-artifact-quality.v1",
+    candidate: {
+      commitHash: candidate.sourceCommitHash,
+      treeHash: candidate.sourceTreeHash,
+    },
+    contextPack: {
+      id: contextPackId,
+      hash: contextPackId.slice("context-pack-".length),
+    },
+    frames: candidate.renderSpec.frames,
+    frameResults: [],
+    round: 0,
+  };
   return {
     lease: {
       taskId: "replaced-by-fixture",
@@ -485,27 +524,42 @@ function candidateInput(label: string): StageGenerationTaskCandidateInput {
       ownerId: "replaced-by-fixture",
       leaseToken: "replaced-by-fixture",
     },
-    candidate: {
-      kind: "artifact",
-      sourceCommitHash: checksum(`${label}:candidate-commit`),
-      sourceTreeHash: checksum(`${label}:candidate-tree`),
-      renderSpec: {
-        frames: [
-          { id: "desktop", width: 1_440, height: 900 },
-          { id: "mobile", width: 390, height: 844 },
-        ],
-      },
-      quality: { state: "passed", score: 97, findings: [] },
-    },
+    candidate,
     evidence: {
-      runtimeChecks: [{ id: "load", status: "passed" }],
-      visualReview: { status: "passed", fidelity: 0.97 },
+      protocol: "dezin.artifact-run.v1",
+      projectId,
+      taskId: claim.task.id,
+      planId: claim.task.planId,
+      workspaceId: claim.task.workspaceId,
+      attempt: claim.attempt.attempt,
+      attemptCreatedAt: claim.attempt.createdAt,
+      inputHash: claim.attempt.inputHash,
+      contextPackId,
+      contextPackHash: contextPackId.slice("context-pack-".length),
+      sourceBase: {
+        commitHash: claim.attempt.sourceCommitHash,
+        treeHash: claim.attempt.sourceTreeHash,
+      },
+      candidateRetentionRef: generationTaskArtifactCandidateRetentionRef(claim.attempt),
+      selectedRound: 0,
+      versions: [{
+        round: 0,
+        commitHash: candidate.sourceCommitHash,
+        treeHash: candidate.sourceTreeHash,
+        passed: true,
+        score: candidate.quality.score,
+      }],
+      qualityEvidence,
     },
   };
 }
 
-function inputForClaim(label: string, claim: GenerationTaskAttemptClaim): StageGenerationTaskCandidateInput {
-  return { ...candidateInput(label), lease: claim.lease };
+function inputForClaim(
+  label: string,
+  claim: GenerationTaskAttemptClaim,
+  projectId: string,
+): StageGenerationTaskCandidateInput {
+  return { ...candidateInput(label, claim, projectId), lease: claim.lease };
 }
 
 function candidateDurableState(store: Store, projectId: string, planId: string, taskId: string) {
@@ -548,10 +602,112 @@ function candidateDurableState(store: Store, projectId: string, planId: string, 
   };
 }
 
+test("Artifact candidate ref recovery entries are exact, stably ordered, and limited", () => {
+  const fixture = createCandidateFixture("ref-recovery-order");
+  try {
+    const beforePage = fixture.store.workspace.listArtifactCandidateRefRecoveryEntries();
+    assert.deepEqual(beforePage.entries.map((entry) => entry.task.id), [fixture.componentTask.id]);
+    const component = beforePage.entries[0];
+    assert.equal(component?.retentionKind, "retained-candidate");
+    if (component?.retentionKind !== "retained-candidate") assert.fail("expected retained Component");
+    assert.equal(component.attempt.status, "succeeded");
+    assert.equal(component.attempt.materializationSealed, true);
+    assert.equal(component.attempt.lease, null);
+    assert.equal(component.attempt.candidateRevisionId, fixture.componentSuccessor.id);
+    assert.equal(component.revision.id, fixture.componentSuccessor.id);
+    assert.equal(beforePage.nextCursor, null);
+
+    const staged = fixture.store.workspace.stageGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      inputForClaim("ref-recovery-order", fixture.claim, fixture.project.id),
+    );
+    const published = fixture.store.workspace.publishGenerationTaskCandidateForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      { lease: fixture.claim.lease },
+    );
+    assert.equal(published.status, "succeeded");
+
+    const page = fixture.store.workspace.listArtifactCandidateRefRecoveryEntries(100);
+    assert.deepEqual(page.entries.map((entry) => entry.task.id), [
+      fixture.componentTask.id,
+      fixture.pageTask.id,
+    ]);
+    assert.deepEqual(page.entries.map((entry) => entry.attempt.attempt), [1, 1]);
+    const generatedPage = page.entries[1];
+    assert.equal(generatedPage?.retentionKind, "retained-candidate");
+    if (generatedPage?.retentionKind !== "retained-candidate") assert.fail("expected retained Page");
+    assert.equal(generatedPage.attempt.candidateRevisionId, staged.artifactRevision.id);
+    assert.equal(generatedPage.revision.id, staged.artifactRevision.id);
+    assert.equal(page.nextCursor, null);
+    const first = fixture.store.workspace.listArtifactCandidateRefRecoveryEntries(1);
+    assert.deepEqual(first.entries.map((entry) => entry.task.id), [fixture.componentTask.id]);
+    assert.ok(first.nextCursor);
+    const second = fixture.store.workspace.listArtifactCandidateRefRecoveryEntries(1, first.nextCursor);
+    assert.deepEqual(second.entries.map((entry) => entry.task.id), [fixture.pageTask.id]);
+    const exhausted = fixture.store.workspace.listArtifactCandidateRefRecoveryEntries(1, second.nextCursor);
+    assert.deepEqual(exhausted.entries, []);
+    assert.equal(exhausted.nextCursor, null);
+    assert.throws(
+      () => fixture.store.workspace.listArtifactCandidateRefRecoveryEntries(0),
+      /limit must be a safe integer >= 1/i,
+    );
+    assert.throws(
+      () => fixture.store.workspace.listArtifactCandidateRefRecoveryEntries(1_001),
+      /limit must not exceed 1000/i,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("Artifact candidate ref recovery includes an exact terminal orphan Attempt with no candidate", () => {
+  const fixture = createCandidateFixture("ref-recovery-missing-revision");
+  try {
+    fixture.store.workspace.finishGenerationTaskAttemptForProject(
+      fixture.project.id,
+      fixture.plan.id,
+      {
+        lease: fixture.claim.lease,
+        failure: {
+          failureClass: "cancelled",
+          error: { code: "TEST_CANCELLED", message: "cancel before candidate staging" },
+        },
+      },
+    );
+
+    const entries = fixture.store.workspace.listArtifactCandidateRefRecoveryEntries().entries;
+    assert.deepEqual(entries.map((entry) => entry.task.id), [
+      fixture.componentTask.id,
+      fixture.pageTask.id,
+    ]);
+    assert.equal(entries[0]?.retentionKind, "retained-candidate");
+    const orphan = entries[1];
+    assert.equal(orphan?.retentionKind, "orphan-attempt");
+    if (orphan?.retentionKind !== "orphan-attempt") {
+      assert.fail("expected a terminal orphan Artifact Attempt recovery entry");
+    }
+    assert.equal(orphan.revision, null);
+    assert.equal(orphan.attempt.status, "failed");
+    assert.equal(orphan.attempt.candidateRevisionId, null);
+    assert.equal(orphan.attempt.candidateResourceRevisionId, null);
+    assert.equal(orphan.attempt.candidateEvidence, null);
+    assert.equal(orphan.attempt.candidateEvidenceHash, null);
+    assert.equal(orphan.attempt.sourceCommitHash, fixture.pageRevision.sourceCommitHash);
+    assert.equal(orphan.attempt.sourceTreeHash, fixture.pageRevision.sourceTreeHash);
+    assert.equal(orphan.attempt.materializationSealed, true);
+    assert.equal(orphan.attempt.lease, null);
+    assert.notEqual(orphan.attempt.finishedAt, null);
+  } finally {
+    fixture.store.close();
+  }
+});
+
 test("staging an Artifact candidate atomically seals a derived Revision without publishing it", () => {
   const fixture = createCandidateFixture("success");
   try {
-    const input = inputForClaim("success", fixture.claim);
+    const input = inputForClaim("success", fixture.claim, fixture.project.id);
     const before = candidateDurableState(
       fixture.store,
       fixture.project.id,
@@ -688,7 +844,7 @@ test("staging preserves a detached candidate when the target Head advances after
     const result = fixture.store.workspace.stageGenerationTaskCandidateForProject(
       fixture.project.id,
       fixture.plan.id,
-      inputForClaim("head-drift", fixture.claim),
+      inputForClaim("head-drift", fixture.claim, fixture.project.id),
     );
     assert.equal(result.attempt.status, "candidate-ready");
     assert.equal(result.artifactRevision.parentRevisionId, fixture.claim.attempt.baseRevisionId);
@@ -748,7 +904,7 @@ test("staging preserves a detached root candidate when a concurrent root publish
         baseRevisionId: null,
         dependsOnArtifactIds: [],
         capabilityIds: [],
-        responsiveFrameIds: [],
+        responsiveFrameIds: ["desktop"],
       }],
     },
     rationale: "Keep generation detached until its exact root can publish",
@@ -780,6 +936,8 @@ test("staging preserves a detached root candidate when a concurrent root publish
     {
       ...observation,
       contextPackId: context.id,
+      sourceCommitHash: checksum(`${label}:attempt-source-commit`),
+      sourceTreeHash: checksum(`${label}:attempt-source-tree`),
       retryContextPolicy: "same-context",
       executionMode: "full",
     },
@@ -816,7 +974,7 @@ test("staging preserves a detached root candidate when a concurrent root publish
     const staged = store.workspace.stageGenerationTaskCandidateForProject(
       project.id,
       compiled.plan.id,
-      inputForClaim(label, claim),
+      inputForClaim(label, claim, project.id),
     );
     assert.equal(staged.artifactRevision.parentRevisionId, null);
     assert.notEqual(staged.artifactRevision.id, competing.id);
@@ -851,7 +1009,7 @@ test("candidate staging rejects non-git object hashes before making any durable 
       fixture.plan.id,
       fixture.pageTask.id,
     );
-    const input = inputForClaim("invalid-git-hash", fixture.claim);
+    const input = inputForClaim("invalid-git-hash", fixture.claim, fixture.project.id);
     input.candidate = { ...input.candidate, sourceCommitHash: "not-a-git-object-id" };
     assert.throws(
       () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
@@ -879,11 +1037,43 @@ test("candidate staging rejects failed quality before making any durable write",
       fixture.plan.id,
       fixture.pageTask.id,
     );
-    const input = inputForClaim("failed-quality", fixture.claim);
+    const input = inputForClaim("failed-quality", fixture.claim, fixture.project.id);
     input.candidate = {
       ...input.candidate,
       quality: { state: "failed", score: 42, findings: [] },
     };
+    assert.throws(
+      () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
+        fixture.project.id,
+        fixture.plan.id,
+        input,
+      ),
+      (error) => error instanceof GenerationTaskQualityGateError,
+    );
+    assert.deepEqual(
+      candidateDurableState(fixture.store, fixture.project.id, fixture.plan.id, fixture.pageTask.id),
+      before,
+    );
+  } finally {
+    fixture.store.close();
+  }
+});
+
+test("candidate staging fences visual evidence to the authoritative Store Project", () => {
+  const fixture = createCandidateFixture("foreign-evidence-project");
+  try {
+    const before = candidateDurableState(
+      fixture.store,
+      fixture.project.id,
+      fixture.plan.id,
+      fixture.pageTask.id,
+    );
+    const input = inputForClaim(
+      "foreign-evidence-project",
+      fixture.claim,
+      fixture.project.id,
+    );
+    input.evidence = { ...input.evidence, projectId: "project-foreign" };
     assert.throws(
       () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
         fixture.project.id,
@@ -922,7 +1112,7 @@ test("candidate staging rolls back the Revision and state when the ready event c
       () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
         fixture.project.id,
         fixture.plan.id,
-        inputForClaim("rollback", fixture.claim),
+        inputForClaim("rollback", fixture.claim, fixture.project.id),
       ),
       /injected candidate-ready event failure/,
     );
@@ -939,7 +1129,7 @@ test("wrong, expired, and stale lease tokens fence candidate staging with zero w
   await t.test("wrong lease token", () => {
     const fixture = createCandidateFixture("wrong-token");
     try {
-      const input = inputForClaim("wrong-token", fixture.claim);
+      const input = inputForClaim("wrong-token", fixture.claim, fixture.project.id);
       input.lease = { ...input.lease, leaseToken: `${input.lease.leaseToken}-wrong` };
       const before = candidateDurableState(
         fixture.store,
@@ -979,7 +1169,7 @@ test("wrong, expired, and stale lease tokens fence candidate staging with zero w
         () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
           fixture.project.id,
           fixture.plan.id,
-          inputForClaim("expired-token", fixture.claim),
+          inputForClaim("expired-token", fixture.claim, fixture.project.id),
         ),
         (error) => error instanceof GenerationTaskLeaseFenceError,
       );
@@ -1035,7 +1225,7 @@ test("wrong, expired, and stale lease tokens fence candidate staging with zero w
         () => fixture.store.workspace.stageGenerationTaskCandidateForProject(
           fixture.project.id,
           fixture.plan.id,
-          inputForClaim("stale-token", fixture.claim),
+          inputForClaim("stale-token", fixture.claim, fixture.project.id),
         ),
         (error) => error instanceof GenerationTaskLeaseFenceError,
       );
@@ -1053,7 +1243,7 @@ test("candidate staging replays an exact lost response and rejects a different i
   const fixture = createCandidateFixture("replay");
   try {
     const api = fixture.store.workspace;
-    const input = inputForClaim("replay", fixture.claim);
+    const input = inputForClaim("replay", fixture.claim, fixture.project.id);
     const before = candidateDurableState(
       fixture.store,
       fixture.project.id,

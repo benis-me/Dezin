@@ -6,36 +6,95 @@ export interface GenerationPlanRecoveryDeps {
     recoverExpiredGenerationTaskAttempts(now: number): GenerationTaskRecoverySummary;
   };
   planService: {
-    compileAndEnqueueApprovedShell(planId: string): unknown;
+    compileAndEnqueueApprovedShell(planId: string): unknown | Promise<unknown>;
     reconcileNeedsRebaseTasks(): Promise<{ planIds: readonly string[] }>;
   };
   clock: { now(): number };
   logger: {
-    warn(context: { planId: string; error: unknown }, message: string): void;
+    warn(context: GenerationPlanRecoveryWarningContext, message: string): void;
   };
 }
 
+export type GenerationPlanRecoveryWarningContext =
+  | { operation: "list-approved-shells"; error: unknown }
+  | { operation: "compile-approved-shell"; planId: string; error: unknown }
+  | { operation: "recover-expired-attempts"; error: unknown }
+  | { operation: "reconcile-needs-rebase"; error: unknown };
+
 function stableUnique(values: readonly string[]): string[] {
   return [...new Set(values)];
+}
+
+function emptyRecoverySummary(): GenerationTaskRecoverySummary {
+  return {
+    planIds: [],
+    retriedTaskIds: [],
+    needsRebaseTaskIds: [],
+    cancelledTaskIds: [],
+    failedTaskIds: [],
+  };
+}
+
+function warn(
+  deps: GenerationPlanRecoveryDeps,
+  context: GenerationPlanRecoveryWarningContext,
+  message: string,
+): void {
+  try {
+    deps.logger.warn(context, message);
+  } catch {
+    // Startup observability is best-effort and cannot own durable recovery.
+  }
 }
 
 /** Reconcile all correctness-critical durable Generation state before admission. */
 export async function recoverGenerationPlans(
   deps: GenerationPlanRecoveryDeps,
 ): Promise<GenerationTaskRecoverySummary> {
-  for (const shell of deps.store.listApprovedGenerationPlanShells()) {
+  let shells: readonly { id: string }[] = [];
+  try {
+    shells = deps.store.listApprovedGenerationPlanShells();
+  } catch (error) {
+    warn(
+      deps,
+      { operation: "list-approved-shells", error },
+      "approved generation Plan scan failed during startup",
+    );
+  }
+
+  for (const shell of shells) {
     try {
-      deps.planService.compileAndEnqueueApprovedShell(shell.id);
+      await deps.planService.compileAndEnqueueApprovedShell(shell.id);
     } catch (error) {
-      deps.logger.warn(
-        { planId: shell.id, error },
+      warn(
+        deps,
+        { operation: "compile-approved-shell", planId: shell.id, error },
         "generation plan compilation failed during recovery",
       );
     }
   }
 
-  const expired = deps.store.recoverExpiredGenerationTaskAttempts(deps.clock.now());
-  const rebased = await deps.planService.reconcileNeedsRebaseTasks();
+  let expired = emptyRecoverySummary();
+  try {
+    expired = deps.store.recoverExpiredGenerationTaskAttempts(deps.clock.now());
+  } catch (error) {
+    warn(
+      deps,
+      { operation: "recover-expired-attempts", error },
+      "expired generation Attempt recovery failed during startup",
+    );
+  }
+
+  let rebased: { planIds: readonly string[] } = { planIds: [] };
+  try {
+    rebased = await deps.planService.reconcileNeedsRebaseTasks();
+  } catch (error) {
+    warn(
+      deps,
+      { operation: "reconcile-needs-rebase", error },
+      "generation Task rebase reconciliation failed during startup",
+    );
+  }
   return {
     planIds: stableUnique([...expired.planIds, ...rebased.planIds]),
     retriedTaskIds: stableUnique(expired.retriedTaskIds),

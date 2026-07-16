@@ -4,6 +4,7 @@ import type { GenerationTaskRecoverySummary } from "../../../packages/core/src/i
 import {
   recoverGenerationPlans,
   type GenerationPlanRecoveryDeps,
+  type GenerationPlanRecoveryWarningContext,
 } from "../src/orchestration/recovery.ts";
 
 function recoverySummary(
@@ -22,7 +23,7 @@ function recoverySummary(
 test("recoverGenerationPlans isolates each approved shell and continues startup recovery after a compile failure", async () => {
   const order: string[] = [];
   const compileError = new Error("proposal revision is no longer valid");
-  const warnings: Array<{ context: { planId: string; error: unknown }; message: string }> = [];
+  const warnings: Array<{ context: GenerationPlanRecoveryWarningContext; message: string }> = [];
   const deps = {
     store: {
       listApprovedGenerationPlanShells() {
@@ -55,7 +56,7 @@ test("recoverGenerationPlans isolates each approved shell and continues startup 
       },
     },
     logger: {
-      warn(context: { planId: string; error: unknown }, message: string) {
+      warn(context: GenerationPlanRecoveryWarningContext, message: string) {
         warnings.push({ context, message });
       },
     },
@@ -74,7 +75,11 @@ test("recoverGenerationPlans isolates each approved shell and continues startup 
   ]);
   assert.deepEqual(warnings, [
     {
-      context: { planId: "plan-invalid", error: compileError },
+      context: {
+        operation: "compile-approved-shell",
+        planId: "plan-invalid",
+        error: compileError,
+      },
       message: "generation plan compilation failed during recovery",
     },
   ]);
@@ -130,4 +135,135 @@ test("recoverGenerationPlans preserves lease dispositions while merging stable u
     cancelledTaskIds: ["task-cancelled"],
     failedTaskIds: ["task-failed"],
   });
+});
+
+test("recoverGenerationPlans isolates asynchronous compilation per approved shell", async () => {
+  const order: string[] = [];
+  const compileError = new Error("async compile failed");
+  const warnings: Array<{ context: unknown; message: string }> = [];
+  const deps = {
+    store: {
+      listApprovedGenerationPlanShells: () => [
+        { id: "plan-before" },
+        { id: "plan-bad" },
+        { id: "plan-after" },
+      ],
+      recoverExpiredGenerationTaskAttempts: () => recoverySummary(),
+    },
+    planService: {
+      async compileAndEnqueueApprovedShell(planId: string) {
+        order.push(`compile:${planId}`);
+        if (planId === "plan-bad") throw compileError;
+      },
+      async reconcileNeedsRebaseTasks() {
+        return { planIds: [] };
+      },
+    },
+    clock: { now: () => 90_000 },
+    logger: {
+      warn(context: unknown, message: string) {
+        warnings.push({ context, message });
+      },
+    },
+  } satisfies GenerationPlanRecoveryDeps;
+
+  await recoverGenerationPlans(deps);
+
+  assert.deepEqual(order, ["compile:plan-before", "compile:plan-bad", "compile:plan-after"]);
+  assert.deepEqual(warnings, [{
+    context: {
+      operation: "compile-approved-shell",
+      planId: "plan-bad",
+      error: compileError,
+    },
+    message: "generation plan compilation failed during recovery",
+  }]);
+});
+
+test("recoverGenerationPlans observes expired-attempt recovery failure and still reconciles rebase work", async () => {
+  const order: string[] = [];
+  const expiredError = new Error("sqlite busy during lease recovery");
+  const warnings: Array<{ context: unknown; message: string }> = [];
+  const deps = {
+    store: {
+      listApprovedGenerationPlanShells: () => [],
+      recoverExpiredGenerationTaskAttempts() {
+        order.push("recover-expired");
+        throw expiredError;
+      },
+    },
+    planService: {
+      compileAndEnqueueApprovedShell() {},
+      async reconcileNeedsRebaseTasks() {
+        order.push("reconcile-needs-rebase");
+        return { planIds: ["plan-rebased"] };
+      },
+    },
+    clock: { now: () => 100_000 },
+    logger: {
+      warn(context: unknown, message: string) {
+        warnings.push({ context, message });
+      },
+    },
+  } satisfies GenerationPlanRecoveryDeps;
+
+  const summary = await recoverGenerationPlans(deps);
+
+  assert.deepEqual(order, ["recover-expired", "reconcile-needs-rebase"]);
+  assert.deepEqual(summary.planIds, ["plan-rebased"]);
+  assert.deepEqual(warnings, [{
+    context: { operation: "recover-expired-attempts", error: expiredError },
+    message: "expired generation Attempt recovery failed during startup",
+  }]);
+});
+
+test("recoverGenerationPlans observes shell-list and rebase failures without discarding completed lease recovery", async () => {
+  const listError = new Error("approved shell scan failed");
+  const rebaseError = new Error("rebase adapter unavailable");
+  const warnings: Array<{ context: unknown; message: string }> = [];
+  const deps = {
+    store: {
+      listApprovedGenerationPlanShells() {
+        throw listError;
+      },
+      recoverExpiredGenerationTaskAttempts: () => recoverySummary({
+        planIds: ["plan-expired"],
+        retriedTaskIds: ["task-retried"],
+      }),
+    },
+    planService: {
+      compileAndEnqueueApprovedShell() {
+        assert.fail("no shell can be compiled after the list operation failed");
+      },
+      async reconcileNeedsRebaseTasks() {
+        throw rebaseError;
+      },
+    },
+    clock: { now: () => 110_000 },
+    logger: {
+      warn(context: unknown, message: string) {
+        warnings.push({ context, message });
+      },
+    },
+  } satisfies GenerationPlanRecoveryDeps;
+
+  const summary = await recoverGenerationPlans(deps);
+
+  assert.deepEqual(summary, {
+    planIds: ["plan-expired"],
+    retriedTaskIds: ["task-retried"],
+    needsRebaseTaskIds: [],
+    cancelledTaskIds: [],
+    failedTaskIds: [],
+  });
+  assert.deepEqual(warnings, [
+    {
+      context: { operation: "list-approved-shells", error: listError },
+      message: "approved generation Plan scan failed during startup",
+    },
+    {
+      context: { operation: "reconcile-needs-rebase", error: rebaseError },
+      message: "generation Task rebase reconciliation failed during startup",
+    },
+  ]);
 });

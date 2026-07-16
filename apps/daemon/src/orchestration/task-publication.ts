@@ -2,6 +2,7 @@ import type {
   AnyPublishGenerationTaskCandidateResult,
   AnyStageGenerationTaskCandidateInput,
   AnyStageGenerationTaskCandidateResult,
+  ArtifactRevisionRecord,
   CompleteGenerationTaskValidationInput,
   CompleteGenerationTaskValidationResult,
   FinishGenerationTaskAttemptFailureInput,
@@ -16,8 +17,10 @@ import type {
   GenerationTaskPublicationPort,
   PreparedGenerationTaskResult,
 } from "./generation-task-executor.ts";
+import type { ArtifactCandidateRetentionPort } from "./artifact-candidate-retention.ts";
 
 export interface GenerationTaskPublicationStorePort {
+  getArtifactRevision(revisionId: string): ArtifactRevisionRecord | null;
   stageGenerationTaskCandidateForProject(
     projectId: string,
     planId: string,
@@ -47,6 +50,7 @@ export interface GenerationTaskPublicationStorePort {
 
 export interface GenerationTaskPublicationOptions {
   readonly store: GenerationTaskPublicationStorePort;
+  readonly artifactRetention: ArtifactCandidateRetentionPort;
   readonly projectIdForWorkspace: (workspaceId: string) => string;
   /** Best-effort wake-up only; durable Plan events remain the source of truth. */
   readonly notifyPlan: (planId: string) => void;
@@ -73,11 +77,13 @@ function assertNever(value: never): never {
  */
 export class GenerationTaskPublication implements GenerationTaskPublicationPort {
   private readonly store: GenerationTaskPublicationStorePort;
+  private readonly artifactRetention: ArtifactCandidateRetentionPort;
   private readonly projectIdForWorkspace: (workspaceId: string) => string;
   private readonly notifyPlan: (planId: string) => void;
 
   constructor(options: GenerationTaskPublicationOptions) {
     this.store = options.store;
+    this.artifactRetention = options.artifactRetention;
     this.projectIdForWorkspace = options.projectIdForWorkspace;
     this.notifyPlan = options.notifyPlan;
   }
@@ -91,24 +97,41 @@ export class GenerationTaskPublication implements GenerationTaskPublicationPort 
     const projectId = this.projectIdForWorkspace(claim.task.workspaceId);
     switch (result.kind) {
       case "artifact-candidate":
-        this.store.stageGenerationTaskCandidateForProject(projectId, claim.task.planId, {
-          lease: claim.lease,
-          candidate: {
-            kind: "artifact",
-            sourceCommitHash: result.sourceCommitHash,
-            sourceTreeHash: result.sourceTreeHash,
-            renderSpec: result.renderSpec,
-            quality: result.quality,
-          },
-          evidence: result.evidence,
-        });
-        this.notifyBestEffort(claim.task.planId);
-        checkAbort(signal);
-        this.store.publishGenerationTaskCandidateForProject(projectId, claim.task.planId, {
-          lease: claim.lease,
-        });
-        this.notifyBestEffort(claim.task.planId);
-        return;
+        {
+          const staged = this.store.stageGenerationTaskCandidateForProject(projectId, claim.task.planId, {
+            lease: claim.lease,
+            candidate: {
+              kind: "artifact",
+              sourceCommitHash: result.sourceCommitHash,
+              sourceTreeHash: result.sourceTreeHash,
+              renderSpec: result.renderSpec,
+              quality: result.quality,
+            },
+            evidence: result.evidence,
+          });
+          if (staged.artifactRevision === null || staged.resourceRevision !== null) {
+            throw new TypeError("Artifact Task staging returned a non-Artifact Revision");
+          }
+          this.notifyBestEffort(claim.task.planId);
+          checkAbort(signal);
+          await this.artifactRetention.promote({
+            claim,
+            artifactRevision: staged.artifactRevision,
+            evidence: result.evidence,
+          }, signal);
+          checkAbort(signal);
+          await this.artifactRetention.release({
+            claim,
+            artifactRevision: staged.artifactRevision,
+            evidence: result.evidence,
+          }, signal);
+          checkAbort(signal);
+          this.store.publishGenerationTaskCandidateForProject(projectId, claim.task.planId, {
+            lease: claim.lease,
+          });
+          this.notifyBestEffort(claim.task.planId);
+          return;
+        }
       case "resource-candidate":
         this.store.stageGenerationTaskCandidateForProject(projectId, claim.task.planId, {
           lease: claim.lease,
@@ -150,6 +173,26 @@ export class GenerationTaskPublication implements GenerationTaskPublicationPort 
   ): Promise<void> {
     checkAbort(signal);
     const projectId = this.projectIdForWorkspace(claim.task.workspaceId);
+    if (claim.task.target.type === "artifact") {
+      const revisionId = claim.attempt.candidateRevisionId;
+      const evidence = claim.attempt.candidateEvidence;
+      if (revisionId === null || evidence === null) {
+        throw new TypeError("Artifact publication retry has no recorded candidate");
+      }
+      const artifactRevision = this.store.getArtifactRevision(revisionId);
+      if (artifactRevision === null) {
+        throw new TypeError("Artifact publication retry candidate Revision is missing");
+      }
+      await this.artifactRetention.promote({ claim, artifactRevision, evidence }, signal);
+      checkAbort(signal);
+      await this.artifactRetention.release({ claim, artifactRevision, evidence }, signal);
+      checkAbort(signal);
+      this.store.publishGenerationTaskCandidateForProject(projectId, claim.task.planId, {
+        lease: claim.lease,
+      });
+      this.notifyBestEffort(claim.task.planId);
+      return;
+    }
     this.store.publishGenerationTaskCandidateForProject(projectId, claim.task.planId, {
       lease: claim.lease,
     });

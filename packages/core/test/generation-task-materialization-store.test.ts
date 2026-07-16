@@ -20,7 +20,7 @@ function emptyGeneration() {
     dependencyPlans: [],
     prototypeIntents: [],
     capabilities: [],
-    responsiveFrames: [],
+    responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
     qualityProfile: {
       requiredFrameIds: [],
       blockingSeverities: [],
@@ -75,6 +75,8 @@ test("root Task materialization freezes one immutable Attempt and replays idempo
   assert.equal(observation.expectedSnapshotId, plan.baseSnapshotId);
   assert.equal(observation.kernelRevisionId, store.workspace.getWorkspace(project.id)?.activeKernelRevisionId);
   assert.equal(observation.baseRevisionId, null);
+  assert.equal(Object.hasOwn(observation, "sourceCommitHash"), false);
+  assert.equal(Object.hasOwn(observation, "sourceTreeHash"), false);
   assert.deepEqual(observation.dependencyOutputs, []);
   assert.deepEqual(observation.resourcePins, []);
   assert.deepEqual(observation.componentPins, []);
@@ -82,6 +84,8 @@ test("root Task materialization freezes one immutable Attempt and replays idempo
   const input = {
     ...observation,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context" as const,
     executionMode: "full" as const,
   };
@@ -109,6 +113,8 @@ test("root Task materialization freezes one immutable Attempt and replays idempo
   assert.deepEqual(events.map((event) => event.type), ["plan-queued", "task-materialized"]);
   assert.equal(events[1]?.payload.attempt, 1);
   assert.equal(events[1]?.payload.inputHash, attempt.inputHash);
+  assert.equal(events[1]?.payload.sourceCommitHash, null);
+  assert.equal(events[1]?.payload.sourceTreeHash, null);
 
   const foreign = store.createProject({ name: "Foreign attempt reader", mode: "standard" });
   store.workspace.ensureWorkspaceRecord(foreign.id);
@@ -139,6 +145,8 @@ test("dependent Task materialization freezes the exact succeeded predecessor out
   store.workspace.createGenerationTaskAttemptForProject(project.id, plan.id, {
     ...validationObservation,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
@@ -176,6 +184,8 @@ test("dependent Task materialization freezes the exact succeeded predecessor out
   const attempt = store.workspace.createGenerationTaskAttemptForProject(project.id, plan.id, {
     ...observation,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
@@ -210,6 +220,8 @@ test("a stale materialization observation rolls back the Attempt, Task pointer, 
     () => store.workspace.createGenerationTaskAttemptForProject(project.id, plan.id, {
       ...observation,
       contextPackId: null,
+      sourceCommitHash: null,
+      sourceTreeHash: null,
       retryContextPolicy: "same-context",
       executionMode: "full",
     }),
@@ -230,6 +242,110 @@ test("a stale materialization observation rolls back the Attempt, Task pointer, 
       .map((event) => event.type),
     ["plan-queued"],
   );
+  store.close();
+});
+
+test("Artifact create materialization freezes a daemon-resolved Source Base without inventing Git facts in Core", () => {
+  const store = new Store(":memory:", fakeClock());
+  const project = store.createProject({ name: "Created Artifact Source Base", mode: "standard" });
+  const workspace = store.workspace.ensureWorkspaceRecord(project.id);
+  const layout = store.workspace.getLayout(project.id);
+  const proposal = store.workspace.createProposal({
+    projectId: project.id,
+    kind: "workspace-generation",
+    baseGraphRevision: workspace.graphRevision,
+    baseSnapshotId: workspace.activeSnapshotId,
+    layoutId: layout.layoutId,
+    baseLayoutChecksum: layout.checksum,
+    operations: [{
+      id: "add-source-base-page",
+      type: "add-node",
+      node: {
+        id: "source-base-page-node",
+        kind: "page",
+        name: "Source Base Page",
+        artifactId: "source-base-page",
+        createIdentity: { initialTrackId: "source-base-page-track" },
+      },
+    }],
+    layoutOperations: [],
+    generation: {
+      ...emptyGeneration(),
+      artifactPlans: [{
+        operation: "create",
+        nodeId: "source-base-page-node",
+        artifactId: "source-base-page",
+        kind: "page",
+        name: "Source Base Page",
+        trackId: "source-base-page-track",
+        baseRevisionId: null,
+        dependsOnArtifactIds: [],
+        capabilityIds: [],
+        responsiveFrameIds: ["desktop"],
+      }],
+    },
+    rationale: "Freeze daemon Git identity before the first Artifact Attempt",
+    assumptions: [],
+  });
+  const approved = store.workspace.approveProposalForProject(project.id, proposal.id, "generate");
+  assert.ok(approved.plan);
+  const compiled = store.workspace.compileApprovedGenerationPlanForProject(project.id, approved.plan.id);
+  const task = compiled.tasks.find((candidate) => candidate.kind === "page");
+  assert.ok(task);
+  const observation = store.workspace.observeGenerationTaskMaterializationForProject(
+    project.id,
+    compiled.plan.id,
+    task.id,
+  );
+  assert.equal(observation.baseRevisionId, null);
+  assert.equal(Object.hasOwn(observation, "sourceCommitHash"), false);
+  const kernel = store.workspace.getKernelRevision(observation.kernelRevisionId);
+  const activeWorkspace = store.workspace.getWorkspace(project.id);
+  assert.ok(kernel);
+  assert.ok(activeWorkspace);
+  const pack = store.workspace.persistContextPack({
+    id: "source-base-page-context",
+    workspaceId: activeWorkspace.id,
+    graphRevision: activeWorkspace.graphRevision,
+    target: { type: "artifact", id: "source-base-page" },
+    intent: "generate",
+    messageChecksum: "7".repeat(64),
+    items: [{
+      ref: { kind: "kernel", id: kernel.id, revisionId: kernel.id },
+      resolvedKind: "kernel-revision",
+      kernelRevisionId: kernel.id,
+      checksum: kernel.checksum,
+      reason: "design-kernel",
+      trustLevel: "system",
+      boundary: {},
+      tokenEstimate: 1,
+      provenance: {},
+      provided: true,
+    }],
+    omissions: [],
+    tokenEstimate: 1,
+    manifestPath: "context-packs/source-base-page.json",
+    hash: "8".repeat(64),
+  });
+  const sourceCommitHash = "5".repeat(40);
+  const sourceTreeHash = "6".repeat(40);
+  const attempt = store.workspace.createGenerationTaskAttemptForProject(project.id, compiled.plan.id, {
+    ...observation,
+    contextPackId: pack.id,
+    sourceCommitHash,
+    sourceTreeHash,
+    retryContextPolicy: "same-context",
+    executionMode: "full",
+  });
+  assert.equal(attempt.sourceCommitHash, sourceCommitHash);
+  assert.equal(attempt.sourceTreeHash, sourceTreeHash);
+  const event = store.workspace.listGenerationPlanEventsForProject(
+    project.id,
+    compiled.plan.id,
+    { after: 0, limit: 100 },
+  ).find((candidate) => candidate.type === "task-materialized");
+  assert.equal(event?.payload.sourceCommitHash, sourceCommitHash);
+  assert.equal(event?.payload.sourceTreeHash, sourceTreeHash);
   store.close();
 });
 
@@ -269,8 +385,8 @@ function createPinnedPagePlan(store: Store) {
     artifactId,
     trackId,
     parentRevisionId: null,
-    sourceCommitHash: `commit-${artifactId}`,
-    sourceTreeHash: `tree-${artifactId}`,
+    sourceCommitHash: artifactId === "pinned-page" ? "1".repeat(40) : "3".repeat(40),
+    sourceTreeHash: artifactId === "pinned-page" ? "2".repeat(40) : "4".repeat(40),
     kernelRevisionId: active.activeKernelRevisionId,
     renderSpec: { frames: [{ id: "desktop", width: 1_440, height: 900 }] },
     quality: { state: "passed", score: 100, findings: [] },
@@ -349,7 +465,7 @@ function createPinnedPagePlan(store: Store) {
         baseRevisionId: pageRevision.id,
         dependsOnArtifactIds: [],
         capabilityIds: [],
-        responsiveFrameIds: [],
+        responsiveFrameIds: ["desktop"],
       }],
       dependencyPlans: [
         {
@@ -525,6 +641,8 @@ test("Artifact materialization preserves distinct Component instances and requir
     () => store.workspace.createGenerationTaskAttemptForProject(fixture.project.id, fixture.plan.id, {
       ...observation,
       contextPackId: incompletePack.id,
+      sourceCommitHash: fixture.pageRevision.sourceCommitHash,
+      sourceTreeHash: fixture.pageRevision.sourceTreeHash,
       retryContextPolicy: "same-context",
       executionMode: "full",
     }),
@@ -549,9 +667,29 @@ test("Artifact materialization preserves distinct Component instances and requir
     manifestPath: "context-packs/pinned-page-complete.json",
     hash: "e".repeat(64),
   });
+  assert.throws(
+    () => store.workspace.createGenerationTaskAttemptForProject(fixture.project.id, fixture.plan.id, {
+      ...observation,
+      contextPackId: completePack.id,
+      sourceCommitHash: "f".repeat(40),
+      sourceTreeHash: fixture.pageRevision.sourceTreeHash,
+      retryContextPolicy: "same-context",
+      executionMode: "full",
+    }),
+    /Source Base|base Revision|source commit/i,
+  );
+  assert.equal(
+    Number((store.db.prepare(
+      "SELECT COUNT(*) AS count FROM generation_task_attempts WHERE task_id = ?",
+    ).get(fixture.pageTask.id) as { count: number }).count),
+    0,
+    "a mismatched base Revision pair must roll back the entire materialization",
+  );
   const attempt = store.workspace.createGenerationTaskAttemptForProject(fixture.project.id, fixture.plan.id, {
     ...observation,
     contextPackId: completePack.id,
+    sourceCommitHash: fixture.pageRevision.sourceCommitHash,
+    sourceTreeHash: fixture.pageRevision.sourceTreeHash,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
@@ -559,6 +697,17 @@ test("Artifact materialization preserves distinct Component instances and requir
   assert.equal(attempt.componentPins.length, 2);
   assert.equal(attempt.resourcePins.length, 1);
   assert.notDeepEqual(attempt.componentPins[0]?.overrides, attempt.componentPins[1]?.overrides);
+  assert.throws(
+    () => store.workspace.createGenerationTaskAttemptForProject(fixture.project.id, fixture.plan.id, {
+      ...observation,
+      contextPackId: completePack.id,
+      sourceCommitHash: "9".repeat(40),
+      sourceTreeHash: fixture.pageRevision.sourceTreeHash,
+      retryContextPolicy: "same-context",
+      executionMode: "full",
+    }),
+    /already exists with different immutable input/i,
+  );
   store.close();
 });
 
@@ -695,6 +844,8 @@ test("a needs-rebase successor materialization failure preserves publication-onl
   const firstAttempt = store.workspace.createGenerationTaskAttemptForProject(project.id, plan.id, {
     ...firstObservation,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });
@@ -737,6 +888,8 @@ test("a needs-rebase successor materialization failure preserves publication-onl
   const retryAttempt = store.workspace.createGenerationTaskAttemptForProject(project.id, plan.id, {
     ...retryObservation,
     contextPackId: null,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "publication-only",
   });
@@ -945,6 +1098,8 @@ test("Resource Task materialization freezes the active Resource base and Resourc
   const attempt = store.workspace.createGenerationTaskAttemptForProject(project.id, compiled.plan.id, {
     ...observation,
     contextPackId: pack.id,
+    sourceCommitHash: null,
+    sourceTreeHash: null,
     retryContextPolicy: "same-context",
     executionMode: "full",
   });

@@ -22,6 +22,8 @@ const WORKSPACE_ID = "workspace-executor";
 const PLAN_ID = "plan-executor";
 const TASK_ID = "task-executor";
 const MAX_OUTPUT_BYTES = 8_000_000;
+const CONTEXT_PACK_HASH = "c".repeat(64);
+const CONTEXT_PACK_ID = `context-pack-${CONTEXT_PACK_HASH}`;
 const QUALITY = {
   requiredFrameIds: ["desktop"],
   blockingSeverities: ["P0", "P1"] as Array<"P0" | "P1">,
@@ -33,7 +35,7 @@ function payloadFor(kind: GenerationTaskKind, target: GenerationTaskTarget): Rec
   if (kind === "page" || kind === "component") {
     assert.equal(target.type, "artifact");
     return {
-      version: 1,
+      version: 2,
       artifactPlan: {
         operation: "revise",
         nodeId: `node-${target.id}`,
@@ -48,12 +50,22 @@ function payloadFor(kind: GenerationTaskKind, target: GenerationTaskTarget): Rec
       },
       dependencyPlans: [],
       responsiveFrames: [{ id: "desktop", name: "Desktop", width: 1440, height: 900 }],
+      brief: {
+        proposalRationale: "Generate the exact approved executor fixture.",
+        assumptions: ["The immutable Attempt provides every required dependency."],
+        targetInstructions: {
+          operation: "revise",
+          kind,
+          name: `Generated ${kind}`,
+        },
+      },
+      capabilityDescriptors: [{ id: "generate", kind: "text", required: true }],
     };
   }
   if (kind === "resource") {
     assert.equal(target.type, "resource");
     return {
-      version: 1,
+      version: 2,
       operation: {
         operation: "revise",
         nodeId: `node-${target.id}`,
@@ -61,6 +73,21 @@ function payloadFor(kind: GenerationTaskKind, target: GenerationTaskTarget): Rec
         kind: "asset",
         title: "Generated asset",
         revisionPolicy: { kind: "generate" },
+      },
+      brief: {
+        proposalRationale: "Generate the exact approved executor fixture.",
+        assumptions: ["The immutable Attempt provides every required dependency."],
+        targetInstructions: {
+          operation: "revise",
+          kind: "asset",
+          title: "Generated asset",
+        },
+      },
+      capabilityDescriptors: [{ id: "generate", kind: "text", required: true }],
+      adapter: {
+        id: "dezin.resource-adapter.asset",
+        version: 1,
+        kind: "asset",
       },
     };
   }
@@ -200,10 +227,12 @@ function claimFixture(
     attempt: task.currentAttempt,
     target: task.target,
     baseRevisionId: task.target.type === "workspace" ? null : `base-${task.target.id}`,
+    sourceCommitHash: task.target.type === "artifact" ? "a".repeat(40) : null,
+    sourceTreeHash: task.target.type === "artifact" ? "b".repeat(40) : null,
     expectedSnapshotId: "snapshot-executor",
     contextPackId: task.kind === "page" || task.kind === "component" || task.kind === "resource"
       || task.kind === "propagation-candidate"
-      ? "context-executor"
+      ? CONTEXT_PACK_ID
       : null,
     kernelRevisionId: "kernel-executor",
     payload: task.payload,
@@ -244,21 +273,79 @@ function artifactResultFor(claim: GenerationTaskAttemptClaim): ArtifactPreparedC
   const task = claim.task;
   assert.ok(task.kind === "page" || task.kind === "component");
   assert.equal(task.target.type, "artifact");
+  const candidateCommitHash = "a".repeat(40);
+  const candidateTreeHash = "b".repeat(40);
+  const frames = [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }];
+  const round = 0;
+  const frameAttemptId = "quality-round-0-desktop";
+  const sha256 = "d".repeat(64);
+  const storageKey = [
+    "generation-task-evidence",
+    "project-executor",
+    task.workspaceId,
+    task.planId,
+    task.id,
+    `attempt-${claim.attempt.attempt}`,
+    "visual",
+    `round-${round}-desktop-${sha256}.png`,
+  ].join("/");
+  const owner = {
+    projectId: "project-executor",
+    workspaceId: task.workspaceId,
+    planId: task.planId,
+    taskId: task.id,
+    attempt: claim.attempt.attempt,
+    candidateCommitHash,
+    candidateTreeHash,
+    contextPackId: CONTEXT_PACK_ID,
+    contextPackHash: CONTEXT_PACK_HASH,
+  };
   return {
     kind: "artifact-candidate",
     taskId: task.id,
     workspaceId: task.workspaceId,
     artifactId: task.target.id,
     trackId: task.target.trackId,
-    sourceCommitHash: "a".repeat(40),
-    sourceTreeHash: "b".repeat(40),
-    renderSpec: {
-      frames: [{ id: "desktop", name: "Desktop", width: 1_440, height: 900 }],
-    },
+    sourceCommitHash: candidateCommitHash,
+    sourceTreeHash: candidateTreeHash,
+    renderSpec: { frames },
     quality: { state: "passed", score: 100, findings: [] },
     evidence: {
-      runtimeChecks: [{ id: "load", status: "passed" }],
-      visualReview: { status: "passed", fidelity: 0.99 },
+      protocol: "dezin.standard-artifact-quality.v1",
+      candidate: { commitHash: candidateCommitHash, treeHash: candidateTreeHash },
+      contextPack: { id: CONTEXT_PACK_ID, hash: CONTEXT_PACK_HASH },
+      frames,
+      frameResults: [{
+        frameId: "desktop",
+        frameAttemptId,
+        width: 1_440,
+        height: 900,
+        status: "passed",
+        reviewed: true,
+      }],
+      round,
+      runtimeChecks: [{ id: "frame:desktop", status: "passed" }],
+      visualReview: {
+        status: "passed",
+        fidelity: 0.99,
+        evidence: [{
+          frameId: "desktop",
+          frameAttemptId,
+          sha256,
+          byteLength: 1_024,
+          storageKey,
+        }],
+      },
+      visualEvidence: [{
+        protocol: "dezin.generation-task-visual-evidence.v1",
+        owner,
+        frame: { ...frames[0]!, frameAttemptId },
+        round,
+        mediaType: "image/png",
+        sha256,
+        byteLength: 1_024,
+        storageKey,
+      }],
     },
   };
 }
@@ -303,11 +390,17 @@ function prototypeResultFor(claim: GenerationTaskAttemptClaim): PrototypeValidat
 function harness(input: {
   leafError?: unknown;
   publicationError?: unknown;
+  resourceCleanupError?: unknown;
   artifactResultFactory?: (claim: GenerationTaskAttemptClaim) => ArtifactPreparedCandidate;
   resourceResultFactory?: (claim: GenerationTaskAttemptClaim) => ResourcePreparedCandidate;
   prototypeResultFactory?: (claim: GenerationTaskAttemptClaim) => PrototypeValidationResult;
 } = {}) {
   const calls: Array<{ port: string; values: unknown[] }> = [];
+  const resourceCleanups: Array<{
+    claim: GenerationTaskAttemptClaim;
+    candidate: ResourcePreparedCandidate;
+  }> = [];
+  const reported: unknown[] = [];
   const executeLeaf = async <Result>(
     port: string,
     claim: GenerationTaskAttemptClaim,
@@ -326,6 +419,11 @@ function harness(input: {
     resources: {
       execute: (claim, signal) => executeLeaf("resource", claim, signal,
         () => input.resourceResultFactory?.(claim) ?? resourceResultFor(claim)),
+      async cleanupIfUnreferenced(claim, candidate) {
+        resourceCleanups.push({ claim, candidate });
+        if (input.resourceCleanupError !== undefined) throw input.resourceCleanupError;
+        return true;
+      },
     },
     prototypeValidation: {
       execute: (claim, signal) => executeLeaf("prototype", claim, signal,
@@ -348,8 +446,9 @@ function harness(input: {
         calls.push({ port: "finish-failure", values });
       },
     },
+    reportError: (error) => reported.push(error),
   });
-  return { calls, executor };
+  return { calls, executor, reported, resourceCleanups };
 }
 
 const FULL_EXECUTION_ROUTES = {
@@ -723,7 +822,7 @@ const MALFORMED_RESOURCE_REVISIONS = [
 
 for (const { name, mutate } of MALFORMED_RESOURCE_REVISIONS) {
   test(`GenerationTaskExecutor terminalizes a Resource candidate with ${name} before publication`, async () => {
-    const { calls, executor } = harness({
+    const { calls, executor, resourceCleanups } = harness({
       resourceResultFactory(claim) {
         const result = resourceResultFor(claim);
         return { ...result, revision: mutate(result.revision) };
@@ -735,6 +834,7 @@ for (const { name, mutate } of MALFORMED_RESOURCE_REVISIONS) {
     assert.deepEqual(calls.map((call) => call.port), ["resource", "finish-failure"]);
     assert.equal(calls.filter((call) => call.port === "finish-failure").length, 1);
     assert.equal(calls.some((call) => call.port.startsWith("publish-")), false);
+    assert.equal(resourceCleanups.length, 1);
   });
 }
 
@@ -808,6 +908,34 @@ test("GenerationTaskExecutor propagates publication failure without attempting a
     (error) => error === publicationError,
   );
   assert.deepEqual(calls.map((call) => call.port), ["artifact", "publish-prepared"]);
+});
+
+test("GenerationTaskExecutor reconciles Resource payload storage after success and publication response loss", async (t) => {
+  await t.test("successful publication", async () => {
+    const { calls, executor, resourceCleanups } = harness();
+    const claim = claimFixture("resource");
+    await executor.execute(claim, new AbortController().signal);
+    assert.deepEqual(calls.map((call) => call.port), ["resource", "publish-prepared"]);
+    assert.equal(resourceCleanups.length, 1);
+    assert.strictEqual(resourceCleanups[0]?.claim, claim);
+  });
+
+  await t.test("publication response loss", async () => {
+    const publicationError = new Error("Resource candidate transaction response lost");
+    const cleanupError = new Error("orphan reconciliation will retry at startup");
+    const { calls, executor, reported, resourceCleanups } = harness({
+      publicationError,
+      resourceCleanupError: cleanupError,
+    });
+    await assert.rejects(
+      executor.execute(claimFixture("resource"), new AbortController().signal),
+      (error) => error === publicationError,
+    );
+    assert.deepEqual(calls.map((call) => call.port), ["resource", "publish-prepared"]);
+    assert.equal(resourceCleanups.length, 1);
+    assert.deepEqual(reported, [cleanupError]);
+    assert.equal(calls.some((call) => call.port === "finish-failure"), false);
+  });
 });
 
 test("GenerationTaskExecutor fails closed for propagation kinds until Task 13 owns them", async () => {

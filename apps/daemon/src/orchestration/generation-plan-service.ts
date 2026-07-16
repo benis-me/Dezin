@@ -1,3 +1,4 @@
+import { types as nodeUtilTypes } from "node:util";
 import {
   type CreateGenerationTaskAttemptInput,
   type GenerationPlan,
@@ -9,6 +10,7 @@ import {
   type GenerationTaskMaterializationFailure,
   type GenerationTaskMaterializationObservation,
   type GenerationTaskRetryContextPolicy,
+  type GenerationTaskSourceBase,
   type RecordGenerationTaskMaterializationFailureInput,
 } from "../../../../packages/core/src/index.ts";
 import { BlockedContextError } from "../context/context-types.ts";
@@ -56,17 +58,30 @@ export interface GenerationTaskContextRequest {
 }
 
 export interface GenerationTaskContextResolver {
-  resolve(input: GenerationTaskContextRequest): Promise<{ id: string }>;
+  resolve(input: GenerationTaskContextRequest, signal: AbortSignal): Promise<{ id: string }>;
+}
+
+export interface GenerationTaskSourceBaseRequest {
+  [key: string]: unknown;
+  projectId: string;
+  planId: string;
+  task: GenerationTask;
+  observation: GenerationTaskMaterializationObservation;
+}
+
+export interface GenerationTaskSourceBaseResolver {
+  resolve(input: GenerationTaskSourceBaseRequest, signal: AbortSignal): Promise<GenerationTaskSourceBase>;
 }
 
 export interface GenerationTaskRebaseReconciler {
-  reconcileNeedsRebaseTasks(): Promise<GenerationPlanMaterializationSummary>;
+  reconcileNeedsRebaseTasks(signal: AbortSignal): Promise<GenerationPlanMaterializationSummary>;
 }
 
 export interface GenerationPlanServiceOptions {
   store: GenerationPlanStorePort;
   projectLookup: GenerationPlanProjectLookup;
   contextResolver: GenerationTaskContextResolver;
+  sourceBaseResolver: GenerationTaskSourceBaseResolver;
   rebaseReconciler: GenerationTaskRebaseReconciler;
   onError?: (error: unknown) => void;
 }
@@ -75,7 +90,7 @@ export interface GenerationPlanMaterializationSummary {
   planIds: string[];
 }
 
-type MaterializationPhase = "observe" | "context" | "create";
+type MaterializationPhase = "observe" | "context" | "source-base" | "create";
 
 const ACTIVE_PLAN_STATUSES = new Set<GenerationPlan["status"]>(["queued", "running"]);
 const AGENT_TASK_KINDS = new Set<GenerationTask["kind"]>([
@@ -84,6 +99,29 @@ const AGENT_TASK_KINDS = new Set<GenerationTask["kind"]>([
   "page",
   "propagation-candidate",
 ]);
+const NEVER_ABORTED_SIGNAL = new AbortController().signal;
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("Generation Plan maintenance aborted", "AbortError");
+}
+
+function checkAbort(signal: AbortSignal): void {
+  if (signal.aborted) throw abortReason(signal);
+}
+
+async function awaitWithAbort<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
+  checkAbort(signal);
+  let listener: (() => void) | null = null;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    listener = () => reject(abortReason(signal));
+    signal.addEventListener("abort", listener, { once: true });
+  });
+  try {
+    return await Promise.race([value, aborted]);
+  } finally {
+    if (listener !== null) signal.removeEventListener("abort", listener);
+  }
+}
 
 function compareBinary(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -120,6 +158,48 @@ function isRebaseTask(task: GenerationTask): boolean {
   return task.status === "needs-rebase" || task.status === "awaiting-context-refresh";
 }
 
+function immutableSourceBase(
+  value: unknown,
+  label: string,
+): Readonly<GenerationTaskSourceBase> {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)
+      || nodeUtilTypes.isProxy(value)) {
+      throw new Error("not a plain object");
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error("not a plain object");
+    }
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== 2
+      || !keys.includes("sourceCommitHash")
+      || !keys.includes("sourceTreeHash")
+      || keys.some((key) => typeof key !== "string")) {
+      throw new Error("not an exact Source Base object");
+    }
+    const readDataField = (key: "sourceCommitHash" | "sourceTreeHash"): string => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !("value" in descriptor)
+        || typeof descriptor.value !== "string"
+        || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(descriptor.value)) {
+        throw new Error("not an exact Git object id");
+      }
+      return descriptor.value;
+    };
+    const sourceCommitHash = readDataField("sourceCommitHash");
+    const sourceTreeHash = readDataField("sourceTreeHash");
+    if (sourceCommitHash.length !== sourceTreeHash.length) {
+      throw new Error("mixed Git object formats");
+    }
+    return Object.freeze({ sourceCommitHash, sourceTreeHash });
+  } catch {
+    throw new GenerationPlanServiceInvariantError(
+      `${label} returned an invalid Source Base; expected exactly two lowercase Git object ids`,
+    );
+  }
+}
+
 export class GenerationPlanServiceInvariantError extends Error {
   readonly failureClass = "unknown" as const;
 
@@ -148,29 +228,41 @@ export class GenerationPlanService {
     return this.options.store.compileApprovedGenerationPlanForProject(projectId, planId).plan;
   }
 
-  async reconcileNeedsRebaseTasks(): Promise<GenerationPlanMaterializationSummary> {
-    const summary = await this.options.rebaseReconciler.reconcileNeedsRebaseTasks();
+  async reconcileNeedsRebaseTasks(
+    signal: AbortSignal = NEVER_ABORTED_SIGNAL,
+  ): Promise<GenerationPlanMaterializationSummary> {
+    checkAbort(signal);
+    const summary = await awaitWithAbort(
+      this.options.rebaseReconciler.reconcileNeedsRebaseTasks(signal),
+      signal,
+    );
     return { planIds: [...new Set(summary.planIds)].sort(compareBinary) };
   }
 
-  async materializeReadyTaskAttempts(): Promise<GenerationPlanMaterializationSummary> {
+  async materializeReadyTaskAttempts(
+    signal: AbortSignal = NEVER_ABORTED_SIGNAL,
+  ): Promise<GenerationPlanMaterializationSummary> {
     return this.materializeTasks((projectId, planId, task) => !this.taskRequiresRebaseReconciler(
       projectId,
       planId,
       task,
-    ));
+    ), signal);
   }
 
   private async materializeTasks(
     acceptsTask: (projectId: string, planId: string, task: GenerationTask) => boolean,
+    signal: AbortSignal,
   ): Promise<GenerationPlanMaterializationSummary> {
+    checkAbort(signal);
     const touchedPlanIds = new Set<string>();
     const projects = [...new Set(this.options.projectLookup.listProjectIds())].sort(compareBinary);
     for (const projectId of projects) {
+      checkAbort(signal);
       const plans = this.options.store.listGenerationPlans(projectId)
         .filter((plan) => plan.constructionSealed && ACTIVE_PLAN_STATUSES.has(plan.status))
         .sort((left, right) => compareBinary(left.id, right.id));
       for (const plan of plans) {
+        checkAbort(signal);
         const readyTaskIds = this.options.store
           .listGenerationTaskIdsReadyForMaterializationForProject(projectId, plan.id);
         if (readyTaskIds.length === 0) continue;
@@ -183,7 +275,8 @@ export class GenerationPlanService {
         if (tasks.length === 0) continue;
         touchedPlanIds.add(plan.id);
         for (const task of tasks) {
-          await this.materializeTask(projectId, plan.id, task);
+          checkAbort(signal);
+          await this.materializeTask(projectId, plan.id, task, signal);
         }
       }
     }
@@ -216,9 +309,11 @@ export class GenerationPlanService {
     projectId: string,
     planId: string,
     task: GenerationTask,
+    signal: AbortSignal,
   ): Promise<void> {
     let phase: MaterializationPhase = "observe";
     try {
+      checkAbort(signal);
       const observation = this.options.store.observeGenerationTaskMaterializationForProject(
         projectId,
         planId,
@@ -246,7 +341,11 @@ export class GenerationPlanService {
           contextPackId = previousAttempt.contextPackId;
         } else {
           phase = "context";
-          const pack = await this.options.contextResolver.resolve({ projectId, planId, task, observation });
+          checkAbort(signal);
+          const pack = await awaitWithAbort(
+            this.options.contextResolver.resolve({ projectId, planId, task, observation }, signal),
+            signal,
+          );
           if (typeof pack.id !== "string" || pack.id.length === 0) {
             throw new GenerationPlanServiceInvariantError(
               `Generation Task ${task.id} Context resolver returned an invalid Pack identity`,
@@ -256,14 +355,48 @@ export class GenerationPlanService {
         }
       }
 
+      let sourceBase: Readonly<GenerationTaskSourceBase> | null = null;
+      if (task.target.type === "artifact") {
+        if (policy === "same-context" && task.currentAttempt > 0) {
+          if (previousAttempt?.sourceCommitHash === null
+            || previousAttempt?.sourceTreeHash === null
+            || previousAttempt === null) {
+            throw new GenerationPlanServiceInvariantError(
+              `Generation Task ${task.id} cannot reuse a missing prior Source Base from a legacy Attempt`,
+            );
+          }
+          sourceBase = immutableSourceBase({
+            sourceCommitHash: previousAttempt.sourceCommitHash,
+            sourceTreeHash: previousAttempt.sourceTreeHash,
+          }, `Generation Task ${task.id} prior Attempt`);
+        } else {
+          phase = "source-base";
+          checkAbort(signal);
+          const resolved = await awaitWithAbort(
+            this.options.sourceBaseResolver.resolve({
+              projectId,
+              planId,
+              task,
+              observation,
+            }, signal),
+            signal,
+          );
+          sourceBase = immutableSourceBase(resolved, `Generation Task ${task.id} Source Base resolver`);
+        }
+      }
+
       phase = "create";
+      checkAbort(signal);
       this.options.store.createGenerationTaskAttemptForProject(projectId, planId, {
         ...observation,
         contextPackId,
+        sourceCommitHash: sourceBase?.sourceCommitHash ?? null,
+        sourceTreeHash: sourceBase?.sourceTreeHash ?? null,
         retryContextPolicy: policy,
         executionMode,
       });
     } catch (error) {
+      if (signal.aborted) throw abortReason(signal);
       if (phase !== "context" && this.taskWasAdvanced(projectId, planId, task)) return;
       try {
         this.options.store.recordGenerationTaskMaterializationFailureForProject(projectId, planId, {
