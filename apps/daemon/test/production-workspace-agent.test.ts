@@ -19,6 +19,7 @@ import { createProductionScopedAgentTaskQueue } from "../src/orchestration/produ
 import { createProductionWorkspaceAgentOrchestrator } from "../src/orchestration/production-workspace-agent.ts";
 
 const WORKSPACE_TURN_ID = "turn-00000000-0000-4000-8000-000000000010";
+const TEST_CLAUDE_EXECUTABLE = "/trusted/claude/install/bin/claude";
 
 function seedArtifactSource(input: {
   root: string;
@@ -107,6 +108,7 @@ test("production Workspace Agent resolves immutable context in a scratch directo
   const orchestrator = createProductionWorkspaceAgentOrchestrator({
     store,
     dataDir: root,
+    resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
     createSpawner(options) {
       spawnerOptions.push(options);
       return spawner;
@@ -135,6 +137,7 @@ test("production Workspace Agent resolves immutable context in a scratch directo
   ).get(workspace.id) as { count: number }).count), 1);
   const spawned = spawner.inputs[0];
   assert.ok(spawned);
+  assert.equal(spawned.command, TEST_CLAUDE_EXECUTABLE);
   assert.notEqual(spawned.cwd, join(root, "projects", project.id));
   assert.equal(existsSync(spawned.cwd), false, "planner scratch directory is removed after the turn");
   assert.equal(spawned.env?.DEZIN_DAEMON_TOKEN, undefined);
@@ -238,6 +241,7 @@ test("production Workspace Agent preserves Kernel QA and raises weak Artifact pl
   const orchestrator = createProductionWorkspaceAgentOrchestrator({
     store,
     dataDir: root,
+    resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
     createSpawner: () => spawner,
   });
 
@@ -291,6 +295,7 @@ test("production Workspace Agent rejects forbidden direct mutations without pers
   const orchestrator = createProductionWorkspaceAgentOrchestrator({
     store,
     dataDir: root,
+    resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
     createSpawner: () => spawner,
   });
 
@@ -325,6 +330,7 @@ test("production Workspace Agent never rebases a plan onto canvas state that cha
   const orchestrator = createProductionWorkspaceAgentOrchestrator({
     store,
     dataDir: root,
+    resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
     createSpawner: () => spawner,
   });
 
@@ -691,6 +697,7 @@ test("production Workspace Agent cancellation leaves no Proposal or planner scra
   const orchestrator = createProductionWorkspaceAgentOrchestrator({
     store,
     dataDir: root,
+    resolveClaudeExecutable: () => TEST_CLAUDE_EXECUTABLE,
     createSpawner: () => spawner,
   });
 

@@ -57,6 +57,8 @@ export interface ProductionWorkspaceAgentOptions {
   readonly dataDir: string;
   /** Test seam for the hard no-tools structured transport. */
   readonly createSpawner?: (options: NodeSpawnerOptions) => ProcessSpawner;
+  /** Test seam; production always resolves the official Claude CLI from fixed install roots. */
+  readonly resolveClaudeExecutable?: () => string;
   readonly plannerTimeoutMs?: number;
   readonly scopedTasks?: ProductionScopedTaskQueuePort;
 }
@@ -922,12 +924,14 @@ class ProductionWorkspacePlanner {
   readonly #store: Store;
   readonly #dataDir: string;
   readonly #createSpawner: ((options: NodeSpawnerOptions) => ProcessSpawner) | undefined;
+  readonly #resolveClaudeExecutable: (() => string) | undefined;
   readonly #timeoutMs: number;
 
   constructor(options: ProductionWorkspaceAgentOptions) {
     this.#store = options.store;
     this.#dataDir = options.dataDir;
     this.#createSpawner = options.createSpawner;
+    this.#resolveClaudeExecutable = options.resolveClaudeExecutable;
     this.#timeoutMs = options.plannerTimeoutMs ?? DEFAULT_PLANNER_TIMEOUT_MS;
   }
 
@@ -965,7 +969,12 @@ class ProductionWorkspacePlanner {
         },
         timeoutMs: this.#timeoutMs,
         maxOutputBytes: MAX_PLANNER_RESPONSE_BYTES,
-      }, { createSpawner: this.#createSpawner });
+      }, {
+        createSpawner: this.#createSpawner,
+        ...(this.#resolveClaudeExecutable === undefined
+          ? {}
+          : { resolveClaudeExecutable: this.#resolveClaudeExecutable }),
+      });
       checkAbort(signal);
       const workspace = this.#store.workspace.getWorkspace(input.projectId);
       if (!workspace || workspace.id !== input.request.scope.workspaceId) {

@@ -160,6 +160,17 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("External fetch aborted", "AbortError");
 }
 
+function referencedTimeoutSignal(timeoutMs: number): { signal: AbortSignal; clear: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException("External fetch timed out", "TimeoutError"));
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timer),
+  };
+}
+
 async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) throw abortReason(signal);
   return await new Promise<T>((resolve, reject) => {
@@ -359,42 +370,46 @@ export function createProductionSafeBoundedExternalFetcher(
   return async (request) => {
     validateRequest(request);
     if (request.signal.aborted) throw abortReason(request.signal);
-    const timeoutSignal = AbortSignal.timeout(request.timeoutMs);
-    const signal = AbortSignal.any([request.signal, timeoutSignal]);
-    let current = exactExternalUrl(request.url);
-    let redirects = 0;
-    for (;;) {
-      if (signal.aborted) throw abortReason(signal);
-      const pinnedAddress = await pinAddress(current, resolveAddresses, signal);
-      const hop = Object.freeze({
-        url: new URL(current.href),
-        pinnedAddress,
-        maxBytes: request.maxBytes,
-        signal,
-      });
-      const result = validateHopResult(
-        await abortable(Promise.resolve().then(() => requestHop(hop)), signal),
-        pinnedAddress,
-        request.maxBytes,
-      );
-      if (!REDIRECT_STATUS.has(result.status)) {
-        return Object.freeze({
-          finalUrl: current.href,
-          status: result.status,
-          mimeType: result.mimeType,
-          bytes: Buffer.from(result.bytes),
+    const timeout = referencedTimeoutSignal(request.timeoutMs);
+    const signal = AbortSignal.any([request.signal, timeout.signal]);
+    try {
+      let current = exactExternalUrl(request.url);
+      let redirects = 0;
+      for (;;) {
+        if (signal.aborted) throw abortReason(signal);
+        const pinnedAddress = await pinAddress(current, resolveAddresses, signal);
+        const hop = Object.freeze({
+          url: new URL(current.href),
+          pinnedAddress,
+          maxBytes: request.maxBytes,
+          signal,
         });
+        const result = validateHopResult(
+          await abortable(Promise.resolve().then(() => requestHop(hop)), signal),
+          pinnedAddress,
+          request.maxBytes,
+        );
+        if (!REDIRECT_STATUS.has(result.status)) {
+          return Object.freeze({
+            finalUrl: current.href,
+            status: result.status,
+            mimeType: result.mimeType,
+            bytes: Buffer.from(result.bytes),
+          });
+        }
+        if (result.location === null) fail("External fetch redirect is missing a Location header");
+        if (redirects >= request.maxRedirects) fail("External fetch exceeded its redirect budget");
+        let next: URL;
+        try {
+          next = new URL(result.location, current);
+        } catch (error) {
+          return fail("External fetch redirect URL is invalid", error);
+        }
+        current = exactExternalUrl(next.href);
+        redirects += 1;
       }
-      if (result.location === null) fail("External fetch redirect is missing a Location header");
-      if (redirects >= request.maxRedirects) fail("External fetch exceeded its redirect budget");
-      let next: URL;
-      try {
-        next = new URL(result.location, current);
-      } catch (error) {
-        return fail("External fetch redirect URL is invalid", error);
-      }
-      current = exactExternalUrl(next.href);
-      redirects += 1;
+    } finally {
+      timeout.clear();
     }
   };
 }

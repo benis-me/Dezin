@@ -1722,9 +1722,10 @@ test("production Sharingan exporter rejects an expired live Attempt lease", asyn
   await withStore(async ({ root, store }) => {
     const { request } = await createBoundCapture(root, store);
     const original = store.workspace.getGenerationTaskAttemptForProject;
+    const expiredAt = Date.now() - 1;
     store.workspace.getGenerationTaskAttemptForProject = ((...args) => {
       const attempt = original.call(store.workspace, ...args);
-      return attempt ? { ...attempt, leaseExpiresAt: Date.now() - 1 } : null;
+      return attempt ? { ...attempt, leaseExpiresAt: expiredAt } : null;
     }) as typeof original;
     try {
       const ports = createProductionResourceRuntimePorts({ store, dataDir: root });

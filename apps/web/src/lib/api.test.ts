@@ -20,6 +20,24 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
+async function readBlobText(blob: Blob): Promise<string> {
+  const text = Reflect.get(blob, "text");
+  if (typeof text === "function") {
+    return await Reflect.apply(text, blob, []) as string;
+  }
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result === "string") resolve(reader.result);
+      else reject(new TypeError("Blob text result is not a string"));
+    }, { once: true });
+    reader.addEventListener("error", () => {
+      reject(reader.error ?? new Error("Blob text read failed"));
+    }, { once: true });
+    reader.readAsText(blob);
+  });
+}
+
 function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
   let i = 0;
@@ -674,15 +692,18 @@ test("exact Resource Revision view and paged history use strict browser decoders
 });
 
 test("exact Resource media bytes are fetched with daemon authentication and never a token query", async () => {
-  const fetchImpl = vi.fn<FetchLike>(async () => new Response(new Blob(["exact"]), {
+  const fetchImpl = vi.fn<FetchLike>(async () => new Response(new TextEncoder().encode("exact"), {
     status: 200,
     headers: { "content-type": "image/png" },
   }));
   const api = createApiClient({ baseUrl: "http://d", daemonToken: "daemon-secret", fetchImpl });
 
-  await expect(api.getResourceRevisionBlob(
+  const blob = await api.getResourceRevisionBlob(
     "/api/projects/project-1/resources/resource-1/revisions/revision-1/embedded-assets/asset-1",
-  )).resolves.toBeInstanceOf(Blob);
+  );
+  expect(blob.size).toBe(5);
+  expect(blob.type).toBe("image/png");
+  await expect(readBlobText(blob)).resolves.toBe("exact");
   expect(fetchImpl).toHaveBeenCalledWith(
     "http://d/api/projects/project-1/resources/resource-1/revisions/revision-1/embedded-assets/asset-1",
     expect.objectContaining({ headers: { "x-dezin-daemon-token": "daemon-secret" } }),

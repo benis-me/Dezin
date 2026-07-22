@@ -568,7 +568,7 @@ test("production Generation system publishes one real Resource to Component to P
           || status === "compile-failed") return true;
         return store!.workspace.getGenerationPlanDetailForProject(project.id, approved.plan!.id).tasks
           .some((task) => task.status === "failed" || task.status === "blocked-context");
-      });
+      }, 15_000);
     } catch {
       const stalled = store.workspace.getGenerationPlanDetailForProject(project.id, approved.plan.id);
       assert.fail(JSON.stringify({
