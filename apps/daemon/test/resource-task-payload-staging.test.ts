@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { lstatSync } from "node:fs";
-import { mkdtemp, rename, rm, symlink } from "node:fs/promises";
+import { link, lstat, mkdtemp, rename, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -324,13 +324,77 @@ test("converges concurrent identical staging races on one immutable receipt", as
   });
   const input = stageInput();
 
-  const [left, right] = await Promise.all([
-    staging.stage(input),
-    staging.stage(input),
-  ]);
+  const settled = await Promise.allSettled(
+    Array.from({ length: 64 }, () => staging.stage(input)),
+  );
+  const rejected = settled.filter((result) => result.status === "rejected");
+  assert.equal(
+    rejected.length,
+    0,
+    rejected.map((result) => String(result.reason?.stack ?? result.reason)).join("\n\n"),
+  );
+  const receipts = settled
+    .filter((result): result is PromiseFulfilledResult<ResourceTaskPayloadReceipt> => result.status === "fulfilled")
+    .map((result) => result.value);
 
-  assert.deepEqual(left, right);
-  assert.deepEqual(await staging.find(input), left);
+  for (const receipt of receipts.slice(1)) {
+    assert.deepEqual(receipt, receipts[0]);
+  }
+  assert.deepEqual(await staging.find(input), receipts[0]);
+});
+
+test("recovers its own interrupted receipt publication hardlink before replay", async (t) => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "dezin-resource-stage-receipt-recovery-"));
+  t.after(() => rm(storageRoot, { recursive: true, force: true }));
+  const staging = new OwnedResourceTaskPayloadStaging({
+    storageRoot,
+    references: referenceGuard({ referenced: false, removals: 0 }),
+    journal: journalDouble(),
+    now: () => 130_500,
+  });
+  const input = stageInput();
+  const committed = await staging.stage(input);
+  const receiptPath = join(storageRoot, ...resourceTaskReceiptRelativePath(
+    input.workspaceId,
+    input.revisionId,
+  ).split("/"));
+  const staleTemporary = join(
+    dirname(receiptPath),
+    ".generation-receipt-00000000-0000-4000-8000-000000000001.tmp",
+  );
+  await link(receiptPath, staleTemporary);
+  assert.equal((await lstat(receiptPath)).nlink, 2);
+
+  assert.deepEqual(await staging.stage(input), committed);
+  await assert.rejects(() => lstat(staleTemporary), /ENOENT/);
+  assert.equal((await lstat(receiptPath)).nlink, 1);
+});
+
+test("rejects a receipt with an unowned hardlink", async (t) => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "dezin-resource-stage-receipt-hardlink-"));
+  t.after(() => rm(storageRoot, { recursive: true, force: true }));
+  const staging = new OwnedResourceTaskPayloadStaging({
+    storageRoot,
+    references: referenceGuard({ referenced: true, removals: 0 }),
+    journal: journalDouble(),
+    now: () => 130_750,
+  });
+  const input = stageInput();
+  await staging.stage(input);
+  const receiptPath = join(storageRoot, ...resourceTaskReceiptRelativePath(
+    input.workspaceId,
+    input.revisionId,
+  ).split("/"));
+  const foreignHardlink = join(storageRoot, "foreign-receipt-hardlink.json");
+  await link(receiptPath, foreignHardlink);
+
+  await assert.rejects(
+    staging.find(input),
+    (error) => error instanceof ResourceTaskPayloadError
+      && error.code === "RESOURCE_PAYLOAD_RECEIPT_INVALID"
+      && /hardlink/.test(error.message),
+  );
+  assert.equal((await lstat(foreignHardlink)).isFile(), true);
 });
 
 test("rejects an immutable revision collision without changing the committed payload", async (t) => {
@@ -442,5 +506,33 @@ test("refuses a symlink-substituted receipt during replay", async (t) => {
     staging.find(input),
     (error) => error instanceof ResourceTaskPayloadError
       && error.failureClass === "storage",
+  );
+});
+
+test("refuses a linked receipt parent even when the receipt is missing", async (t) => {
+  const storageRoot = await mkdtemp(join(tmpdir(), "dezin-resource-stage-parent-link-"));
+  t.after(() => rm(storageRoot, { recursive: true, force: true }));
+  const staging = new OwnedResourceTaskPayloadStaging({
+    storageRoot,
+    references: referenceGuard({ referenced: true, removals: 0 }),
+    journal: journalDouble(),
+    now: () => 127_500,
+  });
+  const input = stageInput();
+  await staging.stage(input);
+  const receiptPath = join(storageRoot, ...resourceTaskReceiptRelativePath(
+    input.workspaceId,
+    input.revisionId,
+  ).split("/"));
+  const revisionDirectory = dirname(receiptPath);
+  const movedDirectory = `${revisionDirectory}.moved`;
+  await rename(revisionDirectory, movedDirectory);
+  await rm(join(movedDirectory, "generation-receipt.json"));
+  await symlink(movedDirectory, revisionDirectory);
+
+  await assert.rejects(
+    staging.find(input),
+    (error) => error instanceof ResourceTaskPayloadError
+      && error.code === "RESOURCE_PAYLOAD_RECEIPT_INVALID",
   );
 });

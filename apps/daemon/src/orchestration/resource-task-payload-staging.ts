@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, lstatSync, unlinkSync } from "node:fs";
 import {
   link,
   lstat,
   mkdir,
   open,
   opendir,
+  readdir,
   realpath,
   rm,
   rmdir,
@@ -44,6 +45,9 @@ const RECEIPT_FILE = "generation-receipt.json";
 const RECEIPT_PROTOCOL = "dezin.resource-task-payload-receipt.v1" as const;
 const MAX_RECEIPT_BYTES = 16 * 1024 * 1024;
 const CHECKSUM = /^[a-f0-9]{64}$/;
+const RECEIPT_TEMP_NAME = /^\.generation-receipt-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/;
+const RECEIPT_SETTLE_TIMEOUT_MS = 2_000;
+const RECEIPT_SETTLE_RETRY_MS = 2;
 
 export interface ResourceTaskPayloadReferenceIdentity {
   readonly taskId: string;
@@ -162,7 +166,7 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
       const absolutePath = ownedPath(root, relativePath, "Resource generation receipt");
       // The Task budget covers adapter-authored bytes and JSON. The receipt's
       // executor-authored identity envelope has its own independent hard cap.
-      const bytes = await readOwnedFile(root, absolutePath, MAX_RECEIPT_BYTES, true);
+      const bytes = await readOwnedReceiptFile(root, absolutePath, true);
       if (bytes === null) return null;
       const raw = parseReceipt(bytes);
       const receipt = validateResourceTaskPayloadReceipt(raw, scope);
@@ -381,7 +385,7 @@ export class OwnedResourceTaskPayloadStaging implements ResourceTaskPayloadStagi
         checkAbort(input.signal);
         try {
           const absolutePath = ownedPath(root, relativePath, "Scanned Resource generation receipt");
-          const bytes = await readOwnedFile(root, absolutePath, MAX_RECEIPT_BYTES, false);
+          const bytes = await readOwnedReceiptFile(root, absolutePath, false);
           if (bytes === null) throw new Error("receipt disappeared");
           const raw = parseReceipt(bytes);
           const scope = scannedReceiptScope(raw, input.signal);
@@ -612,7 +616,7 @@ async function classifyStorage(
   const [manifest, payload, receipt] = await Promise.all([
     readOwnedFile(root, manifestPath, MAX_RECEIPT_BYTES, true),
     readOwnedFile(root, payloadPath, journal.byteSize, true),
-    readOwnedFile(root, receiptPath, MAX_RECEIPT_BYTES, true),
+    readOwnedReceiptFile(root, receiptPath, true),
   ]);
   if (manifest === null && payload === null && receipt === null) return "owned-created";
   if (manifest === null || payload === null) {
@@ -654,7 +658,7 @@ async function verifyJournalFilesForCleanup(
   const [manifest, payload, receipt] = await Promise.all([
     readOwnedFile(root, manifestPath, MAX_RECEIPT_BYTES, true),
     readOwnedFile(root, payloadPath, journal.byteSize, true),
-    readOwnedFile(root, receiptPath, MAX_RECEIPT_BYTES, true),
+    readOwnedReceiptFile(root, receiptPath, true),
   ]);
   if (journal.storageDisposition === null) {
     if (manifest !== null || payload !== null || receipt !== null) {
@@ -881,6 +885,297 @@ function ownedPath(root: string, relativePath: string, label: string): string {
   return absolutePath;
 }
 
+function sameFile(
+  left: { dev: number | bigint; ino: number | bigint; size: number | bigint },
+  right: { dev: number | bigint; ino: number | bigint; size: number | bigint },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size;
+}
+
+function sameNode(
+  left: { dev: number | bigint; ino: number | bigint },
+  right: { dev: number | bigint; ino: number | bigint },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameFileVersion(
+  left: {
+    dev: number | bigint;
+    ino: number | bigint;
+    size: number | bigint;
+    mtimeMs: number;
+    ctimeMs: number;
+  },
+  right: {
+    dev: number | bigint;
+    ino: number | bigint;
+    size: number | bigint;
+    mtimeMs: number;
+    ctimeMs: number;
+  },
+): boolean {
+  return sameFile(left, right)
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+async function assertStableOwnedDirectory(
+  root: string,
+  directory: string,
+  expected: { dev: number | bigint; ino: number | bigint },
+): Promise<void> {
+  const current = await lstat(directory);
+  if (current.isSymbolicLink() || !current.isDirectory() || !sameNode(expected, current)
+    || !inside(root, directory) || await realpath(directory) !== directory) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Owned Resource payload receipt directory changed during publication",
+    );
+  }
+}
+
+function unlinkOwnedTemporaryReceiptNode(
+  path: string,
+  expected: { dev: number | bigint; ino: number | bigint },
+): boolean {
+  try {
+    const current = lstatSync(path);
+    if (current.isSymbolicLink() || !current.isFile() || !sameNode(expected, current)
+      || (typeof process.getuid === "function" && current.uid !== process.getuid())) {
+      return false;
+    }
+    unlinkSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function unlinkOwnedTemporaryReceiptHardlink(
+  path: string,
+  target: {
+    dev: number | bigint;
+    ino: number | bigint;
+    size: number | bigint;
+    uid: number;
+  },
+): boolean {
+  try {
+    const current = lstatSync(path);
+    if (current.isSymbolicLink() || !current.isFile() || current.nlink !== 2
+      || (current.mode & 0o222) !== 0 || current.uid !== target.uid
+      || !sameFile(target, current)) {
+      return false;
+    }
+    unlinkSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function recoverOwnedTemporaryReceiptHardlink(root: string, path: string): Promise<boolean> {
+  const directory = dirname(path);
+  if (!inside(root, path) || !await verifyOwnedParentDirectories(root, path)) return false;
+  const directoryIdentity = await lstat(directory);
+  const target = await lstat(path).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  if (target === null || target.isSymbolicLink() || !target.isFile() || target.nlink !== 2
+    || (target.mode & 0o222) !== 0
+    || (typeof process.getuid === "function" && target.uid !== process.getuid())) {
+    return false;
+  }
+  const matches: string[] = [];
+  for (const name of await readdir(directory)) {
+    if (!RECEIPT_TEMP_NAME.test(name)) continue;
+    const candidate = join(directory, name);
+    const metadata = await lstat(candidate).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (metadata !== null && !metadata.isSymbolicLink() && metadata.isFile()
+      && metadata.nlink === 2 && metadata.uid === target.uid && sameFile(target, metadata)) {
+      matches.push(candidate);
+    }
+  }
+  if (matches.length !== 1) {
+    const currentTarget = await lstat(path).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (currentTarget === null || currentTarget.nlink !== 1 || !sameFile(target, currentTarget)) {
+      return false;
+    }
+    await assertStableOwnedDirectory(root, directory, directoryIdentity);
+    await syncDirectory(directory);
+    const durableTarget = await lstat(path);
+    await assertStableOwnedDirectory(root, directory, directoryIdentity);
+    return durableTarget.nlink === 1 && sameFile(target, durableTarget);
+  }
+  const temporary = matches[0]!;
+  const currentTarget = await lstat(path);
+  const currentTemporary = await lstat(temporary).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  await assertStableOwnedDirectory(root, directory, directoryIdentity);
+  if (currentTemporary === null) {
+    if (currentTarget.nlink !== 1 || !sameFile(target, currentTarget)) return false;
+    await syncDirectory(directory);
+    const durableTarget = await lstat(path);
+    await assertStableOwnedDirectory(root, directory, directoryIdentity);
+    return durableTarget.nlink === 1 && sameFile(target, durableTarget);
+  }
+  if (currentTarget.isSymbolicLink() || !currentTarget.isFile() || currentTarget.nlink !== 2
+    || currentTemporary.isSymbolicLink() || !currentTemporary.isFile() || currentTemporary.nlink !== 2
+    || currentTarget.uid !== target.uid || currentTemporary.uid !== target.uid
+    || !sameFile(target, currentTarget) || !sameFile(currentTarget, currentTemporary)) {
+    return false;
+  }
+  unlinkOwnedTemporaryReceiptHardlink(temporary, target);
+  await syncDirectory(directory);
+  const recoveredTarget = await lstat(path);
+  await assertStableOwnedDirectory(root, directory, directoryIdentity);
+  return recoveredTarget.nlink === 1 && sameFile(target, recoveredTarget);
+}
+
+async function readSecureOwnedReceiptFile(
+  root: string,
+  path: string,
+  optional: boolean,
+): Promise<Buffer | null> {
+  if (!inside(root, path)) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Owned Resource payload receipt path escapes storage",
+    );
+  }
+  const parentsExist = await verifyOwnedParentDirectories(root, path);
+  if (!parentsExist) {
+    if (optional) return null;
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Owned Resource payload receipt parent directory is missing",
+    );
+  }
+  const directory = dirname(path);
+  const directoryIdentity = await lstat(directory);
+  let before;
+  try {
+    before = await lstat(path);
+  } catch (error) {
+    if (optional && (error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  if (before.isSymbolicLink() || !before.isFile()) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Owned Resource payload receipt cannot be a symlink or non-file",
+    );
+  }
+  if (before.nlink !== 1) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Owned Resource payload receipt cannot be an unowned hardlink",
+    );
+  }
+  if (before.size > MAX_RECEIPT_BYTES) {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Owned Resource payload receipt exceeds its byte limit",
+    );
+  }
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch((error) => {
+    throw new ResourceTaskPayloadError(
+      "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+      "Owned Resource payload receipt cannot be opened securely",
+      error,
+    );
+  });
+  try {
+    const opened = await handle.stat();
+    const current = await lstat(path).catch((error) => {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+        "Owned Resource payload receipt changed while being opened",
+        error,
+      );
+    });
+    await assertStableOwnedDirectory(root, directory, directoryIdentity);
+    if (opened.nlink !== 1 || current.nlink !== 1
+      || !sameFileVersion(before, opened) || !sameFileVersion(opened, current)) {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+        "Owned Resource payload receipt changed while being opened",
+      );
+    }
+    const expectedSize = Number(opened.size);
+    const bytes = Buffer.alloc(expectedSize);
+    let offset = 0;
+    while (offset < expectedSize) {
+      const result = await handle.read(bytes, offset, expectedSize - offset, offset);
+      if (result.bytesRead <= 0) {
+        throw new ResourceTaskPayloadError(
+          "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+          "Owned Resource payload receipt shrank while being read",
+        );
+      }
+      offset += result.bytesRead;
+    }
+    const extra = Buffer.allocUnsafe(1);
+    if ((await handle.read(extra, 0, 1, expectedSize)).bytesRead !== 0) {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+        "Owned Resource payload receipt grew while being read",
+      );
+    }
+    const after = await handle.stat();
+    const final = await lstat(path).catch((error) => {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+        "Owned Resource payload receipt changed while being read",
+        error,
+      );
+    });
+    await assertStableOwnedDirectory(root, directory, directoryIdentity);
+    if (after.nlink !== 1 || final.nlink !== 1 || bytes.byteLength !== Number(after.size)
+      || !sameFileVersion(opened, after) || !sameFileVersion(after, final)) {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+        "Owned Resource payload receipt changed while being read",
+      );
+    }
+    return bytes;
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+async function readOwnedReceiptFile(
+  root: string,
+  path: string,
+  optional: boolean,
+): Promise<Buffer | null> {
+  const deadline = Date.now() + RECEIPT_SETTLE_TIMEOUT_MS;
+  for (;;) {
+    try {
+      return await readSecureOwnedReceiptFile(root, path, optional);
+    } catch (error) {
+      const hardlink = error instanceof ResourceTaskPayloadError
+        && error.code === "RESOURCE_PAYLOAD_RECEIPT_INVALID"
+        && error.message === "Owned Resource payload receipt cannot be an unowned hardlink";
+      if (!hardlink || Date.now() >= deadline) throw error;
+      if (await recoverOwnedTemporaryReceiptHardlink(root, path)) continue;
+      await new Promise<void>((resolveRetry) => setTimeout(resolveRetry, RECEIPT_SETTLE_RETRY_MS));
+    }
+  }
+}
+
 async function readOwnedFile(
   root: string,
   path: string,
@@ -971,32 +1266,58 @@ async function immutableReceiptWrite(root: string, path: string, bytes: Buffer):
     );
   }
   const temporaryPath = join(directory, `.generation-receipt-${randomUUID()}.tmp`);
-  const handle = await open(
-    temporaryPath,
-    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
-    0o400,
-  );
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let temporaryIdentity: { dev: number | bigint; ino: number | bigint } | null = null;
+  let created = false;
   try {
+    handle = await open(
+      temporaryPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
+      0o400,
+    );
+    temporaryIdentity = await handle.stat();
     await handle.writeFile(bytes);
     await handle.sync();
-  } finally {
-    await handle.close().catch(() => {});
-  }
-  try {
-    await link(temporaryPath, path);
-    await syncDirectory(directory);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const existing = await readOwnedFile(root, path, MAX_RECEIPT_BYTES, false);
-    if (existing === null || !existing.equals(bytes)) {
+    const written = await handle.stat();
+    const writtenPath = await lstat(temporaryPath);
+    if (writtenPath.isSymbolicLink() || !writtenPath.isFile() || writtenPath.nlink !== 1
+      || !sameNode(temporaryIdentity, written) || !sameFile(written, writtenPath)
+      || written.size !== bytes.byteLength) {
       throw new ResourceTaskPayloadError(
-        "RESOURCE_PAYLOAD_RECEIPT_INVALID",
-        "Owned Resource payload receipt immutable identity collision",
+        "RESOURCE_PAYLOAD_STAGE_FAILED",
+        "Owned Resource payload temporary receipt changed while being written",
       );
     }
+    await handle.close();
+    handle = null;
+    try {
+      await link(temporaryPath, path);
+      created = true;
+      await syncDirectory(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const existing = await readOwnedReceiptFile(root, path, false);
+      if (existing === null || !existing.equals(bytes)) {
+        throw new ResourceTaskPayloadError(
+          "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+          "Owned Resource payload receipt immutable identity collision",
+        );
+      }
+    }
   } finally {
-    await rm(temporaryPath, { force: true });
-    await syncDirectory(directory);
+    await handle?.close().catch(() => {});
+    const removedTemporary = temporaryIdentity !== null
+      && unlinkOwnedTemporaryReceiptNode(temporaryPath, temporaryIdentity);
+    if (removedTemporary) await syncDirectory(directory);
+  }
+  if (created) {
+    const stored = await readOwnedReceiptFile(root, path, false);
+    if (stored === null || !stored.equals(bytes)) {
+      throw new ResourceTaskPayloadError(
+        "RESOURCE_PAYLOAD_RECEIPT_INVALID",
+        "Owned Resource payload receipt immutable write verification failed",
+      );
+    }
   }
 }
 
