@@ -50,5 +50,5 @@ can't drift.
 node --experimental-strip-types --test 'test/*.test.ts'
 ```
 
-The suite runs directly with Node ≥ 22.13 type-stripping. Use the repository-level
+The suite runs directly with Node ≥ 22.16 type-stripping. Use the repository-level
 `pnpm test:coverage` command to run it with the enforced coverage floor.

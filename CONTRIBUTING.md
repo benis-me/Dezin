@@ -4,7 +4,7 @@ Thanks for taking a look. Dezin is small and opinionated by design — contribut
 
 ## Setup
 
-Prerequisites: **Node ≥ 22.13**, **pnpm 11**. For real generation you also need a coding-agent CLI on your PATH (Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, or Hermes), authenticated.
+Prerequisites: **Node ≥ 22.16**, **pnpm 11**. For real generation you also need a coding-agent CLI on your PATH (Claude Code, Codex, Gemini CLI, Cursor Agent, CodeBuddy, Copilot, Qwen, opencode, Kimi CLI, Trae CLI, Pi, or Hermes), authenticated.
 
 ```sh
 pnpm install
@@ -23,7 +23,7 @@ pnpm build:check    # production build, bundle budgets, and lazy-boundary guards
 pnpm run ci         # all CI gates above plus the production dependency audit
 ```
 
-The GitHub workflow runs the same gates on Node 22.14 and pnpm 11.9.
+The GitHub workflow runs the same gates on Node 22.16 and pnpm 11.9.
 
 ## How it's laid out
 

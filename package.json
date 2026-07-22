@@ -9,7 +9,7 @@
     "apps/*"
   ],
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.16"
   },
   "scripts": {
     "dev": "bash scripts/dev.sh",

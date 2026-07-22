@@ -80,7 +80,7 @@ None of Dezin's surfaces is a silo — they feed each other. A single run weaves
 
 ## Quick start
 
-Prerequisites: **Node ≥ 22.13**, **pnpm 11**, and at least one **coding-agent CLI on your PATH** (e.g. `claude`), authenticated, for real generation.
+Prerequisites: **Node ≥ 22.16**, **pnpm 11**, and at least one **coding-agent CLI on your PATH** (e.g. `claude`), authenticated, for real generation.
 
 ```sh
 pnpm install      # install the workspace
@@ -145,7 +145,7 @@ pnpm build:check    # production Web build, initial/total JS budgets, and lazy-b
 pnpm run ci         # all local gates above plus the production dependency audit
 ```
 
-Node suites use `node --experimental-strip-types --experimental-sqlite --test`; Web uses Vitest with V8 coverage. The root orchestrator names every suite explicitly, applies a bounded timeout, and terminates its owned process group on failure. CI runs the same gates on Node 22.14 / pnpm 11.9 and audits production dependencies at high severity.
+Node suites use `node --experimental-strip-types --experimental-sqlite --test`; Web uses Vitest with V8 coverage. The root orchestrator names every suite explicitly, applies a bounded timeout, and terminates its owned process group on failure. CI runs the same gates on Node 22.16 / pnpm 11.9 and audits production dependencies at high severity.
 
 ## Docs
 
